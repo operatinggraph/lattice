@@ -166,8 +166,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		// (a directOp fails closed on the first other package that also claims
 		// the operationType, so it stays pinned regardless of ambiguity today).
 		TargetID: "staleUserTasks",
-		Description: "An open user task — RecordIdentityPII, SignLease, or SetRenewalTerms — whose own gap already " +
-			"closed through another route is cancelled instead of sitting in the assignee's inbox forever.",
+		Description: "An open user task — RecordIdentityPII, SignLease, SetApplicantProfile, SetRenewalTerms, " +
+			"VerifyGuarantor, or SignRenewal — whose own gap already closed through another route is cancelled " +
+			"instead of sitting in the assignee's inbox forever.",
 		LensRef: "staleUserTasks",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_cancellation": {

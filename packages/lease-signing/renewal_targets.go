@@ -105,19 +105,46 @@ func renewalCompleteTarget() pkgmgr.WeaverTargetSpec {
 			Cost:      1,
 		},
 		{
+			// The tenant's qualification profile. SignRenewal refuses an
+			// application with no .applicationSignals (ApplicationSignalsMissing —
+			// absence is unknown, never "no guarantor"), while the lens
+			// coalesces that same absence to hasGuarantor=false, which satisfies
+			// the goal's anyOf on its own; without this leg the search plans
+			// signRenewal straight away and assigns a task the op refuses. The
+			// target is the LEASEAPP (SetApplicantProfile acts on the
+			// application), so the row's leaseApp column, not the anchor. The
+			// tenant may equally submit the profile from their own application
+			// card under their scope=self grant (loftspace-app offers the form
+			// on an approved application until a profile is on file), which
+			// auto-completes nothing — staleUserTasks (lenses.go) retires this
+			// task on that route. Among the equal-cost legs the search orders
+			// by ref, so on a fresh cycle setTerms runs before submitProfile;
+			// the tenant's own route is what lets them get ahead of the leg.
+			Ref:       "submitProfile",
+			Action:    "assignTask",
+			Operation: "SetApplicantProfile",
+			Assignee:  "row.tenant",
+			Target:    "row.leaseApp",
+			Effects:   []json.RawMessage{json.RawMessage(`{"present":"subject.data.signalsSubmittedAt"}`)},
+			Cost:      1,
+		},
+		{
 			// The terminal-leg rule (§4.3/§5): pre is the GOAL'S FULL REMAINDER
-			// (everything but signedAt itself), mirrored in SignRenewal's own
-			// write guard (renewal_scripts.go: NotReadyToSign / GuarantorNotVerified).
-			// Without this, the canonical tie-break
+			// (everything but signedAt itself) PLUS the write guard's own absence
+			// refusal, mirrored in SignRenewal's own write guard
+			// (renewal_scripts.go: ApplicationSignalsMissing / NotReadyToSign /
+			// GuarantorNotVerified). Without this, the canonical tie-break
 			// ("signRenewal" < "verifyGuarantor" lexicographically) would fire
 			// signRenewal as soon as it becomes CHEAPEST-cost-reachable, before
-			// the guarantor leg — the B1 regression.
+			// the guarantor leg — the B1 regression — and a never-submitted
+			// profile would plan signing before submitProfile.
 			Ref:       "signRenewal",
 			Action:    "assignTask",
 			Operation: "SignRenewal",
 			Assignee:  "row.tenant",
 			Target:    "row.entityKey",
 			Pre: json.RawMessage(`{"allOf":[
+				{"present":"subject.data.signalsSubmittedAt"},
 				{"present":"subject.data.bgcheckValidUntil"},
 				{"anyOf":[
 					{"equals":{"path":"subject.data.hasGuarantor","value":false}},

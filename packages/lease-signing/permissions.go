@@ -235,12 +235,17 @@ func Permissions() []pkgmgr.PermissionSpec {
 //     resolves the externalTask instanceOp/replyOp from the step strings
 //     directly (and the bridge selects the dispatchOp from the event body), not
 //     via forOperation, so these are hygiene, not strictly required.
-//   - SetRenewalTerms / VerifyGuarantor / SignRenewal — REQUIRED: the three
-//     assignTask operations the renewalComplete goal's actions catalog binds
-//     (renewal_targets.go); the Weaver Actuator resolves forOperation to each
-//     op-meta when it creates the remediation task. CancelRenewal is task-less
+//   - SetRenewalTerms / VerifyGuarantor / SignRenewal / SetApplicantProfile —
+//     REQUIRED: the four assignTask operations the renewalComplete goal's
+//     actions catalog binds (renewal_targets.go); the Weaver Actuator resolves
+//     forOperation to each op-meta when it creates the remediation task.
+//     SetApplicantProfile's descriptor (below) stays AuthContext "self": the
+//     tenant completes the task from loftspace-app's own profile form under
+//     their consumer scope=self grant, and the app retires the task through
+//     CompleteTask — the task's ephemeral grant is minted but never the path
+//     the form submits on. CancelRenewal is task-less
 //     (a directOp/operator action, never an assignTask target), so its meta is
-//     owed to S1 rather than to forOperation resolution. All four carry full
+//     owed to S1 rather than to forOperation resolution. All five carry full
 //     descriptors below: SignRenewal's tenant leg is a real loftspace-app
 //     screen (web/app.js — the Tasks-inbox completion modal, and the "Sign
 //     renewal" button on the tenant's own renewal card), which is the app-seam
@@ -524,7 +529,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"annualIncome":{"type":"number","title":"Annual income","description":"Gross annual income."},` +
 				`"employmentStatus":{"type":"string","title":"Employment","description":"Employment status."},` +
 				`"employerName":{"type":"string","title":"Employer","description":"Employer name. Optional."},` +
-				`"references":{"type":"integer","title":"References","description":"Number of references offered. Optional."},` +
+				`"references":{"type":"array","items":{"type":"string"},"title":"References","description":"References offered, one free-text entry each. Optional."},` +
 				`"hasCoApplicant":{"type":"boolean","title":"Applying with someone?","description":"Whether a co-applicant is joining. Optional."},` +
 				`"coApplicantName":{"type":"string","title":"Co-applicant's name","description":"Co-applicant's name. Optional."},` +
 				`"coApplicantContact":{"type":"string","title":"Co-applicant's contact","description":"Co-applicant's contact. Optional."},` +
@@ -539,7 +544,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"annualIncome":          "Your gross annual income. Used to derive whether income meets 3x the unit's rent; the figure itself is never shown to the landlord.",
 				"employmentStatus":      "Your employment status. Used to derive an employment-verified signal.",
 				"employerName":          "Optional. Kept as part of the application record; never projected.",
-				"references":            "Optional. How many references you are offering — the landlord sees the count.",
+				"references":            "Optional. The references you are offering, one per entry — the landlord sees only the count.",
 				"hasCoApplicant":        "Optional. Whether someone is applying jointly with you.",
 				"coApplicantName":       "Optional. Only meaningful alongside a co-applicant.",
 				"coApplicantContact":    "Optional. Only meaningful alongside a co-applicant.",

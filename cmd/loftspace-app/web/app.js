@@ -1854,10 +1854,12 @@ function renderApplicationCard(row, highlight) {
 
   // Qualification profile — the applicant records income / employment / references /
   // co-applicant / guarantor so the landlord has something to decide on. Available
-  // while the application is live (hidden once the landlord has approved + the lease
-  // is being finalized). The raw figures go to the package; only the derived signals
-  // the landlord reads are projected back.
-  if (!row.landlordApproved && row.unitKey) {
+  // while the application is live, and again on an approved application that never
+  // had one: a renewal cannot be signed without a profile on file (lease-signing
+  // SignRenewal fails closed ApplicationSignalsMissing), and this card is the
+  // tenant's own route to it ahead of the renewal chain's task. The raw figures go
+  // to the package; only the derived signals the landlord reads are projected back.
+  if (row.unitKey && (!row.landlordApproved || !row.profileSubmitted)) {
     card.append(renderProfilePanel(row));
   }
 
@@ -2007,7 +2009,27 @@ function renderProfilePanel(row) {
   const form = document.createElement("form");
   form.className = "profile-form";
   form.hidden = true;
-  form.innerHTML = `
+  form.innerHTML = profileFieldsMarkup() + `
+    <div class="profile-form-actions">
+      <button type="submit">Save profile</button>
+    </div>
+  `;
+  wireProfileSubFields(form);
+  toggle.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+  });
+  form.addEventListener("submit", (ev) => submitProfile(ev, row));
+  panel.append(form);
+  return panel;
+}
+
+// profileFieldsMarkup is the qualification-profile form body — the raw
+// fields SetApplicantProfile captures — shared by the application card's
+// collapsible panel and the Tasks inbox's completion modal, so the tenant a
+// renewal sends to their profile fills in exactly the form an applicant did.
+// Field names are what submitProfile reads off the submitted form.
+function profileFieldsMarkup() {
+  return `
     <label>Gross annual income ($)
       <input type="number" name="annualIncome" min="1" step="1" required />
     </label>
@@ -2043,36 +2065,34 @@ function renderProfilePanel(row) {
         <input type="number" name="guarantorAnnualIncome" min="1" step="1" />
       </label>
     </div>
-    <div class="profile-form-actions">
-      <button type="submit">Save profile</button>
-    </div>
   `;
-  // A guarantor / co-applicant's detail sub-fields are revealed only when its flag
-  // is checked (and the op captures them only then), so the form stays compact.
-  form.querySelectorAll('input[name="hasCoApplicant"], input[name="hasGuarantor"]').forEach((cb) => {
-    const sub = form.querySelector(`.profile-sub[data-for="${cb.name}"]`);
+}
+
+// wireProfileSubFields reveals a guarantor / co-applicant's detail sub-fields
+// only when its flag is checked (and the op captures them only then), so the
+// form stays compact. `root` is whatever element the profile fields were
+// mounted into.
+function wireProfileSubFields(root) {
+  root.querySelectorAll('input[name="hasCoApplicant"], input[name="hasGuarantor"]').forEach((cb) => {
+    const sub = root.querySelector(`.profile-sub[data-for="${cb.name}"]`);
     cb.addEventListener("change", () => {
       if (sub) sub.hidden = !cb.checked;
     });
   });
-  toggle.addEventListener("click", () => {
-    form.hidden = !form.hidden;
-  });
-  form.addEventListener("submit", (ev) => submitProfile(ev, row));
-  panel.append(form);
-  return panel;
 }
 
 // submitProfile sends SetApplicantProfile with the raw profile fields (the package
 // derives + projects the landlord-facing signals). The op validates the application
-// + its appliesToUnit link, and reads the unit's listing rent on demand.
+// + its appliesToUnit link, and reads the unit's listing rent on demand. Resolves
+// true only when the Processor accepted the profile — the inbox's task path
+// retires its task on that answer and on nothing weaker.
 async function submitProfile(ev, row) {
   ev.preventDefault();
   const f = ev.target;
   const income = Number(f.annualIncome.value);
   if (!Number.isFinite(income) || income <= 0) {
     toast("Enter a positive annual income.", "err");
-    return;
+    return false;
   }
   const references = f.references.value
     .split("\n")
@@ -2136,12 +2156,14 @@ async function submitProfile(ev, row) {
     if (reply && reply.status === "rejected") {
       const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
       toast("Profile rejected — " + msg, "err");
-      return;
+      return false;
     }
     toast("Qualification profile saved.", "ok");
     setTimeout(loadApplications, 600);
+    return true;
   } catch (e) {
     toast("Profile failed — " + e.message, "err");
+    return false;
   }
 }
 
@@ -2308,10 +2330,12 @@ function renderTaskCard(t) {
   } else {
     badge.textContent = expired ? "expired" : "open";
     if (expired) badge.className = "badge expired";
-    const canComplete = canCompleteOp(t.operationName);
-    btn.textContent = canComplete ? "Complete" : "Complete in Loupe";
+    const canComplete = isProfileTask(t) ? !!profileTaskApplication(t) : canCompleteOp(t.operationName);
+    btn.textContent = canComplete || isProfileTask(t) ? "Complete" : "Complete in Loupe";
     btn.disabled = !canComplete;
-    btn.title = canComplete ? "" : "This task type isn't completable in this app yet — use Loupe's Submit Op.";
+    btn.title = canComplete ? "" : (isProfileTask(t)
+      ? "Your application isn't loaded yet — reload My applications and try again."
+      : "This task type isn't completable in this app yet — use Loupe's Submit Op.");
     if (canComplete) btn.addEventListener("click", () => openComplete(t));
   }
   actions.append(badge, btn);
@@ -2418,6 +2442,10 @@ async function reportIssue(ev) {
 // wrote a walk-in's SSN onto the operator's own vertex, create-only. No target,
 // no form.
 function openComplete(task) {
+  if (isProfileTask(task)) {
+    openProfileTask(task);
+    return;
+  }
   const desc = descriptorFor(task.operationName);
   if (!desc) return;
   if (!(task.scopedTo || "")) {
@@ -2432,6 +2460,78 @@ function openComplete(task) {
   // never a synchronous exception this caller could catch, so it needs its
   // own catch here or a failure surfaces as a silent, toast-less dead click.
   openCatalogComplete(task, desc).catch((e) => toast("Could not open this action: " + e.message, "err"));
+}
+
+// isProfileTask answers whether task is the renewal chain's submitProfile leg
+// — a SetApplicantProfile task assigned to the tenant on their own application
+// (lease-signing renewal_targets.go). It is the one inbox task this app
+// completes through its OWN form rather than the catalog module's: the op's
+// descriptor is AuthContext "self", and the shipped profile form already
+// submits it under the tenant's consumer scope=self grant with the unit key
+// the op verifies filled from the application row, where the catalog form
+// would ask the tenant to type a unit key.
+function isProfileTask(task) {
+  return !!task && task.operationName === "SetApplicantProfile";
+}
+
+// profileTaskApplication resolves the application a profile task is scoped to
+// from the rows already loaded (loadTasks loads them alongside the tasks; the
+// renewal card's path loads them on demand), or null when the read model has
+// not delivered it yet — submitProfile needs the row's unitKey, so the task
+// is not completable here without it.
+function profileTaskApplication(task) {
+  return (state.applications || []).find((a) => a.entityKey === task.scopedTo && a.unitKey) || null;
+}
+
+// openProfileTask mounts the qualification-profile fields into the completion
+// modal for a SetApplicantProfile task. submitComplete routes the modal's
+// submit to submitProfileTask, which sends the tenant's own self-voiced
+// SetApplicantProfile and then retires the task through CompleteTask — the
+// same standing-grant retirement submitCatalogComplete already uses for every
+// non-task-voice leg, since a self-voiced commit auto-completes nothing.
+async function openProfileTask(task) {
+  let app = profileTaskApplication(task);
+  if (!app) {
+    await loadApplicationsQuiet().catch(() => null);
+    app = profileTaskApplication(task);
+  }
+  if (!app) {
+    toast("Could not find this application — reload My applications and try again.", "err");
+    return;
+  }
+  state.currentTask = task;
+  state.formHandle = null;
+  $("#complete-title").textContent = "Complete your application details";
+  $("#complete-desc").textContent = task.operationDescription || "";
+  $("#tc-target").textContent = app.unitAddress || task.scopedTo;
+  const host = $("#tc-fields");
+  host.innerHTML = profileFieldsMarkup();
+  wireProfileSubFields(host);
+  $("#tc-sensitive").hidden = true;
+  $("#complete-submit").textContent = "Submit details";
+  $("#complete-overlay").hidden = false;
+  const first = host.querySelector("input, select, textarea");
+  if (first) first.focus();
+}
+
+async function submitProfileTask(ev, task) {
+  const app = profileTaskApplication(task);
+  if (!app) {
+    ev.preventDefault();
+    toast("Could not find this application — reload My applications and try again.", "err");
+    return;
+  }
+  const submit = $("#complete-submit");
+  submit.disabled = true;
+  try {
+    const ok = await submitProfile(ev, app);
+    if (!ok) return;
+    await completeTask(task.taskKey);
+    if (state.currentTask === task) closeComplete();
+    loadTasks();
+  } finally {
+    submit.disabled = false;
+  }
 }
 
 // openCatalogComplete renders a raw op-catalog row through the shared
@@ -2517,9 +2617,16 @@ function closeComplete() {
 }
 
 async function submitComplete(ev) {
-  ev.preventDefault();
   const task = state.currentTask;
-  if (!task) return;
+  if (!task) {
+    ev.preventDefault();
+    return;
+  }
+  if (isProfileTask(task)) {
+    await submitProfileTask(ev, task);
+    return;
+  }
+  ev.preventDefault();
   const desc = descriptorFor(task.operationName);
   if (!desc) return;
 
@@ -2714,16 +2821,27 @@ function renderRenewals() {
   }
 }
 
+// profileOnFile reports whether the renewed application carries a submitted
+// qualification profile. renewalsRead projects hasGuarantor RAW off the
+// leaseapp's .applicationSignals (lease-signing renewal_lenses.go — null means
+// no profile was ever submitted, a state the lens keeps distinct from an
+// explicit false on purpose), so a real boolean, either way, is the profile.
+function profileOnFile(row) {
+  return row.hasGuarantor === true || row.hasGuarantor === false;
+}
+
 // renewalReady reports whether row has everything SignRenewal's own write
-// guard requires (terms set; guarantor verified if one is on file) — mirrors
-// the planner's signRenewal `pre`, the terminal-leg rule (design §4.3/§5).
-// Readiness is what makes the Sign button APPEAR; what makes it CLICKABLE is
-// the grant, which for a task-voice op is the tenant's own assigned task
-// (assignedTaskKey) — the Processor authorizes SignRenewal on {task, target},
-// never on the write guard alone, so a ready-but-unassigned cycle is shown
-// as waiting rather than as a button whose submit can only be denied.
+// guard requires (a profile on file — the op fails closed
+// ApplicationSignalsMissing without one; terms set; guarantor verified if one
+// is on file) — mirrors the planner's signRenewal `pre`, the terminal-leg rule
+// (design §4.3/§5). Readiness is what makes the Sign button APPEAR; what makes
+// it CLICKABLE is the grant, which for a task-voice op is the tenant's own
+// assigned task (assignedTaskKey) — the Processor authorizes SignRenewal on
+// {task, target}, never on the write guard alone, so a ready-but-unassigned
+// cycle is shown as waiting rather than as a button whose submit can only be
+// denied.
 function renewalReady(row) {
-  return !!row.termsSetAt && (row.hasGuarantor !== true || !!row.guarantorVerifiedAt);
+  return profileOnFile(row) && !!row.termsSetAt && (row.hasGuarantor !== true || !!row.guarantorVerifiedAt);
 }
 
 // assignedTaskKey answers the caller's own open task for operationName on
@@ -2789,6 +2907,27 @@ function renderRenewalCard(row, landlord) {
       declineBtn.addEventListener("click", () => openRenewalAction(row, "CancelRenewal"));
       actions.append(declineBtn);
     }
+  } else if (unsigned && !profileOnFile(row)) {
+    // The renewal chain asks the tenant for a profile through its own
+    // submitProfile leg (renewal_targets.go) — on a fresh cycle only after the
+    // landlord's terms leg, since equal-cost legs run in ref order — so signing
+    // is not offered until one is on file. The task, once assigned, opens the
+    // same form the inbox does; before that the application card under My
+    // applications carries it, and that route never waits on the chain.
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    const profileTask = (state.tasks || []).find((t) => isProfileTask(t) && t.scopedTo === row.leaseApp);
+    if (profileTask) {
+      const detailsBtn = document.createElement("button");
+      detailsBtn.textContent = "Complete application details";
+      detailsBtn.addEventListener("click", () => openComplete(profileTask));
+      actions.append(detailsBtn);
+      hint.textContent = "Your application details are needed before you can sign — complete them here or from Tasks.";
+    } else {
+      hint.textContent = "Your application details are needed before you can sign — add them from your application card under My applications.";
+    }
+    card.append(title, sub, actions, hint);
+    return card;
   } else if (unsigned && renewalReady(row)) {
     const signBtn = document.createElement("button");
     signBtn.textContent = "Sign renewal";

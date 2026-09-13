@@ -67,8 +67,8 @@ func RenewalLenses() []pkgmgr.LensSpec {
 				AnchorType:       "renewal",
 				OutputKeyPattern: "renewalComplete.{actorSuffix}",
 				BodyColumns: []string{
-					"violating", "missing_renewalComplete", "entityKey", "tenant", "landlord",
-					"open", "leaseappAlive", "hasGuarantor", "bgcheckValidUntil",
+					"violating", "missing_renewalComplete", "entityKey", "leaseApp", "tenant", "landlord",
+					"open", "leaseappAlive", "hasGuarantor", "signalsSubmittedAt", "bgcheckValidUntil",
 					"guarantorVerifiedAt", "termsSetAt", "signedAt",
 					"inflight_renewalComplete", "maxretries_renewalComplete",
 				},
@@ -223,6 +223,21 @@ RETURN
 //     to False, and a raw-null column would make that comparison false too
 //     (null = False is ALSO False, not vacuously true), permanently stranding
 //     missing_renewalComplete regardless of bgcheck/terms/signature.
+//   - signalsSubmittedAt is the leaseapp's own .applicationSignals.data.submittedAt
+//     — null exactly when no profile was ever submitted (SetApplicantProfile
+//     writes the stamp unconditionally, scripts.go). It is the root fact the
+//     catalog's submitProfile leg asserts and the signRenewal leg's pre
+//     requires: SignRenewal fails closed (ApplicationSignalsMissing) on a
+//     missing aspect, and the coalesced hasGuarantor above reads that same
+//     absence as a real false, which alone would satisfy the goal's anyOf and
+//     let the planner assign a signing task the op then refuses. A TIMESTAMP,
+//     not a boolean, because the planner's `present` treats a false bool as
+//     present (planner/state.go absent()).
+//   - leaseApp is the renewed application's key — the submitProfile leg's
+//     assignTask target (SetApplicantProfile acts on the leaseapp, not the
+//     renewal; the row.clauseKey precedent in semantic-contracts). Never null
+//     on a live renewal: OpenRenewal creates the renews link in the same
+//     batch as the vertex.
 //   - bgcheckValidUntil is the freshest COMPLETED bgcheck's validUntil,
 //     null-when-lapsed (the SAME freshness posture leaseApplicationCompleteSpec
 //     uses on its own providedTo fan, re-derived here since this lens walks a
@@ -287,6 +302,7 @@ WITH
   id.key                                  AS tenant,
   min(DISTINCT landlord.key)              AS landlordMin,
   (app.applicationSignals.data.hasGuarantor = True) AS hasGuarantor,
+  app.applicationSignals.data.submittedAt AS signalsSubmittedAt,
   rn.guarantorVerification.data.verifiedAt AS guarantorVerifiedAt,
   rn.terms.data.setAt                     AS termsSetAt,
   rn.terms.data.termMonths                AS termsTermMonths,
@@ -302,6 +318,7 @@ RETURN
   leaseappAlive,
   (status = 'open')                       AS open,
   hasGuarantor,
+  signalsSubmittedAt,
   bgcheckValidUntil,
   guarantorVerifiedAt,
   termsSetAt,

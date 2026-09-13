@@ -1214,23 +1214,36 @@ RETURN
 // granted it. The three OPTIONAL MATCHes are label-typed (identity / leaseapp
 // / renewal), never a bare untyped node — a task's operationType pins exactly
 // which vertex type its scopedTo neighbor is (RecordIdentityPII → identity,
-// SignLease → leaseapp, SetRenewalTerms → renewal), so at most one of
-// onbSsn/sigSignedAt/termsSetAt is ever non-null for a given row; the other
-// two OPTIONAL MATCHes simply fail to match and project null, the same
-// label-gated idiom appliesToUnit/renews use elsewhere in this file.
+// SignLease / SetApplicantProfile → leaseapp, SetRenewalTerms /
+// VerifyGuarantor / SignRenewal → renewal), so at most one label's facts are
+// ever non-null for a given row; the other OPTIONAL MATCHes simply fail to
+// match and project null, the same label-gated idiom appliesToUnit/renews use
+// elsewhere in this file.
 //
-// The three closure predicates are the SAME facts this package's other
+// The six closure predicates are the SAME facts this package's other
 // convergence lenses already read to flip their own missing_* columns:
-//   - RecordIdentityPII: id.ssn.data present (applicantOnboardingSpec's ssnVal)
-//   - SignLease:          app.signature.data.signedAt present (leaseApplicationCompleteSpec's signedAt)
-//   - SetRenewalTerms:    rn.terms.data.setAt present (renewalComplete's termsSetAt goal column)
+//   - RecordIdentityPII:   id.ssn.data present (applicantOnboardingSpec's ssnVal)
+//   - SignLease:           app.signature.data.signedAt present (leaseApplicationCompleteSpec's signedAt)
+//   - SetApplicantProfile: app.applicationSignals.data.submittedAt present
+//     (renewalComplete's signalsSubmittedAt — the applicant may submit the
+//     profile from their own application card under their scope=self grant,
+//     or an operator from the console, routes the §10.7 task-path
+//     auto-complete never sees). Any open SetApplicantProfile task is
+//     retired the instant a profile exists: the arm reads presence, not a
+//     re-submission request, and no producer asks for one today.
+//   - SetRenewalTerms:     rn.terms.data.setAt present (renewalComplete's termsSetAt goal column)
+//   - VerifyGuarantor:     rn.guarantorVerification.data.verifiedAt present
+//   - SignRenewal:         rn.renewalSignature.data.signedAt present — a
+//     renewal episode re-minted while an earlier signing task is still open
+//     (a revoke+enable, or a leg advance after the earlier task's grant) puts
+//     two SignRenewal tasks in the tenant's inbox; whichever signs, the
+//     other is obsolete.
 //
 // The status='open' gate excludes an already complete/cancelled task (nothing
 // left to converge — orphanedTaskGrantsSpec's own reasoning, orchestration-base
-// lenses.go); an operationType this package doesn't dispatch as a userTask
-// (VerifyGuarantor, SignRenewal, or a wholly unrelated op scoped here by
-// coincidence) matches none of the three arms and stays missing_cancellation
-// false forever, never mistaken for a closed gap.
+// lenses.go); an operationType this package doesn't dispatch as a userTask (a
+// wholly unrelated op scoped here by coincidence) matches none of the six arms
+// and stays missing_cancellation false forever, never mistaken for a closed gap.
 const staleUserTasksSpec = `
 MATCH (t:task {key: $actorKey})
   WHERE t.data.status = 'open'
@@ -1243,7 +1256,10 @@ WITH
   op.data.operationType AS opType,
   onbIdentity.ssn.data AS onbSsn,
   sigApp.signature.data.signedAt AS sigSignedAt,
-  termsRenewal.terms.data.setAt AS termsSetAt
+  sigApp.applicationSignals.data.submittedAt AS sigSignalsAt,
+  termsRenewal.terms.data.setAt AS termsSetAt,
+  termsRenewal.guarantorVerification.data.verifiedAt AS guarantorVerifiedAt,
+  termsRenewal.renewalSignature.data.signedAt AS renewalSignedAt
 RETURN
   entityKey AS actorKey,
   entityKey,
@@ -1251,10 +1267,16 @@ RETURN
   entityKey AS taskKey,
   (((opType = 'RecordIdentityPII') AND (onbSsn <> null)) OR
    ((opType = 'SignLease') AND (sigSignedAt <> null)) OR
-   ((opType = 'SetRenewalTerms') AND (termsSetAt <> null))) AS missing_cancellation,
+   ((opType = 'SetApplicantProfile') AND (sigSignalsAt <> null)) OR
+   ((opType = 'SetRenewalTerms') AND (termsSetAt <> null)) OR
+   ((opType = 'VerifyGuarantor') AND (guarantorVerifiedAt <> null)) OR
+   ((opType = 'SignRenewal') AND (renewalSignedAt <> null))) AS missing_cancellation,
   (((opType = 'RecordIdentityPII') AND (onbSsn <> null)) OR
    ((opType = 'SignLease') AND (sigSignedAt <> null)) OR
-   ((opType = 'SetRenewalTerms') AND (termsSetAt <> null))) AS violating
+   ((opType = 'SetApplicantProfile') AND (sigSignalsAt <> null)) OR
+   ((opType = 'SetRenewalTerms') AND (termsSetAt <> null)) OR
+   ((opType = 'VerifyGuarantor') AND (guarantorVerifiedAt <> null)) OR
+   ((opType = 'SignRenewal') AND (renewalSignedAt <> null))) AS violating
 `
 
 // leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3
