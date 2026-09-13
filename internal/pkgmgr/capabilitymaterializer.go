@@ -2,11 +2,13 @@ package pkgmgr
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/guardgrammar"
+	"github.com/operatinggraph/lattice/internal/lenscolumns"
 	"github.com/operatinggraph/lattice/internal/processor"
 )
 
@@ -65,6 +67,11 @@ type SpecLabels struct {
 	// taxonomy-expansion sigil, each of which the runtime replaces with the
 	// concrete types the taxonomy resolves it to.
 	Expansion map[string]struct{}
+
+	// Columns is the RETURN clause's items' effective names (the explicit
+	// alias, else the auto-alias) in declaration order — a mirror of
+	// full.LabelFacts.Columns. Nil when the rule has no RETURN clause.
+	Columns []string
 }
 
 // CypherParser abstracts the static openCypher parse pkgmgr needs in two
@@ -94,6 +101,28 @@ type CypherParser interface {
 	// derived from the SAME parse as the error, so a caller can never pair a
 	// successful parse with label sets compiled from a different body.
 	Parse(ruleBody string) (SpecLabels, error)
+}
+
+// InstalledLensResolver resolves a weaverTarget artifact's lensRef to the
+// columns the bound lens projects. Injected like SensitiveAspectResolver:
+// ValidateCapabilityArtifact never touches a live substrate itself.
+//
+// found is true only for a root whose class is meta.lens and is not
+// tombstoned — a target, pattern, DDL or op-meta id answers false, the same
+// class test the installer applies, so the record-time verdict and the
+// apply-time bound never disagree about what a lensRef binds. A caller that
+// also holds a lens NOT yet installed (Loupe's co-authored Check, which is
+// handed the draft lens in the same request) answers that lens's
+// canonicalName first, then the installed catalog.
+//
+// err is a read that FAILED — no verdict, which the validator returns to its
+// own caller rather than reporting as an invalid artifact; a resolver reading a
+// live catalog wraps ErrLensCatalogUnavailable there, so a caller that stores a
+// verdict can tell that transient apart from an artifact defect. An installed
+// lens whose columns are not derivable is the opposite: found=true with an
+// error wrapping lenscolumns.ErrUnreadable, which IS a verdict on the artifact.
+type InstalledLensResolver interface {
+	ResolveLensColumns(lensRef string) (cols lenscolumns.Result, found bool, err error)
 }
 
 // ArtifactValidationReport is the §5 record-time deterministic-validation
@@ -317,7 +346,14 @@ func requesterHolds(held []HeldPermission, operationType, requestedScope string)
 // one with no live catalog to verify against) may pass nil, though passing
 // nil for an opMeta artifact that declares any aspect-naming read fails that
 // artifact closed (see validateOpMetaArtifact).
-func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser CypherParser, requesterHeld []HeldPermission, sensitiveAspects SensitiveAspectResolver) (ArtifactValidationReport, error) {
+//
+// installedLenses is the live catalog the "weaverTarget" kind's lensRef check
+// resolves against — ignored by every other kind, and fail-closed for this
+// one: a weaverTarget artifact validated with no resolver is invalid
+// unconditionally (it binds a lens nothing verified), which is why every
+// caller's wiring is pinned by scripts/lint-conventions.go rather than left to
+// a nil-able field.
+func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser CypherParser, requesterHeld []HeldPermission, sensitiveAspects SensitiveAspectResolver, installedLenses InstalledLensResolver) (ArtifactValidationReport, error) {
 	if !EnabledArtifactKinds[kind] {
 		return ArtifactValidationReport{
 			Valid:  false,
@@ -394,7 +430,7 @@ func ValidateCapabilityArtifact(kind string, content json.RawMessage, parser Cyp
 					extra)},
 			}, nil
 		}
-		return validateWeaverTargetArtifact(wc), nil
+		return validateWeaverTargetArtifact(wc, installedLenses)
 	case "loomPattern":
 		var lp LoomPatternArtifactContent
 		if err := json.Unmarshal(content, &lp); err != nil {
@@ -605,11 +641,24 @@ func unknownLoomPatternFields(content json.RawMessage) []string {
 // column convention, the reserved expectedRevision param, and
 // validateGapAction's per-action required-field check) — reused, not
 // duplicated, so an AI-authored target can never pass a check a hand-authored
-// one would fail. LensRef resolution (must name an already-installed lens) is
-// a build-time concern (build.go's resolveLensRef), not checked here — same
-// posture as a hand-authored package referencing a sibling package's lens by
-// NanoID.
-func validateWeaverTargetArtifact(wc WeaverTargetArtifactContent) ArtifactValidationReport {
+// one would fail.
+//
+// The lensRef is then resolved against the live installed catalog the caller
+// injected, and the target is judged against the lens it binds: the ref must
+// name a live meta.lens, that lens's row columns must be derivable, and every
+// missing_* column those rows carry must be a `gaps` key. The Contract #10
+// §10.3 `unplannable` exemption the package path carries does NOT apply here —
+// a weaverTarget artifact cannot declare an `augur` block at all
+// (unknownWeaverTargetFields keeps the field out), so there is no escalation
+// policy to route an undeclared column to.
+//
+// The whole chain is fail-closed on absence: with no resolver supplied there
+// is nothing to verify the binding against, and an unverified binding is
+// invalid rather than unchecked. Only a resolver ERROR — a live read that
+// failed — comes back as this function's own error: a gate that could not read
+// the kernel has not found the binding sound, and that is a caller-facing
+// condition, not a verdict on the artifact.
+func validateWeaverTargetArtifact(wc WeaverTargetArtifactContent, installedLenses InstalledLensResolver) (ArtifactValidationReport, error) {
 	var errs []string
 
 	if wc.TargetID == "" {
@@ -624,7 +673,54 @@ func validateWeaverTargetArtifact(wc WeaverTargetArtifactContent) ArtifactValida
 		errs = append(errs, err.Error())
 	}
 
-	return ArtifactValidationReport{Valid: len(errs) == 0, Errors: errs}
+	if wc.LensRef != "" {
+		bindingErrs, err := weaverTargetArtifactLensBinding(wc, installedLenses)
+		if err != nil {
+			return ArtifactValidationReport{}, err
+		}
+		errs = append(errs, bindingErrs...)
+	}
+
+	return ArtifactValidationReport{Valid: len(errs) == 0, Errors: errs}, nil
+}
+
+// weaverTargetArtifactLensBinding runs the lensRef half of the weaverTarget
+// check: the chain stops at the first arm that answers, because every later
+// arm reads what an earlier one could not establish.
+func weaverTargetArtifactLensBinding(wc WeaverTargetArtifactContent, installedLenses InstalledLensResolver) ([]string, error) {
+	if installedLenses == nil {
+		return []string{fmt.Sprintf("no installed-lens catalog was supplied to resolve lensRef %q — a weaverTarget artifact may not bind an unverified lens", wc.LensRef)}, nil
+	}
+	cols, found, err := installedLenses.ResolveLensColumns(wc.LensRef)
+	switch {
+	case err != nil && !errors.Is(err, lenscolumns.ErrUnreadable):
+		return nil, fmt.Errorf("pkgmgr: capability materializer: resolve lensRef %q: %w", wc.LensRef, err)
+	case !found:
+		return []string{fmt.Sprintf("lensRef %q names no installed lens; install the lens first", wc.LensRef)}, nil
+	case err != nil:
+		return []string{fmt.Sprintf("lensRef %q names a lens whose projected columns cannot be derived: %v", wc.LensRef, err)}, nil
+	}
+
+	declared := make(map[string]bool, len(wc.Gaps))
+	for col := range wc.Gaps {
+		declared[col] = true
+	}
+	var errs []string
+	for _, col := range undeclaredGapColumns(cols, declared) {
+		errs = append(errs, UndeclaredGapColumnRefusal(wc.LensRef, col, cols.Columns[col], sortedKeys(declared)))
+	}
+	return errs, nil
+}
+
+// sortedKeys renders a declared-column set in a stable order, so a refusal
+// naming what the author DID declare reads the same on every run.
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // weaverTargetArtifactDefinition is the single shape both record-time

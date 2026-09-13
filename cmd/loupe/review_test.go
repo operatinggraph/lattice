@@ -1319,6 +1319,69 @@ func TestReviewCapabilityApply_RemovalRefusalIs409(t *testing.T) {
 	}
 }
 
+// TestReviewCapabilityApply_LensBindingRefusalIs409 drives the weaver-target
+// lens-binding refusal from the console's own Apply endpoint: an approved
+// proposal whose target binds a lensRef no installed lens carries is refused by
+// the installer's live preflight, and that refusal must reach the UI as a 409.
+// 502 is what this console's front end retries, and no retry ever installs a
+// lens — the remedy is a differently-authored proposal.
+//
+// It posts the real request rather than calling packageApplyStatus directly:
+// the mapping function agreeing about a sentinel proves nothing if the call
+// site never produces it.
+func TestReviewCapabilityApply_LensBindingRefusalIs409(t *testing.T) {
+	srv, client, base, put := newTestReviewServerWithSrv(t)
+	srv.adminActor = "vtx.identity.testAdminHJKMNPQRST"
+
+	// A 20-character lensRef of the NanoID alphabet — the lookalike shape that
+	// reads as an installed lens's id everywhere below. Nothing is seeded under
+	// it, so the binding names nothing.
+	const danglingLensRef = "appointmentReminders"
+	content := map[string]any{
+		"targetId": "coldOnboarding",
+		"lensRef":  danglingLensRef,
+		"gaps": map[string]any{
+			"missing_reminder": map[string]any{"action": "directOp", "operation": "SendReminder"},
+		},
+	}
+	contentJSON, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("marshal artifact content: %v", err)
+	}
+
+	const pkgName = "capauthor-dangling-lens"
+	proposalKey := "vtx.capabilityproposal.dangling1"
+	put(bootstrap.CoreKVBucket, proposalKey+".review", `{"isDeleted":false,"data":{"state":"approved"}}`)
+	// .artifact.content is stored as a STRING, the shape the plan builder
+	// requires (RecordCapabilityProposal writes the artifact JSON verbatim).
+	contentString, err := json.Marshal(string(contentJSON))
+	if err != nil {
+		t.Fatalf("marshal artifact content string: %v", err)
+	}
+	put(bootstrap.CoreKVBucket, proposalKey+".artifact",
+		`{"isDeleted":false,"data":{"kind":"weaverTarget","content":`+string(contentString)+`}}`)
+	put(bootstrap.CoreKVBucket, proposalKey+".target",
+		`{"isDeleted":false,"data":{"packageName":"`+pkgName+`","mode":"newPackage","newVersion":"0.1.0"}}`)
+
+	putCapProposal(t, put, "dangling1", map[string]any{
+		"intent": "approved, binds a lens that does not exist", "kind": "weaverTarget",
+		"content": string(contentJSON), "reviewState": "approved", "targetMode": "newPackage",
+		"targetPackageName": pkgName, "targetNewVersion": "0.1.0",
+	})
+
+	res, body := postReview(t, client, base, "/api/review/capability/dangling1/apply")
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 — a dangling lens binding fails identically on every retry: %+v", res.StatusCode, body)
+	}
+	msg, _ := body["error"].(string)
+	if !strings.Contains(msg, "names no installed meta.lens") {
+		t.Fatalf("want the binding refusal in the body, got %+v", body)
+	}
+	if !strings.Contains(msg, "declare the lens in this package, or bind the installed lens's id") {
+		t.Errorf("the refusal must carry its remedy through to the console, got %q", msg)
+	}
+}
+
 // TestReviewCapabilityApply_SameVersionUpgradeIsNotResumable pins the ordering
 // that makes the console's recovery classification sound.
 //

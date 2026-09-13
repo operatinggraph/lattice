@@ -55,7 +55,7 @@ const (
 // the caller, exactly as the studio client runs it before enabling Propose.
 func submitEnv(t *testing.T, reqID, proposalID, kind string, content json.RawMessage, rationale string) *processor.OperationEnvelope {
 	t.Helper()
-	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{}, nil, nil)
+	report, err := pkgmgr.ValidateCapabilityArtifact(kind, content, fullCypherParser{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("materializer error: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestCapAuthor_Submit_GrantExceedsSubmitterScope_Invalid(t *testing.T) {
 		t.Fatalf("marshal grant content: %v", err)
 	}
 	held := []pkgmgr.HeldPermission{{OperationType: "DeleteEverything", Scope: "self"}}
-	report, err := pkgmgr.ValidateCapabilityArtifact("grant", content, fullCypherParser{}, held, nil)
+	report, err := pkgmgr.ValidateCapabilityArtifact("grant", content, fullCypherParser{}, held, nil, nil)
 	if err != nil {
 		t.Fatalf("materializer error: %v", err)
 	}

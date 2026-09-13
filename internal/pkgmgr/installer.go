@@ -65,12 +65,20 @@ type Installer struct {
 	// label sets so the installer can price a `*` label's declared worst case
 	// against the cap before the lens ever reaches Refractor.
 	//
-	// Optional, and unset leaves that gate silent — which is a diagnostic loss,
-	// not an enforcement hole. The property is enforced unconditionally at
-	// runtime by pipeline.ConsumerFilter's own cap (broad filter, a warn log,
-	// and filterBroadReason "label-cap" on the lens's health entry); what an
-	// unwired installer loses is the EARLY, decidable answer at the actor who
-	// can fix it. Every production INSTALL entry point wires it (cmd/lattice-pkg,
+	// It is also what makes a PLAIN lens's row columns readable — its RETURN
+	// items' names — which the weaver-target binding rule (preflightLive) reads
+	// to decide whether the target declares every missing_* column the lens
+	// projects. A nil parser therefore does two things: it leaves the label-cap
+	// gate silent, and it makes every plain-lens binding UNREADABLE, which that
+	// rule refuses rather than admits. An install of a target bound to a plain
+	// lens fails closed on an unwired installer.
+	//
+	// Optional, and unset leaves the label-cap gate silent — which is a
+	// diagnostic loss, not an enforcement hole. The property is enforced
+	// unconditionally at runtime by pipeline.ConsumerFilter's own cap (broad
+	// filter, a warn log, and filterBroadReason "label-cap" on the lens's health
+	// entry); what an unwired installer loses is the EARLY, decidable answer at
+	// the actor who can fix it. Every production INSTALL entry point wires it (cmd/lattice-pkg,
 	// cmd/loupe) — the one production Installer built without it, the probe
 	// IsPackageInstalled constructs, never installs anything, so the gate has
 	// nothing to be silent about there. It is a field rather than a NewInstaller argument because
@@ -117,6 +125,12 @@ func (i *Installer) Install(ctx context.Context, def Definition) (*InstallResult
 	// If bootstrap has not run, the bucket is absent and we return a clear
 	// actionable error instead of a raw NATS stream-not-found message.
 	if err := i.checkCoreBucketExists(ctx); err != nil {
+		return nil, err
+	}
+
+	// The live half of preflight: what an already-installed lens projects is
+	// the one fact the pure gates above cannot read.
+	if err := i.preflightLive(ctx, def); err != nil {
 		return nil, err
 	}
 
@@ -741,6 +755,20 @@ var ErrUninstallConflict = errors.New("pkgmgr: uninstall conflict — a declared
 // reads as success, and once that tracker expires the batch instead fails with
 // a bare RevisionConflict naming neither the occupied key nor a remedy.
 var ErrDeclaredKeysOccupied = errors.New("pkgmgr: install refused — declared keys are already committed in the kernel")
+
+// ErrLensBindingRefused is the sentinel every weaver-target lens-binding
+// refusal wraps, for callers that only need to know an install was refused for
+// this reason — cmd/loupe maps it to 409, because a target bound to a lens
+// that does not exist, cannot be read, or projects a gap column the target
+// never declared fails identically on every retry until an author changes one
+// of the two declarations.
+//
+// The refusal is what makes Contract #10 §10.8's binding hold on the apply
+// path: the recorded record-time verdict is caller-supplied, and
+// `lattice-pkg apply-proposal` never re-validates it, so without this the only
+// holder of "every missing_* column the bound Lens projects is a gaps key"
+// would be a CI lint that cannot see an already-installed lens at all.
+var ErrLensBindingRefused = errors.New("pkgmgr: install refused — a weaver target's lens binding does not hold")
 
 // DeclaredKeysOccupiedError is the typed occupancy refusal. Error() renders the
 // operator-facing message, and the fields carry the same answer structurally so

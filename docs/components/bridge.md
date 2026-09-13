@@ -337,6 +337,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `BridgeAdapterMissing`. Check: `cmd/bridge`'s `TestReferenceAdapters_CoverEveryPackageDeclaredAdapter`
   censuses the shipped corpus's declared adapter names against the registered set — extend the census
   when a new declaration site appears, and never let an e2e's private registration stand in for it.
+  **Second sighting (weaverTarget gap-declaration holder, 2026-09-13), the permission axis:** the fixture connected
+  over an unauthenticated `natsfixture` conn and seeded `core-kv`, so a Core-KV read the bridge's NKey is DENIED
+  (`internal/natsperm/matrix.go`, the decrypt-RPC side-channel tightening) went green end to end; on a real stack the
+  denied publish fails asynchronously and the read blocks for its whole budget. Check: a design sentence "this binary
+  already holds read X" is a `matrix.go` fact, not a P5 platform-binary-list fact — grep the binary's deny list before
+  wiring a new reader, and give any new read a `natsperm` vector under the binary's real profile.
 - **A reference fake's output is read by a human, so its stamped provenance is part of its behaviour.**
   A fake that fills a provenance field with a real vendor's identifier makes a fixture indistinguishable
   from the real thing on the surface where someone approves it. Minted: `FakeAugur` stamped

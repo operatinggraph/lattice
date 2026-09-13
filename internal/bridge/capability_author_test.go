@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -102,19 +103,38 @@ func (f *fakeRunner) calls() []wire.Request {
 type fakeValidator struct {
 	mu      sync.Mutex
 	seen    [][]byte
+	lenses  []InstalledLensResolver
 	verdict func(n int, kind string, content []byte) (string, string)
+	// declineWith, when set, makes the validator DECLINE to decide — the shape
+	// a missing or unreadable dependency takes. It is not a verdict, and the
+	// adapter must not file a proposal on it.
+	declineWith error
 }
 
-func (v *fakeValidator) validate(kind string, content []byte) (string, string) {
+func (v *fakeValidator) validate(kind string, content []byte, lenses InstalledLensResolver) (string, string, error) {
 	v.mu.Lock()
 	n := len(v.seen)
 	v.seen = append(v.seen, append([]byte(nil), content...))
+	v.lenses = append(v.lenses, lenses)
 	verdict := v.verdict
+	decline := v.declineWith
 	v.mu.Unlock()
-	if verdict == nil {
-		return ValidationStateValid, ""
+	if decline != nil {
+		return "", "", decline
 	}
-	return verdict(n, kind, content)
+	if verdict == nil {
+		return ValidationStateValid, "", nil
+	}
+	state, report := verdict(n, kind, content)
+	return state, report, nil
+}
+
+// resolvers returns the installed-lens catalog handed to each validate call, so
+// a test can assert the adapter supplied one at all.
+func (v *fakeValidator) resolvers() []InstalledLensResolver {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]InstalledLensResolver(nil), v.lenses...)
 }
 
 func (v *fakeValidator) judged() [][]byte {
@@ -130,6 +150,25 @@ type authorFixture struct {
 	runner    *fakeRunner
 	validator *fakeValidator
 	conn      *substrate.Conn
+}
+
+// fixtureReturnColumns is the plain-lens column parse stand-in: the fixtures
+// judge bindings through the fakeValidator, so the only thing a real parse
+// would add here is a dependency on the rule engine. It answers one column per
+// `AS <name>` in the rule, which is enough for the catalog resolver's own
+// vectors to be about the CATALOG rather than about cypher.
+func fixtureReturnColumns(rule string) ([]string, error) {
+	var out []string
+	for _, part := range strings.Split(rule, " AS ")[1:] {
+		name := strings.TrimSpace(strings.SplitN(part, ",", 2)[0])
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no RETURN aliases in %q", rule)
+	}
+	return out, nil
 }
 
 // notProtected is the deny-list stand-in for every case where protection is not
@@ -165,7 +204,7 @@ func newAuthorFixtureProtecting(t *testing.T, protected ProtectedPackagePredicat
 
 	runner := &fakeRunner{}
 	validator := &fakeValidator{}
-	adapter, err := NewCapabilityAuthor(runner, conn, testCatalogBucket, validator.validate, protected,
+	adapter, err := NewCapabilityAuthor(runner, conn, testCatalogBucket, validator.validate, fixtureReturnColumns, protected,
 		WithCapabilityAuthorClock(func() time.Time { return time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC) }))
 	if err != nil {
 		t.Fatalf("NewCapabilityAuthor: %v", err)
@@ -180,16 +219,13 @@ func newAuthorFixtureProtecting(t *testing.T, protected ProtectedPackagePredicat
 // filable lensRef. The lens spec carries a Postgres targetConfig with a DSN and
 // RLS posture, so the sanitisation vector (nothing sensitive reaches the vendor)
 // has a real payload to strip.
-func seedCatalog(t *testing.T, conn *substrate.Conn) {
-	t.Helper()
-	for _, id := range []string{staleLensNanoID, existingTargetID, nudgePatternID, sendReminderMetaID, bareEventMetaID} {
-		if !substrate.IsValidNanoID(id) {
-			t.Fatalf("seed NanoID %q is not a valid NanoID (fix the test constant)", id)
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	rows := map[string]string{
+// catalogFixtureRows is the seeded catalog as the capabilityAuthorContext lens
+// projects it: one row per meta-vertex, keyed by the meta key. Held as data
+// rather than written straight to KV so the same rows drive both the live
+// fixture (seedCatalog below) and the in-memory readers that judge the row
+// shapes directly.
+func catalogFixtureRows() map[string]string {
+	return map[string]string{
 		"vtx.meta." + staleLensNanoID: `{"key":"vtx.meta.` + staleLensNanoID + `","class":"meta.lens","canonicalName":"` + staleLensCanonical + `",` +
 			`"description":"onboarding rows that have gone cold",` +
 			`"spec":{"canonicalName":"` + staleLensCanonical + `","targetType":"postgres","cypherRule":"MATCH (i:identity) RETURN i.key AS key, true AS missing_reminder",` +
@@ -214,7 +250,40 @@ func seedCatalog(t *testing.T, conn *substrate.Conn) {
 		"vtx.meta." + bareEventMetaID: `{"key":"vtx.meta.` + bareEventMetaID + `","class":"meta.ddl.eventType","canonicalName":"SomeEvent","spec":null}`,
 		"vtx.meta." + poisonRowNanoID: `not json at all`,
 	}
-	for key, body := range rows {
+}
+
+// catalogFixtureKeys returns the fixture's row keys sorted, the order
+// readCatalogRows reads them in.
+func catalogFixtureKeys() []string {
+	rows := catalogFixtureRows()
+	keys := make([]string, 0, len(rows))
+	for k := range rows {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// catalogFixtureValue reads one fixture row's bytes, the shape buildCatalogRead
+// takes its values through.
+func catalogFixtureValue(key string) []byte {
+	body, ok := catalogFixtureRows()[key]
+	if !ok {
+		return nil
+	}
+	return []byte(body)
+}
+
+func seedCatalog(t *testing.T, conn *substrate.Conn) {
+	t.Helper()
+	for _, id := range []string{staleLensNanoID, existingTargetID, nudgePatternID, sendReminderMetaID, bareEventMetaID} {
+		if !substrate.IsValidNanoID(id) {
+			t.Fatalf("seed NanoID %q is not a valid NanoID (fix the test constant)", id)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for key, body := range catalogFixtureRows() {
 		if _, err := conn.KVPut(ctx, testCatalogBucket, key, []byte(body)); err != nil {
 			t.Fatalf("seed catalog row %s: %v", key, err)
 		}
@@ -433,6 +502,68 @@ func authoringRequest(intent string) Request {
 		Operation:      "RecordCapabilityProposal",
 		Subject:        testHandle,
 		Params:         map[string]string{"requesterId": "vtx.identity.Op1aaaaaaaaaaaaaaaa", "intent": intent},
+	}
+}
+
+// --- the validator declining to decide --------------------------------------
+
+// TestCapabilityAuthor_ValidatorDeclining_FilesNothing pins the difference
+// between "the artifact is bad" and "I could not decide". A recorded verdict is
+// permanent and a reviewer reads it as the author's failing, so a dependency
+// the validator could not read must never become one: the Poll fails, the
+// bridge's own machinery re-arms it, and nothing is filed.
+func TestCapabilityAuthor_ValidatorDeclining_FilesNothing(t *testing.T) {
+	t.Parallel()
+	f := newAuthorFixture(t)
+	ctx := context.Background()
+	f.validator.declineWith = errors.New("the installed-lens catalog could not be read")
+
+	if _, err := f.adapter.Execute(ctx, authoringRequest("remind cold onboardings")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	f.writeResult(t, testHandle, completed(t, goodDraft(), "model-a"))
+
+	d, err := f.adapter.Poll(ctx, testHandle)
+	if err == nil {
+		t.Fatalf("Poll = %+v, want the declined decision propagated as an error the poll retries", d)
+	}
+	if !strings.Contains(err.Error(), "catalog could not be read") {
+		t.Errorf("err = %v, want the validator's own reason carried through", err)
+	}
+	if d.Result.Status != "" || d.Ref != "" {
+		t.Errorf("Poll returned a dispatch alongside the error: %+v", d)
+	}
+}
+
+// The adapter must actually HAND the validator a catalog to resolve against —
+// a nil there would make every weaverTarget artifact fail closed on the
+// validator's own nil posture, which reads as a corpus of bad proposals.
+func TestCapabilityAuthor_SuppliesTheLensCatalogToTheValidator(t *testing.T) {
+	t.Parallel()
+	f := newAuthorFixture(t)
+	ctx := context.Background()
+
+	if _, err := f.adapter.Execute(ctx, authoringRequest("remind cold onboardings")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	f.writeResult(t, testHandle, completed(t, goodDraft(), "model-a"))
+	if _, err := f.adapter.Poll(ctx, testHandle); err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+
+	resolvers := f.validator.resolvers()
+	if len(resolvers) == 0 {
+		t.Fatalf("the validator was never called")
+	}
+	for i, r := range resolvers {
+		if r == nil {
+			t.Fatalf("validate call %d got a nil installed-lens catalog", i)
+		}
+		// And it is the CATALOG's answer, not an empty stand-in: the seeded
+		// lens resolves through it.
+		if _, found, err := r.ResolveLensColumns(staleLensNanoID); !found || err != nil {
+			t.Fatalf("validate call %d: the supplied catalog does not resolve the seeded lens (found %v, err %v)", i, found, err)
+		}
 	}
 }
 
@@ -947,7 +1078,7 @@ func TestCapabilityAuthor_ColdEpisodeStillFilesALandedAnswer(t *testing.T) {
 
 	// A fresh adapter over the same buckets: the bridge restarted after the
 	// request went out, so the prompt is gone but the answer is in KV.
-	restarted, err := NewCapabilityAuthor(f.runner, f.conn, testCatalogBucket, f.validator.validate, notProtected)
+	restarted, err := NewCapabilityAuthor(f.runner, f.conn, testCatalogBucket, f.validator.validate, fixtureReturnColumns, notProtected)
 	if err != nil {
 		t.Fatalf("NewCapabilityAuthor: %v", err)
 	}
@@ -976,7 +1107,7 @@ func TestCapabilityAuthor_ColdEpisodeWithNoAnswerIsTerminal(t *testing.T) {
 	t.Parallel()
 	f := newAuthorFixture(t)
 
-	restarted, err := NewCapabilityAuthor(f.runner, f.conn, testCatalogBucket, f.validator.validate, notProtected)
+	restarted, err := NewCapabilityAuthor(f.runner, f.conn, testCatalogBucket, f.validator.validate, fixtureReturnColumns, notProtected)
 	if err != nil {
 		t.Fatalf("NewCapabilityAuthor: %v", err)
 	}
@@ -1380,7 +1511,7 @@ func TestCatalogRead_EmptyBucketIsTerminal(t *testing.T) {
 		t.Fatalf("provision: %v", err)
 	}
 	runner := &fakeRunner{}
-	adapter, err := NewCapabilityAuthor(runner, conn, testCatalogBucket, (&fakeValidator{}).validate, notProtected)
+	adapter, err := NewCapabilityAuthor(runner, conn, testCatalogBucket, (&fakeValidator{}).validate, fixtureReturnColumns, notProtected)
 	if err != nil {
 		t.Fatalf("NewCapabilityAuthor: %v", err)
 	}
@@ -1410,22 +1541,29 @@ func TestNewCapabilityAuthor_RequiresEveryDependency(t *testing.T) {
 
 	for name, build := range map[string]func() (*CapabilityAuthor, error){
 		"no dispatcher": func() (*CapabilityAuthor, error) {
-			return NewCapabilityAuthor(nil, conn, testCatalogBucket, validate, notProtected)
+			return NewCapabilityAuthor(nil, conn, testCatalogBucket, validate, fixtureReturnColumns, notProtected)
 		},
 		"no conn": func() (*CapabilityAuthor, error) {
-			return NewCapabilityAuthor(runner, nil, testCatalogBucket, validate, notProtected)
+			return NewCapabilityAuthor(runner, nil, testCatalogBucket, validate, fixtureReturnColumns, notProtected)
 		},
 		"no bucket": func() (*CapabilityAuthor, error) {
-			return NewCapabilityAuthor(runner, conn, "", validate, notProtected)
+			return NewCapabilityAuthor(runner, conn, "", validate, fixtureReturnColumns, notProtected)
 		},
 		"no validator": func() (*CapabilityAuthor, error) {
-			return NewCapabilityAuthor(runner, conn, testCatalogBucket, nil, notProtected)
+			return NewCapabilityAuthor(runner, conn, testCatalogBucket, nil, fixtureReturnColumns, notProtected)
+		},
+		// A nil column parse is the same class of fail-CLOSED wiring bug the
+		// validator's own nil resolver is: every capability-artifact lens is
+		// plain, so without a parse every authored target's binding reads
+		// underivable and records invalid.
+		"no plain-lens column parse": func() (*CapabilityAuthor, error) {
+			return NewCapabilityAuthor(runner, conn, testCatalogBucket, validate, nil, notProtected)
 		},
 		// A nil predicate is the fail-OPEN wiring bug: it would answer "nothing
 		// is protected" for every package, so it has to be as fatal as a nil
 		// validator rather than defaulted away.
 		"no protected-package predicate": func() (*CapabilityAuthor, error) {
-			return NewCapabilityAuthor(runner, conn, testCatalogBucket, validate, nil)
+			return NewCapabilityAuthor(runner, conn, testCatalogBucket, validate, fixtureReturnColumns, nil)
 		},
 	} {
 		name, build := name, build
@@ -1851,7 +1989,7 @@ func TestCapabilityAuthor_ColdEditFilesTheFreshPackageTarget(t *testing.T) {
 
 	// A different adapter over the same buckets IS the restarted bridge: the
 	// result bucket carries the answer, nothing carries the request's scope.
-	cold, err := NewCapabilityAuthor(f.runner, f.conn, testCatalogBucket, f.validator.validate, notProtected,
+	cold, err := NewCapabilityAuthor(f.runner, f.conn, testCatalogBucket, f.validator.validate, fixtureReturnColumns, notProtected,
 		WithCapabilityAuthorClock(func() time.Time { return time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC) }))
 	if err != nil {
 		t.Fatalf("NewCapabilityAuthor: %v", err)

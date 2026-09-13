@@ -18,7 +18,7 @@ non-advisory finding.
 | `lint-manifest-entity-type` | An edge-manifest lens tail's `entityType` matches its `entityKey` binding |
 | `lint-doc-orphan` | A doc comment names the declaration it sits above |
 | `lint-capability-kv-readers` | One reader owns Contract #6 §6.1 |
-| `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map |
+| `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map — derived through `internal/lenscolumns`, the one reading of "which keys does a row of this lens carry", which `internal/pkgmgr` holds the same invariant on at the two non-CI paths (the installer's live preflight refuses the install; the capability-artifact validator records the proposal invalid) |
 | `lint-board` | The backlog is an index, not a journal |
 | `lint-slog-values` | An slog attribute value's in-module struct type implements `slog.LogValuer`/`json.Marshaler`/`encoding.TextMarshaler` — a JSON handler never consults `fmt.Stringer` |
 | `lint-flag-consumer-census` | A registered process-wide flag's readers are a declared ledger (file + function), so a new reader re-reads the bound the flag's own comment prices |
@@ -89,3 +89,11 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   fed the target's rows unchecked. Check: for every set a gate derives, grep for an existing consumer or
   sibling gate that derives the same set and diff the two definitions before writing your own; read the
   producing function to its end; and where the binding is positional, key on the position.
+- **A gate that SKIPS what it cannot parse fails OPEN — an unreadable candidate is a finding, not a pass.** The
+  `validator-lens-resolver` pin counted a call's arguments by splitting on commas and `continue`d on any count it did
+  not expect, so gofmt's own trailing comma, a `//` comment with an apostrophe inside the argument list, a typed-nil
+  conversion, an identifier declared `var x T` and never assigned, and an aliased import each slipped past a rule whose
+  whole job was to catch an unwired nil. Minted: weaverTarget gap-declaration holder, cold review (2026-09-13). Check:
+  when a rule's reader cannot parse a candidate it EMITS ("cannot read the argument list — write it in a shape the gate
+  can read"); enumerate every spelling the language allows for the hazard value (`nil`, `T(nil)`, a never-assigned
+  declaration, an alias) and give each a denied fixture beside its allowed twin.

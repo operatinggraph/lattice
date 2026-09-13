@@ -496,23 +496,41 @@ func TestWeaverAuthorRequest_MalformedBodyRejected(t *testing.T) {
 // requirements), build.go:566-590 (resolveLensRef — an installed target's
 // LensRef is always a bare NanoID; a canonicalName only resolves within the
 // SAME Definition's own declared Lenses, which a Studio proposal — always a
-// single-artifact Definition — never carries), capabilitymaterializer.go:601
-// (validateWeaverTargetArtifact requires lensRef non-empty but never resolves
-// it — resolution is apply-time only, so Check-time validity is unaffected by
-// whether a lensRef is a canonicalName or a NanoID).
+// single-artifact Definition — never carries).
 
 // lensMetaSpecValue is the Core KV value classifyKey+metaData expect at
 // vtx.meta.<id>.spec for an installed lens — the {"data":{...}} envelope
-// metaData's own decode struct requires (cmd/loupe/ops.go).
-func lensMetaSpecValue(canonicalName string) string {
-	return `{"data":{"canonicalName":"` + canonicalName + `","targetType":"nats-kv","targetConfig":{},"cypherRule":"MATCH (e) RETURN e","engine":"full"}}`
+// metaData's own decode struct requires (cmd/loupe/ops.go). The cypherRule is
+// what the Check endpoint's lens resolver reads a plain lens's row columns
+// from, so a fixture names the gap columns it wants the draft judged against.
+func lensMetaSpecValue(canonicalName string, gapColumns ...string) string {
+	rule := "MATCH (e:identity) RETURN e.key AS key"
+	for _, col := range gapColumns {
+		rule += ", true AS " + col
+	}
+	return `{"data":{"canonicalName":"` + canonicalName + `","targetType":"nats-kv","targetConfig":{},"cypherRule":"` + rule + `","engine":"full"}}`
+}
+
+// lensMetaRootValue is the lens meta-vertex ROOT the binding rule reads the
+// class and tombstone state from — the half buildLensCanonicalIndex never
+// looks at, and the half that tells a lens apart from a DDL or a target.
+func lensMetaRootValue() string {
+	return `{"class":"meta.lens","isDeleted":false,"data":{}}`
+}
+
+// installedLens seeds both halves of an installed lens in Core KV.
+func installedLens(put func(bucket, key, value string), lensID, canonicalName string, gapColumns ...string) {
+	put(bootstrap.CoreKVBucket, "vtx.meta."+lensID, lensMetaRootValue())
+	put(bootstrap.CoreKVBucket, "vtx.meta."+lensID+".spec", lensMetaSpecValue(canonicalName, gapColumns...))
 }
 
 func TestWeaverAuthorCheck_TargetOnlyOmitsLensValidation(t *testing.T) {
-	srv, _, _, _ := newTestReviewServerWithSrv(t)
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	const lensID = "aaaaaaaaaaaaaaaaaaaa"
+	installedLens(put, lensID, "leaseViolations")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/weaver/author/check", strings.NewReader(
-		`{"target":{"targetId":"t1","lensRef":"aaaaaaaaaaaaaaaaaaaa","gaps":{}}}`))
+		`{"target":{"targetId":"t1","lensRef":"`+lensID+`","gaps":{}}}`))
 	rec := httptest.NewRecorder()
 	srv.weaverAuthorCheck(rec, req)
 	if rec.Code != http.StatusOK {
@@ -529,8 +547,110 @@ func TestWeaverAuthorCheck_TargetOnlyOmitsLensValidation(t *testing.T) {
 		t.Errorf("lensValidation = %+v, want nil", resp.LensValidation)
 	}
 	if !resp.TargetValidation.Valid {
-		t.Errorf("targetValidation = %+v, want valid — Check-time validation never resolves lensRef (apply-time only)", resp.TargetValidation)
+		t.Errorf("targetValidation = %+v, want valid — the lens it binds is installed and projects no gap column the target leaves undeclared", resp.TargetValidation)
 	}
+}
+
+// The binding rule at the authoring surface, as a negative-with-positive pair
+// driven through the HTTP handler: the same draft, against the same installed
+// lens, differing only in whether the gaps map declares the column the lens
+// projects.
+func TestWeaverAuthorCheck_UndeclaredGapColumnAgainstInstalledLens(t *testing.T) {
+	srv, _, _, put := newTestReviewServerWithSrv(t)
+	const lensID = "bbbbbbbbbbbbbbbbbbbb"
+	installedLens(put, lensID, "coldOnboarding", "missing_reminder")
+
+	undeclared := checkDraft(t, srv, `{"target":{"targetId":"t1","lensRef":"`+lensID+`","gaps":{}}}`)
+	if undeclared.TargetValidation.Valid {
+		t.Fatalf("a target declaring none of its lens's gap columns must not read valid: %+v", undeclared.TargetValidation)
+	}
+	joined := strings.Join(undeclared.TargetValidation.Errors, " ")
+	if !strings.Contains(joined, `projects gap column "missing_reminder" (in RETURN)`) {
+		t.Fatalf("errors = %q, want the undeclared column named with where it came from", joined)
+	}
+
+	declared := checkDraft(t, srv, `{"target":{"targetId":"t1","lensRef":"`+lensID+`",`+
+		`"gaps":{"missing_reminder":{"action":"surface","issueCode":"coldOnboarding","issueSeverity":"warning"}}}}`)
+	if !declared.TargetValidation.Valid {
+		t.Fatalf("declaring the column must make the same draft valid: %+v", declared.TargetValidation)
+	}
+}
+
+// A lensRef naming nothing installed reads invalid — and Check is the ONE
+// caller that can honestly offer the second remedy, because its own propose
+// submits the target and a co-authored lens as one bundle.
+func TestWeaverAuthorCheck_UnknownLensRefCarriesTheCoAuthoringRemedy(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+
+	resp := checkDraft(t, srv, `{"target":{"targetId":"t1","lensRef":"cccccccccccccccccccc","gaps":{}}}`)
+	if resp.TargetValidation.Valid {
+		t.Fatalf("a lensRef naming no installed lens must not read valid: %+v", resp.TargetValidation)
+	}
+	joined := strings.Join(resp.TargetValidation.Errors, " ")
+	if !strings.Contains(joined, "names no installed lens; install the lens first — or propose it alongside this target, as one bundle") {
+		t.Fatalf("errors = %q, want the caller-neutral verdict plus the remedy this endpoint can honour", joined)
+	}
+}
+
+// The co-authored path: the lens is in the SAME request and has no installed
+// id yet, so the draft lens itself is what the target is judged against.
+func TestWeaverAuthorCheck_CoAuthoredLensAnswersItsOwnTarget(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+
+	body := `{"target":{"targetId":"t1","lensRef":"draftLens","gaps":{"missing_x":{"action":"surface","issueCode":"X","issueSeverity":"warning"}}},` +
+		`"lens":{"canonicalName":"draftLens","adapter":"nats-kv","bucket":"weaver-targets",` +
+		`"spec":"MATCH (e:identity) RETURN e.key AS key, true AS missing_x"}}`
+	resp := checkDraft(t, srv, body)
+	if !resp.TargetValidation.Valid {
+		t.Fatalf("a target declaring every gap column its co-authored lens projects must read valid: %+v", resp.TargetValidation)
+	}
+
+	undeclared := `{"target":{"targetId":"t1","lensRef":"draftLens","gaps":{}},` +
+		`"lens":{"canonicalName":"draftLens","adapter":"nats-kv","bucket":"weaver-targets",` +
+		`"spec":"MATCH (e:identity) RETURN e.key AS key, true AS missing_x"}}`
+	bad := checkDraft(t, srv, undeclared)
+	if bad.TargetValidation.Valid {
+		t.Fatalf("the same pair with the gap undeclared must not read valid: %+v", bad.TargetValidation)
+	}
+	if joined := strings.Join(bad.TargetValidation.Errors, " "); !strings.Contains(joined, `projects gap column "missing_x"`) {
+		t.Fatalf("errors = %q, want the draft lens's own column named", joined)
+	}
+}
+
+// A co-authored lens whose spec does not parse leaves the target's binding
+// underivable — and the verdict has to say WHOSE lens, because the author is
+// holding two artifacts and one of them is the one they just typed.
+func TestWeaverAuthorCheck_UnparseableDraftLensNamesItself(t *testing.T) {
+	srv, _, _, _ := newTestReviewServerWithSrv(t)
+
+	body := `{"target":{"targetId":"t1","lensRef":"draftLens","gaps":{}},` +
+		`"lens":{"canonicalName":"draftLens","adapter":"nats-kv","bucket":"weaver-targets",` +
+		`"spec":"this is not openCypher at all"}}`
+	resp := checkDraft(t, srv, body)
+	if resp.TargetValidation.Valid {
+		t.Fatalf("a target bound to an unreadable lens must not read valid: %+v", resp.TargetValidation)
+	}
+	joined := strings.Join(resp.TargetValidation.Errors, " ")
+	if !strings.Contains(joined, `cannot be derived: the co-authored lens "draftLens"`) {
+		t.Fatalf("errors = %q, want the verdict to name the co-authored lens as the one that could not be read", joined)
+	}
+}
+
+// checkDraft posts one draft through the real Check handler and decodes its
+// response — the entry point the console calls, not the rule underneath.
+func checkDraft(t *testing.T, srv *server, body string) weaverAuthorCheckResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/weaver/author/check", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.weaverAuthorCheck(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp weaverAuthorCheckResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp
 }
 
 func TestWeaverAuthorCheck_WithLensComputesLensValidation(t *testing.T) {

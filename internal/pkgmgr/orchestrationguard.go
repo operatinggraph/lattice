@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/operatinggraph/lattice/internal/lenscolumns"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -439,35 +440,120 @@ func typedLiteralInStringField(fields []namedValue) (namedValue, bool) {
 // that shape through the gate untouched. The lens is resolved from the target's
 // LensRef by canonicalName, mirroring resolveLensRef (build.go).
 //
-// Two absences are skipped rather than refused, deliberately. A LensRef that
-// names no lens in this batch (an already-installed lens from another package,
-// referenced by NanoID) and a lens with no Output descriptor (not an
-// actor-aggregate) both leave the declaration outside what this installer can
-// see, and a gate cannot validate what it cannot read — refusing on absence
-// would fail every cross-package target. The runtime `uncappedExternal` backoff
-// remains the backstop for everything static validation cannot reach: this gate
-// reads DECLARATIONS, while the engine's gapSuppressed reads VALUES, and a lens
-// may declare `maxretries_<g>` and still project null or zero into the row.
+// One absence is skipped rather than refused: a lens whose row columns are not
+// derivable at all (a per-entry list lens, an unparseable rule) declares
+// nothing this rule can read, and a gate cannot validate what it cannot read.
+// That absence is not a way past the check — the installer's live preflight
+// refuses an unreadable binding outright before dispatch ever sees it, and the
+// preflight is also what resolves a LensRef naming an ALREADY-INSTALLED lens
+// (a bare NanoID from another package), so this rule reaches those too. The
+// runtime `uncappedExternal` backoff remains the backstop for what static
+// validation cannot reach: this gate reads DECLARATIONS, while the engine's
+// gapSuppressed reads VALUES, and a lens may declare `maxretries_<g>` and still
+// project null or zero into the row.
 //
 // col has already been checked to carry the gapColumnPrefix by the caller's
 // loop, so the trimmed remainder is the gap name `<g>`.
 func (def Definition) validateGapCompanionPair(targetIdx int, t WeaverTargetSpec, col string, ga GapActionSpec) error {
-	if !staticallyExternalGapActions[ga.Action] {
-		return nil
-	}
 	lens := def.lensByCanonicalName(t.LensRef)
 	if lens == nil || lens.Output == nil {
 		return nil
 	}
+	return validateGapCompanionPairDeclared(targetIdx, t, col, ga, lens.CanonicalName, declaredRowBodyColumns(lens.Output))
+}
+
+// validateGapCompanionPairDeclared is the companion-pair rule over an already
+// resolved column set: declared maps each column a row of the bound lens
+// carries to the declaration it came from. Callers differ only in where that
+// set comes from — the batch's own LensSpec here, the installed lens's stored
+// spec in the live preflight — so the verdict cannot differ with the lens's
+// provenance.
+func validateGapCompanionPairDeclared(targetIdx int, t WeaverTargetSpec, col string, ga GapActionSpec, lensName string, declared map[string]string) error {
+	if !staticallyExternalGapActions[ga.Action] {
+		return nil
+	}
 	gap := strings.TrimPrefix(col, gapColumnPrefix)
 	inflightCol, maxretriesCol := inflightColumnPrefix+gap, maxretriesColumnPrefix+gap
-	declared := declaredRowBodyColumns(lens.Output)
 	inflightIn, declaresInflight := declared[inflightCol]
 	if _, declaresCap := declared[maxretriesCol]; !declaresInflight || declaresCap {
 		return nil
 	}
-	return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: lens %q declares row-body column %q (in %s) but no %q — action %q is external-class, and Contract #10 §10.3 requires the companion pair there: the declared marker takes the gap off the engine's default retry budget, so without a cap the dispatch count can never reach one, §10.8's GapBudgetExhausted can never fire, and the gap re-dispatches indefinitely with nothing telling an operator it is not converging. Declare %q in the lens's Output.BodyColumns, sized to what draining this gap can legitimately take (a StaticEmptyColumns entry projects an empty array, which the engine reads as no usable cap at all). Dropping %q instead is also a legal fix, but only because that hands the gap back to the engine's default retry budget — a real bound, not a way past this check",
-		targetIdx, t.TargetID, col, lens.CanonicalName, inflightCol, inflightIn, maxretriesCol, ga.Action, maxretriesCol, inflightCol)
+	return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: lens %q declares row-body column %q (in %s) but no %q — action %q is external-class, and Contract #10 §10.3 requires the companion pair there: the declared marker takes the gap off the engine's default retry budget, so without a cap the dispatch count can never reach one, §10.8's GapBudgetExhausted can never fire, and the gap re-dispatches indefinitely with nothing telling an operator it is not converging. %s Dropping %q instead is also a legal fix, but only because that hands the gap back to the engine's default retry budget — a real bound, not a way past this check",
+		targetIdx, t.TargetID, col, lensName, inflightCol, inflightIn, maxretriesCol, ga.Action,
+		companionCapRemedy(maxretriesCol, inflightIn), inflightCol)
+}
+
+// companionCapRemedy renders the "declare the cap" half of the companion-pair
+// refusal in terms of the declaration the MARKER came from, because that is
+// where the cap has to be added and the three shapes are edited in three
+// different places. A remedy naming Output.BodyColumns to the author of a plain
+// lens — which has no Output descriptor at all — is an instruction they cannot
+// follow.
+func companionCapRemedy(maxretriesCol, markerProvenance string) string {
+	switch markerProvenance {
+	case lenscolumns.ProvenanceReturn:
+		return fmt.Sprintf("Add %q to the lens's RETURN clause, sized to what draining this gap can legitimately take.", maxretriesCol)
+	case lenscolumns.ProvenanceProjectColumns:
+		return fmt.Sprintf("Add %q to the source's project.columns, sized to what draining this gap can legitimately take.", maxretriesCol)
+	default:
+		return fmt.Sprintf("Declare %q in the lens's Output.BodyColumns, sized to what draining this gap can legitimately take (a StaticEmptyColumns entry projects an empty array, which the engine reads as no usable cap at all).", maxretriesCol)
+	}
+}
+
+// undeclaredGapColumns returns, sorted, every missing_* column the lens's rows
+// carry that declared does not name — the §10.8 subset rule both holders of
+// the weaver-target binding apply (the artifact validator at record time, the
+// installer's live preflight at apply time), over the one derivation in
+// internal/lenscolumns.
+func undeclaredGapColumns(cols lenscolumns.Result, declared map[string]bool) []string {
+	var out []string
+	for col := range lenscolumns.Gaps(cols) {
+		if !declared[col] {
+			out = append(out, col)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// UndeclaredGapColumnRefusal renders the one sentence every holder of the
+// subset rule reports an undeclared gap column with: the installer's live
+// preflight, the capability-artifact validator, and the CI gate
+// scripts/lint-gap-column-declaration.go, which calls this rather than keeping
+// a copy. An author who has read one of the three has read them all, and a
+// reworded remedy cannot reach two of them and not the third.
+//
+// provenance is the lenscolumns declaration the column came from
+// (Output.BodyColumns, Output.StaticEmptyColumns, Source.Project.Columns or
+// RETURN), which is what tells the author which list to edit. declared is the
+// target's own gaps keys, sorted.
+func UndeclaredGapColumnRefusal(lensName, col, provenance string, declared []string) string {
+	declaredList := "none"
+	if len(declared) > 0 {
+		declaredList = strings.Join(declared, ", ")
+	}
+	return fmt.Sprintf("lens %q projects gap column %q (in %s), which the target's gaps map does not declare (declared: %s). Weaver's dispatchGap holds such a row on the long redelivery floor indefinitely. Add a gaps entry naming the remediation action — or, if the column is deliberately not remediated, declare it `surface` so it raises a standing Health issue and Acks.",
+		lensName, col, provenance, declaredList)
+}
+
+// escalatesUnplannable reports whether the target's Augur policy redirects an
+// undeclared gap column to the AI reasoning tier — Weaver's dispatchGap routes
+// such a column there and never reaches the long-Nak arm, so it needs no gaps
+// entry. The exemption covers the subset rule alone: a binding that names no
+// installed lens is still refused for an escalating target, since escalation
+// says nothing about a lens that does not exist.
+//
+// Nil-safe: most targets declare no policy at all.
+func (t WeaverTargetSpec) escalatesUnplannable() bool {
+	if t.Augur == nil {
+		return false
+	}
+	for _, trigger := range t.Augur.Escalate {
+		if trigger == escalateUnplannable {
+			return true
+		}
+	}
+	return false
 }
 
 // declaredRowBodyColumns returns every column an actor-aggregate lens's Output
@@ -476,15 +562,27 @@ func (def Definition) validateGapCompanionPair(targetIdx int, t WeaverTargetSpec
 // Refractor's projection driver materializes BodyColumns and StaticEmptyColumns
 // into the same envelope, so both are columns the Weaver sees; a name in both
 // lists is attributed to BodyColumns, which is the one carrying a real value.
+//
+// A call into lenscolumns.Projected for the actorAggregate shape — shares the
+// derivation with the lint's gapColumnsOf. Callers here already guard
+// out != nil for a lens they know is actorAggregate-shaped, so ProjectionKind
+// is supplied directly rather than round-tripped through the caller's
+// LensSpec.
 func declaredRowBodyColumns(out *OutputDescriptorSpec) map[string]string {
-	declared := make(map[string]string, len(out.BodyColumns)+len(out.StaticEmptyColumns))
-	for _, c := range out.StaticEmptyColumns {
-		declared[c] = "Output.StaticEmptyColumns"
+	result, err := lenscolumns.Projected(lenscolumns.Spec{
+		ProjectionKind: lenscolumns.ActorAggregateKind,
+		Output: &lenscolumns.Output{
+			BodyColumns:        out.BodyColumns,
+			StaticEmptyColumns: out.StaticEmptyColumns,
+			EntryKeyColumn:     out.EntryKeyColumn,
+		},
+	}, nil)
+	if err != nil {
+		// An unreadable shape (a per-entry list lens) declares no statically
+		// knowable columns, so the companion-pair rule has nothing to check.
+		return map[string]string{}
 	}
-	for _, c := range out.BodyColumns {
-		declared[c] = "Output.BodyColumns"
-	}
-	return declared
+	return result.Columns
 }
 
 // lensByCanonicalName resolves a WeaverTarget's LensRef to the lens this batch

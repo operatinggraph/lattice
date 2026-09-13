@@ -123,6 +123,7 @@ import (
 	"strings"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
+	"github.com/operatinggraph/lattice/internal/lenscolumns"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
 )
@@ -311,8 +312,12 @@ func checkTarget(pkg string, def pkgmgr.Definition, t pkgmgr.WeaverTargetSpec, s
 		if exempt {
 			continue
 		}
-		findings = append(findings, fmt.Sprintf("%s: lens %q projects gap column %q (in %s), which the target's gaps map does not declare (declared: %s). Weaver's dispatchGap holds such a row on the long redelivery floor indefinitely. Add a gaps entry naming the remediation action — or, if the column is deliberately not remediated, declare it `surface` so it raises a standing Health issue and Acks.",
-			where, col.lens, col.name, col.field, declaredKeys(t.Gaps)))
+		// The sentence itself is pkgmgr's, not this gate's: the installer's
+		// live preflight and the capability-artifact validator refuse the same
+		// column, and an author who fixes one refusal is reading the same
+		// remedy whichever holder caught them. One spelling, three holders.
+		findings = append(findings, fmt.Sprintf("%s: %s", where,
+			pkgmgr.UndeclaredGapColumnRefusal(col.lens, col.name, col.field, sortedDeclaredKeys(t.Gaps))))
 	}
 	return findings
 }
@@ -367,6 +372,9 @@ func classify(l pkgmgr.LensSpec) rowSource {
 	case l.Output == nil:
 		src.why = "it declares no Output descriptor, so there is no BodyColumns/StaticEmptyColumns list stating what its rows carry"
 		return src
+	case l.Output.EntryKeyColumn != "":
+		src.why = "it is a per-entry list lens (Output.EntryKeyColumn is set), so its row body is a runtime shape lenscolumns cannot read statically"
+		return src
 	}
 	prefix, ok := keyPrefix(l.Output.OutputKeyPattern)
 	if !ok {
@@ -381,24 +389,37 @@ func classify(l pkgmgr.LensSpec) rowSource {
 
 // gapColumnsOf returns the `missing_*` columns an actor-aggregate lens's Output
 // descriptor puts into the projected row body, mapped to the descriptor field
-// that declares each. It mirrors pkgmgr's declaredRowBodyColumns
-// (orchestrationguard.go), including its attribution of a name appearing in both
-// lists to BodyColumns — the one carrying a real value. The union is what
-// matters: Refractor's driver writes every BodyColumn into the envelope and then
-// writes each StaticEmptyColumn as an empty array, so both are keys Weaver sees.
+// that declares each. It delegates to internal/lenscolumns — the one
+// derivation pkgmgr's declaredRowBodyColumns (orchestrationguard.go) also
+// calls into — including its attribution of a name appearing in both lists to
+// BodyColumns, the one carrying a real value. The union is what matters:
+// Refractor's driver writes every BodyColumn into the envelope and then writes
+// each StaticEmptyColumn as an empty array, so both are keys Weaver sees.
+//
+// The caller (classify) has already refused a lens whose ProjectionKind isn't
+// actorAggregateKind, whose Output is nil, or whose Output.EntryKeyColumn is
+// set — every shape lenscolumns.Projected itself refuses for this branch — so
+// ProjectionKind is supplied directly rather than round-tripped through the
+// caller's LensSpec, and Projected returning an error here is a gate defect,
+// not a corpus finding.
 func gapColumnsOf(out *pkgmgr.OutputDescriptorSpec) map[string]string {
-	cols := make(map[string]string, len(out.BodyColumns)+len(out.StaticEmptyColumns))
-	for _, c := range out.StaticEmptyColumns {
-		if strings.HasPrefix(c, gapColumnPrefix) {
-			cols[c] = "Output.StaticEmptyColumns"
-		}
+	result, err := lenscolumns.Projected(lenscolumns.Spec{
+		ProjectionKind: lenscolumns.ActorAggregateKind,
+		Output: &lenscolumns.Output{
+			BodyColumns:        out.BodyColumns,
+			StaticEmptyColumns: out.StaticEmptyColumns,
+			EntryKeyColumn:     out.EntryKeyColumn,
+		},
+	}, nil)
+	if err != nil {
+		// classify's whitelist and lenscolumns.Projected's whitelist have
+		// drifted apart: classify let through an Output this delegation
+		// cannot read after all. That is this gate lying about what it
+		// checked, not a package to report — fail loudly rather than
+		// answering an empty (falsely "no gap columns") result.
+		panic(fmt.Sprintf("lint-gap-column-declaration: gapColumnsOf: gate defect — classify() admitted an Output lenscolumns.Projected refuses: %v", err))
 	}
-	for _, c := range out.BodyColumns {
-		if strings.HasPrefix(c, gapColumnPrefix) {
-			cols[c] = "Output.BodyColumns"
-		}
-	}
-	return cols
+	return lenscolumns.Gaps(result)
 }
 
 // keyPrefix returns the segment of an OutputKeyPattern before its first dot —
@@ -444,18 +465,16 @@ func lookupLens(def pkgmgr.Definition, ref string) (pkgmgr.LensSpec, bool) {
 	return found, ok
 }
 
-// declaredKeys renders a target's declared gap keys in sorted order, so the
-// finding names what the author DID declare beside what they did not.
-func declaredKeys(gaps map[string]pkgmgr.GapActionSpec) string {
-	if len(gaps) == 0 {
-		return "none"
-	}
+// sortedDeclaredKeys returns a target's declared gap keys in sorted order, so
+// the finding names what the author DID declare beside what they did not — and
+// names them in the same order on every run.
+func sortedDeclaredKeys(gaps map[string]pkgmgr.GapActionSpec) []string {
 	keys := make([]string, 0, len(gaps))
 	for k := range gaps {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	return strings.Join(keys, ", ")
+	return keys
 }
 
 // runSelfTest drives synthetic Definitions through checkPackage — the same entry
@@ -584,6 +603,9 @@ func runSelfTest(verbose bool) {
 		{"a weaver-targets lens with a nil Output", pkgmgr.LensSpec{CanonicalName: "nilOutLens", Adapter: natsKVAdapter, Bucket: bootstrap.WeaverTargetsBucket,
 			ProjectionKind: actorAggregateKind}, "no Output descriptor"},
 		{"a weaver-targets lens whose OutputKeyPattern has no prefix segment", wtLens("noDotLens", "plainTarget", []string{"missing_thing"}, nil), "no `<prefix>.` segment"},
+		{"a weaver-targets lens with Output.EntryKeyColumn set (a per-entry list lens)", pkgmgr.LensSpec{CanonicalName: "entryKeyedLens", Adapter: natsKVAdapter, Bucket: bootstrap.WeaverTargetsBucket,
+			ProjectionKind: actorAggregateKind,
+			Output:         &pkgmgr.OutputDescriptorSpec{OutputKeyPattern: "plainTarget.{actorSuffix}", BodyColumns: []string{"missing_thing"}, EntryKeyColumn: "anchorId"}}, "per-entry list lens"},
 	} {
 		f, st = run(pkgmgr.Definition{
 			Lenses:        []pkgmgr.LensSpec{tc.lens},
@@ -596,6 +618,19 @@ func runSelfTest(verbose bool) {
 		check(st.lensesRead == 0 && st.columnsChecked == 0,
 			fmt.Sprintf("%s contributes nothing to the examined counts (got %d/%d)", tc.desc, st.lensesRead, st.columnsChecked))
 	}
+
+	// The entry-keyed fixture above minus EntryKeyColumn is readable — the
+	// positive pairing that proves the arm is keyed on EntryKeyColumn, not on
+	// the lens's canonicalName or shape otherwise.
+	f, st = run(pkgmgr.Definition{
+		Lenses: []pkgmgr.LensSpec{{CanonicalName: "entryKeyedLens", Adapter: natsKVAdapter, Bucket: bootstrap.WeaverTargetsBucket,
+			ProjectionKind: actorAggregateKind,
+			Output:         &pkgmgr.OutputDescriptorSpec{OutputKeyPattern: "plainTarget.{actorSuffix}", BodyColumns: []string{"missing_thing"}}}},
+		WeaverTargets: []pkgmgr.WeaverTargetSpec{target("plainTarget", "entryKeyedLens", []string{"missing_thing"})},
+	})
+	check(len(f) == 0 && st.lensesRead == 1 && st.columnsChecked == 1,
+		fmt.Sprintf("the same lens without EntryKeyColumn is readable and its declared gap column is checked (got %d finding(s), lensesRead=%d, columnsChecked=%d: %s)",
+			len(f), st.lensesRead, st.columnsChecked, joined(f)))
 
 	// Vector 7 — a duplicate canonicalName resolves LAST-wins, as the
 	// installer's canonicalName→id map does.

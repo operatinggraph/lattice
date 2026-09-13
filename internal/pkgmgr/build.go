@@ -197,7 +197,7 @@ func (i *Installer) buildInstallBatch(
 		lensID := lensIDs[idx]
 		class := l.Class
 		if class == "" {
-			class = "meta.lens"
+			class = MetaLensClass
 		}
 		addCreate(lensKey, docVertex(class, nil))
 		// The `spec` aspect carries the full LensSpec body Refractor's

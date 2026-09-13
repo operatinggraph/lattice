@@ -1798,10 +1798,7 @@ func (ex *executor) projectItems(bindings []binding, items []ProjectionItem, red
 		}
 	}
 	itemAlias := func(i int) string {
-		if items[i].Alias != "" {
-			return items[i].Alias
-		}
-		return projectionAutoAlias(items[i].Expr, i)
+		return itemAliasAt(items, i)
 	}
 
 	if !anyAggregating {

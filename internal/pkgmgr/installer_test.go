@@ -112,6 +112,13 @@ func newInstallerHarness(t *testing.T) (context.Context, *substrate.Conn, *Insta
 	inst.RoleIDs = map[string]string{
 		"operator": bootstrap.RoleOperatorID,
 	}
+	// The spec parser every production entry point wires (cmd/lattice-pkg,
+	// cmd/loupe, testutil.NewInstaller). Two install-time gates read it — the
+	// narrowed-filter label cap, and the weaver-target binding rule, for which
+	// a plain lens's row columns ARE its RETURN names — so a harness without
+	// it would exercise an installer no operator runs. The tests that pin what
+	// an UNWIRED installer does set the field back to nil themselves.
+	inst.SpecParser = fullCypherParser{}
 	return ctx, conn, inst
 }
 

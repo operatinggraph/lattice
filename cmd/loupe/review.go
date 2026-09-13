@@ -454,6 +454,7 @@ func (loupeCypherParser) Parse(ruleBody string) (pkgmgr.SpecLabels, error) {
 		Referenced: facts.Referenced,
 		Exhaustive: facts.Exhaustive,
 		Expansion:  facts.Expansion,
+		Columns:    facts.Columns,
 	}, nil
 }
 
@@ -564,11 +565,12 @@ func newLiveSensitiveAspectResolver(ctx context.Context, conn *substrate.Conn) (
 // approve-time can drift) and returns the ArtifactValidationReport the
 // approve op's fresh-validation payload requires. Kept separate from the HTTP
 // handler so the decision logic is unit-testable without a live substrate for
-// the kinds that need no live read (lens/weaverTarget/loomPattern/
-// vertexTypeDDL — held/sensitiveAspects both nil). Mirrors the CLI's
-// freshApprovalVerdict (cmd/lattice/capability): only "grant" reads the
-// requester's live held permissions; only "opMeta" needs the live
-// sensitive-aspect resolver.
+// the kinds that need no live read (lens/loomPattern/vertexTypeDDL — all three
+// injected dependencies nil). Mirrors the CLI's freshApprovalVerdict
+// (cmd/lattice/capability): only "grant" reads the requester's live held
+// permissions, only "opMeta" needs the live sensitive-aspect resolver, and
+// only "weaverTarget" needs the installed-lens catalog its lensRef binds
+// against.
 //
 // The held permissions are the proposal's own REQUESTER's, never the approving
 // operator's — a grant proposal widens what the requester may already do, so
@@ -594,7 +596,11 @@ func (s *server) freshCapabilityVerdict(ctx context.Context, conn *substrate.Con
 			return pkgmgr.ArtifactValidationReport{}, fmt.Errorf("load live DDL catalog for sensitive-aspect check: %w", err)
 		}
 	}
-	return pkgmgr.ValidateCapabilityArtifact(cols.Kind, json.RawMessage(cols.Content), loupeCypherParser{}, held, sensitiveAspects)
+	var installedLenses pkgmgr.InstalledLensResolver
+	if cols.Kind == "weaverTarget" {
+		installedLenses = pkgmgr.NewCoreKVLensResolver(ctx, conn, loupeCypherParser{})
+	}
+	return pkgmgr.ValidateCapabilityArtifact(cols.Kind, json.RawMessage(cols.Content), loupeCypherParser{}, held, sensitiveAspects, installedLenses)
 }
 
 // reviewCapabilityApprove implements POST /api/review/capability/<id>/approve

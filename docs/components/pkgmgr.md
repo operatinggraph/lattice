@@ -16,6 +16,23 @@ refusal, the `meta`/`op` name reservation (paired with the Processor's step-6 ga
 **narrowed-filter label cap** (`lenslabelcap.go`), which refuses an install whose own lens cannot fit
 `K + Σ leafBudget ≤ 8` at its abstract labels' declared worst case.
 
+**The live preflight** (`preflightLive`, called by all three mutating entry points — `Install`, `Apply` and
+`Upgrade` — after the pure `preflight` and the core-kv bucket check, and ahead of `Apply`'s `DryRun` return so
+a preview shows the refusal rather than a delta nobody can commit) is the install-time bound on Contract #10
+§10.8's weaver-target binding. For every
+declared `WeaverTarget` carrying a `LensRef`, it resolves the bound lens — from this Definition's own
+`Lenses` when it declares one, otherwise from the installed kernel by id (one `KVGetMulti` of the lens
+meta-vertex's root and its `spec` aspect) — and refuses the install, wrapping `ErrLensBindingRefused`, when
+the ref names no live `meta.lens`, when the lens's row columns are not derivable, when a `missing_*` column
+those rows carry is not a `gaps` key (waived only for a target whose `augur.escalate` includes
+`unplannable`), or when a declared `inflight_<g>` marker has no `maxretries_<g>` cap (§10.3). Row columns
+come from `internal/lenscolumns` — the same derivation the gap-column lint reads — so a plain lens's columns
+are its RETURN names, which makes `Installer.SpecParser` load-bearing: with none wired, every plain-lens
+binding is unreadable and therefore refused. The **artifact validator** holds the same rule at record time
+through an injected `InstalledLensResolver` (`CoreKVLensResolver` is the one live implementation, shared by
+Loupe, the CLI and the bridge); a `weaverTarget` artifact validated with no resolver is invalid, and every
+call site's wiring is pinned by `scripts/lint-conventions.go`'s `validator-lens-resolver` rule.
+
 *This doc is deliberately minimal — mandate + dossier. The owner fleshes out mechanism sections as it works
 the component (docs-in-Definition-of-Done, `agents/owner/SKILL.md` §6).*
 
@@ -54,6 +71,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   declaration (`testutil.DeclaredEnumerations`), never restates it; and the fallback for a surface that
   genuinely has no declaration is keyed on THAT surface by name, never on "the resolve came back empty" —
   an emptiness-keyed fallback silently re-absorbs the deletion it exists to expose.
+  **Fourth sighting (weaverTarget gap-declaration holder, 2026-09-13), one level out again: the gate was wired on two of
+  THREE sibling entry points.** `Install` and `Apply` ran the live preflight; `Upgrade` — which shares `preflight` and
+  the delta path with `Apply` — did not, because the design's census grepped `(Install\|Apply)(` and so named the
+  answer it expected. Check: a census of "every entry that must carry this gate" enumerates the exported methods of the
+  type (`^func (i \*Installer) [A-Z]`), never the names already known; and every sibling entry gets the same
+  negative-with-positive vector, so a missing wiring reds a test rather than a reviewer's mutation.
 - **A refusal's stated remedy must not be a move that defeats the gate — and "the verb exists and is
   granted" is NOT evidence the remedy works.** Two sightings. The cap refusal advised dropping the redundant
   concrete label, which clears exhaustiveness and trades the refusal for the exact silent regression the gate

@@ -345,16 +345,22 @@ func (cr *CompiledRule) returnAliases() ([]string, bool) {
 			continue
 		}
 		aliases := make([]string, 0, len(r.Items))
-		for i, it := range r.Items {
-			a := it.Alias
-			if a == "" {
-				a = projectionAutoAlias(it.Expr, i)
-			}
-			aliases = append(aliases, a)
+		for i := range r.Items {
+			aliases = append(aliases, itemAliasAt(r.Items, i))
 		}
 		return aliases, true
 	}
 	return nil, false
+}
+
+// ReturnColumns is the exported form of returnAliases: the effective output
+// name of each RETURN item (its alias, else the auto-alias) in declaration
+// order, and whether the rule has a RETURN clause at all. It is the same
+// derivation the executor writes row keys with (itemAliasAt), so a caller
+// reasoning about a lens's columns without running it sees the names the
+// runtime would actually produce.
+func (cr *CompiledRule) ReturnColumns() ([]string, bool) {
+	return cr.returnAliases()
 }
 
 // ValidateKeyColumns fails closed when a declared key column is not a RETURN

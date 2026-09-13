@@ -314,7 +314,12 @@ func freshApprovalVerdict(ctx context.Context, conn *substrate.Conn, proposalID,
 		}
 	}
 
-	report, err := pkgmgr.ValidateCapabilityArtifact(row.Kind, json.RawMessage(row.Content), fullCypherParser{}, held, sensitiveAspects)
+	var installedLenses pkgmgr.InstalledLensResolver
+	if row.Kind == "weaverTarget" {
+		installedLenses = pkgmgr.NewCoreKVLensResolver(ctx, conn, fullCypherParser{})
+	}
+
+	report, err := pkgmgr.ValidateCapabilityArtifact(row.Kind, json.RawMessage(row.Content), fullCypherParser{}, held, sensitiveAspects, installedLenses)
 	if err != nil {
 		return nil, fmt.Errorf("validate artifact: %w", err)
 	}

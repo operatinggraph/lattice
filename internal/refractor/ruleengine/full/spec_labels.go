@@ -29,6 +29,11 @@ type LabelFacts struct {
 	// with the trailing `*` taxonomy-expansion sigil, each of which the runtime
 	// replaces with its resolved concrete closure.
 	Expansion map[string]struct{}
+
+	// Columns is CompiledRule.ReturnColumns()'s first return: the RETURN
+	// items' effective names (the explicit alias, else the auto-alias) in
+	// declaration order. Nil when the rule has no RETURN clause.
+	Columns []string
 }
 
 // SpecLabels statically parses ruleBody and reports its LabelFacts. It is the
@@ -54,9 +59,11 @@ func SpecLabels(ruleBody string) (LabelFacts, error) {
 		return LabelFacts{}, fmt.Errorf("full: SpecLabels: parse returned %T, not *full.CompiledRule", compiled)
 	}
 	referenced, exhaustive := cr.ReferencedLabels()
+	columns, _ := cr.ReturnColumns()
 	return LabelFacts{
 		Referenced: referenced,
 		Exhaustive: exhaustive,
 		Expansion:  cr.ExpansionLabels(),
+		Columns:    columns,
 	}, nil
 }

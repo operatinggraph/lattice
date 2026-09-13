@@ -141,8 +141,15 @@ undeclared column from the lens the target names".
 ### 3.2 Permission envelope
 
 Every reader here is a platform binary or Loupe: the installer (`lattice-pkg`, Loupe's review handler), `cmd/bridge`,
-`cmd/lattice`, `cmd/loupe`, `cmd/weaver`. All already hold Core-KV read; no `$JS.API.*` verb is added; `lint-conventions`'
-P5 gate lists `bridge` and `lattice` among the platform binaries. No new write anywhere.
+`cmd/lattice`, `cmd/loupe`, `cmd/weaver`. The installer, Loupe and the CLI hold Core-KV read; no `$JS.API.*` verb is
+added; `lint-conventions`' P5 gate lists `bridge` and `lattice` among the platform binaries. No new write anywhere.
+**Amended at build (2026-09-13):** the sentence "all already hold Core-KV read" was false for **`cmd/bridge`** — its NKey
+is deliberately **denied** `$JS.API.DIRECT.GET.KV_core-kv` (`internal/natsperm/matrix.go`, the decrypt-RPC side-channel
+tightening, pinned by `bridge_egress_test.go`), and a denied publish fails asynchronously, so a Core-KV read from the
+bridge blocks for its whole budget. The bridge's holder therefore reads the **`capabilityAuthorContext` catalog lens**
+it already consumes (`packages/capability-author/lenses.go`: `m.class AS class`, `m.spec.data AS spec` per `vtx.meta.*`
+row) — the same class test and the same spec body, from the read model the bridge is permitted. The permission envelope
+stays exactly as it was; a cold review caught this before merge (§14.1).
 
 ### 3.3 Import graph (`go list -deps`, run 2026-09-06)
 
@@ -161,12 +168,12 @@ the package boundary is what is preserved, not the link size (§7 row 8).
 | 2 | NanoID-shaped `LensRef` literals in packages | `grep -rhn "LensRef:" packages --include='*.go' \| grep -v _test \| grep -c '"[A-Za-z0-9_-]\{20\}"'` | **2** — `clinic-reminders/targets.go:32` (`appointmentReminders`), `augur/targets.go:19` (`augurDispatchPending`); both same-package canonical names, resolved by the map before the NanoID passthrough |
 | 3 | lens canonical names that pass `IsValidNanoID` | 20-char names from `CanonicalName: "…"` literals, filtered by the alphabet (the reviewer ran `keys.IsValidNanoID` itself) | **3 of 11**: `appointmentReminders`, `augurDispatchPending`, `capUpgradeRosterLens` |
 | 4 | validator callers (each needs the resolver wired) | `grep -rn "ValidateCapabilityArtifact(" --include='*.go' cmd internal \| grep -v _test` minus the definition | **5**: `cmd/bridge/main.go:288`, `cmd/lattice/capability/capability.go:317`, `cmd/loupe/weaverauthor.go:179`, `:192`, `cmd/loupe/review.go:597` |
-| 5 | `CypherParser` doubles (each copies the new field) | `grep -rln "Parse(ruleBody string) (pkgmgr.SpecLabels" --include='*.go' .` | **6 files**: `cmd/bridge/main.go`, `cmd/lattice-pkg/cypherparser.go`, `cmd/lattice/capability/cypherparser.go`, `cmd/loupe/review.go`, `internal/testutil/cypherparser.go`, `packages/capability-author/proposal_test.go` |
+| 5 | `CypherParser` doubles (each copies the new field) | `grep -rln "Parse(ruleBody string) (pkgmgr.SpecLabels" --include='*.go' .` | **6 files** at design time: `cmd/bridge/main.go`, `cmd/lattice-pkg/cypherparser.go`, `cmd/lattice/capability/cypherparser.go`, `cmd/loupe/review.go`, `internal/testutil/cypherparser.go`, `packages/capability-author/proposal_test.go` — **re-run at build 2026-09-13: 8** (the grep misses the two in-package doubles whose return type is spelled unqualified: `internal/pkgmgr/capabilitymaterializer_test.go`, `internal/pkgmgr/lenslabelcap_corpus_test.go`); all eight thread `Columns` |
 | 6 | engines in the corpus | `grep -rhn 'Engine:' packages --include='*.go' \| grep -v _test \| sort \| uniq -c` | **118 `"full"`, 0 other** |
 | 7 | install-time gap rules in the installer | `grep -n "gapColumnPrefix\|validateGapCompanionPair(" internal/pkgmgr/orchestrationguard.go` | key convention (`:185`) + companion pair (`:230/:454`) — **no subset rule** |
 | 8 | apply drivers that never re-validate | `grep -n "ValidateCapabilityArtifact" cmd/lattice-pkg/main.go` | **0** — `lattice-pkg apply-proposal` runs `ApplyCapabilityPlan` (`:560`) on the recorded verdict; the installer bound is the only gate on that driver |
 | 9 | lens shapes outside the actorAggregate/plain pair | `grep -rn 'Kind: *"eventStream"' packages --include='*.go' \| grep -v _test` · `grep -rn "EntryKeyColumn:" packages --include='*.go' \| grep -v _test` | **1** eventStream (`orchestration-base` `loomFlowHistory`, bucket `orchestration-history`) · **0** entry-keyed |
-| 10 | installer entry points that must carry the live step | `grep -n "^func (i \*Installer) \(Install\|Apply\)(" internal/pkgmgr/*.go` · `grep -rn "inst.Install(ctx" --include='*.go' internal cmd` | **2** entries; `Install` is called directly (`internal/testutil/install_phase1_packages.go:87`), `ApplyCapabilityPlan` routes through `Apply` (`capabilityapply.go:159`) |
+| 10 | installer entry points that must carry the live step | `grep -n "^func (i \*Installer) \(Install\|Apply\)(" internal/pkgmgr/*.go` · `grep -rn "inst.Install(ctx" --include='*.go' internal cmd` | **2** entries at design time — **wrong: the grep presupposed its answer.** Re-run at build 2026-09-13 with `^func (i \*Installer) [A-Z]`: **3** mutating entries — `Install`, `Apply`, and `Upgrade` (`upgrade.go:120`), which shares `preflight` + `computeDeltaAgainst` with `Apply` and has no production driver today (`lattice-pkg upgrade` and Loupe route through `Apply`). All three carry the live step. `Install` is called directly (`internal/testutil/install_phase1_packages.go:87`), `ApplyCapabilityPlan` routes through `Apply` (`capabilityapply.go:159`) |
 | 11 | kernel/primordial targets bound by NanoID | `grep -rn "WeaverTarget" internal/bootstrap/` | bucket names only — bootstrap installs no `meta.weaverTarget` and is not an installer driver |
 
 ## 4. The shape
@@ -247,13 +254,17 @@ keeps it out), so the `unplannable` exemption never applies here.
 | `cmd/loupe/weaverauthor.go:179` (Check) | composite: `req.Lens` by canonicalName (the co-authored draft — caller-owned, but it is the very lens the author is declaring, so the check is "your target vs your lens"), then installed lenses by canonicalName **and** NanoID via the `readers` the handler already built (`weaverCoreReaders`, `weaver.go:1287`), reading the **root's class** as well as the spec (`buildLensCanonicalIndex` alone does not — it excludes patterns and targets by probing spec fields and would admit a DDL or op-meta id) | installed half platform-owned (Core KV); a lone target naming an installed lens by canonicalName resolves here, exactly as `resolveWeaverTargetLensRefs` will rebind it at propose |
 | `cmd/loupe/review.go:597` (fresh verdict at approve; refuses on invalid at `:650`) | installed only, from `conn` — `newLiveInstalledLensResolver(ctx, conn)` beside `newLiveSensitiveAspectResolver` | platform-owned |
 | `cmd/lattice/capability/capability.go:317` | same constructor, built only for `kind == "weaverTarget"` (the `opMeta`-only idiom at `:311`) | platform-owned |
-| `cmd/bridge/main.go:288` | the composition root closes `capabilityArtifactVerdict` over the bridge's conn; the `nil, nil` comment there ("this adapter authors weaver targets and nothing else, so neither is ever consulted") is rewritten — the third dependency **is** consulted for exactly that kind | platform-owned; the `lensRef` the adapter records is the id its own catalog lookup resolved from the model's canonicalName (`capability_author.go:1250-1262`) |
+| `cmd/bridge/main.go:288` | the composition root closes `capabilityArtifactVerdict` over a resolver backed by the **`capabilityAuthorContext` catalog lens** (class + spec per meta row) — **not** Core KV, which the bridge's NKey is denied (§3.2, amended at build); the `nil, nil` comment there ("this adapter authors weaver targets and nothing else, so neither is ever consulted") is rewritten — the third dependency **is** consulted for exactly that kind. A failed catalog read is a **transient adapter error**, never an `invalid` verdict (a verdict recorded on a blip would brand a sound proposal as the author's fault, permanently) | platform-owned read model; the `lensRef` the adapter records is the id its own catalog lookup resolved from the model's canonicalName (`capability_author.go:1250-1262`) |
 | `cmd/loupe/weaverauthor.go:192` (the paired `lens` artifact) | `nil` — the lens kind never consults it | n/a |
 
 Wiring is not optional and not left to the compiler: `scripts/lint-conventions.go` gains a pin that every
 `ValidateCapabilityArtifact(` call site outside `internal/pkgmgr` passes a non-`nil` sixth argument **or** a kind
 literal that is not `"weaverTarget"` (the pkgmgr dossier's "an injected dependency held in a nil-able field silently
-disables the gate it feeds" — the `NewInstaller` pin, `lint-conventions.go:601,1504,1708`, is the idiom).
+disables the gate it feeds" — the `NewInstaller` pin, `lint-conventions.go:601,1504,1708`, is the idiom). **Scope as
+built (2026-09-13):** non-test files only (a test passing `nil` proves a refusal, not a wiring), the package-qualified
+spelling incl. an aliased import, and a call whose argument list the gate cannot read is itself a finding — the gate
+fails closed rather than skipping (a cold review found the first cut skipped a trailing-comma call, a commented
+argument, a typed-nil conversion and a bare identifier declared `var x pkgmgr.InstalledLensResolver` and never assigned).
 
 **Verdict provenance.** The recorded `validation.state` is caller-supplied (Loupe's propose carries the Check verdict
 verbatim; the DDL copies it through), so this layer is **legibility** — the author is told at the moment they can fix
@@ -261,15 +272,20 @@ it. The **bound** is §4.3.
 
 ### 4.3 The apply-time bound — the installer
 
-A live preflight, `i.preflightLive(ctx, def)`, called immediately after the pure `i.preflight(def)` on **both**
-entries — `Install` (`installer.go:109`) and `Apply` (`apply.go:145`) — so it precedes the `DryRun` return
-(`apply.go:274`): **a dry-run preview shows the refusal** rather than previewing a delta the real apply would refuse.
-For each `WeaverTargets[i]`:
+A live preflight, `i.preflightLive(ctx, def)`, called after the pure `i.preflight(def)` **and after
+`checkCoreBucketExists`** (so a missing `core-kv` bucket still surfaces as "run bootstrap", not as a stream-not-found from
+the lens read) on **all three** mutating entries — `Install`, `Apply`, and `Upgrade` (census 10, corrected at build) —
+ahead of every branch, so it precedes the `DryRun` return: **a dry-run preview shows the refusal** rather than previewing
+a delta the real apply would refuse. `Apply`'s fresh-install branch delegates to `Install`, so that path runs the step
+twice (≤ 2 keys per out-of-batch target each; accepted). For each `WeaverTargets[i]`:
 
 1. `LensRef == ""` → passes through unchanged (`resolveLensRef`'s "no lens binding declared" case; the lint flags it
    for packages, the artifact validator requires it). An in-batch canonicalName → the existing pure checks already ran
-   over the Output union; additionally run the subset check over `Projected(that lens)` so an in-batch **plain** lens
-   is read too.
+   over the Output union; additionally run the subset check **and the companion-pair check** over `Projected(that lens)`
+   so an in-batch **plain** lens is read by both rules too (for an in-batch actorAggregate lens the companion pair is
+   the pure gate's verdict computed a second time — the pure gate reports first, un-wrapped). A ref that is neither an
+   in-batch canonicalName nor NanoID-shaped is refused **here**, wrapping `ErrLensBindingRefused` (the same ref
+   `resolveLensRef` would refuse when the batch is built; raised earlier so the target's index and id name it).
 2. Otherwise the ref is NanoID-shaped. `KVGetMulti(CoreBucket, ["vtx.meta.<ref>", "vtx.meta.<ref>.spec"])`: root
    absent or tombstoned, or `class != "meta.lens"` → **refuse** `ErrLensBindingRefused`: `pkgmgr: WeaverTarget[%d] %q:
    LensRef %q names no installed meta.lens (a canonicalName of exactly 20 alphabet characters reads as an id here —
@@ -281,9 +297,12 @@ For each `WeaverTargets[i]`:
    out-of-batch plain-lens binding a refusal. The `NewInstaller` pin's finding text is updated to say so.
 4. Subset: every `missing_*` in `Gaps` is a `gaps` key, **unless** `t.Augur != nil && Escalate ∋ "unplannable"` (the
    lint's exemption, `escalatesUnplannable`) → else **refuse** with the lint's wording.
-5. The companion-pair check (`validateGapCompanionPair`) runs over the resolved out-of-batch lens too — its "cannot see
-   through" skip retires for NanoID refs (the doc comment's two-absence paragraph is rewritten: the remaining skip is a
-   lens with no readable columns, which step 3 now refuses).
+5. The companion-pair check (`validateGapCompanionPair`) runs over the resolved lens — out-of-batch and in-batch alike
+   (step 1) — over a supplied declared-columns map; its "cannot see through" skip retires (the doc comment's two-absence
+   paragraph is rewritten: the remaining skip is a lens with no readable columns, which step 3 refuses first). Its
+   remedy sentence follows the column's provenance: a RETURN-projected `inflight_<g>` is told to add `maxretries_<g>`
+   to the RETURN clause, not to an Output list the lens does not have. The subset refusal names **every** undeclared
+   column at once (the validator does the same), so an author with three omissions makes one fix, not three attempts.
 
 Cost: one `KVGetMulti` of ≤ 2 keys per out-of-batch target per install/apply (0 targets today). The refusal reaches
 every driver — `lattice-pkg apply` / `apply-proposal` (`main.go:560`), Loupe's review apply (`review.go:809`), direct
@@ -348,7 +367,7 @@ Bootstrap is not a driver (census 11).
 |---|---|---|---|
 | empty | — | — | pass through at install (unchanged); the lint flags it for packages; invalid for an artifact (already) |
 | canonicalName, declared in this Definition | yes | — | subset over `Projected(that lens)`; an in-batch plain lens is now read |
-| canonicalName, not declared here, not NanoID-shaped | no | — | validator: found only if a caller-supplied source (Loupe's co-authored `req.Lens`) answers, else invalid; installer: `resolveLensRef`'s existing refusal |
+| canonicalName, not declared here, not NanoID-shaped | no | — | validator: found only if a caller-supplied source (Loupe's co-authored `req.Lens`) answers, else invalid; installer: **refused in `preflightLive`, wrapping `ErrLensBindingRefused`** (409 at Loupe), before `resolveLensRef` would refuse the same ref un-wrapped |
 | 20-char alphabet lookalike (`appointmentReminders` from another package or a Loupe draft) | no | **no** | **refused** (step 2) / invalid (`found=false`) — was: silently installed bound to nothing |
 | NanoID, installed, actorAggregate with Output | — | yes | subset over the Output union |
 | NanoID, installed, plain | — | yes | subset over RETURN names |
@@ -359,7 +378,9 @@ Bootstrap is not a driver (census 11).
 | NanoID, installed, rule unparseable / no RETURN | — | yes, unreadable | **refused**, reason named |
 | any of the above, target escalates `unplannable` (package path only) | | | existence and readability still enforced; the subset rule is exempt (the undeclared column routes to the Augur by design) |
 | `DryRun` | | | the live preflight runs; a preview that would be refused reports the refusal instead of a delta |
-| re-run (same Definition applied twice) | | | idempotent — pure over the same inputs |
+| re-run (same Definition applied twice) | | | idempotent — pure over the same inputs; **except** that the live read is re-made, so re-applying a package whose out-of-batch lens was uninstalled in between is refused (fail-closed; a dangling binding is a real fault, not noise) |
+| a lens with `cypherBranches` AND `cypherRule` both set | | | **unreadable ⇒ refused** — Refractor refuses the pair at activation, so a lens in that shape never projects; reading branch 0 would judge a target against rows that never arrive |
+| eventStream lens with no `project.columns` | | | **unreadable ⇒ refused** (the Chronicler refuses such a lens too) — never a declared-empty set |
 | never-written: a package whose lens gains a `missing_*` column via `make reinstall-package` without CI | | | the installer refuses the upgrade — the case the lint alone could not hold |
 
 ## 6. Contract surface
@@ -372,7 +393,9 @@ doc gains the three codes in the same change (steward §4's health-emission rule
 
 **Changes** §10.8 — one install-time validation clause, **text of record here, landing with Inc 2's commit** (the
 2026-09-01 exception: a refusal clause is held out of the tree until the runtime keeps it). Added to the "§10.2 ↔ §10.8
-binding" list after the `gaps`-key bullet:
+binding" list **after the row-level config-error bullet** — the clause's last sentence says "the row-level rule above",
+so it sits below that rule (the §14 brief's "after the `gaps`-key bullet" placement would have made the sentence false;
+corrected at build 2026-09-13, text unchanged):
 
 > - **A `lensRef` MUST name a Lens that exists, and the target MUST be fully declared against it.** A `lensRef` names a
 >   Lens declared in the same package or an already-installed `meta.lens` by id; install refuses a binding to anything
@@ -697,3 +720,49 @@ Loupe rendering of any new issue family. The `lens` artifact validator.
 **Scope-diff gate:** every touch above traces to the two scope sentences; the one substitution is the e2e's transport (embedded
 NATS + httptest for a docker stack), predicate unchanged. Dependencies: Inc 2 consumes Inc 1 (re-verified: the validator's plain
 read needs `parser.Parse(...).Columns`); no `seq:` on the row; §6.1-style prerequisites none.
+
+### 14.1 Close (2026-09-13) — deviations, reviews, classification, gates
+
+**Deviations from the brief, each recorded where the body stands (§3.2, §3.4, §4.2, §4.3, §5, §6 amended 2026-09-13):**
+the live preflight runs after the bucket probe, on `Upgrade` as well as `Install`/`Apply`; the companion pair runs
+in-batch too and its remedy follows the column's provenance; every undeclared column is named in one refusal; the
+bridge's resolver reads the `capabilityAuthorContext` catalog, not Core KV; the lint pin's scope and fail-closed
+posture; the contract bullet's placement; the docker-stack e2e replaced by embedded-NATS installer vectors and a
+handler-driven Loupe Check test (same predicate, REMOTE §3). Dropped: the "plain lens with no RETURN" installer row
+(indistinguishable from a parse error in this dialect; pinned in `lenscolumns`' own table).
+
+**Reviews.** Inc 1: lead review (one fix — the lint's `classify` refuses the per-entry list shape instead of reading an
+empty gap set). Inc 2 + close: three cold passes over the whole diff — Blind Hunter, Edge-Case Hunter, Acceptance
+Auditor — then one fix round with a revert-proof per refusal. What they found, classified:
+
+| Class | Finding | Fixed |
+|---|---|---|
+| design-gap (bridge) | §3.2 asserted the bridge holds Core-KV read; its NKey is denied it, so the resolver would block its whole budget and record every AI-authored target invalid | yes — catalog-backed resolver, no extra read; body amended |
+| design-gap (bridge) | a validator error, once a live read joined a pure check, was still mapped to a stored `invalid` verdict — a transient would brand a sound proposal | yes — `ErrLensCatalogUnavailable`, propagated as a transient adapter error |
+| brief-gap / census (pkgmgr) | census 10's grep named the entries it expected and missed `Upgrade`, a third mutating entry with no live preflight | yes — preflight on `Upgrade`; census corrected |
+| implementation-bug (lint-gates) | the `validator-lens-resolver` pin skipped what it could not parse: trailing-comma calls, commented arguments, typed nils, a declared-never-assigned identifier, an aliased import | yes — each denied; an unreadable call is a finding |
+| test-shape (pkgmgr) | two fail-closed resolver arms (spec absent / tombstoned) and the empty-`lensRef` pass-through survived deletion; a wrong-class validator test asserted nothing about class | yes — vectors on both entries; class-aware stub |
+| test-shape (pkgmgr) | seven §5 rows had no installer vector (eventStream, Output-less, entry-keyed, unparseable, dual-cypher, tombstoned out-of-batch, in-place upgrade) | yes |
+| implementation-bug (pkgmgr) | the companion-pair remedy told a plain lens to edit an Output list it does not have; the subset refusal named one column per attempt | yes |
+| convention (pkgmgr, lint-gates) | the undeclared-column sentence existed twice; an eighth `CypherParser` double omitted `Columns`; two test comments narrated a prior state | yes — one exported sentence; threaded; present tense |
+| design-doc truth | §4.3's ordering and step scope, §5 row 3 and the re-run row, §4.2's pin scope, §14's clause placement | amended in the body |
+| accepted, not changed | `Apply`'s fresh-install branch runs the preflight twice (≤ 2 keys per out-of-batch target, zero today); the in-batch companion pair reaches Loupe as 502 from the pure gate and 409 from the live one (the pure `validateAll` family is un-wrapped throughout — a wider change than this row); a Loupe Check verdict is caller-influenced by design (§4.2 "Verdict provenance"; approve re-derives, apply re-bounds); the two `cmd/` fixtures hand-write a lens root + spec (the on-wire shape is pinned once, in `internal/pkgmgr`, through a real `Install`) | — |
+
+Dossier: lint-gates gains one entry (a gate that skips what it cannot parse fails open); pkgmgr's nil-able-field entry
+and bridge's own-engine-fixture entry each record a further sighting (a gate absent on one of three sibling entries; a
+fixture connecting without the binary's NATS permissions). No class was mechanized this fire; the lint pin's own
+self-test now carries every shape found.
+
+**Gates (remote, native Postgres on :5433):** `go build ./...`, `make vet`, `golangci-lint run ./...` (v2.11.4 built
+with go1.26.1) 0 issues, `gofmt` clean, every `scripts/lint-*.go` STRICT clean, `lint-gap-column-declaration`
+32 / 15 / 33 / 52 / 0 exempt throughout, `lint-package-version` clean against the merge base, `go test ./... -p 4`
+green with `POSTGRES_TEST_DSN`, every build-tagged harness compiled under its tag. MERGED ≠ RUNNING: no shared stack
+in the remote container (REMOTE §3); the affected binaries are `bin/{lattice-pkg,loupe,bridge,lattice}` and every
+binary linking `internal/pkgmgr` — a live deploy cycles them in any order (no wire change; `edge-manifest` 0.17.13
+reinstalls its generated lens).
+
+**Landing:** one `--no-ff` merge to `main` carrying the contract clause with the mechanism that keeps it. **Inc 3
+stays sequenced** behind §11's trigger; the row returns to the board only when that trigger fires.
+
+**Neighbours on ship:** none blocked on this row; `lint-gap-column-declaration` keeps its UNREADABLE bucket for plain
+lenses by design (§4.1).

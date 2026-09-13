@@ -426,6 +426,7 @@ func TestLensLabelCap_NoSigil_Installs(t *testing.T) {
 // nobody notices until a lens ships broad.
 func TestLensLabelCap_NoParserWired_GateIsSilent(t *testing.T) {
 	ctx, _, inst := newInstallerHarness(t)
+	inst.SpecParser = nil
 
 	def := capLensDef("cap-no-parser", capLensSpec(4, "location"), map[string]int{"location": 5})
 	if _, err := inst.Install(ctx, def); err != nil {
