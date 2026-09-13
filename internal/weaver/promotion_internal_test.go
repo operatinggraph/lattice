@@ -272,3 +272,110 @@ func TestPromotion_SweepObservedCloseEmits(t *testing.T) {
 	}
 	h.requireNoOp(t)
 }
+
+// declaredActionSpec is a PLANNED target whose gap declares its own action —
+// nothing is derived, so there is nothing a package author could be asked to
+// declare. The credit sites hand the mark's action over all the same
+// (resolvePlannedAction returns a declared action verbatim), which is exactly
+// the vector the admission test exists for.
+func declaredActionSpec(targetID string) map[string]any {
+	return map[string]any{
+		"targetId": targetID,
+		"lensRef":  "lensFixture",
+		"mode":     targetModePlanned,
+		"gaps": map[string]any{
+			goalLegGap: map[string]any{
+				"action": actionAssignTask, "operation": "DoA",
+				"assignee": "row.applicant", "target": "row.entityKey",
+			},
+		},
+	}
+}
+
+// TestPromotion_DeclaredActionIsNeverPromoted: the recommendation is "declare
+// this derived leg", so a gap that ALREADY declares its action has nothing to
+// recommend. Emitting one would mint a durable "promote assignTask" vertex and
+// latch the triple — a permanent, human-facing recommendation that says nothing.
+func TestPromotion_DeclaredActionIsNeverPromoted(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "fixPromoDeclared"
+	registerSpec(t, h.engine.source, declaredActionSpec(targetID))
+	target, ok := h.engine.source.target(targetID)
+	if !ok {
+		t.Fatal("setup: the target must be registered")
+	}
+	// The window is full and spotless for the DECLARED action, and the target is
+	// planned-mode: everything except the admission test says emit.
+	seedEffectWindow(t, ctx, h.conn, targetID, goalLegGap, actionAssignTask, effectWindowSize, 0)
+	h.engine.proposePromotionIfClean(ctx, target, targetID, goalLegGap, actionAssignTask)
+	h.requireNoOp(t)
+}
+
+// TestPromotion_EscalationDispatchClassIsNeverPromoted: an escalation mark
+// records the reasoning op's dispatch CLASS, not a catalog ref, and the
+// gap-close credit sites hand that string over like any other. "Promote
+// directOp" is not a playbook entry anyone could author.
+func TestPromotion_EscalationDispatchClassIsNeverPromoted(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const targetID = "fixPromoEscClass"
+	h, _ := promotionHarness(t, ctx, targetID, true)
+	target, ok := h.engine.source.target(targetID)
+	if !ok {
+		t.Fatal("setup: the target must be registered")
+	}
+	seedEffectWindow(t, ctx, h.conn, targetID, goalLegGap, actionDirectOp, effectWindowSize, 0)
+	h.engine.proposePromotionIfClean(ctx, target, targetID, goalLegGap, actionDirectOp)
+	h.requireNoOp(t)
+}
+
+// TestPromotion_LaneOneGapCloseEmits covers the third credit site from the other
+// side: lane 1's own clearClosedMarks. The row is delivered NON-violating with
+// its gap column closed, which is the delivery that credits the window — and the
+// recommendation that close earns must be proposed from there too.
+func TestPromotion_LaneOneGapCloseEmits(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const targetID = "fixPromoLaneOne"
+	h, _ := promotionHarness(t, ctx, targetID, true)
+	entityID := testNanoID(t)
+
+	seedEffectWindow(t, ctx, h.conn, targetID, goalLegGap, "legA", effectWindowSize-1, 1)
+	if _, _, lost, err := h.engine.marks.create(ctx, targetID, entityID, goalLegGap,
+		"vtx.leaseApp."+entityID, "legA", "", "", 0); err != nil || lost {
+		t.Fatalf("seed legA's mark: err=%v lost=%v", err, lost)
+	}
+
+	// The gap closed: the row is delivered with the column false and not
+	// violating, which is what clearClosedMarks acts on.
+	row := goalLegRow(entityID, 0, map[string]any{goalLegGap: false, "violating": false, "aDone": true})
+	if dec := h.engine.handleRow(ctx, h.rowMessage(t, targetID, entityID, row, 11, 1)); dec != substrate.Ack {
+		t.Fatalf("a closing delivery must Ack, got %v", dec)
+	}
+
+	op := h.nextOp(t)
+	if op["operationType"] != opRecordPromotionProposal {
+		t.Fatalf("op = %v, want %s", op["operationType"], opRecordPromotionProposal)
+	}
+	if op["requestId"] != derivePromotionRequestID(targetID, goalLegGap, "legA") {
+		t.Fatalf("requestId = %v, want the per-triple deterministic id", op["requestId"])
+	}
+	h.requireNoOp(t)
+}

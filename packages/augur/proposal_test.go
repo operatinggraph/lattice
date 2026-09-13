@@ -1614,3 +1614,35 @@ func TestAugur_Promotion_ApproveDeclaresTheApproveReadSet(t *testing.T) {
 		t.Fatalf("review.state = %q, want approved", got)
 	}
 }
+
+// TestAugur_Claim_PromotionTriggerRejected: `trigger` is a payload field, and one
+// of its values is authority-bearing — a proposal carrying "promotion" skips the
+// §5 re-validation at approval and is excluded from dispatch by the lens. Only
+// Weaver's own RecordPromotionProposal may write it, so the escalation op closes
+// the vocabulary rather than trusting whatever the caller sends.
+func TestAugur_Claim_PromotionTriggerRejected(t *testing.T) {
+	ctx, conn := setupAugurEnv(t)
+	cp, cons := newProposalPipeline(t, ctx, conn, "ap-trigger")
+	targetKey, entityKey := seedEscalation(t, ctx, conn)
+
+	const handle = "BBaugurTrigHJKMNPQRS"
+	claim := createClaimEnv(testutil.GenReqID("APClaimTrigger"), handle, targetKey, entityKey)
+	var payload map[string]any
+	if err := json.Unmarshal(claim.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal claim payload: %v", err)
+	}
+	payload["trigger"] = "promotion"
+	b, _ := json.Marshal(payload)
+	claim.Payload = json.RawMessage(b)
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, claim)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("a forged promotion trigger: outcome = %v, want Rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "trigger") {
+		t.Fatalf("the denial must name the trigger vocabulary, got %+v", reply.Error)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "vtx.augurproposal."+handle+".gap"); err == nil {
+		t.Fatal("a rejected claim must write no .gap aspect")
+	}
+}

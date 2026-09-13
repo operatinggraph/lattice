@@ -33,9 +33,8 @@ var augurAllowedActions = map[string]bool{
 // ordered plan and dispatchLeg how many of its legs have already fired, so this
 // call materialises steps[dispatchLeg] and nothing else; the flip advances the
 // counter, the row re-projects still-approved while legs remain, and the next
-// leg arrives as an ordinary delivery. A row carrying no steps at all is a
-// proposal recorded before the plan shape: its single leg is
-// proposedAction/proposedParams at leg 0, dispatched exactly as before.
+// leg arrives as an ordinary delivery. A row with no steps is the single-leg
+// shape: proposedAction/proposedParams at leg 0.
 //
 // A dispatch-time-INVALID proposal (bad action, scope escape, a stale
 // operation/pattern reference) fires ONLY the RecordProposalDispatch{outcome:

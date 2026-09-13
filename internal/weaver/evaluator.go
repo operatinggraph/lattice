@@ -540,7 +540,7 @@ func (e *Engine) dispatchGap(ctx context.Context, target *Target, targetID, enti
 	// own release rather than a branch of the one above because a proposal has no
 	// catalog leg to test effects against and no confidence window to credit: the
 	// row's own counter is the boundary, already decided by the flip.
-	if found && e.releaseAdvancedProposalLeg(ctx, targetID, entityID, col, ga, rec, row, markRev, countRev) {
+	if found && e.releaseAdvancedProposalLeg(ctx, targetID, entityID, col, ga, rec, row, markRev) {
 		found = false
 		pinnedAction = ""
 		// The release cleared the mark and the count, so nothing records a leg or
@@ -1982,8 +1982,13 @@ func (e *Engine) releaseEscalation(ctx context.Context, targetID, entityID, col 
 // fires only when that window is FULL and every one of its episodes closed: the
 // evidence the recommendation rests on is "this action has never once failed to
 // close, across a whole window", and a single un-closed episode withdraws it.
-// Non-planned targets never reach the emission — only a planned-mode target
-// derives its legs, so only it has a derived leg to recommend declaring.
+// Only a DERIVED leg is promotable, and derivedLeg is what decides it. The
+// credit sites hand over the MARK's action, which for a gap that already
+// declares one is that declared action and for an escalation is the reasoning
+// op's dispatch class — neither is something a package author could be asked to
+// declare, and recommending either would burn the triple's one emission on a
+// recommendation that says nothing. Non-planned targets never reach here for the
+// same reason: only a planned-mode target derives a leg at all.
 //
 // It fires NO EPISODE, and that is the whole point: there is no mark, no
 // dispatch-count booking, no classifier and no pacing. Those exist to bound
@@ -2005,6 +2010,20 @@ func (e *Engine) proposePromotionIfClean(ctx context.Context, target *Target, ta
 	if target == nil || target.Mode != targetModePlanned || actionRef == "" {
 		return
 	}
+	if !derivedLeg(target.Gaps[gapColumn], actionRef) {
+		return
+	}
+	latch := targetID + "\x00" + gapColumn + "\x00" + actionRef
+	// Two-step latch. The cheap Load short-circuits every later close of an
+	// already-recommended triple before the window read, which is the common
+	// case once a recommendation has been made (a full all-closed window stays
+	// full, so every close after it would otherwise pay a KV read to learn
+	// nothing). The STORE has to wait until the window has actually been
+	// judged: latching on an unproven triple would burn the one emission this
+	// triple ever gets on a window that had not earned it.
+	if _, seen := e.promoted.Load(latch); seen {
+		return
+	}
 	rate, sampleSize, ok, err := e.marks.effectCloseRate(ctx, targetID, gapColumn, actionRef)
 	if err != nil {
 		e.logger.Warn("weaver: promotion window read failed; not proposing this close",
@@ -2018,7 +2037,6 @@ func (e *Engine) proposePromotionIfClean(ctx context.Context, target *Target, ta
 	if !ok {
 		return
 	}
-	latch := targetID + "\x00" + gapColumn + "\x00" + actionRef
 	if _, loaded := e.promoted.LoadOrStore(latch, struct{}{}); loaded {
 		return
 	}
@@ -2046,6 +2064,36 @@ func (e *Engine) proposePromotionIfClean(ctx context.Context, target *Target, ta
 		"targetId", targetID, "gap", gapColumn, "action", actionRef, "window", effectWindowSize)
 }
 
+// derivedLeg reports whether actionRef names a leg the PLANNER derived for this
+// gap, rather than something the playbook already declares. It is the promotion
+// emission's admission test, and it is keyed exactly as the `__effect` window
+// is: a goal gap's catalog entry by its Ref (releaseCompletedLeg matches the
+// same field), a candidates gap's entry by its Action (rankCandidates returns
+// and the window is keyed by that field, since GapCandidate carries no separate
+// ref).
+//
+// A gap that declares its own `action` is excluded outright, before either list
+// is consulted: resolvePlannedAction returns that action verbatim and never
+// reaches the planner, so its entries — if a target authored both — are dead,
+// and a declared action coincidentally equal to one of them must not read as a
+// derived leg.
+func derivedLeg(ga GapAction, actionRef string) bool {
+	if ga.Action != "" {
+		return false
+	}
+	for i := range ga.Actions {
+		if ga.Actions[i].Ref == actionRef {
+			return true
+		}
+	}
+	for i := range ga.Candidates {
+		if ga.Candidates[i].Action == actionRef {
+			return true
+		}
+	}
+	return false
+}
+
 // releaseAdvancedProposalLeg clears the mark of a proposedOp episode the
 // proposal has already moved past: the row's dispatchLeg column says the plan's
 // leg counter is beyond the leg this mark stands over, so the leg it holds was
@@ -2071,17 +2119,18 @@ func (e *Engine) proposePromotionIfClean(ctx context.Context, target *Target, ta
 // the attempts charged to it were spent reaching the leg that has now been
 // recorded, and carrying them into the next leg would spend one plan's budget on
 // another leg's first try. The mark delete goes FIRST and is what decides
-// ownership — it is the mutex, exactly as releaseCompletedLeg's marked branch
-// argues — so the count reset follows only a won delete. A crash between the two
+// ownership — it IS the mutex, exactly as releaseCompletedLeg's marked branch
+// argues — so the count reset follows only a won delete, and follows it BLIND:
+// nothing else can be holding the document once this caller owns the release,
+// and a revision the caller read before the delete may already be stale
+// (a booking can land in between), which would leave the reset silently skipped
+// and the next leg inheriting this leg's spent attempts and re-arm tally — the
+// one thing the contract promises does not happen. A crash between the two
 // leaves a released mark over a stale count, which the next episode's own
 // booking writes over; the reverse order would destroy the budget of an episode
-// this caller may not own. countRev is the revision the caller read the count at:
-// a conflict (a concurrent dispatch booked against it since) leaves the document
-// standing and the release still stands. A caller holding no revision — the gate
-// answered without reading the count — clears it blind on the strength of the
-// same mutex.
+// this caller may not own.
 func (e *Engine) releaseAdvancedProposalLeg(ctx context.Context, targetID, entityID, col string,
-	ga GapAction, rec *mark, row map[string]any, markRev, countRev uint64) bool {
+	ga GapAction, rec *mark, row map[string]any, markRev uint64) bool {
 
 	if ga.Action != actionProposedOp || rec == nil {
 		return false
@@ -2102,16 +2151,7 @@ func (e *Engine) releaseAdvancedProposalLeg(ctx context.Context, targetID, entit
 			"targetId", targetID, "entityId", entityID, "gap", col, "leg", rec.ProposalLeg)
 		return false
 	}
-	if countRev != 0 {
-		countConflict, cErr := e.marks.deleteDispatchCountRevision(ctx, targetID, entityID, col, countRev)
-		if cErr != nil {
-			e.logger.Warn("weaver: proposal leg release dispatch-count reset failed",
-				"targetId", targetID, "entityId", entityID, "gap", col, "err", cErr)
-		} else if countConflict {
-			e.logger.Debug("weaver: proposal leg release left a changed dispatch-count standing",
-				"targetId", targetID, "entityId", entityID, "gap", col)
-		}
-	} else if cErr := e.marks.deleteDispatchCount(ctx, targetID, entityID, col); cErr != nil {
+	if cErr := e.marks.deleteDispatchCount(ctx, targetID, entityID, col); cErr != nil {
 		e.logger.Warn("weaver: proposal leg release dispatch-count reset failed",
 			"targetId", targetID, "entityId", entityID, "gap", col, "err", cErr)
 	}

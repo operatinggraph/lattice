@@ -878,10 +878,6 @@ func TestReleaseAdvancedProposalLeg_ResetsTheGapsDispatchCount(t *testing.T) {
 	}
 	putStateValue(t, ctx, h.conn, countKey(targetID, handle, "missing_dispatch"),
 		dispatchCount{Count: 3, Leg: actionProposedOp})
-	_, countRev, err := h.engine.marks.getDispatchCount(ctx, targetID, handle, "missing_dispatch")
-	if err != nil {
-		t.Fatalf("read the seeded count's revision: %v", err)
-	}
 
 	ga := GapAction{Action: actionProposedOp}
 	rec, _, found, err := h.engine.marks.get(ctx, targetID, handle, "missing_dispatch")
@@ -889,7 +885,7 @@ func TestReleaseAdvancedProposalLeg_ResetsTheGapsDispatchCount(t *testing.T) {
 		t.Fatalf("read the seeded mark: err=%v found=%v", err, found)
 	}
 	if !h.engine.releaseAdvancedProposalLeg(ctx, targetID, handle, "missing_dispatch", ga, rec,
-		twoLegRow(handle, 1), markRev, countRev) {
+		twoLegRow(handle, 1), markRev) {
 		t.Fatal("the advanced leg must release")
 	}
 
@@ -901,5 +897,102 @@ func TestReleaseAdvancedProposalLeg_ResetsTheGapsDispatchCount(t *testing.T) {
 	}
 	if doc.Count != 0 {
 		t.Fatalf("count document = %+v, want it reset: the next leg starts on a fresh per-leg budget", doc)
+	}
+}
+
+// TestReleaseAdvancedProposalLeg_ResetsARebookedCount: the reset follows the WON
+// mark delete blind, so a booking that landed between the caller's count read
+// and the release is cleared too. Conditioning the delete on a revision read
+// earlier would skip exactly this case, leaving leg N+1 to inherit leg N's spent
+// attempts and re-arm tally — the reset the per-leg budget promises, silently
+// not happening.
+func TestReleaseAdvancedProposalLeg_ResetsARebookedCount(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	h := newHandlerHarness(t, ctx)
+
+	const targetID = "augurDispatch"
+	const handle = "BBdispatchJHJKMNPQRS"
+	h.seedTarget(augurPlanTarget(targetID))
+
+	markRev, _, lost, err := h.engine.marks.create(ctx, targetID, handle, "missing_dispatch",
+		"vtx.augurproposal."+handle, actionProposedOp, "", "", 0)
+	if err != nil || lost {
+		t.Fatalf("seed leg-0 mark: err=%v lost=%v", err, lost)
+	}
+	putStateValue(t, ctx, h.conn, countKey(targetID, handle, "missing_dispatch"),
+		dispatchCount{Count: 3, Leg: actionProposedOp})
+	rec, _, found, err := h.engine.marks.get(ctx, targetID, handle, "missing_dispatch")
+	if err != nil || !found {
+		t.Fatalf("read the seeded mark: err=%v found=%v", err, found)
+	}
+	// The concurrent booking: the count moves on after the caller would have
+	// read its revision, and before the release runs.
+	putStateValue(t, ctx, h.conn, countKey(targetID, handle, "missing_dispatch"),
+		dispatchCount{Count: 4, Leg: actionProposedOp})
+
+	if !h.engine.releaseAdvancedProposalLeg(ctx, targetID, handle, "missing_dispatch",
+		GapAction{Action: actionProposedOp}, rec, twoLegRow(handle, 1), markRev) {
+		t.Fatal("the advanced leg must release")
+	}
+	doc, _, err := h.engine.marks.getDispatchCount(ctx, targetID, handle, "missing_dispatch")
+	if err != nil {
+		t.Fatalf("read the count document back: %v", err)
+	}
+	if doc.Count != 0 {
+		t.Fatalf("count document = %+v, want it reset even though it moved since the read", doc)
+	}
+}
+
+// TestReclaim_AugurDispatch_AdvanceWithheldWhileInFlight: the advance is a
+// DISPATCH, and a row declaring a call in flight must not have a fresh episode
+// fired at it from the sweep — the same gate the goal branch applies to its own
+// advance. The release still stands either way: it clears a leg the flip already
+// recorded, which is a fact about the past, not a new attempt.
+func TestReclaim_AugurDispatch_AdvanceWithheldWhileInFlight(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, tc := range []struct {
+		name     string
+		inflight bool
+		wantOp   bool
+	}{{"callInFlight", true, false}, {"callConcluded", false, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			h := newSweepHarness(t, ctx)
+
+			const targetID = "augurDispatch"
+			handle := "BBdispatchK" + map[bool]string{true: "1", false: "2"}[tc.inflight] + "JKMNPQRS"
+			h.seedTarget(augurPlanTarget(targetID))
+
+			key := markKey(targetID, handle, "missing_dispatch")
+			rec := fixtureMark(targetID, handle, "missing_dispatch", actionProposedOp, pastLease())
+			rec.EntityKey = "vtx.augurproposal." + handle
+			h.putMark(t, ctx, key, rec)
+			row := twoLegRow(handle, 1)
+			row["inflight_dispatch"] = tc.inflight
+			h.putRow(t, ctx, targetID, handle, row)
+
+			h.pass(ctx)
+
+			if !tc.wantOp {
+				h.requireNoOp(t)
+			} else if op := h.nextOp(t); op["operationType"] != "RecordLeaseDecision" {
+				t.Fatalf("op = %v, want the next leg's remediation", op["operationType"])
+			}
+			// The RELEASE is unconditional: the leg the flip recorded is gone
+			// from weaver-state whether or not its advance was withheld.
+			if h.markExists(t, ctx, key) && !tc.wantOp {
+				t.Fatal("the release must stand even when the advance is withheld")
+			}
+		})
 	}
 }

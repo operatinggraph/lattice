@@ -628,11 +628,18 @@ function augurActionSection(p, raw) {
   }
   const row = el("div", "lens-ctlrow");
   const proposalKey = "vtx.augurproposal." + p.proposalId;
+  // A PROMOTION is Weaver's own recommendation that the package author declare
+  // an action the planner keeps deriving. Approving one ratifies a note for a
+  // human to act on; nothing is dispatched, and the lens excludes it from the
+  // dispatch surface entirely. Saying "dispatch" here would offer the reviewer a
+  // consequence the platform will not deliver.
+  const isPromotion = p.trigger === "promotion";
 
-  const approve = demoHide(el("button", null, "Approve & dispatch"));
+  const approve = demoHide(el("button", null, isPromotion ? "Approve recommendation" : "Approve & dispatch"));
   approve.addEventListener("click", async () => {
-    if (!window.confirm(
-      "Approving arms autonomous dispatch of this op against " + (p.entityId || "the escalated candidate") + ".")) return;
+    if (!window.confirm(isPromotion
+      ? "Approving records this as a ratified recommendation for the package author; nothing is dispatched."
+      : "Approving arms autonomous dispatch of this op against " + (p.entityId || "the escalated candidate") + ".")) return;
     row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
     setStatus("review-detail-status", "submitting approve…");
     const body = await api("/api/op", {
@@ -650,15 +657,16 @@ function augurActionSection(p, raw) {
       row.querySelectorAll("button").forEach((b) => { b.disabled = false; });
       return;
     }
-    toast("proposal approved — dispatch is now armed");
+    toast(isPromotion ? "recommendation approved" : "proposal approved — dispatch is now armed");
     loadDetail("augur", p.proposalId, raw);
   });
   row.appendChild(approve);
 
   const reject = demoHide(el("button", "danger-btn", "Reject"));
   reject.addEventListener("click", async () => {
-    if (!window.confirm(
-      "Reject this proposal? The AI's reasoning stays recorded for audit; the remediation will not dispatch.")) return;
+    if (!window.confirm(isPromotion
+      ? "Reject this recommendation? It stays recorded for audit; the playbook is left as it is."
+      : "Reject this proposal? The AI's reasoning stays recorded for audit; the remediation will not dispatch.")) return;
     row.querySelectorAll("button").forEach((b) => { b.disabled = true; });
     setStatus("review-detail-status", "submitting reject…");
     const body = await api("/api/op", {
@@ -695,6 +703,9 @@ function augurOutcomeLine(p, displayState) {
     return "approved & dispatched at " + (p.dispatchedAt || "?") + legSuffix;
   }
   if (displayState === "approved") {
+    // Same reason the approve control drops the word: an approved promotion is
+    // a ratified note, not something queued to fire.
+    if (p.trigger === "promotion") return "ratified at " + (p.reviewedAt || "?");
     return "approved at " + (p.reviewedAt || "?") + " — awaiting dispatch" + legSuffix;
   }
   if (displayState === "rejected") {

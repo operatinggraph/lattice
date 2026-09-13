@@ -652,6 +652,14 @@ def execute(state, op):
         entity_key = required_string(p, "entityId")
         gap_column = required_string(p, "gapColumn")
         trigger = required_string(p, "trigger")
+        # The trigger is a payload field, and this same script treats one value
+        # of it — "promotion" — as authority-bearing: a proposal carrying it is
+        # exempt from the §5 re-validation at approval and excluded from dispatch
+        # by the lens. Only Weaver's own RecordPromotionProposal may write that
+        # value, so the escalation vocabulary is closed here rather than left to
+        # whatever the caller sends.
+        if trigger != "unplannable" and trigger != "exhausted":
+            fail("InvalidArgument: trigger: must be one of unplannable, exhausted; got " + trigger)
         # model is the OPTIONAL adapter model override (augur.model, Contract
         # #10 §10.8) — "" when the target's augur block sets none, in which
         # case the adapter applies its own default (design: claude-opus-4-8).
