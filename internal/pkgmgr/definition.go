@@ -1177,6 +1177,15 @@ const (
 	RetentionPolicyEraseOnExpiry = "eraseOnExpiry"
 )
 
+// CustodyKinds is the closed set of custody kinds an install admits
+// (validateCustodyScope reads it; a DDL naming anything else is refused). It is
+// the declaration-side twin of vault.KeyHolderKinds, which is pinned to the
+// holder VERTEX TYPES these kinds resolve to — so a kind added here without a
+// holder kind the external-egress boundary can serve fails that pin rather than
+// reaching a package author as an envelope that never projects. A fresh slice
+// per call, so no caller can widen what install admits.
+func CustodyKinds() []string { return []string{CustodyKindIdentity, CustodyKindRetentionClass} }
+
 // CustodySpec declares which key holder custodies a sensitive aspect's DEK.
 // Custody is a function of the resolved aspect-type DDL and nothing else —
 // never supplied by the caller, never discovered by graph traversal (design

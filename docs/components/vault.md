@@ -195,4 +195,10 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `ErrHolderNotIdentity` surfaced as 403 from Reveal and as 502 ("the platform is broken") from the
   object read/upload proxies. Check: `internal/objectcrypto.wireError` turns known sentinels back into
   sentinels; grep every `objectcrypto.`/`vault.DecryptSubject` caller for an `errors.Is` on each one.
+- **A "cross-check" whose upstream set is a literal in the test is a restatement, not a pin.** A closed
+  set pinned only to other hand-maintained literals terminates in nothing upstream, so the case the pin
+  exists for — a kind added at the source — leaves every pin green. Minted: `KeyHolderKinds` was pinned to
+  a two-entry map the test wrote itself while `pkgmgr`'s custody switch stayed a hand-written `case`.
+  Check: the source exports its set as a function the switch consults, and the pin derives its expected
+  set from that function.
 

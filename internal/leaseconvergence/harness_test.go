@@ -122,8 +122,9 @@ type harnessConfig struct {
 	// retry leg).
 	bridgePollInterval time.Duration
 	bridgeCallDeadline time.Duration
-	// extraLenses names additional actor-aggregate lenses (beyond
-	// leaseApplicationComplete) to activate off the ONE CoreKVSource this
+	// extraLenses names additional lenses — actor-aggregate or flat, each
+	// activated on the pipeline its spec calls for (beyond
+	// leaseApplicationComplete) — off the ONE CoreKVSource this
 	// harness starts (the renewal targets, leaseExpiry/renewalComplete) —
 	// the simpler shape; each CoreKVSource boot gets its own per-boot
 	// JetStream durable, so a second source would work too, it's just

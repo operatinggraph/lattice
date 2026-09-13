@@ -54,14 +54,29 @@ func TestEnvelopeBucketFor_ServesExactlyTheKeyHolderKinds(t *testing.T) {
 
 	// The other direction, enumerated off the table itself: every kind it
 	// serves must be a kind custody can name.
-	for kind, bucket := range envelopeBucketByHolderKind {
+	table := envelopeBuckets()
+	for kind, bucket := range table {
 		if !vault.IsKeyHolderKind(kind) {
 			t.Errorf("envelopeBucketFor serves %q from %q, but vault.KeyHolderKinds() %v does not carry that kind",
 				kind, bucket, vault.KeyHolderKinds())
 		}
 	}
-	if len(envelopeBucketByHolderKind) != len(vault.KeyHolderKinds()) {
+	if len(table) != len(vault.KeyHolderKinds()) {
 		t.Errorf("the envelope table serves %d kinds, vault.KeyHolderKinds() carries %d — the two sets have drifted",
-			len(envelopeBucketByHolderKind), len(vault.KeyHolderKinds()))
+			len(table), len(vault.KeyHolderKinds()))
+	}
+}
+
+// TestEnvelopeBuckets_CallerCannotWidenTheTable mirrors the vault's own
+// no-widening pin: the table is handed out by value per call, so a caller that
+// writes into the map it got cannot make the boundary serve a holder kind whose
+// envelopes no lens projects.
+func TestEnvelopeBuckets_CallerCannotWidenTheTable(t *testing.T) {
+	t.Parallel()
+
+	got := envelopeBuckets()
+	got["foo"] = identityEnvelopeBucket
+	if _, served := envelopeBucketFor("foo"); served {
+		t.Fatal(`envelopeBucketFor("foo") = served after a caller wrote into its own copy of the table`)
 	}
 }

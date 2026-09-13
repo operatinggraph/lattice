@@ -342,3 +342,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   from the real thing on the surface where someone approves it. Minted: `FakeAugur` stamped
   `Model: "claude-opus-4-8"` on canned proposals that the `augur-proposals` lens carries into Loupe's
   review console. Check: a fake names itself in any field an operator reads to judge trustworthiness.
+- **Two detectors of one wire shape must share one predicate.** A marker recognised by struct-tag decoding
+  is matched case-insensitively (`encoding/json` folds tag names), while a hand-written key scan matches
+  exactly, so the boundary serves a spelling the refusal cannot see. Minted: the nested-marker scan missed
+  `$SensitiveRef` at depth while `detectSensitiveRef` served it at the top. Check: one exact key lookup
+  feeds both the serve and the refuse path, and a raw case-insensitive residual check over the substituted
+  bytes backstops every structural walk (`internal/pkgmgr`'s materializer scan is the precedent).
+- **A pass-through arm written before a refusal existed silently exempts a shape from it.** Every early
+  `return raw, nil` in a boundary is a claim that nothing below needs the new rule; re-walk each one when
+  a refusal is added, and walk the served value too, not only the unserved ones. Minted: the nested-marker
+  refusal skipped a non-object `params` and never scanned a top-level value that was itself a marker, so a
+  second marker inside it rode to the vendor in `RawParams`. Check: the refusal's tests include one case
+  per early-return arm and one where the smuggled shape sits inside a legitimately served value.

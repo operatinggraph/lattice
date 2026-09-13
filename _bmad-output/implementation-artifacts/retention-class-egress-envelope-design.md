@@ -784,3 +784,45 @@ change to `piiKeyEnvelope`, the MAC, the ref-verified RPC, the Refractor, or `ha
 **Scope-diff gate:** every touch above traces to the scope sentence; the fixture package is the §10 "test-package
 fixture", not a new consumer. Dependencies: none declared (`seq:` dropped at §13 #2); §6.1 shipped (`e81914be`)
 and is untouched here — re-verified both ways.
+
+### 14.1 Close (2026-09-12) — deviations, reviews, classification, gates
+
+**Deviations from the brief, all recorded where the body stands:** the bucket table is a map (§3.3); the nested
+refusal is wider on two axes (§3.5 b); the docGen resolution order (§3.5 a); the census (§5 C6) and version (§10)
+numbers; two doc sites the §12 table missed. The e2e fixture mints a vertex (the Processor accepted that shape
+first try; a zero-mutation batch was not tried), and its second arm witnesses the bridge's terminal `replyOp` on the
+op lane before asserting the vendor was never called.
+
+**Reviews.** Per-increment: lead review on Inc A (mechanical), Inc B (posture-changing, lead review found the
+array-element hole before commit), Inc C (lead review). Close: three cold passes over the whole diff — Blind
+Hunter, Edge-Case Hunter, Acceptance Auditor. What they found, classified:
+
+| Class | Finding | Fixed |
+|---|---|---|
+| implementation-bug (bridge) | case-variant `$SensitiveRef` served at top, missed at depth (struct-tag fold vs exact scan) | yes — exact lookup both sides + case-insensitive residual backstop |
+| implementation-bug (bridge) | a served marker's value never scanned; a non-object `params` never scanned; an array element at depth 0 | yes — scan every value incl. served, scan non-object params, arrays are a level |
+| implementation-bug (bridge) | empty `{}`/`[]` past the depth bound over-refused | yes |
+| test-shape (bridge) | class shred case pinned the placeholder envelope, not the real-DEK+shredded row | yes — both rows |
+| test-shape (vault) | the custody-kind cross-check restated a literal | yes — `pkgmgr.CustodyKinds()` consulted by the install switch and the pin |
+| implementation-bug (bridge) | map-order refusal message; permanent vs transient decided by visit order | yes — sorted keys, scan-before-resolve |
+| convention (bridge, natsperm) | mutable package-level table; a read-set comment naming one bucket; a harness comment naming one lens kind | yes |
+| design-gap | the depth bound's fail-closed truncation and the non-object arm were not in the ratified §3.5(b) | amended (§3.5 b, §11) |
+| brief-gap | "8 census files" was 7; 0.15.7 was 0.15.8 | amended (§5 C6, §10) |
+| review-over-reach | two wording objections to Andrew-ratified contract text — §7.1(a)'s "serves every kind" beside its own refusal sentence, and §7.1(c)'s "verifies that provenance" where the MAC binds `{ref, requestId, ciphertext}` and the actor is the script guard's | not taken: the text is Andrew's, ratified verbatim; flagged here for his eye, no row |
+
+Dossier: bridge gains two entries (two detectors of one wire shape; a pass-through arm predating a refusal), vault
+one (a cross-check whose upstream set is a literal). No class was seen a second time across items this fire.
+
+**Gates (remote, native Postgres on :5433):** `go build ./...`, `make vet`, `golangci-lint run ./...` (v2.11.4 built
+with go1.26.1) 0 issues, every `scripts/lint-*.go` STRICT clean, `lint-package-version` clean, `gofmt` clean,
+`go test ./... -p 4` green with `POSTGRES_TEST_DSN`, `make test-lease-convergence` green (both commands, the two
+new arms included), every other build-tagged harness compiled under its tag. MERGED ≠ RUNNING: no shared stack
+exists in the remote container (`REMOTE.md` §3); the rolling order for a live deploy is §10's — install
+`privacy-base` 0.16.0 before cycling the Processor, then the bridge.
+
+**Landing:** one `--no-ff` merge to `main`, so `main` never carries the widened contract clause without the
+mechanism that makes it true (the fire branch's first commit is the contract text, which the exception says lands
+*with* the build; on the branch it precedes the build by two commits, which the merge collapses).
+
+**Neighbours on ship:** `verticals.md`'s lease-tenant-name row is `🚧 blocked-on:` this row and is now unblocked
+(Inc 2, §12) — that lane's steward flips it; this fire writes only `lattice.md`.
