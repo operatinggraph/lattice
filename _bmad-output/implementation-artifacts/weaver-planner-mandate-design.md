@@ -538,9 +538,9 @@ in Fires 1–8 is edited.
 ### Fire 9 close note (2026-09-13 — Steward, remote fire `claude/relaxed-rubin-e79fru`)
 
 **Shipped whole, one fire, both increments + the review fold + docs; landing shape: merged once when complete**
-(main never partial). Units on the fire branch: Inc A `42ee734` (plan-shaped proposals, per-leg dispatch), Inc B
-`c792301` (promotion proposal, per-leg budget reset, plan e2e, Loupe plan rendering), contract amendments
-`61ea524`, review fold `05c6a56`. Gates on the combined tree: `go build ./...` · `make vet` · `golangci-lint run
+(main never partial). Units on the fire branch: Inc A `0bf353b` (plan-shaped proposals, per-leg dispatch), Inc B
+`406a956` (promotion proposal, per-leg budget reset, plan e2e, Loupe plan rendering), contract amendments
+`5d97ce5`, review fold `1faea45`. Gates on the combined tree: `go build ./...` · `make vet` · `golangci-lint run
 ./...` · every `scripts/lint-*.go` STRICT · `internal/refractor` corpus census pins (no pin moved: both augur lenses
 are `nats-kv`) · `make test-augur-convergence` (+ the plan-shaped episode) · `make test-control-plane-authz` ·
 `test-lease-convergence` · `test-unrouted-convergence` · `test-object-gc` · `test-crypto-shred` ·
@@ -571,8 +571,8 @@ hand, as its Fire-2b sibling does, so the lens projection of `dispatchLeg` is pr
 and the two legs' distinct commits end to end.
 
 **Review record.** Lead review per increment + one cold adversarial pass (opus) over the whole diff at close:
-0 BLOCKING, 5 SHOULD-FIX, 5 NIT, 4 NOTE — every code finding folded and revert-proved in `05c6a56`, the
-three contract-text findings in `61ea524`. Findings by class, per component:
+0 BLOCKING, 5 SHOULD-FIX, 5 NIT, 4 NOTE — every code finding folded and revert-proved in `1faea45`, the
+three contract-text findings in `5d97ce5`. Findings by class, per component:
 - *design-gap ×2 (Weaver)* — (1) the promotion gate checked the target's mode while the two gap-close credit
   sites hand it the mark's action, so a planned target's plain playbook gap (or an escalation's `directOp`)
   would have minted a "promote what you already declare" recommendation and latched the triple —

@@ -117,7 +117,6 @@ but the *fork decision* + the *contract commit* are Andrew's.
 | **The Augur — Fire 3 (autoApply)** | Fires 1+2a+2b close the escalate→review→dispatch loop with a human verdict in it; Fire 3 removes it for high-confidence remediations. | ★★ | M | 🚧 Andrew-gated · [design](../../implementation-artifacts/augur-design.md) + [dispatch](../../implementation-artifacts/augur-dispatch-pickup-design.md) |
 | **[capability-author] One authoring request cannot co-propose a NEW lens + the target that binds it** | `RecordCapabilityProposal` records one `{kind,content}` per request and single-artifact apply resolves `lensRef` only by NanoID or same-Definition name — so a new-lens-plus-target intent can't produce both atomically. NL v1 binds an existing lens instead. | ★★ | L | 🗄️ shelved (revive: a real new-lens+target atomic intent, or a reported torn bundle) · two-step workaround shipped · [why](../../implementation-artifacts/capability-proposal-bundles-design.md) |
 
-| **[Weaver] The planner mandate's Fire 9 — the Augur floor** | Fires 1–8 shipped. The Augur materialises one `proposedAction`/`proposedParams`, so a novel gap with no pre-authored decomposition has no remediation path; plan-shaped proposals dispatched per leg + the playbook-promotion proposal at the `__effect` threshold. | ★★ | M | 🏗️ building · owner: claude/relaxed-rubin-e79fru · [design §8](../../implementation-artifacts/weaver-planner-mandate-design.md) · next: Inc A plan-shaped proposals |
 
 ### Read-model / projection maturity
 | Item | What it is | Imp | Size | State |
@@ -144,6 +143,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-13 · `5a9c3ca` · [Weaver/Augur] the planner mandate's Fire 9 — plan-shaped proposals dispatched leg by leg + the promotion proposal; Fires 1–9 built ([design](../../implementation-artifacts/weaver-planner-mandate-design.md))
 - 2026-09-13 · `0cda80c` · [lease-signing] a superseded bgcheck retires itself — lens + Weaver directOp; the op derives its reads, admits Weaver ([design](../../implementation-artifacts/bgcheck-supersession-convergence-rule-design.md))
 - 2026-09-13 · `83e1e14` · [Loom] `loom-state` enumeration bounded to the actionable set — failed index, complete-resolution listings, sentinel-gated backfill ([design](../../implementation-artifacts/loom-instance-enumeration-bounding-design.md))
 - 2026-09-13 · `f276112` · [Pkgmgr/Bridge/Loupe] a weaver target's lens binding held at authoring and install; §10.8 clause landed ([design](../../implementation-artifacts/weaver-target-gap-declaration-holder-design.md))
