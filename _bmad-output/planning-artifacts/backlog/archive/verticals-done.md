@@ -2,6 +2,12 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-06 · `6b913413` · A follow-up documented without a target date leads the clinic worklist until one is set — never auto-addressed, "Set date" opens the documentation modal; live: Riley Chen's 7 August visits surface.
+- 2026-09-05 · `d49f77ed` · Clinic self-pay cap's `.balance` is hydrated by the script's own `derive_reads`; legacy replay only for a self-pay, after the ownership proof; whole-cents money (found by the café unit, fixed same run).
+- 2026-09-05 · `e01be391` · A house-tab payment can never exceed what is owed — every `CreditCafeAccount` leg capped against a platform-hydrated `.balance` cache (clinic mirror + `derive_reads`); refusals proven live.
+- 2026-09-05 · `b2c4ea38` · A menu item can be renamed or repriced in place — `UpdateMenuItem` rewrites `.price` under OCC, Manage Menu gets an Edit form; proven live via the Gateway and restored.
+- 2026-09-05 · `2e73d122` · A resident who paid ahead is no longer chased for charges the credit covered — `deriveStatement` carries the surplus forward and prepays later debits in order; six never-in-credit live debtors unchanged.
+- 2026-09-05 · `84298db5` · A settled café charge can be refunded — `RefundCafeCharge` posts a credit that `reverses` the charge (same account, debit only, CAS-pinned cap, never self-scoped); statement badge + desk Refund button; proven live.
 - 2026-09-05 · `e9cffe9e` · A voided café item drops off the permanent statement — `itemsMemo` is derived from the tab's live non-voided lines at Charge/Void/Settle; live: 3 croissants, line 1 voided, posted `Croissant, Croissant` for $7.00.
 - 2026-09-05 · `42c8eae8` · The desk is shown the claim secret it mints for a new patient (clinic) or guest (wellness) — the shared ceremony overlay on an accepted `CreateUnclaimedIdentity` reply; proven in-browser.
 - 2026-09-05 · `8731eac5` · A called-off class releases every booking it strands — the orphan lens drops the aspect-anchor conjunct, the release op enumerates `forSession`/`bookedBy`; both legacy $25 fees refunded live.

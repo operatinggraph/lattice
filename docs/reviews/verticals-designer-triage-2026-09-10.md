@@ -517,7 +517,12 @@ knows an identity is being used as a member.
 
 **Residual (no drain):** the 6 stranded `slot*` cells, the 2 `noShow` rows and the $30 account on the admin
 identity stay — no op can tombstone under a protected root, and after this fire the admin can hold no new
-booking, so they are inert. **Contract surface:** none. **Size XS (pkg) · Winston-adjudicated.**
+booking. They are inert **with one trigger** (review, 2026-09-13): `ReleaseOrphanedBooking` releases a
+`noShow` booking's booker cells unconditionally ([ddls.go:5314-5329](../../packages/wellness-domain/ddls.go)),
+so a `TombstoneSession` on either of the admin's two past sessions (09-09, 09-13) opens a
+`wellnessOrphanedBookingSettlement` gap every dispatch of which is refused `ProtectedKey` until its retry budget
+is spent. Nothing tombstones a past session in the ordinary flow; the drain stays a non-goal, the trigger is
+named. **Contract surface:** none. **Size XS (pkg) · Winston-adjudicated.**
 
 ### `ProtectedBooker` fire brief (build note, 2026-09-13)
 
@@ -532,3 +537,25 @@ written, and the unprotected positive vector in the same test. Precedent: `Wrong
 (:3894). Gotchas: `data` may be absent on a fixture doc — guard with `hasattr`; the FE shows `code: message`
 verbatim (`app.js:159`), so the message is the user's text. Non-goals: no kernel change, no FE change, no drain of
 the stranded cells, no lens column.
+
+**Close (2026-09-13).** Shipped `3658dadb` (wellness-domain 0.27.1), CI on the push head. Live on the dev stack after
+`make reinstall-package`: `CreateBooking` and `JoinWaitlist` submitted by the current primordial admin
+(`ZieEKvPvwv7M9C14Yhr8`, `data.protected`) for itself on the 09-16 *Evening Flow* both reply
+`ScriptError: fail: ProtectedBooker: … is a kernel identity, not a member; its slot cells could never be released`;
+its hub carries 0 `slot*` cells afterwards. (Core KV holds two protected admin roots — `gk12KR…` is a prior
+epoch's, still protected, and it is the one that carries the 6 stranded cells.) One cold adversarial review, no
+blocking findings; applied: the `opmetas.go` Reads comment names the refusal (the brief's touch-list — a
+brief-gap the builder skipped); the guard reads `state[booker].data.get("protected")` directly (the `getattr`
+fallback defended a doc shape `vertexDocToStarlark` never produces — a comment asserting a runtime shape it had
+not read; convention); the test's "must precede every cell write" message softened (a `fail()` commits nothing,
+so cell absence proves the refusal, not its position; convention); the residual above amended (design-gap —
+"inert" was asserted without opening `ReleaseOrphanedBooking`'s `noShow` arm). Verified sound by the reviewer:
+the flag is the same `bool` predicate the kernel's `docIsProtected` tests, so package and kernel agree on every
+shape; `claim_cell(booker, …)` has exactly one site, behind the guard; `ReassignSession`/`ReassignSessionSeries`
+migrate studio and instructor cells only and `PromoteWaitlistedBookings` touches no booker cell, so no path
+re-claims for a booker already in; no new `kv.Read`; the seeds, `verify-package-wellness-domain` and the app's
+authz tests book no protected identity. Findings classified: brief-gap ×1, design-gap ×1, convention ×2. The
+class — *a create under a protected root commits and its release never will, so an op that claims cells on a
+caller-named identity hub must refuse a kernel root as its subject* — is a first sighting; the packages dossier
+is already past its cap (15 of 12), so it is recorded here and in the `bookerSlotClaim` DDL description, not
+appended.
