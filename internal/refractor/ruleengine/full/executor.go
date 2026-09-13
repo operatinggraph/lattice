@@ -609,7 +609,6 @@ func (ex *executor) footprint() ruleengine.EvalFootprint {
 	return ruleengine.EvalFootprint{NodeRevisions: nodeRevs, EdgeRevisions: edgeRevs, EdgeSelectors: edgeSelectors}
 }
 
-// Execute satisfies ruleengine.RuleEngine. It is the single-row convenience
 // Execute satisfies ruleengine.RuleEngine but cannot operate on a real graph
 // because the engine-neutral signature does not carry KV handles. The pipeline
 // calls ExecuteWith directly. Returning a typed error keeps the contract honest.
