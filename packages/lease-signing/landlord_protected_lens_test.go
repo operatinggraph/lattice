@@ -545,3 +545,32 @@ func TestLandlordLeaseApplicationsRead_ProjectsDocPointers(t *testing.T) {
 	require.Equal(t, []string{f.ids["larry"]}, anchorStrings(t, v["authz_anchors"]),
 		"the managing-landlord anchor is untouched by the doc fans")
 }
+
+// TestLandlordLeaseApplicationsRead_LostToRival — the landlord's row carries
+// the same lost_to_rival leaseApplicationsRead projects: an undecided
+// application on a unit that has leased reads true; the approved winner and
+// an undecided application on an available unit read false.
+func TestLandlordLeaseApplicationsRead_LostToRival(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedManagedApplication(t, "winner", "alice", "unit1", "larry")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 4200, "rentCurrency": "USD", "status": "leased"})
+	f.vtx(t, "rival", "leaseapp")
+	f.vtx(t, "bob", "identity")
+	f.edge(t, "applicationFor", "rival", "bob")
+	f.edge(t, "appliesToUnit", "rival", "unit1")
+	f.seedManagedApplication(t, "pending", "carol", "unit2", "larry")
+	f.aspect(t, "pending", "decision", "decision", map[string]any{})
+
+	rows := f.projectLandlordRead(t)
+	byApp := map[string]map[string]any{}
+	for _, r := range rows {
+		byApp[r.Values["app_id"].(string)] = r.Values
+	}
+	require.Len(t, byApp, 3)
+	require.Equal(t, true, byApp[f.ids["rival"]]["lost_to_rival"], "unit leased, no decision → lost to a rival")
+	require.Equal(t, false, byApp[f.ids["winner"]]["lost_to_rival"], "the approved application is the winner")
+	require.Equal(t, false, byApp[f.ids["pending"]]["lost_to_rival"], "an undecided application on an available unit is awaiting the landlord")
+}

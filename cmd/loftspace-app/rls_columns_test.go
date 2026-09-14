@@ -52,6 +52,7 @@ func applicantProtectedColumns() []adapter.ColumnDef {
 		{Name: "declined_bgcheck", Type: "boolean"},
 		{Name: "declined_payment", Type: "boolean"},
 		{Name: "declined", Type: "boolean"},
+		{Name: "lost_to_rival", Type: "boolean"},
 	}
 }
 
@@ -97,5 +98,6 @@ func landlordProtectedColumns() []adapter.ColumnDef {
 		{Name: "applicant_email", Type: "text"},
 		{Name: "applicant_phone", Type: "text"},
 		{Name: "qualified", Type: "boolean"},
+		{Name: "lost_to_rival", Type: "boolean"},
 	}
 }

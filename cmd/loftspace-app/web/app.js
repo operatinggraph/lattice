@@ -1810,8 +1810,11 @@ function shortKey(key) {
 // early approval on a not-yet-qualified application does not read
 // "complete"). Between the approval and the listing flip the lease is being
 // finalized (row.landlordApproved, unit not yet leased) — a short window the
-// directOp closes. A qualified-but-undecided application (row.missing_decision)
-// reads "awaiting landlord review."
+// directOp closes. A losing rival (row.lostToRival — the unit leased and this
+// application was never decided) reads "went to another applicant": its gaps
+// are all closed, so without this branch the default would read "In review"
+// for a unit that is already gone. A qualified-but-undecided application
+// (row.missing_decision) reads "awaiting landlord review."
 function applicationBannerFor(row) {
   if (row.tenancyEndedAt) {
     return { cls: "decision ok", text: "Lease ended " + fmtUTCDate(row.tenancyEndedAt) };
@@ -1832,6 +1835,9 @@ function applicationBannerFor(row) {
   }
   if (row.landlordApproved) {
     return { cls: "decision ok", text: "Approved — finalizing lease." };
+  }
+  if (row.lostToRival) {
+    return { cls: "decision declined", text: "This unit went to another applicant." };
   }
   if (row.missing_decision) {
     return { cls: "decision pending", text: "Qualified — awaiting landlord review." };
@@ -1900,7 +1906,8 @@ function renderApplicationCard(row, highlight) {
   // SignRenewal fails closed ApplicationSignalsMissing), and this card is the
   // tenant's own route to it ahead of the renewal chain's task. The raw figures go
   // to the package; only the derived signals the landlord reads are projected back.
-  if (row.unitKey && (!row.landlordApproved || !row.profileSubmitted)) {
+  // A losing rival has no decision left to inform, so the panel is not offered.
+  if (row.unitKey && !row.lostToRival && (!row.landlordApproved || !row.profileSubmitted)) {
     card.append(renderProfilePanel(row));
   }
 
@@ -2375,8 +2382,45 @@ function renderTasks() {
   }
   empty.hidden = true;
   for (const t of state.tasks) grid.append(renderTaskCard(t));
-  const n = state.tasks.length;
-  $("#tasks-summary").textContent = `${n} open task${n === 1 ? "" : "s"}`;
+  $("#tasks-summary").textContent = tasksSummaryFor(state.tasks, Date.now());
+}
+
+// tasksSummaryFor counts the inbox by disposition: an expired task is still
+// listed (it is the record of what was asked) but it is not open.
+function tasksSummaryFor(tasks, nowMs) {
+  const expired = tasks.filter((t) => taskExpired(t, nowMs)).length;
+  const n = tasks.length - expired;
+  return `${n} open task${n === 1 ? "" : "s"}` + (expired > 0 ? ` · ${expired} expired` : "");
+}
+
+// taskExpired: the task's grant deadline has passed. The Processor refuses a
+// completion submitted past expiresAt (the ephemeral grant no longer holds),
+// so the inbox treats such a task as read-only rather than offering a button
+// whose only outcome is that refusal.
+function taskExpired(t, nowMs) {
+  return !!(t.expiresAt && new Date(t.expiresAt).getTime() < nowMs);
+}
+
+// taskDisposition decides an assigned task's badge + Complete control as a
+// pure function of the task, the clock and what this app can complete —
+// DOM-free so it is goja-testable. Expired wins over everything: the button
+// is disabled and says so, whatever the op. A profile task completes through
+// the app's own form (its application must be loaded); any other op needs
+// the catalog + module to have marked it completable here.
+function taskDisposition(t, nowMs, canComplete, profileTask) {
+  if (taskExpired(t, nowMs)) {
+    return {
+      badge: "expired",
+      label: "Expired",
+      disabled: true,
+      title: "This task expired on " + fmtDate(t.expiresAt) + " and can no longer be completed.",
+    };
+  }
+  if (canComplete) return { badge: "open", label: "Complete", disabled: false, title: "" };
+  if (profileTask) {
+    return { badge: "open", label: "Complete", disabled: true, title: "Your application isn't loaded yet — reload My applications and try again." };
+  }
+  return { badge: "open", label: "Complete in Loupe", disabled: true, title: "This task type isn't completable in this app yet — use Loupe's Submit Op." };
 }
 
 function renderTaskCard(t) {
@@ -2403,7 +2447,7 @@ function renderTaskCard(t) {
   const app = (state.applications || []).find((a) => a.entityKey === t.scopedTo);
   if (app && app.unitAddress) target.textContent = "For: " + app.unitAddress;
 
-  const expired = t.expiresAt && new Date(t.expiresAt).getTime() < Date.now();
+  const expired = taskExpired(t, Date.now());
 
   const meta = document.createElement("div");
   meta.className = "meta";
@@ -2422,15 +2466,14 @@ function renderTaskCard(t) {
     btn.textContent = "Claim";
     btn.addEventListener("click", () => claimTask(t.taskKey));
   } else {
-    badge.textContent = expired ? "expired" : "open";
-    if (expired) badge.className = "badge expired";
     const canComplete = isProfileTask(t) ? !!profileTaskApplication(t) : canCompleteOp(t.operationName);
-    btn.textContent = canComplete || isProfileTask(t) ? "Complete" : "Complete in Loupe";
-    btn.disabled = !canComplete;
-    btn.title = canComplete ? "" : (isProfileTask(t)
-      ? "Your application isn't loaded yet — reload My applications and try again."
-      : "This task type isn't completable in this app yet — use Loupe's Submit Op.");
-    if (canComplete) btn.addEventListener("click", () => openComplete(t));
+    const disp = taskDisposition(t, Date.now(), canComplete, isProfileTask(t));
+    badge.textContent = disp.badge;
+    if (expired) badge.className = "badge expired";
+    btn.textContent = disp.label;
+    btn.disabled = disp.disabled;
+    btn.title = disp.title;
+    if (!disp.disabled) btn.addEventListener("click", () => openComplete(t));
   }
   actions.append(badge, btn);
 
@@ -4093,6 +4136,7 @@ function renderRLSApplicantRow(a, unit) {
   if (a.tenancyEndedAt) info.append(dispChip("Lease ended " + fmtUTCDate(a.tenancyEndedAt), "leased"));
   else if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
   else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
+  else if (a.lostToRival) info.append(dispChip("Unit leased to another applicant", "declined"));
   else info.append(dispChip("Awaiting your decision", "review"));
   if (a.signedAt) {
     const signed = document.createElement("span");
@@ -4125,7 +4169,6 @@ function renderRLSApplicantRow(a, unit) {
 
   row.append(renderQualification(a));
 
-  const unitLeased = (unit && unit.unitStatus) === "leased";
   if (decisionOffered(a, unit)) {
     // States the terms an approval would sign — the same chain
     // DecideLeaseApplication itself walks (pendingLeaseTerms), so the decision
@@ -4155,10 +4198,10 @@ function renderRLSApplicantRow(a, unit) {
     decline.addEventListener("click", () => decideApplication({ ...a, leaseAppKey: a.entityKey }, "declined"));
     actions.append(approve, decline);
     row.append(actions);
-  } else if (unitLeased && !a.landlordApproved && !a.landlordDeclined) {
+  } else if (a.lostToRival) {
     const note = document.createElement("div");
     note.className = "applicant-note";
-    note.textContent = "Unit leased to another applicant.";
+    note.textContent = "Unit leased to another applicant — no decision is left to make here.";
     row.append(note);
   }
 

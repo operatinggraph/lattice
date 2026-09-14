@@ -300,6 +300,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "declined", Type: "boolean"},
 				{Name: "escalated_bgcheck", Type: "boolean"},
 				{Name: "escalated_payment", Type: "boolean"},
+				{Name: "lost_to_rival", Type: "boolean"},
 			},
 		},
 		{
@@ -458,6 +459,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "applicant_email", Type: "text"},
 				{Name: "applicant_phone", Type: "text"},
 				{Name: "qualified", Type: "boolean"},
+				{Name: "lost_to_rival", Type: "boolean"},
 			},
 			SecureColumns: []pkgmgr.SecureColumn{
 				{Column: "applicant_name", HolderTypes: []string{"identity"}, Field: "value"},
@@ -1361,6 +1363,14 @@ RETURN
 //     while the WINNING applicant's own stepper still reflects a later bgcheck
 //     freshness lapse on their now-leased unit (the landlordDecision='approved'
 //     escape hatch; see leaseApplicationCompleteSpec's doc comment).
+//   - lost_to_rival names that terminal state for the losing rival explicitly:
+//     the unit has leased (unitStatus = 'leased') and this application carries
+//     no decision at all — the landlord decided a sibling, never this one, so
+//     nothing is left to await. A declined application is not "lost" (it was
+//     decided), an approved one is the winner, and an ended tenancy relists the
+//     unit (unitStatus leaves 'leased'), so none of those read true here. The
+//     card's banner reads it ahead of the stepper's closed gaps, which would
+//     otherwise render as "In review".
 //   - authz_anchors = [nanoIdFromKey(id.key)] — the applicant-self anchor only
 //     (the milestone). applicationFor is a REQUIRED MATCH (not OPTIONAL): a
 //     leaseapp with no applicant link projects NO row, so the read model holds
@@ -1487,6 +1497,7 @@ RETURN
   (((bgFailed > 0) AND (freshBgComplete = 0)) OR ((payFailed > 0) AND (payComplete = 0)) OR (landlordDecision = 'declined')) AS declined,
   (bgEscalated > 0)                                 AS escalated_bgcheck,
   (payEscalated > 0)                                AS escalated_payment,
+  ((unitKey <> null) AND (unitStatus = 'leased') AND (landlordDecision = null)) AS lost_to_rival,
   [nanoIdFromKey(applicantKey)]  AS authz_anchors
 `, readinessOptionalMatch, readinessWithItems)
 
@@ -1530,6 +1541,11 @@ RETURN
 //     WITH-carried one). Approve is still gated by the trusted console's own
 //     copy of this same formula (applicantApproved) — this column lets the RLS
 //     surface show the SAME gate without a second, weaver-targets-sourced read.
+//   - lost_to_rival is leaseApplicationsReadSpec's column of the same name (the
+//     unit has leased and this application carries no decision): the landlord's
+//     row for a losing rival reads "unit leased to another applicant" instead of
+//     "awaiting your decision" — there is no decision left for it to await. The
+//     unit walk is REQUIRED here, so no unitKey guard is needed.
 //   - applicant_name / applicant_email / applicant_phone are SECURE columns
 //     (see the Lenses() declaration): each RETURNs the applicant identity's
 //     sensitive aspect envelope whole (id.<aspect>.data — ciphertext at rest;
@@ -1634,5 +1650,6 @@ RETURN
   applicantEmailEnv               AS applicant_email,
   applicantPhoneEnv               AS applicant_phone,
   [nanoIdFromKey(landlordKey)] + [(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors,
-  ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null)) AS qualified
+  ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null)) AS qualified,
+  ((unitStatus = 'leased') AND (landlordDecision = null)) AS lost_to_rival
 `, readinessOptionalMatch, readinessWithItems)

@@ -103,6 +103,10 @@ type protectedLandlordRow struct {
 	HasGuarantor             *bool    `json:"hasGuarantor"`
 	GuarantorIncomeToRentMet *bool    `json:"guarantorIncomeToRentMet"`
 	Qualified                bool     `json:"qualified"`
+	// LostToRival: the unit has leased and this application carries no decision
+	// — the landlord decided a sibling, so the row reads "unit leased to another
+	// applicant" rather than "awaiting your decision".
+	LostToRival bool `json:"lostToRival"`
 }
 
 // landlordUnitGroup is the per-unit grouping the FE renders: a unit the signed-in
@@ -134,7 +138,8 @@ SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        doc_store_name, doc_filename, doc_content_type,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
-       guarantor_income_to_rent_met, COALESCE(qualified, false)
+       guarantor_income_to_rent_met, COALESCE(qualified, false),
+       COALESCE(lost_to_rival, false)
 FROM read_landlord_lease_applications
 ORDER BY unit_key, app_id`
 
@@ -179,7 +184,7 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 			&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
-			&row.GuarantorIncomeToRentMet, &row.Qualified,
+			&row.GuarantorIncomeToRentMet, &row.Qualified, &row.LostToRival,
 		); err != nil {
 			return nil, err
 		}
@@ -227,7 +232,8 @@ SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        doc_store_name, doc_filename, doc_content_type,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
-       guarantor_income_to_rent_met, COALESCE(qualified, false)
+       guarantor_income_to_rent_met, COALESCE(qualified, false),
+       COALESCE(lost_to_rival, false)
 FROM read_landlord_lease_applications
 WHERE entity_key = $1
 ORDER BY landlord_id
@@ -263,7 +269,7 @@ func queryLandlordApplicationByKey(ctx context.Context, pool pgxBeginner, actorI
 		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 		&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
-		&row.GuarantorIncomeToRentMet, &row.Qualified,
+		&row.GuarantorIncomeToRentMet, &row.Qualified, &row.LostToRival,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

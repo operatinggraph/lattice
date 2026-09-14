@@ -551,3 +551,44 @@ func TestLeaseApplicationsRead_EndedTenancyClosesTheStepper(t *testing.T) {
 		require.Equal(t, false, v[col], "%s stays closed on an ended tenancy", col)
 	}
 }
+
+// TestLeaseApplicationsRead_LostToRival_NamesTheLosingRival — lost_to_rival is
+// the losing rival's explicit terminal state: the unit leased and this
+// application carries no decision. The winner (decision approved on the same
+// leased unit), a declined rival (decided), and an undecided application on a
+// unit still available all read false.
+func TestLeaseApplicationsRead_LostToRival_NamesTheLosingRival(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+	for _, name := range []string{"rival", "winner", "declinedRival"} {
+		f.vtx(t, name, "leaseapp")
+		f.vtx(t, name+"Id", "identity")
+		f.edge(t, "applicationFor", name, name+"Id")
+		f.edge(t, "appliesToUnit", name, "unit1")
+	}
+	f.aspect(t, "winner", "decision", "decision", map[string]any{"value": "approved"})
+	f.aspect(t, "declinedRival", "decision", "decision", map[string]any{"value": "declined"})
+	// An undecided application on a unit that is still available: in review.
+	f.vtx(t, "unit2", "unit")
+	f.aspect(t, "unit2", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	f.vtx(t, "pending", "leaseapp")
+	f.vtx(t, "pendingId", "identity")
+	f.edge(t, "applicationFor", "pending", "pendingId")
+	f.edge(t, "appliesToUnit", "pending", "unit2")
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 4)
+	byApp := map[string]map[string]any{}
+	for _, r := range rows {
+		byApp[r.Values["app_id"].(string)] = r.Values
+	}
+	require.Equal(t, true, byApp[f.ids["rival"]]["lost_to_rival"], "unit leased, no decision → lost to a rival")
+	require.Equal(t, false, byApp[f.ids["winner"]]["lost_to_rival"], "the approved application is the winner")
+	require.Equal(t, false, byApp[f.ids["declinedRival"]]["lost_to_rival"], "a declined application was decided, not lost")
+	require.Equal(t, false, byApp[f.ids["pending"]]["lost_to_rival"], "an undecided application on an available unit is in review")
+	require.Equal(t, true, byApp[f.ids["declinedRival"]]["declined"])
+}

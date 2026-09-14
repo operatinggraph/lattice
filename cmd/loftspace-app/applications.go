@@ -86,6 +86,10 @@ type protectedApplicationRow struct {
 	InflightPayment   bool `json:"inflight_payment"`
 	DeclinedBgcheck   bool `json:"declined_bgcheck"`
 	DeclinedPayment   bool `json:"declined_payment"`
+	// LostToRival: the unit has leased and this application carries no decision —
+	// the landlord decided a sibling. The card's banner reads it ahead of the
+	// closed-gap stepper, and the inbox treats its expired tasks as read-only.
+	LostToRival bool `json:"lostToRival"`
 }
 
 // selectApplicationsSQL reads the protected model. It carries NO auth WHERE — the
@@ -104,7 +108,7 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        has_co_applicant, has_guarantor, guarantor_income_to_rent_met,
        missing_onboarding, missing_bgcheck, missing_payment, missing_signature,
        missing_decision, inflight_bgcheck, inflight_payment, declined_bgcheck,
-       declined_payment, declined
+       declined_payment, declined, COALESCE(lost_to_rival, false)
 FROM read_lease_applications
 ORDER BY app_id`
 
@@ -153,7 +157,7 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 			&row.HasCoApplicant, &row.HasGuarantor, &row.GuarantorIncomeToRentMet,
 			&row.MissingOnboarding, &row.MissingBgcheck, &row.MissingPayment, &row.MissingSignature,
 			&row.MissingDecision, &row.InflightBgcheck, &row.InflightPayment, &row.DeclinedBgcheck,
-			&row.DeclinedPayment, &row.Declined,
+			&row.DeclinedPayment, &row.Declined, &row.LostToRival,
 		); err != nil {
 			return nil, err
 		}
@@ -186,7 +190,7 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        has_co_applicant, has_guarantor, guarantor_income_to_rent_met,
        missing_onboarding, missing_bgcheck, missing_payment, missing_signature,
        missing_decision, inflight_bgcheck, inflight_payment, declined_bgcheck,
-       declined_payment, declined
+       declined_payment, declined, COALESCE(lost_to_rival, false)
 FROM read_lease_applications
 WHERE entity_key = $1`
 
@@ -220,7 +224,7 @@ func queryApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entit
 		&row.HasCoApplicant, &row.HasGuarantor, &row.GuarantorIncomeToRentMet,
 		&row.MissingOnboarding, &row.MissingBgcheck, &row.MissingPayment, &row.MissingSignature,
 		&row.MissingDecision, &row.InflightBgcheck, &row.InflightPayment, &row.DeclinedBgcheck,
-		&row.DeclinedPayment, &row.Declined,
+		&row.DeclinedPayment, &row.Declined, &row.LostToRival,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
