@@ -420,8 +420,9 @@ would return bodies — which is exactly the fetch its narrow reader interface e
 signal). It is **settled by every terminal batch**, atomically with the status flip: **written** (plain PUT)
 on the failed arm, **removed** (TTL'd purge) on the complete arm, and removed the same way by `redrive`'s
 CAS-guarded batch. The complete arm's removal is what heals a marker whose instance has moved on — nothing
-else would, since redrive refuses a non-failed instance and no sweep touches the family — at the cost of one
-transient subject per completing instance that had no marker, gone a minute later. **Never `CreateOnly`:** a
+else would, since the family's only other removal is redrive's own batch (which reaches a running instance
+only when it carries an inconclusive `deadlineProbe` verdict) and no sweep touches the family — at the cost
+of one transient subject per completing instance that had no marker, gone a minute later. **Never `CreateOnly`:** a
 removal's purge marker stands on that subject for the marker's lifetime, and a redriven instance that fails
 again inside it would have a create-only write refused — the second failure would then be invisible to the
 queue. The index is a membership claim only: the cursor's `status` stays authoritative, so a marker can
@@ -471,7 +472,7 @@ is later wanted — while any single instance stays answerable by id whatever it
 | Long-waiting instance > 24h | Extended-dedupe at engine (idempotency horizon, arch §85) |
 | Crash mid-step | Write-ahead atomic batch (pointer + cursor + outbox record before any side effect); the relay re-publishes the `outbox.<token>` op on resume, collapsing on the Contract #4 tracker → re-drive safely; pointer presence is the idempotency guard |
 | Relay publish (or outbox-delete) fails | The outbox record persists; the relay returns **`NakWithDelay`** → JetStream redelivers no sooner than the 5s floor (`substrate.DefaultRedeliveryDelay`) → re-publish (idempotent). Bounded cadence, unbounded count: at-least-once preserved, no `MaxDeliver`, and the relay never hot-loops against a failing ops stream **or** a failing `loom-state` KV. Submission cannot be lost between batch and broker |
-| Rejected / failed / unseen step | Off-stream terminal (a rejected op writes no tracker/event) — learned via the `deadline.<instanceId>` TTL expiry + a read-before-act probe (`GET vtx.op.<token>`: committed → advance+alert; not yet relayed → re-arm; else → `status=failed`, or an alerted `deadlineProbe` note with the instance left running when the step's own evidence is older than `opstatus.TrackerTTL`). Never the submit reply; never wedges |
+| Rejected / failed / unseen step | Off-stream terminal (a rejected op writes no tracker/event) — learned via the `deadline.<instanceId>` TTL expiry + a read-before-act probe (`GET vtx.op.<token>`: committed → advance+alert; not yet relayed → re-arm; else → `status=failed`, or an alerted `deadlineProbe` note with the instance left running when the step's own evidence is older than `opstatus.TrackerTTL`). Never the submit reply; never a SILENT wedge — the one state that holds is the alerted note, and `lattice loom redrive` accepts it |
 
 ---
 
@@ -589,13 +590,20 @@ placement (Contract #10 §10.3/§10.8).
 **Built (Phase 3).** The operator-facing control plane (`internal/loom/control`): the
 `lattice.ctrl.loom.*` micro-service — `list` / `consumers` / `inspect` / `pause` / `resume` /
 `redrive` — reading `loom-state` and the supervisor's pause state, driven by the `lattice loom` CLI.
-`redrive` resumes a FAILED instance at its recorded cursor — never restarts it under a fresh id, which
-would re-execute every step the failed run already committed (§10.3's terminal-batch pin deletion means
+`redrive` resumes a STALLED instance at its recorded cursor — never restarts it under a fresh id, which
+would re-execute every step the earlier run already committed (§10.3's terminal-batch pin deletion means
 `redrive` re-pins from the CURRENT live pattern, refusing rather than misindexing if the pattern's step
 count changed since the failure). The resumed step's `token.<token>` is written as a **put**, guarded by
 the same batch's CAS on the instance record that guards the pin's re-pin, rather than the `CreateOnly`
-every other advancer uses: the failed step's token subject carries the fail arm's marker for the marker's
-lifetime, and a `CreateOnly` write against it is refused. The Starlark guard
+every other advancer uses: the resumed step's token subject carries the abandoning purge's marker for the
+marker's lifetime, and a `CreateOnly` write against it is refused. **Two states are stalled, and `redrive`
+accepts both:** `failed`, and `running` with a standing `deadlineProbe` note — an instance whose step
+deadline expired on evidence already past `opstatus.TrackerTTL`, so the probe could not tell a
+committed-and-aged-out op from a rejected one and nothing re-arms. A plain running instance stays refused.
+The resume gives up the parked step's `token.<token>` pointer in the same CAS-guarded batch (so a
+completion arriving mid-resume resolves nothing instead of advancing the cursor under a re-submission),
+and past that horizon the re-submitted op does not collapse on the Contract #4 tracker — a committed op
+can run twice, which is the operator's call and is named in the alert. The Starlark guard
 escape hatch (`{reads, starlark}`, loom-starlark-guards-design.md Fire 2) — parse-time compile-check
 + eval against the shared verified-pure sandbox (`internal/starlarksandbox`, Fire 1), for a predicate
 the declarative grammar can't express.
@@ -647,10 +655,6 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   step's token and writes it against a subject that carries the fail arm's marker — the identical shape,
   the next key. Minted: the 2026-09-03 tombstone-sweep fire. Check: the redrive-after-real-fail test in
   `control_internal_test.go` (`TestRedriveInstance_ResumesOverTheFailedStepsRemovedToken`).
-- **A removal in `loom-state` is a TTL'd purge, never a DEL.** A DEL is a permanent subject on a
-  `max_msgs_per_subject=1` bucket — exactly the growth this design exists to stop. Minted: the same fire.
-  Check: `lint-conventions`' `checkLoomStateDelete` (mechanized at ship; this entry records the why, the
-  gate does the catching).
 - **A message on `deadline.>` is a delivery to a handler whose evidence outlives nothing it backstops.** For
   a running instance parked in an unbounded wait, the step-deadline probe's evidence (the 24 h tracker) is
   gone long before the wait ends, so anything that puts such an instance through the probe fails it. The
@@ -697,3 +701,15 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   2026-09-14 evidence-horizon fire. Check:
   `TestOnDeadline_AbsenceIsEvidenceOnlyInsideTheEvidencesLifetime` (both verdicts, one instance, one
   marker) and `TestDeadlineProbeNote_IsSettledByEveryPathThatLeavesTheStep`.
+- **Withholding a verdict is only kinder than a wrong one if some verb still reaches the flow — otherwise
+  it is the same wedge with better manners.** The evidence-horizon guard replaced a false terminal with an
+  alerted note and left the instance running, which is right for a flow whose completer can still act and
+  was a permanent wedge for one whose op was genuinely rejected: nothing re-arms, so no further deadline
+  fires, and `RedriveInstance` refused every non-`failed` instance — the recovery verb the design named
+  did not accept the state the design created. When a change turns a terminal into a park, enumerate the
+  paths that still reach the parked flow per STEP KIND before calling the alert a discharge (a systemOp
+  step has no completer at all), and check that the operator surface renders the new state: a field only
+  `--output json` prints is not an operator cue. Minted: the 2026-09-14 evidence-horizon fire, by cold
+  review on the contract layer. Check: `TestRedriveInstance_AcceptsAnInstanceParkedOnAnInconclusiveVerdict`
+  + `TestRedriveInstance_AbandonsTheParkedStepsPointerInItsOwnBatch`, and
+  `TestOnDeadline_TheHorizonGuardsEveryStepKindsRejectedOrLostVerdict` for the per-kind enumeration.

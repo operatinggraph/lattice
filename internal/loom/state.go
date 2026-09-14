@@ -749,10 +749,24 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 	return nil
 }
 
-// redrive re-pins pattern, flips inst.Status back to running and removes the
-// instance's failed index, in one AtomicBatch, for a manual operator redrive of
-// a failed instance (Engine.RedriveInstance). expectedRevision is the revision
-// the caller read the instance record at (getInstanceAtRevision).
+// redrive re-pins pattern, flips inst.Status back to running, removes the
+// instance's failed index and abandons the pointer of the step being resumed, in
+// one AtomicBatch, for a manual operator redrive (Engine.RedriveInstance).
+// expectedRevision is the revision the caller read the instance record at
+// (getInstanceAtRevision).
+//
+// abandonToken is the pending token whose reverse pointer this redrive gives
+// up, or "" when there is none. A redrive of a FAILED instance has none — the
+// terminal transition removed it — and passing "" is what keeps this batch from
+// purging an absent subject and minting a marker on a subject that held nothing
+// (the hazard deleteToken documents). A redrive of an instance PARKED on an
+// inconclusive deadline verdict has a live one, and abandoning it is what makes
+// the resume safe: a completion for that token arriving while the redrive runs
+// then resolves no live pointer in handleCompletion and is dropped, instead of
+// advancing the cursor under a re-submission of the same step. The two paths
+// therefore leave the identical intermediate state — running, with an empty
+// pending token — which is the state transition's doc comment already reasons
+// about.
 //
 // The index removal rides this batch rather than a read-then-remove because the
 // batch is the only place it can be atomic with the status flip — a redriven
@@ -771,7 +785,7 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 // refused by exactly that. The marker is present for the marker's lifetime and
 // the guard must not depend on it, so the pin is written as an ordinary put,
 // guarded by the same batch's CAS.
-func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern, expectedRevision uint64) error {
+func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern, abandonToken string, expectedRevision uint64) error {
 	// A redrive resumes the step from the operator's decision, so any
 	// inconclusive deadline-probe note left on the record is spent: the operator
 	// has answered what the probe could not. Settled in this batch, for the same
@@ -789,6 +803,14 @@ func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Patte
 		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body, HasRevision: true, Revision: expectedRevision},
 		{Bucket: s.bucket, Key: patternPinKey(inst.InstanceID), Value: pinBody},
 		{Bucket: s.bucket, Key: failedMarkerKey(inst.InstanceID), Purge: true, TTL: tombstoneTTL},
+	}
+	if abandonToken != "" {
+		ops = append(ops, substrate.BatchOp{
+			Bucket: s.bucket,
+			Key:    tokenKey(abandonToken),
+			Purge:  true,
+			TTL:    tombstoneTTL,
+		})
 	}
 	if _, err := s.conn.AtomicBatch(ctx, ops); err != nil {
 		return fmt.Errorf("loom: redrive instance %q: %w", inst.InstanceID, err)
@@ -884,22 +906,27 @@ func (s *stateStore) rearmDeadline(ctx context.Context, instanceID string, ttl t
 //
 // It is deliberately NOT a transition. A transition with no deadline to arm
 // purges deadline.<instanceId>, and the key the probe was woken by has already
-// expired — so that purge would land on an empty subject and mint a fresh
-// marker there, waking the probe again on a step that was never due (the hazard
-// deleteToken documents). The note is a fact about the record, so the record is
-// the only key it touches.
+// expired — so that purge would land on a subject holding nothing and mint a
+// fresh marker on it, the growth hazard deleteToken documents, on the one family
+// whose every message the deadline durable then has to classify. The note is a
+// fact about the record, so the record is the only key it touches.
 //
 // The CAS is the ordering, and a refusal is an answer rather than an error: the
-// caller reads a revision conflict as "the instance moved on under the probe"
-// and drops the note, exactly as probeFail drops a refused terminal. inst is
-// mutated to carry the note, so a caller holding it sees what was written.
+// caller reads a revision conflict as a verdict another writer got in ahead of
+// and drops the note, exactly as probeFail drops a refused terminal. inst
+// carries the note only if it was written — a refused write restores the field
+// to what it held — so an in-memory record never claims a note the bucket does
+// not hold.
 func (s *stateStore) noteDeadlineProbe(ctx context.Context, inst *Instance, reason string, at time.Time, expectedRevision uint64) error {
+	prior := inst.DeadlineProbe
 	inst.DeadlineProbe = &probeNote{At: substrate.FormatTimestamp(at), Reason: reason}
 	body, err := json.Marshal(inst)
 	if err != nil {
+		inst.DeadlineProbe = prior
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
 	}
 	if _, err := s.conn.KVUpdate(ctx, s.bucket, instanceKey(inst.InstanceID), body, expectedRevision); err != nil {
+		inst.DeadlineProbe = prior
 		return fmt.Errorf("loom: note deadline probe %q: %w", inst.InstanceID, err)
 	}
 	return nil

@@ -447,8 +447,10 @@ func TestDeadlineArmed_PropagatesGenuineGetFailure(t *testing.T) {
 // Above: an expiry is delivered as a marker that stands for the loom-state
 // bucket's marker TTL, and the probe that marker wakes reads the op tracker's
 // presence as its evidence — so arm plus window must finish well inside the
-// tracker's own life or the probe fails a healthy instance. MaxDeadlineArm is
-// what stops a deployment's own value from crossing that, and bootstrap's
+// tracker's own life or the probe has no evidence to judge by, and returns the
+// inconclusive verdict (an alert on a still-parked step) in place of the
+// rejected-or-lost terminal it exists to write. MaxDeadlineArm is what stops a
+// deployment's own value from crossing that, and bootstrap's
 // TestLoomStateMarkerTTL_FitsInsideTheTrackerLifetime asserts the ceiling
 // against the window it has to fit beside.
 func TestWithDefaults_ClampsTheDeadlineArmBothWays(t *testing.T) {
