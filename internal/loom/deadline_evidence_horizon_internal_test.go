@@ -15,14 +15,10 @@ import (
 
 // --- fixtures ---------------------------------------------------------------
 
-// pastTheHorizon returns a clock reading far enough ahead that any epoch
-// stamped during the test is older than the evidence horizon. It is the only
-// way to stand a test on the far side of a 24 h bound: the server stamps the
-// token pointer's timestamp, so the epoch cannot be backdated, and waiting a
-// day out is not a test.
-func pastTheHorizon() func() time.Time {
-	return func() time.Time { return time.Now().Add(opstatus.TrackerTTL + time.Minute) }
-}
+// wellPastTheHorizon is the step age every test that only needs "the evidence
+// has aged out" pins its clock to. An hour clear of the bound, so the assertion
+// is about the guard rather than about how precisely a clock is placed.
+const wellPastTheHorizon = opstatus.TrackerTTL + time.Hour
 
 // seedExpiredUserTaskArm parks an instance on a userTask step and then removes
 // its arm, which is the state the probe is only ever entered in: the expiry
@@ -32,6 +28,27 @@ func seedExpiredUserTaskArm(ctx context.Context, t *testing.T, s *stateStore, in
 	t.Helper()
 	token := seedParkedUserTask(ctx, t, s, instanceID, time.Hour)
 	removeDeadlineArm(ctx, t, s, instanceID)
+	return token
+}
+
+// seedAtStepAge seeds an expired userTask arm and pins the engine's clock so the
+// probe reads that step as exactly age old, however long the test then takes.
+//
+// The clock is anchored to the STEP'S OWN EPOCH — the timestamp the server
+// stamped on the token pointer — and not to time.Now plus an offset. Reading the
+// epoch back and offsetting from it is what makes the age a fixed quantity: a
+// clock built from time.Now measures an age that moves with the host's wall
+// clock between the seed and the probe, and a host that steps its clock (a
+// virtualised one resyncing, say) then lands the age on the wrong side of a
+// bound the test never meant to test. It is also the only way to stand a test
+// past a 24 h bound at all — the server stamps the epoch, so it cannot be
+// backdated, and waiting the bound out is not a test.
+func seedAtStepAge(ctx context.Context, t *testing.T, s *stateStore, e *Engine, instanceID string, age time.Duration) string {
+	t.Helper()
+	token := seedExpiredUserTaskArm(ctx, t, s, instanceID)
+	epoch, err := s.tokenEpoch(ctx, token)
+	require.NoError(t, err, "seed precondition: the step's token pointer carries an epoch")
+	e.clock = func() time.Time { return epoch.Add(age) }
 	return token
 }
 
@@ -104,11 +121,10 @@ func TestProbeRejectedOrLost_EvidencePastItsOwnLifetimeIsNoVerdict(t *testing.T)
 	s := newLoomStateStoreForTransition(ctx, t)
 	var logs bytes.Buffer
 	e := newSweepEngine(s, sweepLogger(&logs))
-	e.clock = pastTheHorizon()
 	responder := startNotCommittedResponder(t, s.conn)
 
 	const instanceID = "instHorizon1"
-	token := seedExpiredUserTaskArm(ctx, t, s, instanceID)
+	token := seedAtStepAge(ctx, t, s, e, instanceID, wellPastTheHorizon)
 
 	deliverExpiry(ctx, t, e, s, instanceID)
 
@@ -170,11 +186,10 @@ func TestProbeRejectedOrLost_MissingTokenPointerIsAnInvariantBreak(t *testing.T)
 	s := newLoomStateStoreForTransition(ctx, t)
 	var logs bytes.Buffer
 	e := newSweepEngine(s, sweepLogger(&logs))
-	e.clock = pastTheHorizon()
 	startNotCommittedResponder(t, s.conn)
 
 	const instanceID = "instNoPointer1"
-	token := seedExpiredUserTaskArm(ctx, t, s, instanceID)
+	token := seedAtStepAge(ctx, t, s, e, instanceID, wellPastTheHorizon)
 	require.NoError(t, s.deleteToken(ctx, token), "the break the arm exists for")
 
 	deliverExpiry(ctx, t, e, s, instanceID)
@@ -312,11 +327,10 @@ func TestNoteDeadlineProbe_TouchesTheRecordAndNothingElse(t *testing.T) {
 
 	s := newLoomStateStoreForTransition(ctx, t)
 	e := newSweepEngine(s, sweepLogger(&bytes.Buffer{}))
-	e.clock = pastTheHorizon()
 	startNotCommittedResponder(t, s.conn)
 
 	const instanceID = "instNoStrayMarker1"
-	token := seedExpiredUserTaskArm(ctx, t, s, instanceID)
+	token := seedAtStepAge(ctx, t, s, e, instanceID, wellPastTheHorizon)
 
 	stream, err := s.conn.JetStream().Stream(ctx, "KV_"+s.bucket)
 	require.NoError(t, err)
@@ -354,11 +368,10 @@ func TestInspectInstance_CarriesTheInconclusiveNote(t *testing.T) {
 
 	s := newLoomStateStoreForTransition(ctx, t)
 	e := newSweepEngine(s, sweepLogger(&bytes.Buffer{}))
-	e.clock = pastTheHorizon()
 	startNotCommittedResponder(t, s.conn)
 
 	const instanceID = "instInspectNote1"
-	seedExpiredUserTaskArm(ctx, t, s, instanceID)
+	seedAtStepAge(ctx, t, s, e, instanceID, wellPastTheHorizon)
 	deliverExpiry(ctx, t, e, s, instanceID)
 
 	detail, err := e.InspectInstance(ctx, instanceID)
@@ -393,11 +406,10 @@ func TestNoteDeadlineProbe_SecondReplicasRefusedCASIsTheAnswer(t *testing.T) {
 	s := newLoomStateStoreForTransition(ctx, t)
 	var logs bytes.Buffer
 	e := newSweepEngine(s, sweepLogger(&logs))
-	e.clock = pastTheHorizon()
 	startNotCommittedResponder(t, s.conn)
 
 	const instanceID = "instTwoReplicas1"
-	token := seedExpiredUserTaskArm(ctx, t, s, instanceID)
+	token := seedAtStepAge(ctx, t, s, e, instanceID, wellPastTheHorizon)
 	const reason = "step 0 CreateTask rejected"
 
 	// What both replicas read before they went off to gather evidence.
@@ -437,12 +449,11 @@ func TestProbeRejectedOrLost_RedeliveredMarkerRenotesAndFailsNothing(t *testing.
 
 	s := newLoomStateStoreForTransition(ctx, t)
 	e := newSweepEngine(s, sweepLogger(&bytes.Buffer{}))
-	e.clock = pastTheHorizon()
 	startNotCommittedResponder(t, s.conn)
 
 	const instanceID = "instRenotedMarker1"
 	const reason = "step 0 CreateTask rejected"
-	token := seedExpiredUserTaskArm(ctx, t, s, instanceID)
+	token := seedAtStepAge(ctx, t, s, e, instanceID, wellPastTheHorizon)
 
 	deliverExpiry(ctx, t, e, s, instanceID)
 	firstRevision := requireNoted(ctx, t, s, instanceID, token, reason)
@@ -458,8 +469,9 @@ func TestProbeRejectedOrLost_RedeliveredMarkerRenotesAndFailsNothing(t *testing.
 // compares against. The horizon is not a Loom taste: it is the life of the very
 // evidence the probe read, so it must be opstatus.TrackerTTL — the constant the
 // Processor stamps every tracker with — and not a local copy that could drift
-// from it. A clock one minute INSIDE the horizon still fails; one minute past it
-// refuses.
+// from it. The two rows sit one second apart across that exact value: a step a
+// tick younger than the tracker's life is still decided, a step exactly as old
+// as it is not.
 func TestProbeRejectedOrLost_HorizonIsTheTrackerLifetime(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -473,18 +485,16 @@ func TestProbeRejectedOrLost_HorizonIsTheTrackerLifetime(t *testing.T) {
 	startNotCommittedResponder(t, s.conn)
 
 	for _, tc := range []struct {
-		name   string
-		offset time.Duration
-		want   string
+		name string
+		age  time.Duration
+		want string
 	}{
-		{"a minute inside the tracker's life is still a verdict", opstatus.TrackerTTL - time.Minute, StatusFailed},
-		{"a minute past it is not", opstatus.TrackerTTL + time.Minute, StatusRunning},
+		{"a step one tick short of the tracker's life is still a verdict", opstatus.TrackerTTL - time.Second, StatusFailed},
+		{"a step exactly as old as the tracker's life is not", opstatus.TrackerTTL, StatusRunning},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			instanceID := "instHz" + strings.ReplaceAll(tc.want, " ", "")
-			seedExpiredUserTaskArm(ctx, t, s, instanceID)
-			at := time.Now().Add(tc.offset)
-			e.clock = func() time.Time { return at }
+			seedAtStepAge(ctx, t, s, e, instanceID, tc.age)
 
 			deliverExpiry(ctx, t, e, s, instanceID)
 
