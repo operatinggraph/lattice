@@ -313,8 +313,10 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 // Preconditions, each a distinct typed error so the operator sees why a
 // redrive was refused rather than a generic failure:
 //   - the instance must exist (ErrInstanceNotFound);
-//   - status must be exactly StatusFailed (errInstanceNotFailed) — running is
-//     already progressing, complete has nothing to resume;
+//   - the instance must be RESUMABLE (errInstanceNotFailed) — see
+//     isResumable: a failed instance, or a running one parked on an
+//     inconclusive deadline verdict. A running instance with no such note is
+//     progressing on its own and complete has nothing to resume;
 //   - the instance's pattern must still be loaded in the live source
 //     (errPatternNotLoaded) — the terminal batch purges a FAILED instance's own
 //     pin (§10.3), so redrive re-pins from the CURRENT live definition, not the
@@ -338,7 +340,25 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 // failing transition removed, onto a subject that carries that removal's marker;
 // create-if-absent would be refused there, after the redrive batch has already
 // flipped the record to running. The guard this path relies on instead is that
-// batch's compare-and-set (transition's doc comment carries the argument).
+// batch's compare-and-set (transition's doc comment carries the argument). That
+// put is also what makes a redrive the exit from an inconclusive verdict: it
+// re-stamps the token pointer, so the step's epoch restarts and the next probe
+// judges on evidence as young as the re-submitted op.
+//
+// The token the instance was parked on is carried into the resume as oldToken,
+// so a cursor that moves under a guard re-evaluation purges the pointer it left
+// behind. A failed instance parks on no token (fail cleared it), which makes
+// that argument empty and this path exactly what it is for a failed redrive.
+//
+// WHAT A REDRIVE OFF AN INCONCLUSIVE VERDICT COSTS. The verdict is refused
+// precisely because the engine cannot tell a committed op from a rejected one,
+// so this re-submits a step that MAY have already run. The Contract #4 tracker
+// that would ordinarily collapse the duplicate has aged out — that is the whole
+// premise of the refusal — so the re-submission executes for real. That is the
+// same duplicate an operator accepts today when they redrive an instance the
+// probe failed on evidence it could no longer read, and it is taken knowingly:
+// the alert names both readings, and the alternative is an instance parked
+// forever on a step nothing will ever complete.
 func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 	inst, revision, err := e.state.getInstanceAtRevision(ctx, instanceID)
 	if err != nil {
@@ -347,9 +367,10 @@ func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 	if inst == nil {
 		return fmt.Errorf("loom: instance %q %w", instanceID, ErrInstanceNotFound)
 	}
-	if inst.Status != StatusFailed {
+	if !isResumable(inst) {
 		return fmt.Errorf("loom: %w: %q (status=%s)", errInstanceNotFailed, instanceID, inst.Status)
 	}
+	parkedToken := inst.PendingToken
 
 	patternID := patternIDFromRef(inst.PatternRef)
 	pattern, ok := e.source.get(patternID)
@@ -362,7 +383,6 @@ func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 	}
 
 	inst.Status = StatusRunning
-	// PendingToken is already "" — fail() cleared it on the terminal transition.
 	if err := e.state.redrive(ctx, inst, pattern, revision); err != nil {
 		return err
 	}
@@ -375,14 +395,14 @@ func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 	}
 	inst.Cursor = runCursor
 	if completed {
-		if err := e.complete(ctx, inst, pattern, ""); err != nil {
+		if err := e.complete(ctx, inst, pattern, parkedToken); err != nil {
 			return fmt.Errorf("loom: redrive %q: complete: %w", instanceID, err)
 		}
 		e.logger.Info("loom instance completed on redrive (all remaining guards skipped)",
 			"instanceId", instanceID, "patternId", pattern.PatternID)
 		return nil
 	}
-	if err := e.submitStep(ctx, inst, pattern, "", tokenPutUnderRedriveCAS); err != nil {
+	if err := e.submitStep(ctx, inst, pattern, parkedToken, tokenPutUnderRedriveCAS); err != nil {
 		return fmt.Errorf("loom: redrive %q: submit step: %w", instanceID, err)
 	}
 	e.logger.Info("loom instance resumed on redrive", "instanceId", instanceID, "cursor", inst.Cursor, "patternId", pattern.PatternID)
