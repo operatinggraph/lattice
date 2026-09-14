@@ -68,13 +68,15 @@ const triggerSubject = "events.loom.patternStarted"
 // It is a soundness bound, not a taste. A deadline expiry is delivered as a
 // marker that stands for the loom-state bucket's marker TTL, and the probe
 // woken by that marker decides rejected-or-lost from the ABSENCE of the op
-// tracker — which the Processor writes with a 24h TTL. So the whole path,
-// arm plus delivery window, has to finish well inside the tracker's life:
-// past it, the probe reads a committed op's aged-out tracker as "never
-// committed" and fails a healthy instance. An hour of arm against a one-hour
-// window leaves that path an order of magnitude of headroom, and a step that
-// has not reported for an hour is lost rather than slow — waiting longer buys
-// nothing the off-stream backstop is for.
+// tracker — which the Processor writes with opstatus.TrackerTTL. So the whole
+// path, arm plus delivery window, has to finish well inside the tracker's
+// life: past it the probe's own evidence is stale, it refuses to read absence
+// as rejection (deadlineRejectedOrLost), and what is lost is the verdict
+// itself — the off-stream rejected-or-lost backstop degrades to an alert on a
+// still-parked instance for every step armed that long. An hour of arm against
+// a one-hour window leaves that path an order of magnitude of headroom, and a
+// step that has not reported for an hour is lost rather than slow — waiting
+// longer buys nothing the off-stream backstop is for.
 const MaxDeadlineArm = 1 * time.Hour
 
 // Config parameterizes the engine. Bucket/stream names default to the
@@ -194,8 +196,9 @@ func (c *Config) withDefaults() {
 	}
 	if c.StepTimeout > MaxDeadlineArm {
 		// The mirror clamp: an arm long enough to outlast the tracker the
-		// deadline probe reads as its evidence turns the probe against healthy
-		// instances (MaxDeadlineArm).
+		// deadline probe reads as its evidence leaves the probe with nothing to
+		// judge, so every rejected-or-lost step resolves to the inconclusive
+		// verdict instead of a terminal (MaxDeadlineArm).
 		c.StepTimeout = MaxDeadlineArm
 	}
 	if c.CreateTaskTimeout <= 0 {
@@ -233,6 +236,11 @@ type Engine struct {
 	// through. It is conn for every production engine; a test replaces it to
 	// observe the requests that one pass makes.
 	failedIndex failedIndexStore
+	// clock is the wall clock the deadline probe's evidence-age comparison
+	// reads, injectable so a test can reach an epoch past the op-status horizon
+	// without waiting a day out or backdating an entry the server stamps. Nil
+	// means time.Now — see Engine.now, which is what every caller goes through.
+	clock func() time.Time
 
 	mu sync.Mutex
 	// domains is the last-applied desired per-domain consumer set, diffed on
@@ -281,6 +289,16 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 	}
 	e.source = newPatternSource(conn, cfg.CoreKVBucket, cfg.Instance, cfg.Logger)
 	return e
+}
+
+// now reads the engine's clock. It tolerates a zero-value clock so an Engine
+// assembled field-by-field — which several of this package's tests do — reads
+// the wall clock without having to know this seam exists.
+func (e *Engine) now() time.Time {
+	if e.clock != nil {
+		return e.clock()
+	}
+	return time.Now()
 }
 
 // Start runs the engine until ctx is cancelled. It (1) starts the fixed trigger
@@ -1284,11 +1302,14 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 // The window it closes is the probe's own: it reads the record, asks the
 // lattice.op.status RPC and the outbox, and only then writes — and a completion
 // landing anywhere in there advances the instance to a step this probe knows
-// nothing about. The record's three writers are createInstance (create-only),
-// transition and redrive, and none of them bumps the revision while leaving the
-// pending step in place, so a bump under a running read is always another
-// actor's advance, completion or fail. Dropping is then exactly right, and it
-// is the same drop advance takes on a stale completion.
+// nothing about. The record's writers are createInstance (create-only),
+// transition, redrive and the inconclusive verdict's note (noteDeadlineProbe).
+// Of those only the note bumps the revision while leaving the pending step in
+// place, and it is written by a probe that read the same step epoch against the
+// same horizon this one did — so it stood where this verdict would have stood.
+// Every other bump under a running read is another actor's advance, completion
+// or fail. Dropping is then exactly right, and it is the same drop advance
+// takes on a stale completion.
 //
 // The drop is a nil return (⇒ Ack), never a Nak: a MaxAge marker lives one
 // second, so a Nak asks for a redelivery that will not exist, and a re-probe
@@ -1301,6 +1322,79 @@ func (e *Engine) probeFail(ctx context.Context, inst *Instance, oldToken, reason
 		return nil
 	}
 	return err
+}
+
+// deadlineRejectedOrLost is the verdict every "no tracker, no outbox record"
+// arm of the deadline probe routes through — the systemOp, CreateTask and
+// instanceOp arms alike, since all three read the same two absences and all
+// three read them about the step the instance is parked on.
+//
+// Absence is evidence only inside the evidence's own lifetime. The op tracker
+// the probe reads through lattice.op.status carries opstatus.TrackerTTL, so
+// past that horizon "no tracker" stops meaning "the op never committed" and
+// means only "nothing here is recent". The age of the step is the timestamp of
+// its token pointer (tokenEpoch — the one key in the family written by the
+// step's own transition and touched by nothing since), so:
+//
+//   - epoch younger than the horizon → the tracker would still be there if the
+//     op had committed, so its absence IS the rejected-or-lost verdict: fail.
+//   - epoch at or past the horizon → a committed op whose tracker has aged out
+//     and a genuinely rejected op read identically, and no runtime can tell them
+//     apart once the tracker is gone. The verdict is inconclusive: alert, record
+//     the note on the instance, and leave the instance running on its token
+//     (Contract #10 §10.6 — the engine distinguishes BY EVIDENCE, and alerts
+//     rather than wedging silently when it cannot). Nothing else is spent on it:
+//     the step is not re-armed, so the alert stands on the wait itself.
+//   - no token pointer at all → an invariant break, not age: the pointer rides
+//     the step's own batch. It fails the instance with that reason, the posture
+//     a missing pattern pin gets.
+//
+// oldToken is the token the fail path acts on, which each arm supplies itself;
+// the epoch is always read from the pending token's own pointer.
+func (e *Engine) deadlineRejectedOrLost(ctx context.Context, inst *Instance, oldToken, reason string, expectedRevision uint64) error {
+	epoch, err := e.state.tokenEpoch(ctx, inst.PendingToken)
+	if err != nil {
+		if errors.Is(err, errTokenPointerMissing) {
+			return e.probeFail(ctx, inst, oldToken, "token pointer missing", expectedRevision)
+		}
+		return err
+	}
+	if age := e.now().Sub(epoch); age >= opstatus.TrackerTTL {
+		return e.noteInconclusiveDeadline(ctx, inst, reason, epoch, age, expectedRevision)
+	}
+	return e.probeFail(ctx, inst, oldToken, reason, expectedRevision)
+}
+
+// noteInconclusiveDeadline is the inconclusive verdict's write: the §10.6 alert
+// on the carrier Loom already alerts advance-and-alert on, plus a note on the
+// instance record so the reason survives the log's retention and an operator
+// inspecting the instance can see why it is parked rather than failed.
+//
+// The note's write is conditioned on the revision the probe read the instance
+// at, and a refused condition is the answer rather than an error — the same drop
+// probeFail takes, for the same reason: a bump under a running probe is another
+// actor's advance, completion or fail, and the note describes a step that actor
+// has already left. Two replicas on one late marker therefore write one note.
+// The return is nil either way ⇒ Ack, never a Nak: the marker that woke this
+// probe lives one second, and a redelivery would reach the same verdict.
+func (e *Engine) noteInconclusiveDeadline(ctx context.Context, inst *Instance, reason string, epoch time.Time, age time.Duration, expectedRevision uint64) error {
+	note := fmt.Sprintf("%s: INCONCLUSIVE — the step's evidence is older than the %v op-status horizon "+
+		"(step epoch %s, age %v), so an absent op tracker cannot tell an op that committed and aged out "+
+		"from one that was rejected; the instance stays running on its token and its wait continues.",
+		reason, opstatus.TrackerTTL, substrate.FormatTimestamp(epoch), age.Truncate(time.Second))
+	if err := e.state.noteDeadlineProbe(ctx, inst, note, e.now(), expectedRevision); err != nil {
+		if substrate.IsRevisionConflict(err) {
+			e.logger.Info("loom: instance moved on under the probe; inconclusive deadline note dropped",
+				"instanceId", inst.InstanceID, "expectedRevision", expectedRevision)
+			return nil
+		}
+		return err
+	}
+	e.logger.Warn("loom: step deadline verdict inconclusive; instance left running",
+		"instanceId", inst.InstanceID, "cursor", inst.Cursor, "pendingToken", inst.PendingToken,
+		"stepEpoch", substrate.FormatTimestamp(epoch), "evidenceAge", age.String(),
+		"horizon", opstatus.TrackerTTL.String(), "reason", note)
+	return nil
 }
 
 // userTaskTokenPrefix is the key prefix of a userTask write-ahead token (the
@@ -1370,7 +1464,9 @@ func (e *Engine) handleDeadline(ctx context.Context, subjPrefix string, msg subs
 // whether the Contract #4 op tracker for the pending token COMMITTED — present
 // → the op committed but its event was missed → advance + alert; absent but
 // the outbox record still present → the relay has not delivered → re-arm;
-// absent and no outbox record → rejected → fail.
+// absent and no outbox record → rejected → fail, unless the step's own evidence
+// has aged past the op-status horizon, where absence proves nothing and the
+// verdict is inconclusive (deadlineRejectedOrLost).
 //
 // Three things keep the verdict about the arm that actually expired. The caller
 // admits only the server's MaxAge marker, so the probe never runs on a removal
@@ -1484,8 +1580,9 @@ func (e *Engine) onDeadline(ctx context.Context, instanceID string) error {
 		return e.state.rearmDeadline(ctx, instanceID, e.cfg.StepTimeout)
 	}
 
-	// Tracker absent and the op was relayed (no outbox record) → rejected/lost.
-	return e.probeFail(ctx, inst, token,
+	// Tracker absent and the op was relayed (no outbox record) → rejected/lost,
+	// if the step is recent enough for that absence to mean anything.
+	return e.deadlineRejectedOrLost(ctx, inst, token,
 		fmt.Sprintf("step %d deadline exceeded; op rejected or lost", inst.Cursor), revision)
 }
 
@@ -1501,7 +1598,9 @@ func (e *Engine) onDeadline(ctx context.Context, instanceID string) error {
 //     re-armed, cursor and token untouched; the human may take days.
 //  2. Not committed, outbox record still present → the relay has not
 //     delivered CreateTask yet → re-arm.
-//  3. Not committed, no outbox record → CreateTask rejected/lost → fail.
+//  3. Not committed, no outbox record → CreateTask rejected/lost → fail, or
+//     inconclusive when the step's evidence has outlived the op-status horizon
+//     (deadlineRejectedOrLost).
 //
 // The caller has already established that the instance is running, that its
 // deadline key is absent (so the arm that expired is the current one) and the
@@ -1536,10 +1635,10 @@ func (e *Engine) onUserTaskDeadline(ctx context.Context, inst *Instance, revisio
 		return e.state.rearmDeadline(ctx, inst.InstanceID, e.cfg.CreateTaskTimeout)
 	}
 
-	// No tracker, no outbox record → the CreateTask was rejected or lost. Fail
-	// the instance rather than park the token forever (§10.6: never a silent
-	// wedge).
-	return e.probeFail(ctx, inst, inst.PendingToken,
+	// No tracker, no outbox record → the CreateTask was rejected or lost, if the
+	// step is recent enough for that absence to mean anything. Fail the instance
+	// rather than park the token forever (§10.6: never a silent wedge).
+	return e.deadlineRejectedOrLost(ctx, inst, inst.PendingToken,
 		fmt.Sprintf("step %d CreateTask rejected", inst.Cursor), revision)
 }
 
@@ -1567,7 +1666,9 @@ func (e *Engine) onUserTaskDeadline(ctx context.Context, inst *Instance, revisio
 //  2. tracker absent, outbox record present → the relay has not delivered the
 //     instanceOp yet → re-arm.
 //  3. tracker absent, outbox absent → the instanceOp was rejected/lost → fail
-//     (FR29 — the submission is never a silent wedge).
+//     (FR29 — the submission is never a silent wedge), or inconclusive when the
+//     step's evidence has outlived the op-status horizon
+//     (deadlineRejectedOrLost).
 //
 // The caller has already established that the instance is running, that its
 // deadline key is absent (so the arm that expired is the current one) and the
@@ -1608,8 +1709,9 @@ func (e *Engine) onExternalTaskDeadline(ctx context.Context, inst *Instance, rev
 	}
 
 	// Tracker absent and the instanceOp was relayed (no outbox record) →
-	// rejected/lost. Fail on the pending handle token.
-	return e.probeFail(ctx, inst, token,
+	// rejected/lost, if the step is recent enough for that absence to mean
+	// anything. The fail path acts on the pending handle token.
+	return e.deadlineRejectedOrLost(ctx, inst, token,
 		fmt.Sprintf("step %d instanceOp rejected", inst.Cursor), revision)
 }
 

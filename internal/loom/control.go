@@ -20,6 +20,15 @@ type InstanceSummary struct {
 	Cursor     int    `json:"cursor"`
 	Status     string `json:"status"`
 	RetryCount int    `json:"retryCount"`
+	// DeadlineProbe is the record's standing inconclusive step-deadline verdict,
+	// when it carries one: a running instance whose step deadline expired with
+	// its own evidence already past the op-status horizon, so the probe could
+	// neither confirm nor deny the step's op and left it running (Instance.
+	// DeadlineProbe). It is the operator's cue that this instance is parked on a
+	// step the engine cannot adjudicate — the wait itself continues, so a
+	// healthy one still completes on its own. Absent (nil) on every other
+	// instance.
+	DeadlineProbe *probeNote `json:"deadlineProbe,omitempty"`
 }
 
 // ConsumerStatus is the operator-facing snapshot of one managed consumer: its
@@ -121,12 +130,13 @@ func (e *Engine) ListInstances(ctx context.Context) ([]InstanceSummary, error) {
 	out := make([]InstanceSummary, 0, len(insts))
 	for _, inst := range insts {
 		out = append(out, InstanceSummary{
-			InstanceID: inst.InstanceID,
-			PatternRef: inst.PatternRef,
-			SubjectKey: inst.SubjectKey,
-			Cursor:     inst.Cursor,
-			Status:     inst.Status,
-			RetryCount: inst.RetryCount,
+			InstanceID:    inst.InstanceID,
+			PatternRef:    inst.PatternRef,
+			SubjectKey:    inst.SubjectKey,
+			Cursor:        inst.Cursor,
+			Status:        inst.Status,
+			RetryCount:    inst.RetryCount,
+			DeadlineProbe: inst.DeadlineProbe,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].InstanceID < out[j].InstanceID })
@@ -182,12 +192,13 @@ func (e *Engine) InspectInstance(ctx context.Context, instanceID string) (Instan
 // inspectResolved resolves the current step for inst, branching on status first.
 func (e *Engine) inspectResolved(ctx context.Context, inst *Instance) (InstanceDetail, error) {
 	summary := InstanceSummary{
-		InstanceID: inst.InstanceID,
-		PatternRef: inst.PatternRef,
-		SubjectKey: inst.SubjectKey,
-		Cursor:     inst.Cursor,
-		Status:     inst.Status,
-		RetryCount: inst.RetryCount,
+		InstanceID:    inst.InstanceID,
+		PatternRef:    inst.PatternRef,
+		SubjectKey:    inst.SubjectKey,
+		Cursor:        inst.Cursor,
+		Status:        inst.Status,
+		RetryCount:    inst.RetryCount,
+		DeadlineProbe: inst.DeadlineProbe,
 	}
 	if inst.Status != StatusRunning {
 		// Terminal: the pin is gone by design and there is no current step.
@@ -215,12 +226,13 @@ func (e *Engine) inspectResolved(ctx context.Context, inst *Instance) (InstanceD
 				rsummary := summary
 				if reread != nil {
 					rsummary = InstanceSummary{
-						InstanceID: reread.InstanceID,
-						PatternRef: reread.PatternRef,
-						SubjectKey: reread.SubjectKey,
-						Cursor:     reread.Cursor,
-						Status:     reread.Status,
-						RetryCount: reread.RetryCount,
+						InstanceID:    reread.InstanceID,
+						PatternRef:    reread.PatternRef,
+						SubjectKey:    reread.SubjectKey,
+						Cursor:        reread.Cursor,
+						Status:        reread.Status,
+						RetryCount:    reread.RetryCount,
+						DeadlineProbe: reread.DeadlineProbe,
 					}
 				} else {
 					rsummary.Status = ""
