@@ -59,6 +59,7 @@ const state = {
   slotApptCache: {}, // providerKey -> existing appointments, for the booking slot picker (invalidated on book)
   slotPatientApptCache: {}, // patientKey -> the patient's appointments across all providers (cross-provider double-book exclusion; invalidated on book)
   slotCalAnchor: null, // UTC-midnight Date for the 1st of the month shown in the booking calendar (null → current UTC month)
+  seriesBookFloor: "", // RFC3339 nextDueAt while booking a recurring series occurrence, "" otherwise — the Book calendar refuses any day ending before it (seriesFloorReason)
   correcting: null, // the appointment the Correct-status modal is open for
   correctingOnDone: null, // the grid reload that modal's submit calls
   correctingHandle: null, // the mounted CorrectAppointmentStatus descriptor-form handle submitCorrectStatus submits
@@ -841,6 +842,12 @@ function populatePatientSelect() {
 
 function setPatient(value) {
   const v = (value || "").trim();
+  if ((state.patient || "") !== v) {
+    state.seriesBookFloor = "";
+    const lead = $("#book-lead");
+    if (lead) lead.textContent = "Pick a provider and a time.";
+    applyStartsAtMin();
+  }
   state.patient = v || null;
   state.highlight = null;
   if (v) localStorage.setItem(PATIENT_KEY, v);
@@ -2442,12 +2449,16 @@ function apptBlocks(a) {
 // calendar date (interpreted as a UTC day, matching how .hours windows are keyed by
 // UTC weekday + seconds-of-day). durationMin is both the slot length and the step,
 // so suggested slots are back-to-back at the appointment length. A slot is dropped
-// when it is in the past, overlaps any time-off range, or overlaps a live
-// appointment — the same conditions the op rejects. `appts` carries both the
-// provider's appointments (the provider double-book / SlotConflict check) and the
-// selected patient's appointments across all providers (the cross-provider
-// PatientDoubleBook check), so the picker never offers a slot the op would reject.
-function computeOpenSlots(p, dateStr, durationMin, appts, nowMs) {
+// when it is in the past, overlaps any time-off range, overlaps a live
+// appointment, or lands before a recurring series' booking floor — the same
+// conditions the op rejects, plus (for the floor) a booking that would not
+// credit the occurrence. `appts` carries both the provider's appointments (the
+// provider double-book / SlotConflict check) and the selected patient's
+// appointments across all providers (the cross-provider PatientDoubleBook
+// check), so the picker never offers a slot the op would reject. `floor` is
+// the active series' nextDueAt (state.seriesBookFloor, beforeSeriesFloor), ""
+// when none is in play.
+function computeOpenSlots(p, dateStr, durationMin, appts, nowMs, floor = "") {
   if (!p || !Array.isArray(p.hours) || !p.hours.length || !dateStr) return [];
   const dayStart = Date.parse(dateStr + "T00:00:00Z");
   if (isNaN(dayStart)) return [];
@@ -2455,6 +2466,9 @@ function computeOpenSlots(p, dateStr, durationMin, appts, nowMs) {
   const durMs = durationMin * 60000;
   const stepSec = Math.max(durationMin, 15) * 60;
   const timeOff = Array.isArray(p.timeOff) ? p.timeOff : [];
+  // floorMs mirrors beforeSeriesFloor's own parse — computed once here since
+  // every slot start below is already a UTC ms number, not an RFC3339 string.
+  const floorMs = floor ? Date.parse(floor) : NaN;
   const blocking = (appts || [])
     .filter(apptBlocks)
     .map((a) => ({ s: Date.parse(a.startsAt), e: Date.parse(a.endsAt) }))
@@ -2467,6 +2481,7 @@ function computeOpenSlots(p, dateStr, durationMin, appts, nowMs) {
       const s = dayStart + sec * 1000;
       const e = s + durMs;
       if (s <= nowMs) continue; // past — matches ScheduleInPast (start <= submittedAt)
+      if (!isNaN(floorMs) && s < floorMs) continue; // before the series' booking floor — would not credit the occurrence
       const offHit = timeOff.some((r) => {
         const rf = Date.parse(r.from), rt = Date.parse(r.to);
         return !isNaN(rf) && !isNaN(rt) && s < rt && e > rf;
@@ -2541,13 +2556,59 @@ function ymdUTC(y, m, d) {
   return `${y}-${pad(m + 1)}-${pad(d)}`;
 }
 
+// seriesFloorReason returns the calendar block reason for a day that falls
+// before a recurring series' next due date, or "" when the day may be booked.
+// A visit booked before nextDueAt is not credited to the occurrence (the
+// visitSeriesDue lens counts only startsAt >= nextDueAt), so the Book
+// calendar refuses those days outright. dayStart is the day's UTC midnight
+// in ms; floor is the RFC3339 nextDueAt (or "" / null = no floor).
+function seriesFloorReason(dayStart, floor) {
+  if (!floor) return "";
+  const floorMs = Date.parse(floor);
+  if (isNaN(floorMs)) return "";
+  if (dayStart + 86400000 <= floorMs) {
+    return "Before this series' due date (" + floor.slice(0, 10) + ") — a visit that early would not count as this occurrence.";
+  }
+  return "";
+}
+
+// beforeSeriesFloor reports whether an RFC3339 UTC instant lands strictly
+// before a recurring series' booking floor (its nextDueAt) — the same instant
+// seriesFloorReason blocks at the whole-day grain, checked here at the exact
+// minute a slot or a typed time falls on: the floor's own day stays open on
+// the calendar because slots after its time-of-day still exist, and this is
+// what tells those slots apart from the ones that don't. No floor, or a floor
+// or startsAt that fails to parse, blocks nothing.
+function beforeSeriesFloor(startsAt, floor) {
+  if (!floor) return false;
+  const floorMs = Date.parse(floor);
+  if (isNaN(floorMs)) return false;
+  const startMs = Date.parse(startsAt);
+  if (isNaN(startMs)) return false;
+  return startMs < floorMs;
+}
+
+// floorTimeUTC formats an RFC3339 instant's UTC time-of-day as "HH:MM UTC",
+// for naming the exact instant a recurring series' booking floor blocks.
+function floorTimeUTC(rfc3339) {
+  const ms = Date.parse(rfc3339);
+  if (isNaN(ms)) return "";
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+
 // dayBlockedReason reports why a whole UTC calendar day is unbookable for a provider,
-// or "" when at least part of the day could be booked. Past days, a weekday the
-// provider doesn't work, and a whole-day time-off range are blocked.
-function dayBlockedReason(p, y, m, d, nowMs) {
+// or "" when at least part of the day could be booked. Past days, a day that falls
+// entirely before a recurring series' booking floor (seriesFloorReason), a weekday
+// the provider doesn't work, and a whole-day time-off range are blocked. floor is
+// the active series' nextDueAt (state.seriesBookFloor), "" when none is in play.
+function dayBlockedReason(p, y, m, d, nowMs, floor = "") {
   const dayStart = Date.UTC(y, m, d);
   const dayEnd = dayStart + 86400000;
   if (dayEnd <= nowMs) return "Past date.";
+  const seriesReason = seriesFloorReason(dayStart, floor);
+  if (seriesReason) return seriesReason;
   const weekday = new Date(dayStart).getUTCDay();
   const days = [...new Set((p.hours || []).map((w) => w.day))];
   if (!days.includes(weekday)) return `${p.name} doesn't see patients on ${DAY_NAMES[weekday]}s.`;
@@ -2638,7 +2699,7 @@ function renderSlotCalendar() {
   }
   for (let d = 1; d <= daysInMonth; d++) {
     const dateStr = ymdUTC(y, m, d);
-    const reason = dayBlockedReason(p, y, m, d, nowMs);
+    const reason = dayBlockedReason(p, y, m, d, nowMs, state.seriesBookFloor || "");
     const cell = document.createElement("button");
     cell.type = "button";
     cell.className = "cal-day";
@@ -2687,11 +2748,21 @@ async function refreshSlots() {
   const patAppts = state.patient ? await patientAppointments(state.patient) : [];
   // The provider/date/patient may have changed while awaiting the fetches — bail if so.
   if ($("#provider").value !== provider || $("#slot-date").value !== dateStr) return;
-  const slots = computeOpenSlots(p, dateStr, durationMin, provAppts.concat(patAppts), Date.now());
+  const floor = state.seriesBookFloor || "";
+  const blocking = provAppts.concat(patAppts);
+  const slots = computeOpenSlots(p, dateStr, durationMin, blocking, Date.now(), floor);
   if (!slots.length) {
     const m = document.createElement("p");
     m.className = "muted";
-    m.textContent = noSlotsReason(p, dateStr) || "No open slots that day — try another date or a shorter duration.";
+    let msg = noSlotsReason(p, dateStr);
+    // The floor's own day can still lose every slot to it (e.g. business
+    // hours end before the due time) — say so instead of the generic
+    // fallback, but only when the floor is actually what emptied this day
+    // (slots exist once it's lifted).
+    if (!msg && floor && computeOpenSlots(p, dateStr, durationMin, blocking, Date.now()).length) {
+      msg = `No slots on or after the due time (${floorTimeUTC(floor)}) — pick a later day.`;
+    }
+    m.textContent = msg || "No open slots that day — try another date or a shorter duration.";
     box.appendChild(m);
     return;
   }
@@ -2719,8 +2790,12 @@ async function refreshSlots() {
 // Stops scanning a provider's days once its first open slot is found (only that
 // provider's soonest matters here); the full remaining-day picker is still
 // computeOpenSlots via refreshSlots once a specific provider is chosen. Mirrors
-// computeOpenSlots' UTC-day grid.
-async function findSoonestSlots(specialty, site, durationMin, nowMs, daysAhead, limit) {
+// computeOpenSlots' UTC-day grid. floor (state.seriesBookFloor) is threaded
+// straight through to computeOpenSlots — this picker is shown whenever no
+// provider is chosen yet, which a series' own provider can be even while a
+// booking floor is active, so it must refuse the same early slots the
+// provider-specific picker does.
+async function findSoonestSlots(specialty, site, durationMin, nowMs, daysAhead, limit, floor) {
   let candidates = state.providers.filter((p) => !specialty || p.specialty === specialty);
   if (site) {
     const atSite = new Set(state.providerSites.filter((ps) => ps.siteKey === site).map((ps) => ps.providerKey));
@@ -2735,7 +2810,7 @@ async function findSoonestSlots(specialty, site, durationMin, nowMs, daysAhead, 
     for (let d = 0; d < daysAhead; d++) {
       const day = new Date(nowMs + d * 86400000);
       const dateStr = ymdUTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
-      const slots = computeOpenSlots(p, dateStr, durationMin, blocking, nowMs);
+      const slots = computeOpenSlots(p, dateStr, durationMin, blocking, nowMs, floor || "");
       if (slots.length) {
         results.push({ ms: slots[0], providerKey: p.providerKey, dateStr });
         break;
@@ -2758,7 +2833,7 @@ async function renderSoonest() {
   const specialty = $("#book-specialty").value;
   const site = $("#book-site") ? $("#book-site").value : "";
   const durationMin = Number($("#duration").value || 30);
-  const results = await findSoonestSlots(specialty, site, durationMin, Date.now(), 14, 5);
+  const results = await findSoonestSlots(specialty, site, durationMin, Date.now(), 14, 5, state.seriesBookFloor || "");
   // The specialty/site/duration/provider may have changed while awaiting the fetches.
   if ($("#book-specialty").value !== specialty || ($("#book-site") ? $("#book-site").value : "") !== site ||
       Number($("#duration").value || 30) !== durationMin || $("#provider").value) return;
@@ -2931,6 +3006,28 @@ function nowLocalInputValue() {
   return toLocalInputValue(new Date(ms).toISOString());
 }
 
+// startsAtMinValue returns the local datetime-local value #startsAt's min
+// should hold right now: the later of "now" (so the picker still discourages
+// a past time) and the active series' booking floor (state.seriesBookFloor) —
+// a time before the floor would not credit the occurrence, so the picker
+// refuses it the same way it refuses the past.
+function startsAtMinValue() {
+  const now = nowLocalInputValue();
+  const floor = state.seriesBookFloor;
+  if (!floor) return now;
+  const floorLocal = toLocalInputValue(floor);
+  if (!floorLocal) return now;
+  return new Date(floorLocal) > new Date(now) ? floorLocal : now;
+}
+
+// applyStartsAtMin refreshes #startsAt's min from startsAtMinValue — called
+// whenever the series booking floor is set or cleared, and on every focus, so
+// a long-open session never carries a stale bound either way.
+function applyStartsAtMin() {
+  const el = $("#startsAt");
+  if (el) el.min = startsAtMinValue();
+}
+
 // durationMinutes derives the appointment length (minutes) from its start/end so
 // the reschedule modal can prefill the duration select.
 function durationMinutes(startsAt, endsAt) {
@@ -2964,6 +3061,18 @@ async function submitBook(ev) {
   const endsAt = addMinutesRFC3339(when, Number($("#duration").value || 30));
   if (!startsAt || !endsAt) {
     toast("That date/time is not valid.", "err");
+    return;
+  }
+  // The calendar and both slot pickers already refuse a day/time that would
+  // not credit a series occurrence — this is the authoritative backstop for
+  // #startsAt regardless of how it got its value (typed directly, or a stale
+  // value left over from before the floor was set), same pattern as the
+  // grid-snap backstop above; `min` on the field is only a browser hint.
+  if (beforeSeriesFloor(startsAt, state.seriesBookFloor)) {
+    toast(
+      `This visit starts before the series' due time (${state.seriesBookFloor.slice(0, 10)} ${floorTimeUTC(state.seriesBookFloor)}) and would not count as this occurrence — pick a later time.`,
+      "err"
+    );
     return;
   }
 
@@ -3035,6 +3144,10 @@ async function submitBook(ev) {
     delete state.slotApptCache[provider];
     delete state.slotPatientApptCache[state.patient];
     $("#book-form").reset();
+    state.seriesBookFloor = "";
+    const lead = $("#book-lead");
+    if (lead) lead.textContent = "Pick a provider and a time.";
+    applyStartsAtMin();
     refreshSlots();
     toast("Appointment booked.", "ok");
     // Route to My Appointments with the new appointment highlighted (the lens may
@@ -3540,6 +3653,12 @@ function bookFollowup(f) {
   const sel = $("#patient");
   if (sel && [...sel.options].some((o) => o.value === f.patientKey)) sel.value = f.patientKey;
   setPatient(f.patientKey);
+  // A follow-up is not a series occurrence — clear any floor left over from a
+  // series booking (setPatient only clears it when the patient itself changes).
+  state.seriesBookFloor = "";
+  const lead = $("#book-lead");
+  if (lead) lead.textContent = "Pick a provider and a time.";
+  applyStartsAtMin();
   const prov = $("#provider");
   if (prov && [...prov.options].some((o) => o.value === f.providerKey)) {
     prov.value = f.providerKey;
@@ -4001,13 +4120,29 @@ function bookSeriesOccurrence(s) {
   const sel = $("#patient");
   if (sel && [...sel.options].some((o) => o.value === s.patientKey)) sel.value = s.patientKey;
   setPatient(s.patientKey);
+  // setPatient clears any stale floor when the patient changes — set this
+  // series' floor only after it returns, so it survives that call.
+  state.seriesBookFloor = s.nextDueAt || "";
+  applyStartsAtMin();
   const prov = $("#provider");
   if (prov && [...prov.options].some((o) => o.value === s.providerKey)) {
     prov.value = s.providerKey;
     prov.dispatchEvent(new Event("change"));
   }
   showView("book");
-  toast("Booking the recurring visit for " + (s.patientName || shortKey(s.patientKey)) + ". Pick a date & time.", "ok");
+  const name = s.patientName || shortKey(s.patientKey);
+  const lead = $("#book-lead");
+  if (lead) {
+    lead.textContent = s.nextDueAt
+      ? `Recurring visit for ${name} — book a date on or after ${s.nextDueAt.slice(0, 10)}; an earlier visit would not count as this occurrence.`
+      : "Pick a provider and a time.";
+  }
+  toast(
+    s.nextDueAt
+      ? `Booking the recurring visit for ${name}. Pick a date on or after ${s.nextDueAt.slice(0, 10)}.`
+      : `Booking the recurring visit for ${name}. Pick a date & time.`,
+    "ok"
+  );
 }
 
 // renderMySeries fills the My Appointments tab's "Recurring visit series" panel
@@ -5751,6 +5886,12 @@ function applyHatGating() {
 
 function showView(view) {
   if (!viewAllowed(view)) view = "book";
+  if (state.view === "book" && view !== "book") {
+    state.seriesBookFloor = "";
+    const lead = $("#book-lead");
+    if (lead) lead.textContent = "Pick a provider and a time.";
+    applyStartsAtMin();
+  }
   state.view = view;
   for (const v of VIEWS) {
     const isV = v === view;
@@ -5800,12 +5941,12 @@ function init() {
     renderAssignSiteForm();
   });
 
-  // Discourage a past booking from the picker itself; refresh on focus so a
-  // long-open session never carries a stale floor. The op stays the authority.
-  $("#startsAt").min = nowLocalInputValue();
-  $("#startsAt").addEventListener("focus", () => {
-    $("#startsAt").min = nowLocalInputValue();
-  });
+  // Discourage a past booking, or one before an active series' booking floor,
+  // from the picker itself (startsAtMinValue); refresh on focus so a
+  // long-open session never carries a stale bound either way. The op stays
+  // the authority.
+  applyStartsAtMin();
+  $("#startsAt").addEventListener("focus", applyStartsAtMin);
   $("#startsAt").addEventListener("change", () => {
     applyGridSnapToField("#startsAt", "#grid-snap-note");
     refreshTimeOffWarning();

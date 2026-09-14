@@ -29,8 +29,8 @@
 //
 //	vtx.visitseries.<id>  class=visitseries  .series {intervalDays, startAt, activeUntil?}  .progress {nextDueAt, occurrenceCount}  .paused? {value}  (this package, visitseries.go)
 //	op StartVisitSeries / PauseVisitSeries / ResumeVisitSeries / AdvanceVisitSeries
-//	lens visitSeriesDue (weaver-target, full)  (freshUntil = .progress.nextDueAt; re-arms forward on every advance, never converges to a permanent close)
-//	playbook missing_series_advance → directOp(AdvanceVisitSeries, dueFor: row.nextDueAt, intervalDays: row.intervalDays, occurrenceCount: row.occurrenceCount)
+//	lens visitSeriesDue (weaver-target, full)  (handledAt = the LATEST qualifying visit at/after nextDueAt; one advance consumes the whole booked run, credited by a visit, never by the clock)
+//	playbook missing_series_advance → directOp(AdvanceVisitSeries, dueFor: row.nextDueAt, handledAt: row.handledAt, intervalDays: row.intervalDays, occurrenceCount: row.occurrenceCount)
 //
 //	lnk.visitseries.<id>.atSite.building.<id>  (the site the visits happen at — visitseries_site.go)
 //	op BackfillVisitSeriesSite{seriesKey} / SetVisitSeriesSite{seriesKey, site}
@@ -53,9 +53,10 @@
 // moves the deadline re-opens the gate and re-arms the reminder. See
 // appointmentRemindersSpec / followUpRemindersSpec + the design doc
 // _bmad-output/implementation-artifacts/clinic-reminders-design.md. The visit-series
-// lens applies the same freshness inversion but never permanently closes — each
-// AdvanceVisitSeries rewrites nextDueAt to a new future deadline, rolling the series
-// forward instead of converging (visitSeriesDueSpec, visitseries.go).
+// lens is level-triggered on a different fact entirely — a qualifying visit, not a
+// clock lapse — and needs no clearing write: AdvanceVisitSeries re-anchors
+// nextDueAt on that visit's own start time, past the visit that satisfied it, so
+// the gap folds shut on the next projection (visitSeriesDueSpec, visitseries.go).
 //
 // Both reminder ops also fire the actual notification send off their own
 // transactional outbox to the bridge's "notification" adapter (notifications.go
@@ -76,14 +77,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-reminders",
-	Version: "0.10.10",
+	Version: "0.11.0",
 	Description: "Clinic appointment & follow-up reminders + recurring visit series + the auto no-show closer (the " +
 		"clinic vertical's orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
 		"RecordFollowUpReminder ops, the appointmentReminders + followUpReminders weaver-target convergence lenses " +
 		"(freshUntil = the .schedule.remindAt / .documentation.followUpDate deadline arms the @at timer; the gap opens " +
 		"at the deadline); the visitseries vertex type + Start/Pause/Resume/End/AdvanceVisitSeries ops + the " +
-		"visitSeriesDue rolling convergence lens (freshUntil re-arms forward on every advance instead of clearing " +
-		"to a permanent close); and the pastDueAppointments convergence lens, which binds freshUntil DIRECTLY to " +
+		"visitSeriesDue convergence lens (level-triggered on a qualifying visit at/after nextDueAt, never on a " +
+		"clock lapse — AdvanceVisitSeries re-anchors nextDueAt on that visit's own start time, folding the gap " +
+		"shut with no clearing write); and the pastDueAppointments convergence lens, which binds freshUntil DIRECTLY to " +
 		"clinic-domain's .schedule.endsAt (no derived deadline) and dispatches clinic-domain's MarkPastDueNoShow " +
 		"once a non-terminal appointment's endsAt passes with no staff status update — the §10.8 playbooks dispatch " +
 		"each gap's directOp. Inverts lease-signing's freshness re-open. A series also records the clinic site " +

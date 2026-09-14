@@ -1,5 +1,5 @@
 name: clinic-reminders
-version: 0.10.10
+version: 0.11.0
 description: |
   Clinic appointment & follow-up reminders + recurring visit series + the auto
   no-show closer — the clinic vertical's orchestration. Four one-shot/rolling @at
@@ -9,17 +9,20 @@ description: |
   clinic-domain precomputes); (2) the at-the-date follow-up reminder — the
   .followUpReminder aspect + RecordFollowUpReminder op, the followUpReminders
   weaver-target lens (freshUntil = the .documentation.followUpDate a documented visit
-  requested); (3) a rolling recurring visit series over its own visitseries vertex
+  requested); (3) a recurring visit series over its own visitseries vertex
   type — StartVisitSeries / PauseVisitSeries / ResumeVisitSeries / EndVisitSeries /
-  AdvanceVisitSeries ops, the visitSeriesDue weaver-target lens (freshUntil =
-  .progress.nextDueAt, re-armed forward on every advance instead of clearing to a
-  permanent close); and (4) pastDueAppointments — closes a past-due, still-open
+  AdvanceVisitSeries ops, the visitSeriesDue weaver-target lens (level-triggered on
+  a qualifying visit at or after .progress.nextDueAt, never on a clock lapse —
+  AdvanceVisitSeries re-anchors nextDueAt on that visit's own start time); and
+  (4) pastDueAppointments — closes a past-due, still-open
   appointment (a visit whose .schedule.endsAt passed with no staff status update)
   by dispatching clinic-domain's MarkPastDueNoShow once endsAt passes, binding
   freshUntil DIRECTLY to endsAt (the unroutedTasks idiom, orchestration-base)
   rather than a derived lead-offset deadline. Each gap dispatches a directOp via
-  the §10.8 playbook; all four invert lease-signing's freshness re-open
-  (open-at-deadline instead of reopen-at-expiry). Both reminder ops also fire
+  the §10.8 playbook; the reminder + past-due lenses invert lease-signing's
+  freshness re-open (open-at-deadline instead of reopen-at-expiry), while
+  visitSeriesDue is level-triggered on a recorded visit instead of a clock lapse.
+  Both reminder ops also fire
   external.notification off their own outbox to the bridge's "notification" adapter;
   RecordAppointmentReminderNotification / RecordFollowUpReminderNotification record
   the outcome as an audit-only aspect (neither gates the convergence lenses above).
