@@ -1417,7 +1417,20 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   field was the second half: it resolved `errData`, the per-ENTITY issue class, minting a latch per violating
   row. Check: for every resolver you extend, list its callers and classify each as value-typed or
   string-typed; the string-typed ones refuse the new form, and the refusal is asserted at dispatch, at load
-  and at install. Ask separately which upstream gate compares that field raw.
+  and at install. Ask separately which upstream gate compares that field raw. Minted a second time 2026-09-14
+  by `{actor}`, with the sharper half: **the field list you hang the new refusal on was built for the OTHER
+  token's scope, so the bag deliberately EXCLUDED for token A is exactly the bag token B must not reach.**
+  `{actor}` was refused over `dispatchStringValues`, whose "Params is deliberately absent" is right for
+  `json:` — the params bag is that token's home — and wrong for a token whose home is the hub, so a gap
+  authoring `Params: {"whoami": "{actor}"}` shipped the literal brace string into the dispatched payload past
+  all three gates. Its twin: a field admitting a token is closed by DEFAULT-DENY over the whole brace
+  vocabulary, never opened by one equality arm — `{actor:id}` and `vtx.identity.{actor}` each dispatched as a
+  literal hub, declaring a walk that can never match. Check: name the bag each token is meaningful in and
+  re-derive the field list from THAT, never by reusing the neighbour's; and where a sibling surface already
+  closes the same authored vocabulary, diff the two — a token admitted on one and inert on the other
+  falsifies any contract sentence asserting they mean the same thing (the op-descriptor hub admitted a
+  whole-SEGMENT placeholder while the gap hub required a whole VALUE, and both shipped clients substituted
+  the segment form into a doubled key).
 - **A Health issue key is a LATCH: scope it to the fact it states, split it only with every clear re-paired,
   and enumerate the raise COLUMNS, not the raise functions** — a key naming `(target, column)` merges N
   subjects onto one latch, so the first subject to close retires the issue raised for the one still stuck;

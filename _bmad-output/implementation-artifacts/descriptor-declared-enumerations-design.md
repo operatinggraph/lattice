@@ -583,3 +583,45 @@ as §8.5 cites, and the op carries no dispatch surface at all — which is §8.8
 `{payload.<field>}` or any other new hub token; the op-descriptor dispatch surface (it already resolves
 `{actor}`); Loom's systemOp step enumerations; the 98 non-actor-role walk rows; hydration — an enumeration
 stays metadata on the envelope; any change to what `ReleaseOrphanedBooking` reads or does.
+
+### 9.8 Close — what shipped, and what the reviews found
+
+**Shipped** at `50d89f1` (branch `claude/exciting-clarke-6mc6ic`): substitution at plan time off the
+Actuator's own actor field; refusal on every non-hub authored value at dispatch, load and install, across
+all three authored surfaces; `ReleaseOrphanedBooking` **and** `PromoteWaitlistedBookings` declaring the
+confinement walk their scripts run, both drift-baseline rows retired; the contract's transitional note
+struck. The fixtures resolve their hints from the `GapActionSpec` through a new
+`testutil.DeclaredGapEnumerations`, the twin of the descriptor surface's own resolver.
+
+**Scope correction the build made.** The brief scoped one op. `PromoteWaitlistedBookings` runs the identical
+`actor_holds_operator` walk, is equally Weaver-only, and its baseline comment asserted "no dispatching
+channel names it" — a claim this build falsifies. One capability, two rows: declaring only the briefed op
+would have left a comment stating the opposite of the shipped behaviour beside a row the same one-line
+change retires.
+
+**Reviews.** Two cold adversarial passes over the whole diff.
+
+| class | component | finding | the check that catches it now |
+|---|---|---|---|
+| **design-gap** | weaver | BLOCKING — the params bag was refused nowhere, while the contract clause asserting a three-part refusal had already been struck. The refusal hung on the `json:` token's field list, whose deliberate exclusion of Params is correct for that token and wrong for this one | refused at dispatch, load (all three surfaces) and install, each revert-proven |
+| **design-gap** | weaver | the hub was default-ALLOW over brace vocabulary where its twin surface is default-deny, so `{actor:id}` / `vtx.identity.{actor}` dispatched as literal hubs — a declaration that can never match the walk | any brace that is not exactly the token is refused at all three points |
+| **implementation-bug** | pkgmgr | the op-descriptor hub required a placeholder to occupy a whole SEGMENT, so both shipped clients substituted `vtx.identity.{actor}` into a doubled key — which is what falsified the contract's cross-surface parity sentence | a hub placeholder must be the whole VALUE |
+| **implementation-bug** | weaver | enumerations on a non-`directOp` action installed and loaded clean, then were silently dropped — `validateOptionalReadsScope` sat beside it refusing exactly that shape | `validateEnumerationsScope`, install + load |
+| **convention** | weaver | two doc comments asserted falsehoods: that an embedded token is inert on every surface, and that an empty actor hub would ADMIT undeclared walks (the guard matches by exact normalized string and fails loud) | both rewritten where they stand |
+| **review-over-reach** | weaver | a reviewer reported the load-side scope gate missing; it was present at all three surfaces and the reviewer had read an earlier tree state | — |
+
+**Dossier — one class routed, as a second sighting rather than a thirteenth entry** (`docs/components/weaver.md`
+stands at its cap of 12). The shared-resolver class gains its sharper half: *the field list you hang a new
+refusal on was built for the OTHER token's scope, so the bag deliberately excluded for token A is exactly the
+bag token B must not reach* — plus its twin, that a field admitting a token is closed by default-deny over
+the whole vocabulary, never opened by one equality arm.
+
+**Accounting.** Every discovery this fire surfaced was fixed in it; no row filed, and none owed. The build
+reported one apparent residual — that a goal-authored gap's top-level `Enumerations` skip the older
+`validateGapEnumerations` shape check at install, since that check is reached only from `validateGapAction`
+and so only when `ga.Action != ""`. Re-checked at close: it is not a hole. The scope gate added in the same
+round sits *above* that branch and runs unconditionally, refusing any `Enumerations` on a gap whose `Action`
+is not `directOp` — which includes the goal-authored gap's empty `Action`. The field the shape check could
+not reach is a field that no longer installs at all, and a goal gap's real walks are declared per catalog
+entry, validated on their own path. The residual was a true reading of one function and a false reading of
+the file.
