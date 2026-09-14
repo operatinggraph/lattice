@@ -870,6 +870,32 @@ func TestActorTypeBindsAnchorOnly_NeverArmsForAConvertedLens(t *testing.T) {
 		require.False(t, ActorTypeBindsAnchorOnly(ix, "identity"))
 	})
 
+	t.Run("edgeManifestReadGrants", func(t *testing.T) {
+		p := derivationPipeline(t, adjKV, generatedReadGrantProducerSpec(t, "edgeManifestReadGrants"))
+		ix := p.ruleState().anchorHops
+		require.True(t, ix.Complete, "%s", ix.Incomplete)
+		require.Equal(t, -1, ix.UnresolvedExpansionPosition(),
+			"the pin has to be earned on a fully resolved index, or it holds for the wrong reason")
+
+		// The governing fact, named rather than left to the verdict. The base
+		// producer's residence spine — `(identity)-[:residesIn]->(home)` then
+		// `(home)-[:containedIn*0..]->(container)` — leaves `home` and
+		// `container` UNLABELLED, and an unlabelled position admits any vertex
+		// type, the identity actor type included. A complete index is what
+		// makes this predicate answerable at all; it must still answer NO, or
+		// an event on one resident's identity would be answered with that one
+		// key and drop every other actor whose row renders the same vertex.
+		positions := ix.PositionsBinding("identity")
+		require.Len(t, positions, 3, "identity binds at %v, anchor=%d", positions, ix.Anchor)
+		for _, pos := range positions {
+			if pos == ix.Anchor {
+				continue
+			}
+			require.Empty(t, ix.Labels[pos], "the two extra positions are the unlabelled residence-chain ends")
+		}
+		require.False(t, ActorTypeBindsAnchorOnly(ix, "identity"))
+	})
+
 	for _, l := range convertingPlainLenses {
 		t.Run(l.name, func(t *testing.T) {
 			p := plainDerivationPipeline(t, adjKV, l.spec)

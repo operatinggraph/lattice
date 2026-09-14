@@ -61,8 +61,9 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"edgeIdentity":                   {"g8/o10[container,loc;instr;leaseapp;pat;prov;role;sp;work,workContainer]", 8, 8},
 	"edgeInstances":                  {"g1/o2!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
 	"edgeManifestProviderReadGrants": {"g1/o1[instr,sess] g1/o1[appt,pr] g1/o1[inst,sp,tpl] g0/o0!no-aggregating-item", 3, 1},
-	"edgeManifestReadGrants":         {"g1/o2[container,home,tpl] g1/o3[container,home,op,tpl] g1/o2[op,task] g1/o1[task] g1/o1[inst] g1/o3[container,home,sess,studio] g1/o2[container,home,prov] g1/o1[bk] g1/o2[la,tab] g1/o2[container,home,item] g0/o0!no-aggregating-item", 10, 1},
+	"edgeManifestReadGrants":         {"g1/o2[container,home,tpl] g1/o3[container,home,op,tpl] g1/o1[task] g1/o1[inst] g1/o3[container,home,sess,studio] g1/o2[container,home,prov] g1/o1[bk] g1/o2[la,tab] g1/o2[container,home,item] g0/o0!no-aggregating-item", 9, 1},
 	"edgeManifestStaffReadGrants":    {"g1/o2[op,perm,role] g1/o2[role,task] g1/o2[place,studio,work] g1/o2[pane,role] g1/o2[place,wo,work] g0/o0!no-aggregating-item", 5, 1},
+	"edgeManifestTaskReadGrants":     {"g1/o2[op,task] g0/o0!no-aggregating-item", 1, 1},
 	"edgeProviderQueue":              {"g1/o1!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
 	"edgeProviderSchedule":           {"g1/o1!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
 	"edgeServices":                   {"g1/o4!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
@@ -151,7 +152,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 // Every name here is executed under BOTH configurations by a differential in
 // ruleengine/full — the sixteen hand-authored lenses by
 // TestBranchDecomposition_ShippedLensesProjectIdenticalRows and its randomized
-// sibling, the three generated read-grant producers by
+// sibling, the four generated read-grant producers by
 // TestBranchDecomposition_GeneratedProducersProjectIdenticalRows. That coverage
 // is not left to this comment: TestBranchDecomposition_EveryDecomposingCorpusLens
 // ReachesADifferential asserts the two enumerations agree, because the first
@@ -167,6 +168,7 @@ var decomposingCorpusLenses = []string{
 	"edgeManifestProviderReadGrants",
 	"edgeManifestReadGrants",
 	"edgeManifestStaffReadGrants",
+	"edgeManifestTaskReadGrants",
 	"identityAnchors",
 	"identityErasureResidue",
 	"landlordLeaseApplicationsRead",
@@ -263,6 +265,7 @@ var footprintValidationVerdicts = map[string]bool{
 	"edgeManifestProviderReadGrants":    false,
 	"edgeManifestReadGrants":            false,
 	"edgeManifestStaffReadGrants":       false,
+	"edgeManifestTaskReadGrants":        false,
 	"followUpReminders":                 true,
 	"identityAnchors":                   true,
 	"identityErasureResidue":            true,

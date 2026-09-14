@@ -55,14 +55,16 @@ var manifestLensNames = map[string]bool{
 const readGrantLensName = "edgeManifestReadGrants"
 
 // readGrantLensNames is every Path B cap-read producer this package ships. The
-// staff and provider slices are each separate from the base one on purpose
-// (§3.3 / persona-worlds-design.md Fire W0): §6.14 unions slices, so a new
-// slice costs nothing, while folding its branches into the base producer
-// would multiply that lens's existing cross-product fan-out for every actor.
+// staff, provider, and task slices are each separate from the base one on
+// purpose (§3.3 / persona-worlds-design.md Fire W0; the task slice per
+// edgeCatalog's own-task Walk): §6.14 unions slices, so a new slice costs
+// nothing, while folding its branches into the base producer would multiply
+// that lens's existing cross-product fan-out for every actor.
 var readGrantLensNames = map[string]bool{
 	readGrantLensName:                true,
 	"edgeManifestStaffReadGrants":    true,
 	"edgeManifestProviderReadGrants": true,
+	"edgeManifestTaskReadGrants":     true,
 }
 
 // plainLensNames is the package's third lens class: an ordinary nats-kv read
@@ -74,9 +76,9 @@ var readGrantLensNames = map[string]bool{
 // the Personal contract over it would be asserting the wrong contract.
 var plainLensNames = map[string]bool{"opCatalog": true}
 
-func TestPackage_NineteenLenses(t *testing.T) {
-	if got := len(emComposedLenses(t)); got != 19 {
-		t.Fatalf("expected 19 lenses (15 manifest + opCatalog + 3 read-grant producers), got %d", got)
+func TestPackage_TwentyLenses(t *testing.T) {
+	if got := len(emComposedLenses(t)); got != 20 {
+		t.Fatalf("expected 20 lenses (15 manifest + opCatalog + 4 read-grant producers), got %d", got)
 	}
 	if !plainLensNames["opCatalog"] {
 		t.Fatal("opCatalog must be classified as a plain lens, not a manifest one")

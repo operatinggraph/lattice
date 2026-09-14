@@ -1,5 +1,5 @@
 name: edge-manifest
-version: 0.17.15
+version: 0.17.16
 description: |
   The Facet edge app's world manifest: fifteen Personal Lenses (edgeIdentity/
   edgeServices/edgeCatalog/edgeTasks/
@@ -10,7 +10,7 @@ description: |
   role-derived reachability path, folding the former edgeInstructorSessions
   and edgeTasksQueued siblings in; edgeCatalog carries a second Walk the same
   way, folding the former edgeCatalogRoles sibling in, plus a third reaching
-  op-metas through the actor's own assigned tasks)
+  op-metas through the actor's own assigned tasks as its own read-grant domain)
   projecting identity (incl. the
   provider/instructor/serviceprovider self-anchors for {me.<type>} dispatch,
   and the same bindings
@@ -27,9 +27,10 @@ description: |
   against) into the manifest.* namespace over the per-actor SYNC transport.
   Each non-self-anchored lens declares its actor->anchor reachability once, as
   an AnchorWalk, and pkgmgr compiles both the lens's own cypher and the
-  read-grant producer that grants its anchors. That yields three generated
+  read-grant producer that grants its anchors. That yields four generated
   producer lenses — edgeManifestReadGrants, edgeManifestStaffReadGrants,
-  edgeManifestProviderReadGrants — one per declared ReadGrantDomain, writing
+  edgeManifestProviderReadGrants, edgeManifestTaskReadGrants — one per
+  declared ReadGrantDomain, writing
   cap-read.edgeManifest*.<actor>: without them every non-self-anchored manifest
   row is dropped by Refractor's D1 readableAnchors fail-closed gate, which is
   never derived from the manifest lenses' own reachability. They are
@@ -103,6 +104,9 @@ declares:
       adapter: nats-kv
       engine: full
     - canonicalName: edgeManifestProviderReadGrants
+      adapter: nats-kv
+      engine: full
+    - canonicalName: edgeManifestTaskReadGrants
       adapter: nats-kv
       engine: full
   panes:

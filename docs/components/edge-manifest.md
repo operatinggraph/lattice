@@ -21,7 +21,7 @@ orchestration-base's tasks, service-domain's templates/instances, service-locati
 wellness/clinic/café domain state, role-standing grants, maintenance work orders, and the provider-hat
 archetypes — into the reserved `manifest.` key namespace, delivered per-actor over the shared
 `lattice.sync.user.<actor>` SYNC transport (the `nats-subject` Personal Lens adapter, `edge-manifest
-Fire 0`). It also declares **three generated read-grant producer lenses** (one per `ReadGrantDomain`), one
+Fire 0`). It also declares **four generated read-grant producer lenses** (one per `ReadGrantDomain`), one
 **plain `nats-kv` lens** (`opCatalog`, the staff-plane op-descriptor read model — see below), and one
 **server pane** (a Protected/RLS descriptor — a different mechanism, see "Server panes" below). It
 declares no DDLs and no permissions: every row is a read-side re-projection of state another package's DDL
@@ -37,8 +37,9 @@ booking, a tab, a studio, a menu item, a work order, an appointment, a pane meta
 (`internal/refractor/projection/personal.go` → `capabilityread.IsReadable`) drops such a row unless the
 actor's unioned `cap-read.<domain>.<actor>` slices list the anchor's bare NanoID — silently, fail-closed, by
 design (Contract #6 §6.14 Path B). Each such lens declares its actor→anchor reachability ONCE, as one or
-more `AnchorWalk`s (`lenses.go`'s `Walks` field — `edgeEntitySessions` and `edgeCatalog` each carry two, one
-per reachability path to the same anchor kind, compiled to independent branches and merged by output key,
+more `AnchorWalk`s (`lenses.go`'s `Walks` field — `edgeEntitySessions` and `edgeTasks` each carry two and
+`edgeCatalog` three, one per reachability path to the same anchor kind, compiled to independent branches and
+merged by output key,
 refractor-shared-keyspace-arbitration-design.md §13), and `pkgmgr` compiles both the lens's own cypher and
 the read-grant producer that grants the anchors, from that declaration.
 
@@ -56,7 +57,7 @@ already have on the nats-kv side).
 |---|---|---|
 | `edgeIdentity` | `manifest.me` | the actor's own identity (self-anchored) — display name, claimed status, roles, residence/workplace anchors, the `{me.<type>}` self-anchor set (leaseapp/workplace/provider/instructor/serviceprovider) |
 | `edgeServices` | `manifest.svc.<tplId>` | service templates reachable via the actor's residence → `containedIn*` → `availableAt` chain |
-| `edgeCatalog` | `manifest.op.<opMetaId>` | op metas reachable via a reachable service template's `permitsOperation` link; carries `viaServices`, the list of service keys that permit it — **or** via a held role's `grantedBy` permission → `forOperation` (the role-standing-grant catalog path, a second `Walk` in the `edgeManifestStaff` domain; see below) |
+| `edgeCatalog` | `manifest.op.<opMetaId>` | op metas reachable via a reachable service template's `permitsOperation` link; carries `viaServices`, the list of service keys that permit it — **or** via a held role's `grantedBy` permission → `forOperation` (the role-standing-grant catalog path, a second `Walk` in the `edgeManifestStaff` domain; see below) — **or** via a task `assignedTo` the actor, over the task's own `forOperation` (the own-task catalog path, a third `Walk` in the `edgeManifestTask` domain; see below) |
 | `edgeTasks` | `manifest.task.<taskId>` | open tasks directly `assignedTo` the actor |
 | `edgeInstances` | `manifest.inst.<instId>` | service instances `providedTo` the actor ("my orders") |
 | `edgeEntitySessions` | `manifest.ent.<sessionId>` | wellness class sessions reachable via residence → the studio's `locatedAt` place (`entityType: "session"`, a `dispatch.targetType: "session"` browse target) — **or** via the actor's own bound instructor's `ledBy`-inverse sessions (the provider-hat "my classes to teach" path, a second `Walk` in the `edgeManifestProvider` domain; see below) |
@@ -84,6 +85,13 @@ reachable via the actor's own inbound `identifiedBy` binding to a provider-arche
 | `edgeProviderQueue` | `manifest.ent.<instanceId>` | a bound service provider's own instance queue (`providedBy` → `instanceOf`) — "what runs do I need to complete" |
 | `edgeEntitySessions` (2nd `Walk`) | `manifest.ent.<sessionId>` | a bound instructor's own led sessions (`ledBy`) — "my classes to teach"; this domain's member is `edgeEntitySessions`' second `AnchorWalk`, not a standalone lens (formerly the sibling `edgeInstructorSessions`, folded in per refractor-shared-keyspace-arbitration-design.md §13.7 build order (b) — same anchor kind, byte-identical RETURN, a resident who is ALSO the instructor of a session reachable both ways projects one idempotent row) |
 
+**Task-scoped lens** (`ReadGrantDomain: edgeManifestTask`) — reachable via a task directly `assignedTo` the
+actor, independent of any held role or residence chain:
+
+| Lens | Key | Anchors on |
+|---|---|---|
+| `edgeCatalog` (3rd `Walk`) | `manifest.op.<opMetaId>` | op metas reachable via a task `assignedTo` the actor's own `forOperation` link — the own-task authorization path (a live task's `cap.ephemeral.*` grant, not a `cap.roles.*` permission); this domain's member is `edgeCatalog`'s third `AnchorWalk`, not a standalone lens; an op reachable this way and also via the base or staff paths projects one merged row |
+
 **Generated read-grant producers** — one `actorAggregate` lens per `ReadGrantDomain`, compiled by `pkgmgr`
 from the `Walk` declarations above rather than hand-written (`lenses.go`'s `ReadGrantDomains()`); without
 them Refractor's D1 `readableAnchors` gate silently drops every row the corresponding lenses project:
@@ -93,6 +101,7 @@ them Refractor's D1 `readableAnchors` gate silently drops every row the correspo
 | `edgeManifestReadGrants` | `cap-read.edgeManifest.<actor>` (nats-kv, `capability-kv`) | every resident/base-lens anchor the actor's residence chain reaches |
 | `edgeManifestStaffReadGrants` | `cap-read.edgeManifestStaff.<actor>` | every staff-lens anchor a role the actor holds reaches |
 | `edgeManifestProviderReadGrants` | `cap-read.edgeManifestProvider.<actor>` | every provider-hat-lens anchor the actor's own provider/instructor/serviceprovider binding reaches |
+| `edgeManifestTaskReadGrants` | `cap-read.edgeManifestTask.<actor>` | every op meta a live task `assignedTo` the actor reaches via that task's own `forOperation` link |
 
 **The staff-plane op catalog** (`opCatalog`, staff-descriptor-rendering-design.md §2.1) is this package's
 one PLAIN lens — an ordinary `nats-kv` read model rather than a Personal Lens, and the only member of the
@@ -126,11 +135,11 @@ missing row could not say. Because the lens references the `permission`/`role` l
 event reaches it through the unseeded whole-corpus rescan rather than an anchored seed; that is
 install-frequency work, not steady-state.
 
-Three domains rather than one: §6.14 unions every cap-read slice into the actor's effective readable set, so
-a reachability path not every actor has (staff role-standing grants, provider-hat bindings) lives in its own
-slice — the §6.14 blast-radius unit, so a path most actors never take neither grows nor invalidates the
-base slice every actor holds. An identity with no such binding simply gets an empty slice, deleted by the
-generated producer's `EmptyBehavior` + realness filter.
+Four domains rather than one: §6.14 unions every cap-read slice into the actor's effective readable set, so
+a reachability path not every actor has (staff role-standing grants, provider-hat bindings, a live task's
+own-task grant) lives in its own slice — the §6.14 blast-radius unit, so a path most actors never take
+neither grows nor invalidates the base slice every actor holds. An identity with no such binding simply gets
+an empty slice, deleted by the generated producer's `EmptyBehavior` + realness filter.
 
 Vocabulary additions riding the op rows: `ceremonyMintedSecretHashField` / `ceremonyRevealTitle` /
 `ceremonyRevealHelp` (all nullable) declare a MINT-AND-REVEAL ceremony — the named field carries the
@@ -203,8 +212,10 @@ narrowings, each a reasonable v1 cut rather than a correctness gap in what IS bu
 - **`edgeIdentity`'s `anchors`/`roles` arrays** carry no human-readable location TYPE segment (there is no
   vertex-type-from-key function beyond `nanoIdFromKey`, and no string concatenation to synthesize one from
   the key's type segment) — the renderer derives type from the key client-side.
-- **Still deferred:** the open-task-`forOperation` catalog path — a task's own bound op already rides inline
-  on its `edgeTasks` row, so that gap is "browse all my ops," never "complete my task."
+- **The open-task-`forOperation` catalog path** is `edgeCatalog`'s third `Walk`, in its own
+  `edgeManifestTask` read-grant domain (see the task-scoped table above). A task's own bound op also rides
+  inline on its `edgeTasks` row; the catalog path is what makes it browsable as an op rather than reachable
+  only through the task.
 
 A degenerate `collect(DISTINCT {…})` entry (e.g. `{key:null,name:null}` when an identity holds no role)
 is expected, not a bug — the renderer obligation is the same one `my-tasks.*` rows already carry (design

@@ -117,27 +117,36 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"edgeIdentity":                   walkNoHealer,
 	"edgeInstances":                  walkNoHealer,
 	"edgeManifestProviderReadGrants": oneKey,
-	"edgeManifestReadGrants":         walkIncompleteIndex,
+	// Its index is complete, so the position count is read rather than
+	// refused — and the answer is the walk: the producer's
+	// `(identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)` chain
+	// carries two UNLABELED positions, which admit any type and therefore the
+	// identity actor type. Another anchor's row really can render this vertex.
+	"edgeManifestReadGrants": walkMultiPosition,
 	// Its index is complete, so the position count is read rather than
 	// refused — and the answer is still the walk: the producer's
 	// `(identity)-[:worksAt]->(work)<-[:containedIn*0..]-(place)` chain carries
 	// two UNLABELED positions, which admit any type and therefore the identity
 	// actor type. Another anchor's row really can render this vertex.
 	"edgeManifestStaffReadGrants": walkMultiPosition,
-	"edgeProviderQueue":           walkNoHealer,
-	"edgeProviderSchedule":        walkNoHealer,
-	"edgeServices":                walkNoHealer,
-	"edgeStaffPanes":              walkNoHealer,
-	"edgeStaffWorkOrders":         walkNoHealer,
-	"edgeTasks#0":                 walkNoHealer,
-	"edgeTasks#1":                 walkNoHealer,
-	"followUpReminders":           oneKey,
-	"identityAnchors":             walkMultiPosition,
-	"identityErasureResidue":      walkMultiPosition,
-	"leaseApplicationComplete":    oneKey,
-	"leaseExpiry":                 oneKey,
-	"leaseRentSettlement":         oneKey,
-	"myTasks":                     walkMultiPosition,
+	// Single walk, fully labelled: `(identity)<-[:assignedTo]-(task:task)` then
+	// `(task)-[:forOperation]->(op:meta)`. The actor type binds at position 0
+	// only, so the one-key answer holds.
+	"edgeManifestTaskReadGrants": oneKey,
+	"edgeProviderQueue":          walkNoHealer,
+	"edgeProviderSchedule":       walkNoHealer,
+	"edgeServices":               walkNoHealer,
+	"edgeStaffPanes":             walkNoHealer,
+	"edgeStaffWorkOrders":        walkNoHealer,
+	"edgeTasks#0":                walkNoHealer,
+	"edgeTasks#1":                walkNoHealer,
+	"followUpReminders":          oneKey,
+	"identityAnchors":            walkMultiPosition,
+	"identityErasureResidue":     walkMultiPosition,
+	"leaseApplicationComplete":   oneKey,
+	"leaseExpiry":                oneKey,
+	"leaseRentSettlement":        oneKey,
+	"myTasks":                    walkMultiPosition,
 	// PositionsBinding("object") is {0, 1}: the `(owner)` end is unlabeled, so it
 	// admits every type — an object attached to another object included.
 	"objectAttachments":   walkMultiPosition,

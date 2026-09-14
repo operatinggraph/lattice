@@ -39,8 +39,8 @@
 //
 //   - the `internal/bootstrap` arm inspects the kernel's base `capabilityRead`
 //     producer, which is a real shipped lens;
-//   - the `packages/**` arm is PREVENTIVE ONLY. The three shipped generated
-//     producers (`edgeManifest{,Staff,Provider}ReadGrants`) are composed at
+//   - the `packages/**` arm is PREVENTIVE ONLY. The shipped generated
+//     producers (one per `edge-manifest` ReadGrantDomain) are composed at
 //     install time by internal/pkgmgr/anchorwalk.go from declared
 //     ReadGrantDomains and are not literals in any package's source, so this
 //     gate never sees them. They are closed elsewhere, by three mechanisms

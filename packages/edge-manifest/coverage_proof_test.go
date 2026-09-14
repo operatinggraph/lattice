@@ -401,3 +401,52 @@ func TestManifestAnchorCoverage_ProviderWorld(t *testing.T) {
 		},
 		[]string{emComposedSpec(t, "edgeManifestProviderReadGrants")})
 }
+
+// --- Task persona -------------------------------------------------------------
+//
+// An actor with a live task assignedTo them reaches an op meta through that
+// task's own forOperation link — edgeCatalog's third Walk
+// (`ReadGrantDomain: edgeManifestTask`), authorized independently of any held
+// role or residence chain (lenses.go's edgeCatalogTail doc comment). The op
+// meta here is reachable NO OTHER WAY: no service template permitsOperation's
+// it and no role's permission forOperation's it, so the base producer, which
+// declares neither of those chains to it, must grant nothing for it.
+//
+//	taskActor ←assignedTo— openTask(task, status=open) —forOperation→ taskOp(meta)
+func emTaskWorld(t *testing.T) *emFixture {
+	f := newEmFixture(t)
+	f.vtx(t, "taskActor", "identity")
+	f.vtxData(t, "openTask", "task", map[string]any{"status": "open"})
+	f.vtx(t, "taskOp", "meta")
+
+	f.edge(t, "assignedTo", "openTask", "taskActor")
+	f.edge(t, "forOperation", "openTask", "taskOp")
+	return f
+}
+
+// TestManifestAnchorCoverage_TaskWorld is the coverage half of the split filed
+// in docs/reviews/lattice-designer-triage-2026-09-10.md §2: edgeCatalog's
+// own-task branch (Walk 2) is covered by edgeManifestTaskReadGrants, and the
+// second assertion is the partition's whole point — the base producer must
+// grant the anchor NOTHING, because the two producers carry genuinely distinct
+// authorization bases rather than binding one name (`op`) over two unrelated
+// chains. The base slice is asserted non-empty first: a negative over an empty
+// projection proves nothing.
+func TestManifestAnchorCoverage_TaskWorld(t *testing.T) {
+	f := emTaskWorld(t)
+	actor := f.key("taskActor")
+
+	f.assertAnchorsCovered(t, actor,
+		[]dataLens{
+			{"edgeCatalog (own-task branch)", emComposedSpecBranch(t, "edgeCatalog", 2)},
+		},
+		[]string{emComposedSpec(t, "edgeManifestTaskReadGrants")})
+
+	baseGranted := f.grantedAnchorIDs(t, actor, []string{emComposedSpec(t, "edgeManifestReadGrants")})
+	require.NotEmpty(t, baseGranted,
+		"the base producer grants nothing at all in this world, so the negative below would hold "+
+			"whether or not the two domains partition")
+	require.Falsef(t, baseGranted[f.ids["taskOp"]],
+		"the own-task op must NOT be granted by the base producer — %q carries it, so the base "+
+			"producer binds op over one chain only", domainTask)
+}
