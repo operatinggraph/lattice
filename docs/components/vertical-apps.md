@@ -112,4 +112,10 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   by-unit console read an ended tenant as "Approved — leasing" and dealt it a ledger panel), the decide gate
   (Approve/Decline re-offered on an ended row as a silent no-op) and the search chip. Minted: LoftSpace
   (2026-09-14), three sites caught cold. Check: grep the app for every `status`/`DISPOSITION`/`case "approved"`
-  switch and every `if (a.qualified` / `landlordApproved` gate, and decide the new state's arm at each.
+  switch and every `if (a.qualified` / `landlordApproved` gate, and decide the new state's arm at each. Second
+  sighting (LoftSpace `lostToRival`, 2026-09-14, caught cold): the state reached the banner and the landlord row
+  and missed the inbox — a task scoped to a lost application stayed "Complete" for the grant's 30 days, refused
+  every time — and the stepper drew four done steps beneath the lost banner. The census now includes every
+  surface keyed by `scopedTo`/`entityKey` to the row (the inbox, the documents list), not only the row's own
+  card. No sound lint shape yet: a mandated goja pin per new terminal boolean covers the banner, the disposition
+  chip, `taskDisposition` and `decisionOffered` together (the `rival_task_ui_test.go` shape).

@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-13 · `3658dadb` · A kernel root is not a member — `CreateBooking`/`JoinWaitlist` refuse a `data.protected` booker (`ProtectedBooker`) before any slot cell lands on its hub; 0.27.1 refreshed live, both ops refuse the admin.
+- 2026-09-13 · `fc2c1f68` · 15 appointments carry no site — `BackfillAppointmentSite` counts LIVE sites (a `practicesAt` link to a tombstoned building is not a second site); 0.34.26 refreshed live, the replay backfilled all 15.
 - 2026-09-13 · `d51c950a` · 8 bookings `booked` on ended classes — resolved live before any replay: `pastDueBookings` shows 0 violating, every 07-20…08-23 booking is `noShow`; the gate was the fire classifier's, not Andrew's.
 - 2026-09-13 · `a87e06b3` · The executed lease names its tenant — `SignLease` snapshots the name under the `executedLeaseRecord` class, docGen egresses it as a top-level ref, the floor tolerates a legacy signed app; live: `Tenant: Priya Raman`.
 - 2026-09-13 · `5f9888b1` · A recurring class moves to a new weekday/time in one act — `ReassignSessionSeries` shifts every still-upcoming occurrence at the studio by one delta, cells one batch per hub, pinned to the anchor the desk saw.
