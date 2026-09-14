@@ -114,11 +114,20 @@ func newListCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 				fmt.Println("(no instances)")
 				return nil
 			}
-			fmt.Printf("%-24s %-24s %-20s %-8s %-10s %s\n",
-				"INSTANCE_ID", "PATTERN_REF", "SUBJECT_KEY", "CURSOR", "STATUS", "RETRIES")
+			fmt.Printf("%-24s %-24s %-20s %-8s %-10s %-8s %s\n",
+				"INSTANCE_ID", "PATTERN_REF", "SUBJECT_KEY", "CURSOR", "STATUS", "RETRIES", "FLAGS")
 			for _, in := range resp.Instances {
-				fmt.Printf("%-24s %-24s %-20s %-8d %-10s %d\n",
-					in.InstanceID, in.PatternRef, in.SubjectKey, in.Cursor, in.Status, in.RetryCount)
+				// A running instance carrying an inconclusive deadline verdict is
+				// parked, not progressing, and only a redrive resumes it — but its
+				// status reads "running" like any healthy one. list is the
+				// discovery surface (inspect needs an id you already have), so the
+				// flag is what makes such an instance findable at all.
+				flags := ""
+				if in.DeadlineProbe != nil {
+					flags = "!probe"
+				}
+				fmt.Printf("%-24s %-24s %-20s %-8d %-10s %-8d %s\n",
+					in.InstanceID, in.PatternRef, in.SubjectKey, in.Cursor, in.Status, in.RetryCount, flags)
 			}
 			return nil
 		},
@@ -209,7 +218,7 @@ func newInspectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 				// redrive` as the operator's move, and this is the command they
 				// reach for first — so the refusal has to be readable here, not
 				// only in --output json.
-				fmt.Printf("deadlineProbe: inconclusive at %s — %s (redrive to resume)\n", n.At, n.Reason)
+				fmt.Printf("probe:       inconclusive at %s — %s (redrive to resume)\n", n.At, n.Reason)
 			}
 			if d.CurrentStep == nil {
 				fmt.Println("currentStep: (none)")

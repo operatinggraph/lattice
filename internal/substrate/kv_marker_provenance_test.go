@@ -388,7 +388,7 @@ func connectRecoveryConn(ctx context.Context, t *testing.T, url string) *Conn {
 //     expires nothing — the arm is still on the stream when the server opens;
 //   - fileStore.recoverTTLState rebuilds the timed hash wheel from the store and
 //     schedules the age check immediately, `defer fs.resetAgeChk(0)`
-//     (:2148-2173) — so the past-due deadline is looked at, not left until some
+//     (:2148-2174) — so the past-due deadline is looked at, not left until some
 //     later write;
 //   - fileStore.expireMsgs drains every past-due wheel entry and
 //     handleRemovalOrSdm stamps each emptied subject's marker with
@@ -427,11 +427,23 @@ func TestKVMarkerProvenance_TTLPastDueAtRecoveryStillMintsAMaxAgeMarker(t *testi
 	armedAt := time.Now()
 	_, err := c.KVPutWithTTL(ctx, bucket, key, []byte(`{"setAt":"t0"}`), armTTL)
 	require.NoError(t, err)
+	// And read AFTER the put returns, which is an UPPER bound on the server's
+	// stamp. The two bounds do different jobs and neither substitutes for the
+	// other: armedAt keeps the liveness guard below sound (the arm was still
+	// live when the server stopped), while putAt is what the downtime is
+	// measured from, so the wheel entry is provably past due at recovery no
+	// matter how slow the put's round trip was. Measuring the downtime from
+	// armedAt instead would spend the whole overshoot budget on that round trip
+	// — a loaded host would leave the arm LIVE when the second server opens and
+	// the test would quietly become an ordinary live-expiry test.
+	putAt := time.Now()
 	_, err = c.KVGet(ctx, bucket, key)
 	require.NoError(t, err, "the arm must be live before the server goes down")
 
 	// Down, and fully down: Stop does not return until the server has finished
-	// shutting down and released the store.
+	// shutting down and released the store. The URL is captured first, so the
+	// restart can be asserted to be a genuinely new server below.
+	firstURL := r.Server().ClientURL()
 	r.Stop()
 	require.WithinDuration(t, armedAt, time.Now(), armTTL,
 		"the arm's TTL must still be in the future when the server stops — otherwise the "+
@@ -441,12 +453,15 @@ func TestKVMarkerProvenance_TTLPastDueAtRecoveryStillMintsAMaxAgeMarker(t *testi
 	// and necessarily so: the deadline is absolute, and there is no server to
 	// poll while it passes. Nothing is being synchronised on — every wait for
 	// an event below polls a condition.
-	deadline := armedAt.Add(armTTL + downOvershoot)
+	deadline := putAt.Add(armTTL + downOvershoot)
 	time.Sleep(time.Until(deadline))
 
 	// Up again, on the same store, at a new URL — so the connection above is
 	// finished and the test needs one of its own.
 	second := r.Start()
+	require.NotEqual(t, firstURL, second.ClientURL(),
+		"the arm must be recovered by a DIFFERENT server process — without a real "+
+			"down-and-up this asserts nothing a live expiry would not also satisfy")
 	c2 := connectRecoveryConn(ctx, t, second.ClientURL())
 
 	// The watcher exists only now, after recovery — Loom's shape when the

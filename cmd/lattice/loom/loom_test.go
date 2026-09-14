@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -233,6 +234,71 @@ func TestLoomInspect_Running_Table(t *testing.T) {
 	assert.Contains(t, out, "running")
 	assert.Contains(t, out, "userTask")
 	assert.Contains(t, out, "ApproveThing")
+}
+
+// TestLoomRendersTheInconclusiveDeadlineNote pins both operator surfaces for a
+// running instance the deadline probe REFUSED to decide on. Such an instance is
+// parked — nothing will resolve its pending token and only a redrive resumes it
+// — yet its status reads "running" like any healthy one, so the note is the only
+// thing that tells the two apart. inspect must print it, and list must flag it:
+// inspect answers an id the operator already has, list is where they find one.
+func TestLoomRendersTheInconclusiveDeadlineNote(t *testing.T) {
+	note := &internalloom.ProbeNote{
+		At:     "2026-09-14T12:00:00Z",
+		Reason: "step 0 CreateTask rejected",
+	}
+	eng := newFakeEngine()
+	eng.instances = []internalloom.InstanceSummary{
+		{InstanceID: "parked1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: "running", DeadlineProbe: note},
+		{InstanceID: "healthy1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w2", Cursor: 0, Status: "running"},
+	}
+	eng.detail["parked1"] = internalloom.InstanceDetail{
+		Instance:    eng.instances[0],
+		CurrentStep: &internalloom.Step{Kind: "userTask", Operation: "ApproveThing"},
+	}
+	eng.detail["healthy1"] = internalloom.InstanceDetail{
+		Instance:    eng.instances[1],
+		CurrentStep: &internalloom.Step{Kind: "userTask", Operation: "ApproveThing"},
+	}
+	url := startLoomControlTest(t, eng)
+
+	natsURL := url
+	outputFmt := ""
+	actorKey := ""
+	cmd := NewCommand(&natsURL, &outputFmt, &actorKey)
+
+	out, err := runCmd(t, cmd, []string{"inspect", "parked1"})
+	require.NoError(t, err)
+	assert.Contains(t, out, "inconclusive at 2026-09-14T12:00:00Z")
+	assert.Contains(t, out, "step 0 CreateTask rejected")
+	assert.Contains(t, out, "redrive to resume",
+		"the note must name the verb, since nothing else resumes a parked instance")
+
+	cmd = NewCommand(&natsURL, &outputFmt, &actorKey)
+	clean, err := runCmd(t, cmd, []string{"inspect", "healthy1"})
+	require.NoError(t, err)
+	assert.NotContains(t, clean, "inconclusive",
+		"an instance with no note must not be rendered as parked")
+
+	cmd = NewCommand(&natsURL, &outputFmt, &actorKey)
+	listed, err := runCmd(t, cmd, []string{"list"})
+	require.NoError(t, err)
+	parked, healthy := listedRow(t, listed, "parked1"), listedRow(t, listed, "healthy1")
+	assert.Contains(t, parked, "!probe", "a parked instance must be findable in the listing")
+	assert.NotContains(t, healthy, "!probe")
+}
+
+// listedRow returns the one line of a `loom list` table that names instanceID,
+// so a per-row assertion cannot be satisfied by a different row's text.
+func listedRow(t *testing.T, out, instanceID string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, instanceID) {
+			return line
+		}
+	}
+	t.Fatalf("no row for %q in:\n%s", instanceID, out)
+	return ""
 }
 
 func TestLoomInspect_Terminal_Table(t *testing.T) {

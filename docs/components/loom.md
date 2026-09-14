@@ -201,8 +201,9 @@ creation-deadline** (`CreateTaskTimeout`) whose **expiry IS the disarm**: the pr
 vertex already minted and **nothing re-arms** (Contract #10 §10.6), after which the human wait is
 **unbounded** — the durable cursor + live `token.<taskKey>`
 pointer survive any restart, so when the user finally acts the completion correlates and the cursor
-advances. A rejected/lost `CreateTask` is failed by the creation-deadline probe (never a silent wedge);
-a mis-declared `completionDomains` is caught by a load-time warn.
+advances. A rejected/lost `CreateTask` is failed by the creation-deadline probe — or, when the marker
+arrives past the tracker's lifetime so that absence proves nothing, alerted and parked for a redrive
+(never a silent wedge either way); a mis-declared `completionDomains` is caught by a load-time warn.
 
 ### External steps (`externalTask`)
 
@@ -237,7 +238,8 @@ to a userTask (dispatch to an async completer, then park; the completer is a hum
   on the `instanceOp` submission**, probed via the `instanceOp`'s own `vtx.op.<opRequestId>` tracker. Its
   **expiry IS the disarm**: the probe finds the `instanceOp` committed, **nothing re-arms**, and the wait
   for the bridge's `replyOp` is **unbounded** — it **never advances the cursor** (only `orchestration.externalTaskCompleted` does). A
-  rejected/lost `instanceOp` → `FailPattern` (FR29, never a silent wedge). A dead bridge surfaces on the
+  rejected/lost `instanceOp` → `FailPattern`, or — when the marker arrives past the tracker's lifetime —
+  an alert and a `deadlineProbe` note the operator redrives (FR29, never a silent wedge). A dead bridge surfaces on the
   **bridge's own** Health, not a per-instance Loom timeout — symmetric to the unbounded human wait.
 
 The `externalTask` step kind, its two-op dispatch, the third `payload.externalRef` correlation key, and
@@ -464,7 +466,7 @@ is later wanted — while any single instance stays answerable by id whatever it
 | Long-waiting instance > 24h | Extended-dedupe at engine (idempotency horizon, arch §85) |
 | Crash mid-step | Write-ahead atomic batch (pointer + cursor + outbox record before any side effect); the relay re-publishes the `outbox.<token>` op on resume, collapsing on the Contract #4 tracker → re-drive safely; pointer presence is the idempotency guard |
 | Relay publish (or outbox-delete) fails | The outbox record persists; the relay returns **`NakWithDelay`** → JetStream redelivers no sooner than the 5s floor (`substrate.DefaultRedeliveryDelay`) → re-publish (idempotent). Bounded cadence, unbounded count: at-least-once preserved, no `MaxDeliver`, and the relay never hot-loops against a failing ops stream **or** a failing `loom-state` KV. Submission cannot be lost between batch and broker |
-| Rejected / failed / unseen step | Off-stream terminal (a rejected op writes no tracker/event) — learned via the `deadline.<instanceId>` TTL expiry + a read-before-act probe (`GET vtx.op.<token>`: committed → advance+alert; not yet relayed → re-arm; else → `status=failed`). Never the submit reply; never wedges |
+| Rejected / failed / unseen step | Off-stream terminal (a rejected op writes no tracker/event) — learned via the `deadline.<instanceId>` TTL expiry + a read-before-act probe (`GET vtx.op.<token>`: committed → advance+alert; not yet relayed → re-arm; else → `status=failed`, unless the pending step is older than `opstatus.TrackerTTL`, where the absences decide nothing and the verdict is refused: alert + a `deadlineProbe` note + the instance left running and redrivable). Never the submit reply; never wedges |
 
 ---
 
@@ -640,15 +642,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   step's token and writes it against a subject that carries the fail arm's marker — the identical shape,
   the next key. Minted: the 2026-09-03 tombstone-sweep fire. Check: the redrive-after-real-fail test in
   `control_internal_test.go` (`TestRedriveInstance_ResumesOverTheFailedStepsRemovedToken`).
-- **A removal in `loom-state` is a TTL'd purge, never a DEL.** A DEL is a permanent subject on a
-  `max_msgs_per_subject=1` bucket — exactly the growth this design exists to stop. Minted: the same fire.
-  Check: `lint-conventions`' `checkLoomStateDelete` (mechanized at ship; this entry records the why, the
-  gate does the catching).
 - **A message on `deadline.>` is a delivery to a handler whose evidence outlives nothing it backstops.** For
   a running instance parked in an unbounded wait, the step-deadline probe's evidence (the 24 h tracker) is
-  gone long before the wait ends, so anything that puts such an instance through the probe fails it. The
-  handler now admits only the server's expiry marker, and the conversion pass still reads the record before
-  touching that family — belt and braces on a destructive path. Minted: the same fire's close pass. Check:
+  gone long before the wait ends, so anything that puts such an instance through the probe spends an operator
+  intervention on it — a false terminal before the evidence-horizon guard, an alert-and-park after. The
+  handler admits only the server's expiry marker, and the conversion pass reads the record before touching
+  that family — belt and braces on a destructive path. Minted: the same fire's close pass. Check:
   `TestConvertFamily_SkipsARunningInstancesDeadlineMarker`.
 - **A handler that acts on "empty body" acts on every removal shape the bucket can produce.** An expiry, a
   delete and a purge are indistinguishable without the headers the substrate delivers — name the header
@@ -673,11 +672,20 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   window's soundness bound reads `maxDeadlineArm + markerTTL < TrackerTTL`, and it was gated by a test
   that hardcoded `maxDeadlineArm` — while `StepTimeout` and `CreateTaskTimeout` were exported fields
   carrying only a lower clamp. A deployment raising either past the tracker's life would turn the
-  deadline probe against healthy instances, silently, with the gate still green — silently no longer,
-  since the probe now refuses a verdict its evidence cannot carry, but the constant is still what buys
-  the verdict. Minted: the marker-TTL fire's cold pass. Check: `MaxDeadlineArm` clamps both arms in
+  deadline probe against healthy instances, with the gate still green. The probe refuses a verdict its
+  evidence cannot carry, so the constant buys the verdict rather than the instance's life — but a bound
+  no computation enforces buys neither. Minted: the marker-TTL fire's cold pass. Check: `MaxDeadlineArm` clamps both arms in
   `withDefaults` (`TestWithDefaults_ClampsTheDeadlineArmBothWays`), and the bootstrap gate computes the
   invariant from that constant instead of restating its value.
+- **An injected clock built from `time.Now()` measures an age that moves with the host clock; anchor it to
+  the stamp it is measured against.** The evidence-horizon cases pinned their clock at `time.Now().Add(TTL +
+  1m)` and compared it against a SERVER-stamped epoch, so the age they tested was "the offset, plus whatever
+  the host clock did between the seed and the probe". This container stepped its clock backwards ~2 h mid-fire
+  and five cases went red on the guard they were proving correct. Anchor the injected clock to the stamp
+  (`seedAtStepAge` reads the token pointer back and offsets from THAT), which makes the age a fixed quantity
+  and lets the boundary row sit one second off the bound instead of a minute. Minted: the 2026-09-14
+  evidence-horizon fire. Check: `seedAtStepAge`, and the ±1s rows of
+  `TestProbeRejectedOrLost_HorizonIsTheTrackerLifetime`.
 - **A probe that reads ABSENCE as a verdict must bound the verdict by the age of the evidence it read:
   absence past the evidence's own lifetime is not a fact.** The deadline probe read "no op tracker, no
   outbox record" as *rejected* whatever the age of those absences, so a substrate outage longer than the

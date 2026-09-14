@@ -631,9 +631,18 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 		// step, and a terminal status is a decided instance. Cleared inside the
 		// batch that moves the instance, exactly as the failed index is settled
 		// below — a derived fact settled by a second write could outlive the
-		// state it describes. A transition that neither writes a token nor
-		// leaves running (a re-arm-shaped rewrite) leaves the note standing,
-		// because the step it describes is still the parked one.
+		// state it describes.
+		//
+		// The condition is DEFENSIVE, not a live branch: every caller in this
+		// package writes a token or takes a terminal status, so no engine path
+		// reaches this method with both false today. It stays because the note
+		// is the only thing that makes a parked instance redrivable
+		// (control.go's isResumable), so a transition-shaped rewrite that did
+		// neither — a re-arm folded into this batch, say — must not silently
+		// strip an instance's one operator exit. The store method's contract is
+		// therefore "clear the note when the step it describes ends", and
+		// TestTransition_LeavesTheNoteOnARewriteThatEndsNoStep holds it to that
+		// rather than to what its callers happen to pass.
 		inst.DeadlineProbe = nil
 	}
 	body, err := json.Marshal(inst)
