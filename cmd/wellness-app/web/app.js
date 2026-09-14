@@ -429,6 +429,14 @@ function fmtDay(iso) {
   return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 }
 
+// ledgerDate is the billing-history date format both ledger render sites
+// use for a transaction's own postedAt — short month/day/year, no weekday
+// (fmtDay's format is for a class session, not a ledger line).
+function ledgerDate(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
 function fmtRange(startsAt, endsAt) {
   if (!startsAt) return "?";
   return fmtDay(startsAt) + " " + fmtTime(startsAt) + " – " + fmtTime(endsAt);
@@ -1131,15 +1139,17 @@ async function renderMyBalance() {
       return;
     }
     empty.hidden = true;
+    const rowByKey = {};
+    txs.forEach((r) => { rowByKey[r.transactionKey] = r; });
     for (const t of txs) {
       const li = document.createElement("li");
       const isWaiver = t.type === "credit" && t.reason === "waiver";
       const isRefund = t.type === "credit" && t.reason === "refund";
       li.className = "ledger-entry " + t.type + (isWaiver ? " waiver" : "") + (isRefund ? " refund" : "");
       const sign = t.type === "debit" ? "+" : "−";
-      const d = new Date(t.postedAt);
-      const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (isRefund ? " (refunded)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + (t.classStartsAt ? " " + fmtDay(t.classStartsAt) : "") + ")" : "");
+      const when = ledgerDate(t.postedAt);
+      const reversed = t.reversesKey ? rowByKey[t.reversesKey] : null;
+      li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (isRefund ? " (refunded)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + (t.classStartsAt ? " " + fmtDay(t.classStartsAt) : "") + ")" : "") + (t.reversesKey ? " · reverses the charge of " + (reversed ? ledgerDate(reversed.postedAt) : "an earlier charge") : "");
       list.append(li);
     }
   } catch (_) {
@@ -2856,15 +2866,17 @@ function renderBillingBody(data) {
     return;
   }
   empty.hidden = true;
+  const rowByKey = {};
+  txs.forEach((r) => { rowByKey[r.transactionKey] = r; });
   for (const t of txs) {
     const li = document.createElement("li");
     const isWaiver = t.type === "credit" && t.reason === "waiver";
     const isRefund = t.type === "credit" && t.reason === "refund";
     li.className = "ledger-entry " + t.type + (isWaiver ? " waiver" : "") + (isRefund ? " refund" : "");
     const sign = t.type === "debit" ? "+" : "−";
-    const d = new Date(t.postedAt);
-    const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (isRefund ? " (refunded)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + (t.classStartsAt ? " " + fmtDay(t.classStartsAt) : "") + ")" : "");
+    const when = ledgerDate(t.postedAt);
+    const reversed = t.reversesKey ? rowByKey[t.reversesKey] : null;
+    li.textContent = when + " · " + sign + money(t.amountCents) + (isWaiver ? " (waived)" : "") + (isRefund ? " (refunded)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "") + (t.className ? " (" + t.className + (t.classStartsAt ? " " + fmtDay(t.classStartsAt) : "") + ")" : "") + (t.reversesKey ? " · reverses the charge of " + (reversed ? ledgerDate(reversed.postedAt) : "an earlier charge") : "");
     list.append(li);
   }
 }

@@ -147,6 +147,7 @@ func computeLedgerBalances(keys []string, get kvGetter, now time.Time) []balance
 			AmountCents:    amount,
 			Memo:           p.Memo,
 			PostedAt:       p.PostedAt,
+			ReversesKey:    p.ReversesKey,
 		})
 	}
 
@@ -194,21 +195,53 @@ func readAllOrFail(keys []string, get rawGetter) (map[string][]byte, error) {
 }
 
 // deriveStatement turns a chronologically-sorted ledger into a due date and
-// overdue state, without the ledger ever storing either: credits offset the
-// OLDEST still-open debit first (FIFO aging, mirroring how a real statement
-// ages a balance), so the survivor at the front of the queue is the charge
-// that has actually been sitting unpaid the longest — not just the most
-// recent charge. A credit posted ahead of any open debit, or one that
-// outruns the whole open-debit queue, carries its unapplied remainder
-// forward as surplus and prepays whichever debits arrive next, in order —
-// so a charge that was already paid for by an earlier credit never ages as
-// if it were the oldest open balance. A zero/credit balance has nothing to
-// age and returns no due date. A malformed postedAt on the oldest open
-// debit fails closed (no due date) rather than guessing.
+// overdue state, without the ledger ever storing either. A credit that names
+// the charge it reverses (ReversesKey) retires that charge specifically: a
+// pre-pass nets every such credit against the debit it names — capped at
+// that debit's own amount, accumulated across however many reversing
+// credits name the same debit — before the FIFO walk ever runs, so a refund
+// of a NEWER charge does not pay off an OLDER, unrelated one. A debit fully
+// retired this way never opens; the rest of a partially-retired debit's
+// amount opens as usual. Everything else still FIFOs: credits offset the
+// OLDEST still-open debit first (mirroring how a real statement ages a
+// balance), so the survivor at the front of the queue is the charge that
+// has actually been sitting unpaid the longest — not just the most recent
+// charge. A credit posted ahead of any open debit, or one that outruns the
+// whole open-debit queue, carries its unapplied remainder (net of whatever
+// it retired above) forward as surplus and prepays whichever debits arrive
+// next, in order — so a charge that was already paid for by an earlier
+// credit never ages as if it were the oldest open balance. A zero/credit
+// balance has nothing to age and returns no due date. A malformed postedAt
+// on the oldest open debit fails closed (no due date) rather than guessing.
 func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (dueDate string, isOverdue bool, daysOverdue int) {
 	if balanceCents <= 0 {
 		return "", false, 0
 	}
+	debitAmount := make(map[string]int64)
+	for _, r := range rows {
+		if r.Type == "debit" {
+			debitAmount[r.TransactionKey] = r.AmountCents
+		}
+	}
+	absorbedTotal := make(map[string]int64)
+	absorbedByCredit := make(map[string]int64)
+	for _, r := range rows {
+		if r.Type != "credit" || r.ReversesKey == "" {
+			continue
+		}
+		target, ok := debitAmount[r.ReversesKey]
+		if !ok {
+			continue
+		}
+		remaining := target - absorbedTotal[r.ReversesKey]
+		absorbed := r.AmountCents
+		if absorbed > remaining {
+			absorbed = remaining
+		}
+		absorbedByCredit[r.TransactionKey] = absorbed
+		absorbedTotal[r.ReversesKey] += absorbed
+	}
+
 	type openDebit struct {
 		postedAt  string
 		remaining int64
@@ -218,7 +251,10 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 	for _, r := range rows {
 		switch r.Type {
 		case "debit":
-			amount := r.AmountCents
+			amount := r.AmountCents - absorbedTotal[r.TransactionKey]
+			if amount <= 0 {
+				continue
+			}
 			if surplus >= amount {
 				surplus -= amount
 				continue
@@ -227,7 +263,7 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 			surplus = 0
 			open = append(open, openDebit{postedAt: r.PostedAt, remaining: amount})
 		case "credit":
-			remaining := r.AmountCents
+			remaining := r.AmountCents - absorbedByCredit[r.TransactionKey]
 			for remaining > 0 && len(open) > 0 {
 				if open[0].remaining > remaining {
 					open[0].remaining -= remaining

@@ -691,6 +691,74 @@ func TestWellnessLedgerHistory_SettlesRefund_ProjectsClassNameFromRefundDetail(t
 	require.Equal(t, "2026-08-19T09:00:00Z", v["classStartsAt"])
 }
 
+// TestWellnessLedgerHistory_SettlesRefund_ProjectsReversesKey proves the
+// `(rf)-[:reverses]->(rtx)` hop off a refund credit's own settlesRefund
+// marker projects reversesKey — the column deriveStatement (cmd/wellness-app
+// ledger.go) reads to retire the specific charge a refund names instead of
+// FIFOing it against whichever debit happens to be oldest. The target need
+// not itself be posted (f.vtx alone) — the lens only needs its key, never
+// its .entry. An ordinary payment settling no refund at all carries no
+// reversesKey.
+func TestWellnessLedgerHistory_SettlesRefund_ProjectsReversesKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPostedTransaction(t, "refund", 1500, "Class price refund")
+	f.vtx(t, "refund_marker", "wellnessrefund")
+	f.aspect(t, "refund_marker", "detail", "wellnessRefundDetail", map[string]any{
+		"accountKey": "vtx.wellnessaccount.BBFAKEACCTHJKMNPQRST", "amountCents": 1500.0,
+		"bookingKey": "vtx.booking.BBFAKEBQQKJNGHJKMNPQ", "className": "Vinyasa Flow", "classStartsAt": "2026-08-19T09:00:00Z",
+	})
+	f.edge(t, "settlesRefund", "refund_tx", "refund_marker")
+	f.vtx(t, "reversed_tx", "wellnesstransaction")
+	f.edge(t, "reverses", "refund_marker", "reversed_tx")
+
+	f.mkPostedTransaction(t, "payment", 5000, "Front-desk payment")
+
+	rows := f.project(t, "wellnessLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, row := range rows {
+		byKey[row.Values["transactionKey"].(string)] = row.Values
+	}
+	refundRow := byKey["vtx.wellnesstransaction."+f.ids["refund_tx"]]
+	require.Equal(t, "vtx.wellnesstransaction."+f.ids["reversed_tx"], refundRow["reversesKey"],
+		"the refund credit's reversesKey names the charge its marker reverses")
+	paymentRow := byKey["vtx.wellnesstransaction."+f.ids["payment_tx"]]
+	require.Nil(t, paymentRow["reversesKey"], "an ordinary payment settles no refund and reverses nothing")
+}
+
+// TestWellnessLedgerHistory_ReversedCharge_ClassNameFromTheMarkerThatReversesIt
+// proves the `(t)<-[:reverses]-(rrf)` hop's rrf.detail is the LAST className
+// fallback: a debit with no settles/settlesClassPrice link of its own (its
+// booking was cancelled and tombstoned, dropping that hop) still gets its
+// class name off the wellnessrefund marker that reverses it — the same
+// snapshot the marker's own credit row reads.
+func TestWellnessLedgerHistory_ReversedCharge_ClassNameFromTheMarkerThatReversesIt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkPostedTransaction(t, "charge", 1500, "Class price")
+	f.vtx(t, "reversing_marker", "wellnessrefund")
+	f.aspect(t, "reversing_marker", "detail", "wellnessRefundDetail", map[string]any{
+		"accountKey": "vtx.wellnessaccount.BBFAKEACCTHJKMNPQRST", "amountCents": 1500.0,
+		"bookingKey": "vtx.booking.BBFAKEBQQKJNGHJKMNPQ", "className": "Vinyasa Flow", "classStartsAt": "2026-08-19T09:00:00Z",
+	})
+	f.edge(t, "reverses", "reversing_marker", "charge_tx")
+
+	rows := f.project(t, "wellnessLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Nil(t, v["bookingKey"], "this charge carries no settles/settlesClassPrice link of its own")
+	require.Equal(t, "Vinyasa Flow", v["className"],
+		"className must resolve off the reversing marker's own .detail snapshot")
+	require.Equal(t, "2026-08-19T09:00:00Z", v["classStartsAt"])
+	require.Nil(t, v["reversesKey"],
+		"this row IS the reversed charge, not the refund credit — reversesKey comes off the OTHER reverses hop ((rf)-[:reverses]->(rtx), via this row's own settlesRefund), which this row has none of")
+}
+
 func TestWellnessLedgerHistory_NoSettlesLink_ProjectsNullClassName(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

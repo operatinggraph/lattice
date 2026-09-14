@@ -247,6 +247,79 @@ func TestDeriveStatement_MalformedPostedAtFailsClosed(t *testing.T) {
 	}
 }
 
+// TestDeriveStatement_ReversalRetiresItsOwnCharge is the Alex Kim shape: a
+// refund names the NEWER of two charges (ReversesKey), so that charge is
+// retired directly and the OLDER, unrelated charge is what the balance ages
+// from — a plain FIFO would have paid off the older one instead and hidden
+// the true head.
+func TestDeriveStatement_ReversalRetiresItsOwnCharge(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "A", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "B", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-20T00:00:00Z"},
+		{TransactionKey: "C", Type: "credit", AmountCents: 1000, PostedAt: "2026-08-21T00:00:00Z", ReversesKey: "B"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1000, now)
+	if due != "2026-08-16T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-08-16T00:00:00Z (the reversal retires B directly, leaving A as the head)", due)
+	}
+	if !overdue || days != 14 {
+		t.Errorf("want overdue=true days=14, got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_ReversalExcessFallsThroughFIFO proves a reversing
+// credit's absorption is capped at the named debit's own face amount: the
+// UNABSORBED remainder still has to go somewhere, and it falls through the
+// ordinary FIFO+surplus path like any other credit — landing on whichever
+// debit is oldest and still open, NOT necessarily the one it just reversed.
+// A 1000/Aug 1 and B 500/Aug 20 are both open; R (1200/Aug 21) reverses B,
+// retiring B's 500 face amount outright and leaving a 700 excess that FIFOs
+// onto A, the oldest still-open debit — A absorbs 700 of its own 1000 and
+// stays open for the remaining 300. C (1000/Aug 22) then opens behind it.
+// The result — A survives as the head — only comes out of the netting
+// rule: under plain FIFO (R applied with no target) R's first 1000 would
+// have cleared A outright instead, leaving B as the head with a due date
+// three weeks later. Both due date AND daysOverdue are asserted so a
+// regression that silently reverts to FIFO cannot pass on the date alone.
+func TestDeriveStatement_ReversalExcessFallsThroughFIFO(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "A", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "B", Type: "debit", AmountCents: 500, PostedAt: "2026-08-20T00:00:00Z"},
+		{TransactionKey: "R", Type: "credit", AmountCents: 1200, PostedAt: "2026-08-21T00:00:00Z", ReversesKey: "B"},
+		{TransactionKey: "C", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-22T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1300, now)
+	if due != "2026-08-16T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-08-16T00:00:00Z (B is retired directly, R's 700 excess FIFOs onto A, A survives as the head; plain FIFO would give B/2026-09-04T00:00:00Z)", due)
+	}
+	if !overdue || days != 14 {
+		t.Errorf("want overdue=true days=14 (Aug 16 -> Aug 29 + 1), got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_ReversalOfUnknownTargetIsAnOrdinaryCredit proves a
+// ReversesKey that names no debit in this row set (the target predates the
+// window, belongs to a different account, or is simply absent) absorbs
+// nothing — the credit falls straight through to the ordinary FIFO walk,
+// identical to a credit carrying no ReversesKey at all.
+func TestDeriveStatement_ReversalOfUnknownTargetIsAnOrdinaryCredit(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "A", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "B", Type: "debit", AmountCents: 500, PostedAt: "2026-08-20T00:00:00Z"},
+		{TransactionKey: "C", Type: "credit", AmountCents: 1000, PostedAt: "2026-08-21T00:00:00Z", ReversesKey: "vtx.cafetransaction.NOTINTHISROWSET0001"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, _ := deriveStatement(rows, 500, now)
+	if due != "2026-09-04T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-04T00:00:00Z (an unknown target FIFOs like an ordinary credit, clearing A and leaving B as the head)", due)
+	}
+	if overdue {
+		t.Errorf("want not overdue (grace runs from the surviving B debit)")
+	}
+}
+
 func TestResolveLeaseAccount_FindsMatchOrEmpty(t *testing.T) {
 	keys, get := fakeKV(map[string]any{
 		"vtx.leaseapp.aaa":   map[string]any{"leaseAppKey": "vtx.leaseapp.aaa", "accountKey": "vtx.cafeaccount.xyz", "arrearsDueAt": "2026-09-11T00:00:00Z", "arrearsReminderSentAt": "2026-09-12T00:00:00Z"},

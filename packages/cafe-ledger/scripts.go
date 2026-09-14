@@ -153,9 +153,14 @@ ARREARS_MAX_PAGES = 10
 
 def arrears_entries(acct_key):
     # Every live entry posted to this account, as {postedAt, key, type,
-    # amountCents}, and whether the page budget ran out before the walk did. An
-    # entry missing any of those three fields is skipped rather than guessed at,
-    # exactly as backfill_balance skips it.
+    # amountCents, reversesKey}, and whether the page budget ran out before
+    # the walk did. reversesKey is the key of the charge a credit's own
+    # reverses link names (None for a payment, or for a refund whose link
+    # is tombstoned) — arrears_head's netting pre-pass reads it to retire
+    # that specific charge instead of aging it by plain FIFO order (mirrors
+    # cmd/cafe-app/ledger.go deriveStatement). An entry missing any of
+    # postedAt/type/amountCents is skipped rather than guessed at, exactly
+    # as backfill_balance skips it.
     entries = []
     cursor = None
     budget_exhausted = True
@@ -177,8 +182,26 @@ def arrears_entries(acct_key):
             tx_type = tx_entry.data.get("type")
             if tx_amount == None or tx_posted_at == None or tx_type == None:
                 continue
+            reverses_key = None
+            if tx_type == "credit":
+                # read-posture: (e) relation=reverses epoch=none -- a refund
+                # carries exactly one reverses link, written atomically by
+                # RefundCafeCharge and never added to afterward, so a limit
+                # of 1 (no cursor loop) is exact, never a keyspace scan. The
+                # limit is not optional: this runs once per CREDIT in the
+                # whole postedTo replay, so an unbounded page here is
+                # charged at the 256 default against the script's live-read
+                # budget, and a history with hundreds of credits blows it
+                # with a script error instead of the intended
+                # historyTooLong degrade this function's own doc comment
+                # promises.
+                reverses_page, _ = kv.Links(lk.sourceVertex, "reverses", "out", None, 1)
+                for lk2 in reverses_page:
+                    if not lk2.isDeleted:
+                        reverses_key = lk2.targetVertex
             entries.append({"postedAt": tx_posted_at, "key": lk.sourceVertex,
-                            "type": tx_type, "amountCents": tx_amount})
+                            "type": tx_type, "amountCents": tx_amount,
+                            "reversesKey": reverses_key})
         if cursor == None:
             budget_exhausted = False
             break
@@ -187,12 +210,22 @@ def arrears_entries(acct_key):
 def arrears_head(entries):
     # The FIFO the resident's own statement runs, reproduced exactly
     # (cmd/cafe-app/ledger.go deriveStatement + sortLedgerRows): entries in
-    # (postedAt, transactionKey) order, credits offsetting the OLDEST still-open
-    # debit first, and a credit with no open debit to apply to carrying its
-    # remainder forward as surplus that prepays whichever debits arrive next.
-    # The survivor at the front of the queue is the charge that has actually
-    # been unpaid longest — not merely the most recent one — which is the whole
-    # reason a reminder can name a date the resident recognises.
+    # (postedAt, transactionKey) order.
+    #
+    # A pre-pass nets every credit that names the charge it reverses
+    # (reversesKey) against that debit's own face amount — capped there,
+    # accumulated across however many reversing credits name the same
+    # debit — before the FIFO walk ever runs, so a refund of a NEWER charge
+    # does not pay off an OLDER, unrelated one. A debit fully retired this
+    # way never opens; a partially-retired one opens for the remainder.
+    #
+    # Everything else still FIFOs: credits offset the OLDEST still-open
+    # debit first, and a credit with no open debit to apply to (net of
+    # whatever it retired above) carries its remainder forward as surplus
+    # that prepays whichever debits arrive next. The survivor at the front
+    # of the queue is the charge that has actually been unpaid longest —
+    # not merely the most recent one — which is the whole reason a
+    # reminder can name a date the resident recognises.
     #
     # The sort key is the PAIR, not postedAt alone: postedAt is whole-second
     # canonical UTC (time.rfc3339_utc), so two charges rung up in the same
@@ -200,6 +233,26 @@ def arrears_head(entries):
     # the order total. Without it the op and the statement can disagree about
     # which of the two is the head, and so about the due date.
     rows = sorted(entries, key=lambda e: (e["postedAt"], e["key"]))
+
+    debit_amount = {}
+    for r in rows:
+        if r["type"] == "debit":
+            debit_amount[r["key"]] = r["amountCents"]
+    absorbed_total = {}
+    absorbed_by_credit = {}
+    for r in rows:
+        if r["type"] != "credit" or r["reversesKey"] == None:
+            continue
+        target = debit_amount.get(r["reversesKey"])
+        if target == None:
+            continue
+        remaining = target - absorbed_total.get(r["reversesKey"], 0)
+        absorbed = r["amountCents"]
+        if absorbed > remaining:
+            absorbed = remaining
+        absorbed_by_credit[r["key"]] = absorbed
+        absorbed_total[r["reversesKey"]] = absorbed_total.get(r["reversesKey"], 0) + absorbed
+
     open_debits = []
     surplus = 0
     balance_cents = 0
@@ -207,6 +260,9 @@ def arrears_head(entries):
         amount = r["amountCents"]
         if r["type"] == "debit":
             balance_cents += amount
+            amount -= absorbed_total.get(r["key"], 0)
+            if amount <= 0:
+                continue
             if surplus >= amount:
                 surplus -= amount
                 continue
@@ -215,7 +271,7 @@ def arrears_head(entries):
             open_debits.append({"postedAt": r["postedAt"], "remaining": amount})
         elif r["type"] == "credit":
             balance_cents -= amount
-            remaining = amount
+            remaining = amount - absorbed_by_credit.get(r["key"], 0)
             # Starlark has no while: each pass either zeroes the remainder or
             # retires one open debit, so len+1 passes is an exact bound, not a
             # budget that can run out mid-walk.

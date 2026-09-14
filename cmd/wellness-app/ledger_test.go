@@ -39,6 +39,219 @@ func TestReadAllOrFail_AllValuesOnSuccess(t *testing.T) {
 	}
 }
 
+func TestDeriveStatement_ZeroOrCreditBalanceHasNoDueDate(t *testing.T) {
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	if due, overdue, days := deriveStatement(nil, 0, now); due != "" || overdue || days != 0 {
+		t.Errorf("zero balance: want no due date, got due=%q overdue=%v days=%d", due, overdue, days)
+	}
+	if due, overdue, days := deriveStatement(nil, -500, now); due != "" || overdue || days != 0 {
+		t.Errorf("credit balance: want no due date, got due=%q overdue=%v days=%d", due, overdue, days)
+	}
+}
+
+func TestDeriveStatement_WithinGraceIsNotOverdue(t *testing.T) {
+	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "2026-08-20T00:00:00Z"}}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 4750, now)
+	if due != "2026-09-04T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-04T00:00:00Z (15 days after the charge)", due)
+	}
+	if overdue || days != 0 {
+		t.Errorf("want not overdue within grace, got overdue=%v days=%d", overdue, days)
+	}
+}
+
+func TestDeriveStatement_PastGraceIsOverdue(t *testing.T) {
+	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "2026-08-01T00:00:00Z"}}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 4750, now)
+	if due != "2026-08-16T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-08-16T00:00:00Z", due)
+	}
+	if !overdue || days != 14 {
+		t.Errorf("want overdue=true days=14 (Aug 16 -> Aug 29 + 1), got overdue=%v days=%d", overdue, days)
+	}
+}
+
+func TestDeriveStatement_CreditsAgeOffTheOldestDebitFirst(t *testing.T) {
+	// Two debits; a credit big enough to fully clear the older one leaves the
+	// NEWER debit's postedAt as the balance's true age — FIFO, not LIFO.
+	rows := []ledgerEntryRow{
+		{Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "debit", AmountCents: 500, PostedAt: "2026-08-20T00:00:00Z"},
+		{Type: "credit", AmountCents: 1000, PostedAt: "2026-08-21T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, _ := deriveStatement(rows, 500, now)
+	if due != "2026-09-04T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-04T00:00:00Z (aged from the surviving Aug 20 debit)", due)
+	}
+	if overdue {
+		t.Errorf("want not overdue (grace runs from the surviving debit, not the paid-off one)")
+	}
+}
+
+// TestDeriveStatement_PrepaidCreditCarriesForward proves a credit posted
+// before any debit exists has nothing to offset yet, so it must carry
+// forward and prepay the next debit rather than vanishing — the debit it
+// prepays must not become an aged, overdue balance later.
+func TestDeriveStatement_PrepaidCreditCarriesForward(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{Type: "credit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "debit", AmountCents: 1000, PostedAt: "2026-08-02T00:00:00Z"},
+		{Type: "debit", AmountCents: 1425, PostedAt: "2026-08-28T23:50:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1425, now)
+	if due != "2026-09-12T23:50:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-12T23:50:00Z (aged from the Aug 28 debit, not the prepaid Aug 2 one)", due)
+	}
+	if overdue || days != 0 {
+		t.Errorf("want not overdue days=0 (the Aug 1 credit prepaid the Aug 2 debit), got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_OverpaymentPrepaysLaterCharges proves a credit that
+// outruns the open-debit queue carries its unapplied surplus forward to
+// prepay whichever debits arrive next, in order — not just a credit that
+// arrives with no debit open yet.
+func TestDeriveStatement_OverpaymentPrepaysLaterCharges(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{Type: "debit", AmountCents: 1425, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "credit", AmountCents: 5000, PostedAt: "2026-08-02T00:00:00Z"},
+		{Type: "debit", AmountCents: 3000, PostedAt: "2026-08-03T00:00:00Z"},
+		{Type: "debit", AmountCents: 2000, PostedAt: "2026-08-28T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1425, now)
+	if due != "2026-09-12T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-12T00:00:00Z (the Aug 3 debit fully prepaid, 575 of the Aug 28 debit prepaid, oldest open debit is Aug 28)", due)
+	}
+	if overdue || days != 0 {
+		t.Errorf("want not overdue days=0, got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_PartialPrepayThenLaterCreditFIFO proves a surplus
+// carried from an early credit and a later credit clearing an old debit's
+// remainder compose correctly — the FIFO queue still ages off the true
+// oldest open debit after both.
+func TestDeriveStatement_PartialPrepayThenLaterCreditFIFO(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{Type: "credit", AmountCents: 500, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "debit", AmountCents: 1000, PostedAt: "2026-08-02T00:00:00Z"},
+		{Type: "debit", AmountCents: 700, PostedAt: "2026-08-20T00:00:00Z"},
+		{Type: "credit", AmountCents: 500, PostedAt: "2026-08-21T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 700, now)
+	if due != "2026-09-04T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-04T00:00:00Z (aged from Aug 20, the Aug 2 remainder cleared by the Aug 21 credit)", due)
+	}
+	if overdue || days != 0 {
+		t.Errorf("want not overdue days=0, got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_PartialRetirementLeavesTheHead proves a credit
+// SMALLER than the oldest open charge's remainder retires part of it and
+// the head does NOT move, so the balance still ages from that older charge.
+func TestDeriveStatement_PartialRetirementLeavesTheHead(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{Type: "debit", AmountCents: 700, PostedAt: "2026-08-20T00:00:00Z"},
+		{Type: "credit", AmountCents: 400, PostedAt: "2026-08-21T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1300, now)
+	if due != "2026-08-16T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-08-16T00:00:00Z (the Aug 1 charge is only PART paid, so it is still the head)", due)
+	}
+	if !overdue || days != 14 {
+		t.Errorf("want overdue=true days=14, got overdue=%v days=%d", overdue, days)
+	}
+}
+
+func TestDeriveStatement_MalformedPostedAtFailsClosed(t *testing.T) {
+	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "not-a-date"}}
+	due, overdue, days := deriveStatement(rows, 4750, time.Now())
+	if due != "" || overdue || days != 0 {
+		t.Errorf("malformed postedAt: want fail-closed (no due date), got due=%q overdue=%v days=%d", due, overdue, days)
+	}
+}
+
+// TestDeriveStatement_ReversalRetiresItsOwnCharge is the Alex Kim shape: a
+// refund names the NEWER of two charges (ReversesKey), so that charge is
+// retired directly and the OLDER, unrelated charge is what the balance ages
+// from — a plain FIFO would have paid off the older one instead and hidden
+// the true head.
+func TestDeriveStatement_ReversalRetiresItsOwnCharge(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "A", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "B", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-20T00:00:00Z"},
+		{TransactionKey: "C", Type: "credit", AmountCents: 1000, PostedAt: "2026-08-21T00:00:00Z", ReversesKey: "B"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1000, now)
+	if due != "2026-08-16T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-08-16T00:00:00Z (the reversal retires B directly, leaving A as the head)", due)
+	}
+	if !overdue || days != 14 {
+		t.Errorf("want overdue=true days=14, got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_ReversalExcessFallsThroughFIFO proves a reversing
+// credit's absorption is capped at the named debit's own face amount: the
+// UNABSORBED remainder still has to go somewhere, and it falls through the
+// ordinary FIFO+surplus path like any other credit — landing on whichever
+// debit is oldest and still open, NOT necessarily the one it just reversed.
+// A 1000/Aug 1 and B 500/Aug 20 are both open; R (1200/Aug 21) reverses B,
+// retiring B's 500 face amount outright and leaving a 700 excess that FIFOs
+// onto A, the oldest still-open debit — A absorbs 700 of its own 1000 and
+// stays open for the remaining 300. C (1000/Aug 22) then opens behind it.
+// The result — A survives as the head — only comes out of the netting
+// rule: under plain FIFO (R applied with no target) R's first 1000 would
+// have cleared A outright instead, leaving B as the head with a due date
+// three weeks later. Both due date AND daysOverdue are asserted so a
+// regression that silently reverts to FIFO cannot pass on the date alone.
+func TestDeriveStatement_ReversalExcessFallsThroughFIFO(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "A", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "B", Type: "debit", AmountCents: 500, PostedAt: "2026-08-20T00:00:00Z"},
+		{TransactionKey: "R", Type: "credit", AmountCents: 1200, PostedAt: "2026-08-21T00:00:00Z", ReversesKey: "B"},
+		{TransactionKey: "C", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-22T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, days := deriveStatement(rows, 1300, now)
+	if due != "2026-08-16T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-08-16T00:00:00Z (B is retired directly, R's 700 excess FIFOs onto A, A survives as the head; plain FIFO would give B/2026-09-04T00:00:00Z)", due)
+	}
+	if !overdue || days != 14 {
+		t.Errorf("want overdue=true days=14 (Aug 16 -> Aug 29 + 1), got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_ReversalOfUnknownTargetIsAnOrdinaryCredit proves a
+// ReversesKey that names no debit in this row set absorbs nothing — the
+// credit falls straight through to the ordinary FIFO walk, identical to a
+// credit carrying no ReversesKey at all.
+func TestDeriveStatement_ReversalOfUnknownTargetIsAnOrdinaryCredit(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "A", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "B", Type: "debit", AmountCents: 500, PostedAt: "2026-08-20T00:00:00Z"},
+		{TransactionKey: "C", Type: "credit", AmountCents: 1000, PostedAt: "2026-08-21T00:00:00Z", ReversesKey: "vtx.wellnesstransaction.NOTINTHISROWSET01"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	due, overdue, _ := deriveStatement(rows, 500, now)
+	if due != "2026-09-04T00:00:00Z" {
+		t.Errorf("dueDate = %q, want 2026-09-04T00:00:00Z (an unknown target FIFOs like an ordinary credit, clearing A and leaving B as the head)", due)
+	}
+	if overdue {
+		t.Errorf("want not overdue (grace runs from the surviving B debit)")
+	}
+}
+
 // seedLedgerAccount seeds one wellnessMemberAccounts row — keyed by the
 // identity itself (memberAccountsSpec, packages/wellness-ledger/lenses.go).
 func seedLedgerAccount(t *testing.T, s *server, identityKey, accountKey string) {
