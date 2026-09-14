@@ -586,7 +586,7 @@ stays metadata on the envelope; any change to what `ReleaseOrphanedBooking` read
 
 ### 9.8 Close — what shipped, and what the reviews found
 
-**Shipped** at `50d89f1` (branch `claude/exciting-clarke-6mc6ic`): substitution at plan time off the
+**Shipped** at `d1f6eb8` (branch `claude/exciting-clarke-6mc6ic`, rebased onto main as 6a289f8..d1f6eb8): substitution at plan time off the
 Actuator's own actor field; refusal on every non-hub authored value at dispatch, load and install, across
 all three authored surfaces; `ReleaseOrphanedBooking` **and** `PromoteWaitlistedBookings` declaring the
 confinement walk their scripts run, both drift-baseline rows retired; the contract's transitional note

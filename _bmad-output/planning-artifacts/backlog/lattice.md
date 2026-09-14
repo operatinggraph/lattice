@@ -140,7 +140,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-09-14 · `50d89f1` · [Weaver] the `{actor}` hub substitutes the dispatching identity, refused off-hub at all three points ([design](../../implementation-artifacts/descriptor-declared-enumerations-design.md) §9)
+- 2026-09-14 · `d1f6eb8` · [Weaver] the `{actor}` hub substitutes the dispatching identity, refused off-hub at all three points ([design](../../implementation-artifacts/descriptor-declared-enumerations-design.md) §9)
 - 2026-09-13 · `06dea92` · [Processor/cafe-domain] batched-read primitive refuted; a Charge resolves its tab's unit once — `leaseapp_unit` memo ([design](../../implementation-artifacts/kv-links-listing-leg-collapse-design.md))
 - 2026-09-13 · `8f202dd` · [CI] each job keeps its own Go build cache — one shared setup-go key had left twelve jobs recompiling the tree cold every run
 - 2026-09-13 · `77feaa3` · [Refractor/Processor] `capabilityEphemeral` reads the recorded lapse — the last `$now` leaves the lens corpus, censused ([design](../../implementation-artifacts/capability-ephemeral-recorded-expiry-design.md))
