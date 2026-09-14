@@ -2167,8 +2167,48 @@ func (e *Engine) releaseAdvancedProposalLeg(ctx context.Context, targetID, entit
 // escalation seam takes it instead. Both leg boundaries land here: a goal gap's
 // completed catalog leg, and an Augur plan's recorded leg, whose next entry the
 // same planGap call resolves from the row's advanced dispatchLeg.
+//
+// THE ADVANCE CARRIES ITS OWN "CANNOT ACT" GATES, and that is the whole reason
+// the release/advance pair is safe to write at a seam that sits above them. A
+// RELEASE is a RETIRE: the fact that a pinned leg's declared effects hold in the
+// current row is a fact about a leg that has already RUN, true whatever the row
+// is in the middle of, so it is owed to every caller and stands above every
+// gate. An ADVANCE is an ACT — a real op fired at a real entity — and so it owes
+// every gate lane 1 fires under. Holding them HERE rather than at each release
+// site is what makes an ungated route impossible to write: this function exists
+// for exactly one purpose, and every caller reaches the dispatch through it.
+//
+// The row must be VIOLATING. Lane 1 dispatches only violating rows (handleRow's
+// L1 gate), and a released leg standing over a row that no longer violates has
+// nothing left to remediate — the goal the chain serves is met, or the lens has
+// stopped saying otherwise.
+//
+// The gap must not be SUPPRESSED. inflight_<g> says a call is outstanding, and a
+// fresh episode fired at the vendor while the previous call stands is the one
+// thing that column exists to prevent. The count is asked as ZERO because every
+// release deletes the dispatch-count document: the budget term would be
+// measuring a chain that no longer exists, and what remains to decide the
+// advance is the inflight term the row alone carries.
+//
+// Nothing is stranded by withholding on either gate. A release removes the mark
+// and the count, so neither sweep leg enumerates the gap any more — but both
+// `violating` and inflight_<g> are columns of THIS row, so the only thing that
+// can lift either withhold is a write to the row, and that write is a lane-1
+// delivery arriving at a gap holding no mark and no pin, which is a genuinely
+// fresh episode's dispatch with the chain already advanced.
 func (e *Engine) advanceReleasedLeg(ctx context.Context, target *Target, targetID, entityID, entityKey, col string,
 	ga GapAction, row map[string]any, rowRevision uint64) substrate.Decision {
+
+	if !e.boolColumn(targetID, entityID, row, "violating") {
+		e.logger.Debug("weaver: released leg's advance withheld; the row no longer violates",
+			"targetId", targetID, "entityId", entityID, "gap", col)
+		return substrate.Ack
+	}
+	if suppressed, _, _ := e.gapSuppressedWithCount(targetID, entityID, row, col, ga.Action, 0); suppressed {
+		e.logger.Debug("weaver: released leg's advance withheld; the gap has a call in flight",
+			"targetId", targetID, "entityId", entityID, "gap", col)
+		return substrate.Ack
+	}
 
 	// The half of a boundary that releaseCompletedLeg cannot claim: the release
 	// is owed to every caller, the advance only to the ones whose gap may be

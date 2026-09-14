@@ -1156,9 +1156,11 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// that satisfied this leg's effect may be the last one for a while).
 	// Dispatch the next leg as a genuinely fresh episode via the SAME
 	// CAS-create path lane-1 uses (fireEpisode's found=false branch)
-	// instead of merely releasing. The one state where releasing and returning
-	// is nevertheless safe is the suppressed one just below, which has a
-	// guaranteed row write of its own.
+	// instead of merely releasing. The states where releasing and returning is
+	// nevertheless the right answer — a row that no longer violates, a gap with a
+	// call in flight — are the ADVANCE's own gates and are withheld inside
+	// advanceReleasedLeg, each behind a row column whose next write is a lane-1
+	// delivery that dispatches the advanced chain itself.
 	//
 	// The same boundary for an Augur PLAN, and here for the same reason the goal
 	// release is here: the sweep enumerates marks, so an expired mark standing
@@ -1167,27 +1169,6 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// plan reaches its next leg; released and returned, it would wait on a row
 	// write that the flip has already made.
 	if e.releaseAdvancedProposalLeg(ctx, targetID, entityID, gapColumn, ga, rec, row, markRev) {
-		if suppressed, _, _ := e.gapSuppressedWithCount(targetID, entityID, row, gapColumn, ga.Action, 0); suppressed {
-			// The ADVANCE is a dispatch, and the gap has a call in flight —
-			// exactly the state inflight_<g> exists to keep a fresh episode out
-			// of, and an advance taken here would jump the suppression gate from
-			// ABOVE. The goal branch below withholds its advance for this reason
-			// and a proposal leg is no different: the next leg's remediation is a
-			// real op against a real entity.
-			//
-			// The RELEASE stands regardless — a release is not a dispatch, and
-			// the leg it cleared was recorded by the flip whatever the row has in
-			// flight now. Only the advance is the gate's business.
-			//
-			// The count is asked as ZERO because the release has just deleted the
-			// document, and nothing is stranded by holding: inflight_<g> is a
-			// column of THIS row, so only a row write can lift the suppression,
-			// and that write is a lane-1 delivery arriving at a gap with no mark
-			// — a genuinely fresh episode, leg advanced.
-			e.logger.Debug("weaver sweep: proposal leg released with its advance withheld; the gap has a call in flight",
-				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
-			return
-		}
 		if fired := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision); fired != substrate.Ack {
 			e.logger.Warn("weaver sweep: proposal leg-advance dispatch did not complete cleanly; will retry",
 				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
@@ -1199,37 +1180,6 @@ func (s *sweeper) reclaim(ctx context.Context, key string, markRev uint64, rec *
 	// carries its displaced leg on the escalation's own mark, so its boundary
 	// stays testable from this leg too.
 	if e.releaseCompletedLeg(ctx, targetID, entityID, gapColumn, ga, legOf(ga, rec, count), row, markRev, countRev) {
-		if suppressed, _, _ := e.gapSuppressedWithCount(targetID, entityID, row, gapColumn, ga.Action, 0); suppressed {
-			// The ADVANCE is a dispatch, and the gap has a call in flight. The
-			// suppression gate below is the load-bearing skip for exactly that
-			// state — the mark-lease expiry → reclaim is the re-dispatch path a
-			// long-pending external call is actually exposed to — and an advance
-			// taken here jumps it from ABOVE: a fresh episode fired at the vendor
-			// while the previous call is still outstanding, which is the one
-			// thing inflight_<g> exists to prevent.
-			//
-			// The RELEASE above stands regardless. A release is not a dispatch:
-			// the gate governs only what may be STARTED (releaseSuppressedLeg's
-			// doc, Contract #10 §10.3), while a pinned leg whose declared effects
-			// hold in the row is a fact about a leg that has already run. Only
-			// the advance is the gate's business, so only the advance is
-			// conditional.
-			//
-			// The count is asked as ZERO because the release has just deleted the
-			// document: the budget term would be measuring a chain that no longer
-			// exists, and what remains to decide the advance is the inflight term
-			// the row alone carries.
-			//
-			// Nothing is stranded by holding here. The release removed the mark
-			// and the count, so neither sweep leg enumerates this gap any more —
-			// but inflight_<g> is a column of THIS row, so the only thing that can
-			// lift the suppression is a write to the row, and that write is a
-			// lane-1 delivery. It arrives at a gap holding no mark and no pin,
-			// which is a genuinely fresh episode's dispatch, chain advanced.
-			e.logger.Debug("weaver sweep: goal leg released with its advance withheld; the gap has a call in flight",
-				"targetId", targetID, "entityId", entityID, "gap", gapColumn)
-			return
-		}
 		if fired := e.advanceReleasedLeg(ctx, target, targetID, entityID, entityKey, gapColumn, ga, row, rowRevision); fired != substrate.Ack {
 			// Either the fresh mark's CAS-create itself failed (truly
 			// markless — the next sweep pass retries the same release) or
