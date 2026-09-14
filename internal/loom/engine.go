@@ -233,6 +233,13 @@ type Engine struct {
 	// through. It is conn for every production engine; a test replaces it to
 	// observe the requests that one pass makes.
 	failedIndex failedIndexStore
+	// clock is the wall clock the deadline probe's evidence-horizon comparison
+	// reads — the "is what I just read still inside its own lifetime?" test in
+	// probeRejectedOrLost. It is injectable because that horizon is a day long
+	// and the substrate, not the test, stamps the epoch it is measured from, so
+	// there is no other way to stand a test on the far side of it. Nil means
+	// time.Now — see Engine.now, which every caller goes through.
+	clock func() time.Time
 
 	mu sync.Mutex
 	// domains is the last-applied desired per-domain consumer set, diffed on
@@ -281,6 +288,16 @@ func NewEngine(conn *substrate.Conn, cfg Config) *Engine {
 	}
 	e.source = newPatternSource(conn, cfg.CoreKVBucket, cfg.Instance, cfg.Logger)
 	return e
+}
+
+// now reads the engine's clock. It tolerates a zero-value clock so an Engine
+// assembled field-by-field — which several of this package's tests do — reads
+// the wall clock without having to know this seam exists.
+func (e *Engine) now() time.Time {
+	if e.clock != nil {
+		return e.clock()
+	}
+	return time.Now()
 }
 
 // Start runs the engine until ctx is cancelled. It (1) starts the fixed trigger
@@ -1303,6 +1320,63 @@ func (e *Engine) probeFail(ctx context.Context, inst *Instance, oldToken, reason
 	return err
 }
 
+// probeRejectedOrLost is the single verdict every deadline probe reaches when
+// it has found no tracker and no outbox record: the op was rejected or lost —
+// UNLESS the absences it just read are older than the evidence that would have
+// contradicted them.
+//
+// Absence is evidence only inside the evidence's lifetime. The tracker the
+// probe asks about lives opstatus.TrackerTTL, so past that age "no tracker" no
+// longer separates an op that never committed from one whose receipt has simply
+// aged out. The age is the pending step's own: token.<pendingToken> is written
+// in the step's transition batch and refreshed by nothing but a redrive, so its
+// timestamp is when this step began waiting (tokenEpoch carries the argument).
+//
+// The three arms:
+//
+//   - No token pointer at all — an invariant break for a running instance, so
+//     it fails the instance like a missing pattern pin does; a break is
+//     evidence in itself.
+//   - Epoch at or past the horizon — INCONCLUSIVE. The probe refuses the
+//     verdict: it warns naming both readings the evidence can no longer tell
+//     apart, records the refusal on the record, and Acks. The instance stays
+//     running on its token, so a human task still open can still complete, and
+//     an operator has the alert and the redrive verb. This is the §10.6
+//     "distinguishes BY EVIDENCE" clause honoured past the evidence's life,
+//     and it is alerted, never a silent wedge.
+//   - Otherwise — fail, exactly as before, at the revision the probe read.
+//
+// The return is nil (⇒ Ack) on the inconclusive arm, never a Nak: a Nak asks
+// for a redelivery that would read the same absences and reach the same refusal.
+func (e *Engine) probeRejectedOrLost(ctx context.Context, inst *Instance, reason string, expectedRevision uint64) error {
+	token := inst.PendingToken
+	epoch, err := e.state.tokenEpoch(ctx, token)
+	if err != nil {
+		if errors.Is(err, errTokenPointerMissing) {
+			return e.probeFail(ctx, inst, token, "token pointer missing", expectedRevision)
+		}
+		return err
+	}
+	age := e.now().Sub(epoch)
+	if age < opstatus.TrackerTTL {
+		return e.probeFail(ctx, inst, token, reason, expectedRevision)
+	}
+
+	e.logger.Warn("loom: deadline verdict inconclusive; the op's tracker outlived nothing and the instance is left running",
+		"instanceId", inst.InstanceID, "cursor", inst.Cursor, "pendingToken", token,
+		"stepAge", age, "evidenceHorizon", opstatus.TrackerTTL, "wouldHaveFailedWith", reason,
+		"readings", "the op may have committed and its tracker aged out, or it was genuinely rejected — "+
+			"no runtime can tell the two apart once the tracker is gone",
+		"operatorAction", "lattice loom redrive")
+	nerr := e.state.noteDeadlineProbe(ctx, inst, reason, e.now(), expectedRevision)
+	if nerr != nil && substrate.IsRevisionConflict(nerr) {
+		e.logger.Info("loom: instance moved on under the probe; inconclusive note dropped",
+			"instanceId", inst.InstanceID, "expectedRevision", expectedRevision, "reason", reason)
+		return nil
+	}
+	return nerr
+}
+
 // userTaskTokenPrefix is the key prefix of a userTask write-ahead token (the
 // taskKey, vtx.task.<id>). A token with this prefix is an unbounded human wait,
 // distinguishing it from a systemOp token (a bare requestId).
@@ -1484,8 +1558,9 @@ func (e *Engine) onDeadline(ctx context.Context, instanceID string) error {
 		return e.state.rearmDeadline(ctx, instanceID, e.cfg.StepTimeout)
 	}
 
-	// Tracker absent and the op was relayed (no outbox record) → rejected/lost.
-	return e.probeFail(ctx, inst, token,
+	// Tracker absent and the op was relayed (no outbox record) → rejected/lost,
+	// if the absences are still young enough to mean that.
+	return e.probeRejectedOrLost(ctx, inst,
 		fmt.Sprintf("step %d deadline exceeded; op rejected or lost", inst.Cursor), revision)
 }
 
@@ -1538,8 +1613,9 @@ func (e *Engine) onUserTaskDeadline(ctx context.Context, inst *Instance, revisio
 
 	// No tracker, no outbox record → the CreateTask was rejected or lost. Fail
 	// the instance rather than park the token forever (§10.6: never a silent
-	// wedge).
-	return e.probeFail(ctx, inst, inst.PendingToken,
+	// wedge) — unless the absences are older than the tracker's own lifetime,
+	// in which case they say nothing and the probe refuses the verdict.
+	return e.probeRejectedOrLost(ctx, inst,
 		fmt.Sprintf("step %d CreateTask rejected", inst.Cursor), revision)
 }
 
@@ -1608,8 +1684,9 @@ func (e *Engine) onExternalTaskDeadline(ctx context.Context, inst *Instance, rev
 	}
 
 	// Tracker absent and the instanceOp was relayed (no outbox record) →
-	// rejected/lost. Fail on the pending handle token.
-	return e.probeFail(ctx, inst, token,
+	// rejected/lost. Fail on the pending handle token, unless the absences are
+	// older than the tracker's own lifetime and so decide nothing.
+	return e.probeRejectedOrLost(ctx, inst,
 		fmt.Sprintf("step %d instanceOp rejected", inst.Cursor), revision)
 }
 

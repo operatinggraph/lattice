@@ -20,6 +20,12 @@ type InstanceSummary struct {
 	Cursor     int    `json:"cursor"`
 	Status     string `json:"status"`
 	RetryCount int    `json:"retryCount"`
+	// DeadlineProbe carries the record's inconclusive-deadline-verdict note
+	// when one stands: a running instance whose step deadline fired with
+	// evidence too old to decide on. It is the operator's whole signal that a
+	// redrive may be wanted, so an omitted note means the record has none, not
+	// that the summary declined to look.
+	DeadlineProbe *probeNote `json:"deadlineProbe,omitempty"`
 }
 
 // ConsumerStatus is the operator-facing snapshot of one managed consumer: its
@@ -121,12 +127,13 @@ func (e *Engine) ListInstances(ctx context.Context) ([]InstanceSummary, error) {
 	out := make([]InstanceSummary, 0, len(insts))
 	for _, inst := range insts {
 		out = append(out, InstanceSummary{
-			InstanceID: inst.InstanceID,
-			PatternRef: inst.PatternRef,
-			SubjectKey: inst.SubjectKey,
-			Cursor:     inst.Cursor,
-			Status:     inst.Status,
-			RetryCount: inst.RetryCount,
+			InstanceID:    inst.InstanceID,
+			PatternRef:    inst.PatternRef,
+			SubjectKey:    inst.SubjectKey,
+			Cursor:        inst.Cursor,
+			Status:        inst.Status,
+			RetryCount:    inst.RetryCount,
+			DeadlineProbe: inst.DeadlineProbe,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].InstanceID < out[j].InstanceID })
@@ -186,8 +193,9 @@ func (e *Engine) inspectResolved(ctx context.Context, inst *Instance) (InstanceD
 		PatternRef: inst.PatternRef,
 		SubjectKey: inst.SubjectKey,
 		Cursor:     inst.Cursor,
-		Status:     inst.Status,
-		RetryCount: inst.RetryCount,
+		Status:        inst.Status,
+		RetryCount:    inst.RetryCount,
+		DeadlineProbe: inst.DeadlineProbe,
 	}
 	if inst.Status != StatusRunning {
 		// Terminal: the pin is gone by design and there is no current step.
@@ -215,12 +223,13 @@ func (e *Engine) inspectResolved(ctx context.Context, inst *Instance) (InstanceD
 				rsummary := summary
 				if reread != nil {
 					rsummary = InstanceSummary{
-						InstanceID: reread.InstanceID,
-						PatternRef: reread.PatternRef,
-						SubjectKey: reread.SubjectKey,
-						Cursor:     reread.Cursor,
-						Status:     reread.Status,
-						RetryCount: reread.RetryCount,
+						InstanceID:    reread.InstanceID,
+						PatternRef:    reread.PatternRef,
+						SubjectKey:    reread.SubjectKey,
+						Cursor:        reread.Cursor,
+						Status:        reread.Status,
+						RetryCount:    reread.RetryCount,
+						DeadlineProbe: reread.DeadlineProbe,
 					}
 				} else {
 					rsummary.Status = ""

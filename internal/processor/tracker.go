@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/operatinggraph/lattice/internal/opstatus"
 	"github.com/operatinggraph/lattice/internal/substrate"
 )
 
@@ -15,8 +16,11 @@ func TrackerKey(requestID string) string {
 }
 
 // TrackerTTL is the per-key TTL applied to every tracker write (Contract
-// #4 §4.3). 24h is the architecture-locked default.
-const TrackerTTL = 24 * time.Hour
+// #4 §4.3). 24h is the architecture-locked default. The value is owned by
+// internal/opstatus — the leaf that hosts the RPC projecting these trackers
+// and that every reader of tracker-absence compares against — so the writer
+// and its readers cannot drift apart.
+const TrackerTTL = opstatus.TrackerTTL
 
 // Tracker is the Contract #4 §4.1 idempotency-tracker entry written at step 8.
 // Shape: `class`, `isDeleted`, `requestId`, `committed`, `observedAt` plus the

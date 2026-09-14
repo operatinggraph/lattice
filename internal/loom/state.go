@@ -149,6 +149,27 @@ type Instance struct {
 	PendingToken string `json:"pendingToken"`
 	Status       string `json:"status"`
 	RetryCount   int    `json:"retryCount"`
+	// DeadlineProbe records that a deadline probe reached its rejected-or-lost
+	// branch with evidence older than its own lifetime and REFUSED to decide
+	// (noteDeadlineProbe). It is an operator-facing fact, never an input to a
+	// verdict: nothing reads it to branch, the probe re-derives its answer from
+	// the token epoch every time. Nil is the ordinary state — a note is written
+	// only by the inconclusive verdict and is cleared the moment the instance
+	// moves (a new token, a terminal status, a redrive). Additive JSON: a
+	// binary that does not know the field decodes the record and drops the note
+	// on its next write.
+	DeadlineProbe *probeNote `json:"deadlineProbe,omitempty"`
+}
+
+// probeNote is the durable trace of one inconclusive deadline verdict. At is
+// the instant the probe refused, RFC3339 UTC (substrate.FormatTimestamp, the
+// same encoding deadlineMark.SetAt uses); Reason is the verdict the probe would
+// have written had its evidence still been current, verbatim — so the operator
+// reads the same sentence a fail would have carried, under the header that it
+// was not asserted.
+type probeNote struct {
+	At     string `json:"at"`
+	Reason string `json:"reason"`
 }
 
 // tokenPointer is the thin reverse index value stored under token.<pendingToken>
@@ -604,6 +625,17 @@ const (
 // trips ago, and an advance landing in that window must refuse the write rather
 // than flip an instance that has already moved to its next step.
 func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, oldToken string, tokenMode tokenWriteMode, outbox *outboxRecord, deadlineTTL time.Duration, expectedRevision uint64) error {
+	if newToken != "" || inst.Status != StatusRunning {
+		// An inconclusive deadline verdict is a statement about ONE parked
+		// step's evidence, so it dies with that step: a new token is a new
+		// step, and a terminal status is a decided instance. Cleared inside the
+		// batch that moves the instance, exactly as the failed index is settled
+		// below — a derived fact settled by a second write could outlive the
+		// state it describes. A transition that neither writes a token nor
+		// leaves running (a re-arm-shaped rewrite) leaves the note standing,
+		// because the step it describes is still the parked one.
+		inst.DeadlineProbe = nil
+	}
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
@@ -741,6 +773,11 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 // the guard must not depend on it, so the pin is written as an ordinary put,
 // guarded by the same batch's CAS.
 func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern, expectedRevision uint64) error {
+	// A redrive is the operator's answer to whatever the last probe said, so
+	// any inconclusive deadline verdict on the record is spent. Cleared in the
+	// same batch that flips the status, for the reason transition's clear
+	// carries: a derived fact settles with the state it describes.
+	inst.DeadlineProbe = nil
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
@@ -792,6 +829,65 @@ func (s *stateStore) deadlineArmed(ctx context.Context, instanceID string) (bool
 		return false, fmt.Errorf("loom: read deadline %q: %w", instanceID, err)
 	}
 	return true, nil
+}
+
+// errTokenPointerMissing reports that token.<pendingToken> is absent for an
+// instance whose record still names that token as pending. The pointer is
+// written in the SAME transition batch that records the token and is removed
+// only by the batch that replaces or clears it, so for a live running instance
+// absence is an invariant break — never a "not written yet" case. Callers match
+// on this sentinel to turn the break into an operator-visible failed terminal
+// (§10.6: never a silent wedge) rather than reading it as an answer; any other
+// pointer-read error stays a retryable error.
+var errTokenPointerMissing = errors.New("token pointer missing for pending token (pointer is written atomically with the instance)")
+
+// tokenEpoch returns the instant the pending step's token pointer was written —
+// the epoch of the step itself, which is what bounds the lifetime of the
+// evidence the deadline probe reads about that step.
+//
+// The pointer is the right clock precisely because nothing refreshes it inside
+// a step: it is written create-only in the step's own transition batch and
+// re-put only by a redrive (which re-submits, so a fresh tracker follows), while
+// re-arms touch deadline.<instanceId> alone and any probe note is written on the
+// instance record. The instance record's own timestamp cannot serve — the note
+// write would refresh it, and the next redelivery would then read a fresh epoch.
+//
+// A missing pointer is errTokenPointerMissing (wrapped), not a zero time: the
+// caller must not read an invariant break as "infinitely old".
+func (s *stateStore) tokenEpoch(ctx context.Context, token string) (time.Time, error) {
+	entry, err := s.conn.KVGet(ctx, s.bucket, tokenKey(token))
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return time.Time{}, fmt.Errorf("loom: token %q: %w", token, errTokenPointerMissing)
+		}
+		return time.Time{}, fmt.Errorf("loom: read token epoch %q: %w", token, err)
+	}
+	return entry.Timestamp, nil
+}
+
+// noteDeadlineProbe records an inconclusive deadline verdict on the instance
+// record and nothing else: a single-key compare-and-set put at the revision the
+// probe read the instance at. A refused condition means the instance moved
+// under the probe, and the caller treats that as the answer (the same drop
+// probeFail takes), not as an error.
+//
+// It is deliberately NOT a transition. transition with no deadline TTL purges
+// deadline.<instanceId>, and that key is already expired on this path — an
+// unconditioned purge of an absent key is accepted by the server rather than
+// reported as not-found, so it would MINT a marker on an empty subject and wake
+// the probe again on evidence of its own making. That is the hazard deleteToken
+// documents, and the one shape this verdict must never create. For the same
+// reason it is not an AtomicBatch: the record is the only thing that changes.
+func (s *stateStore) noteDeadlineProbe(ctx context.Context, inst *Instance, reason string, at time.Time, expectedRevision uint64) error {
+	inst.DeadlineProbe = &probeNote{At: substrate.FormatTimestamp(at), Reason: reason}
+	body, err := json.Marshal(inst)
+	if err != nil {
+		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
+	}
+	if _, err := s.conn.KVUpdate(ctx, s.bucket, instanceKey(inst.InstanceID), body, expectedRevision); err != nil {
+		return fmt.Errorf("loom: note deadline probe %q: %w", inst.InstanceID, err)
+	}
+	return nil
 }
 
 // rearmDeadline re-arms deadline.<instanceId> with a fresh TTL outside a
