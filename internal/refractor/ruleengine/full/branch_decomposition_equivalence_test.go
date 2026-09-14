@@ -1100,7 +1100,7 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 	}
 }
 
-// generatedProducerDifferentialSpecs are the three generated read-grant
+// generatedProducerDifferentialSpecs are the four generated read-grant
 // producers as branchSpecs, so the census's coverage claim reaches them through
 // the same enumeration the hand-authored lenses do.
 func generatedProducerDifferentialSpecs(t *testing.T, actorKey string) []branchSpec {
@@ -1209,7 +1209,7 @@ func TestBranchDecomposition_EveryDecomposingCorpusLensReachesADifferential(t *t
 		"capabilityEphemeral", "capabilityRoles", "capabilityServiceAccess",
 		"clinicNoShowSettlement", "clinicPatientsRead",
 		"edgeIdentity", "edgeManifestProviderReadGrants", "edgeManifestReadGrants",
-		"edgeManifestStaffReadGrants", "identityAnchors", "identityErasureResidue",
+		"edgeManifestStaffReadGrants", "edgeManifestTaskReadGrants", "identityAnchors", "identityErasureResidue",
 		"landlordLeaseApplicationsRead", "leaseApplicationComplete", "leaseApplicationsRead",
 		"leaseExpiry", "leaseRentSettlement", "myTasks", "objectAttachments", "opCatalog",
 		"renewalComplete", "wellnessWaitlistPromotion",

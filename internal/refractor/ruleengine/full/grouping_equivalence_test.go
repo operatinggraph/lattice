@@ -347,20 +347,24 @@ func executeBothWays(t *testing.T, spec, actorKey string, adjKV, coreKV *substra
 }
 
 // TestGroupingReduction_GeneratedProducersProjectIdenticalRows is §8.1: the
-// three real generated producers, over a real corpus, project byte-identical
-// rows with the reduction on and off.
+// generated producers whose staging arms a reduction — the ones with more than
+// one declared Walk — project byte-identical rows with the reduction on and
+// off, over a real corpus. The one-Walk task domain has nothing for this
+// differential to prove (armedReadGrantProducerNames excludes it;
+// executeBothWays's own guard states why).
 func TestGroupingReduction_GeneratedProducersProjectIdenticalRows(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	specs := generatedReadGrantProducers(t)
+	armed := armedReadGrantProducerNames(t, specs)
 
 	// The corpus the staging primitive's own equivalence proof already builds —
 	// same fixture, same shape, so this reduction is measured against the
 	// evidence base that fire established.
 	t.Run("staging-primitive corpus", func(t *testing.T) {
 		corpus := seedEdgeManifestReadGrantCorpus(t)
-		for _, name := range sortedNames(namesOf(specs)) {
+		for _, name := range armed {
 			rows := executeBothWays(t, specs[name], corpus.actorKey, corpus.adjKV, corpus.coreKV)
 			require.Lenf(t, rows, 1, "%s is an actorAggregate producer: one row per actor", name)
 			if name == "edgeManifestReadGrants" {
@@ -370,13 +374,13 @@ func TestGroupingReduction_GeneratedProducersProjectIdenticalRows(t *testing.T) 
 		}
 	})
 
-	// A corpus that grants in ALL THREE domains, so no producer's differential
-	// is a comparison of two empty slices.
+	// A corpus that grants in every domain, so no producer's differential is a
+	// comparison of two empty slices.
 	t.Run("three-domain corpus", func(t *testing.T) {
 		adjKV, coreKV := startExecKVs(t)
 		reg := newFixtureRegistry()
 		actorKey := seedReadGrantCorpus(t, reg, adjKV, coreKV, fullThreeDomainShape("three_"))
-		for _, name := range sortedNames(namesOf(specs)) {
+		for _, name := range armed {
 			rows := executeBothWays(t, specs[name], actorKey, adjKV, coreKV)
 			require.NotEmptyf(t, canonicalAnchorSet(t, rows),
 				"%s granted nothing over the three-domain corpus — the differential would prove nothing", name)
@@ -395,7 +399,7 @@ func TestGroupingReduction_GeneratedProducersProjectIdenticalRows(t *testing.T) 
 			seedReadGrantCorpus(t, reg, adjKV, coreKV,
 				randomCorpusShape(fmt.Sprintf("multi%d_", i), rand.New(rand.NewSource(int64(i)+7))))
 		}
-		for _, name := range sortedNames(namesOf(specs)) {
+		for _, name := range armed {
 			rows := executeBothWays(t, unanchoredProducer(t, specs[name]), "", adjKV, coreKV)
 			require.Lenf(t, rows, actors,
 				"%s must project one row per actor — a merged grouping key shows up here as a short row set", name)
@@ -413,13 +417,14 @@ func TestGroupingReduction_GeneratedProducersProjectIdenticalRows(t *testing.T) 
 // the same on/off comparison over independently randomized actor-rooted
 // corpora, each with its own shared prefixes, multi-parent containedIn arms,
 // zero-hop walks and randomly-empty branches. Seeding is deterministic, so a
-// failure reproduces exactly.
+// failure reproduces exactly. Only the armed producers run the differential —
+// see armedReadGrantProducerNames.
 func TestGroupingReduction_RandomizedCorporaDifferential(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	specs := generatedReadGrantProducers(t)
-	names := sortedNames(namesOf(specs))
+	names := armedReadGrantProducerNames(t, specs)
 
 	adjKV, coreKV := startExecKVs(t)
 	reg := newFixtureRegistry()

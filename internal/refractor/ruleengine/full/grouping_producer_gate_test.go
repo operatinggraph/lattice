@@ -99,6 +99,23 @@ func countGroupingClauses(q *Query) int {
 	return n
 }
 
+// armedReadGrantProducerNames is generatedReadGrantProducers filtered to the
+// ones whose staging actually sheds an accumulator. A domain with a single
+// Walk stages one clause with nothing carried before it to drop, so forcing
+// its reduction off and comparing runs one code path against itself —
+// executeBothWays's own guard refuses that differential outright, which is
+// why the equivalence tests below only run it over the armed population.
+func armedReadGrantProducerNames(t *testing.T, specs map[string]string) []string {
+	t.Helper()
+	names := []string{}
+	for _, name := range sortedNames(namesOf(specs)) {
+		if countRedundant(mustParseQuery(t, specs[name])) > 0 {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // TestGeneratedReadGrantProducers_GroupOnTheActorAlone is the gate. Each
 // generated producer's staging clauses must group on `identity` and nothing
 // else, and stage k must shed all k accumulators it carries — so the total
@@ -114,7 +131,7 @@ func TestGeneratedReadGrantProducers_GroupOnTheActorAlone(t *testing.T) {
 				name, spec)
 
 			stages := countGroupingClauses(q)
-			require.GreaterOrEqual(t, stages, 3, "%s should stage one WITH per declared walk", name)
+			require.GreaterOrEqual(t, stages, 1, "%s should stage one WITH per declared walk", name)
 			require.Equalf(t, stages*(stages-1)/2, countRedundant(q),
 				"stage k of %s carries k accumulators and every one of them must be shed", name)
 		})
