@@ -618,10 +618,34 @@ func TestEngineStart_RunsTheConversionPass(t *testing.T) {
 	}
 }
 
+// joinedPassLogPrefixes are the log messages of the two start-time passes Start
+// WAITS FOR before returning — the legacy-tombstone conversion pass and the
+// failed-index backfill (engine.go's sweepDone / backfillDone joins). A record
+// carrying one of these after Start has returned is the thing under test: a pass
+// still running behind its caller's back.
+//
+// Start's promise is about those two passes and no more. The heartbeat is
+// launched as its own goroutine and is deliberately NOT joined, so a heartbeat
+// line landing after Start returns says nothing about them — and it is reachable
+// on exactly this path, because cancelling the engine context fails whatever put
+// was in flight and that failure logs. Matching on the passes' own messages is
+// therefore what pins the claim; treating ANY late record as the signal asserts a
+// property Start never had.
+//
+// Only the CONVERSION half is exercised by the fixture below, which seeds 400
+// markers for that pass and no work for the backfill — so the backfill finishes
+// before the cancellation lands, and dropping its join leaves this test green
+// (checked, not assumed). The second prefix is listed because Start's claim
+// covers both passes, not because this test pins the second one.
+var joinedPassLogPrefixes = []string{
+	"loom: legacy tombstone conversion pass",
+	"loom: failed-index backfill",
+}
+
 // recordingHandler is a slog.Handler that closes started when the engine
-// announces itself — the point past which Start has launched the conversion
-// pass — and records whether anything was logged after sealed was set, which
-// is the probe for "Start returned while the pass was still running".
+// announces itself — the point past which Start has launched both start-time
+// passes — and records whether either pass logged after sealed was set, which is
+// the probe for "Start returned while a pass it joins was still running".
 type recordingHandler struct {
 	inner   slog.Handler
 	started chan struct{}
@@ -634,7 +658,12 @@ func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return tr
 
 func (h *recordingHandler) Handle(ctx context.Context, r slog.Record) error {
 	if h.sealed.Load() {
-		h.after.Store(true)
+		for _, p := range joinedPassLogPrefixes {
+			if strings.HasPrefix(r.Message, p) {
+				h.after.Store(true)
+				break
+			}
+		}
 	}
 	if r.Message == "loom engine started" {
 		h.once.Do(func() { close(h.started) })
@@ -702,10 +731,11 @@ func TestEngineStart_JoinsTheConversionPassBeforeReturning(t *testing.T) {
 	}
 	rec.sealed.Store(true)
 
-	// Nothing the engine owns may log from here on. The pass logs its summary
-	// unconditionally, so a goroutine still running would be seen.
+	// Neither joined pass may log from here on. Each logs its summary
+	// unconditionally — on the cancelled path too — so one still running would be
+	// seen (joinedPassLogPrefixes carries why the match is by message).
 	require.Never(t, func() bool { return rec.after.Load() }, 2*time.Second, 100*time.Millisecond,
-		"the conversion pass logged after Start returned, so Start did not join it")
+		"a start-time pass logged after Start returned, so Start did not join it")
 }
 
 // --- the deadline family's guard --------------------------------------------
