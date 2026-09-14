@@ -243,6 +243,14 @@ RETURN
 //     let the planner assign a signing task the op then refuses. A TIMESTAMP,
 //     not a boolean, because the planner's `present` treats a false bool as
 //     present (planner/state.go absent()).
+//   - open is the renewal's status gate AND the leaseapp's term being live:
+//     (status = 'open') AND (tenancyEndedAt = null). EndTenancy does not walk
+//     renewals — the tenancyEnd lens's open-renewal hold is a dispatch gate
+//     only — so an operator can end a term under an open cycle; without the
+//     conjunct that cycle stays violating forever with a signRenewal leg the
+//     op refuses TenancyEnded, and a bgcheck lapse re-dispatches a vendor
+//     check on a former tenant. An ended term's open renewal projects nothing
+//     open; CancelRenewal is the landlord's way to close the cycle itself.
 //   - leaseApp is the renewed application's key — the submitProfile leg's
 //     assignTask target (SetApplicantProfile acts on the leaseapp, not the
 //     renewal; the row.clauseKey precedent in semantic-contracts). Never null
@@ -309,6 +317,7 @@ WITH
   rn.data.status                          AS status,
   app.key                                 AS leaseAppKey,
   (app.key <> null AND app.isDeleted <> True) AS leaseappAlive,
+  app.tenancy.data.endedAt                AS tenancyEndedAt,
   id.key                                  AS tenant,
   min(DISTINCT landlord.key)              AS landlordMin,
   (app.applicationSignals.data.hasGuarantor = True) AS hasGuarantor,
@@ -326,7 +335,7 @@ RETURN
   tenant,
   landlordMin                             AS landlord,
   leaseappAlive,
-  (status = 'open')                       AS open,
+  ((status = 'open') AND (tenancyEndedAt = null)) AS open,
   hasGuarantor,
   signalsSubmittedAt,
   bgcheckValidUntil,
@@ -335,13 +344,13 @@ RETURN
   signedAt,
   ((bgInflight > 0) AND (bgcheckValidUntil = null)) AS inflight_renewalComplete,
   6                                       AS maxretries_renewalComplete,
-  ((status = 'open') AND leaseappAlive AND NOT (
+  ((status = 'open') AND (tenancyEndedAt = null) AND leaseappAlive AND NOT (
      (bgcheckValidUntil <> null) AND
      ((hasGuarantor = False) OR (guarantorVerifiedAt <> null)) AND
      (termsSetAt <> null) AND
      (signedAt <> null)
    )) AS missing_renewalComplete,
-  ((status = 'open') AND leaseappAlive AND NOT (
+  ((status = 'open') AND (tenancyEndedAt = null) AND leaseappAlive AND NOT (
      (bgcheckValidUntil <> null) AND
      ((hasGuarantor = False) OR (guarantorVerifiedAt <> null)) AND
      (termsSetAt <> null) AND

@@ -1111,8 +1111,8 @@ func TestCreateLeaseApplication_AppliesToUnit_LinkSentenceValid(t *testing.T) {
 
 	tdoc := readDoc(t, ctx, conn, appKey+".terms")
 	tdata, _ := tdoc["data"].(map[string]any)
-	if got, _ := tdata["moveInDate"].(string); got != "2026-08-01" {
-		t.Fatalf("terms.moveInDate = %q, want 2026-08-01", got)
+	if got, _ := tdata["moveInDate"].(string); got != "2026-08-01T00:00:00Z" {
+		t.Fatalf("terms.moveInDate = %q, want 2026-08-01T00:00:00Z (a bare date is stored as the midnight-UTC instant)", got)
 	}
 	appDoc := readDoc(t, ctx, conn, appKey)
 	if d, _ := appDoc["data"].(map[string]any); len(d) != 0 {
@@ -1293,8 +1293,8 @@ func TestBackfillLeaseTerms_AlreadyHasRequestedRent_NoOp(t *testing.T) {
 		t.Fatalf("terms.requestedRent = %v, want unchanged 1900 (already-present no-op)", tdata["requestedRent"])
 	}
 	moveIn, _ := tdata["moveInDate"].(string)
-	if moveIn != "2026-08-01" {
-		t.Fatalf("terms.moveInDate = %q, want unchanged 2026-08-01 (no-op must not touch other fields)", moveIn)
+	if moveIn != "2026-08-01T00:00:00Z" {
+		t.Fatalf("terms.moveInDate = %q, want unchanged 2026-08-01T00:00:00Z (no-op must not touch other fields)", moveIn)
 	}
 }
 
@@ -2565,9 +2565,9 @@ func createApplicationForUnit(t *testing.T, ctx context.Context, conn *substrate
 // TestDecideLeaseApplication_TenancyDerivedFromTerms_OverridesListing: the
 // applicant's own .terms disagree with the unit's .listing on every field —
 // the FIRST approve stamps .tenancy from .terms, never silently clamped to
-// the listing's availableFrom (the verified live bug: every listing is
-// available-from 2026-08-23, so an applicant asking to move in 2026-09-15 was
-// billed from 08-23).
+// the listing's availableFrom: a listing available from 08-23 and an
+// applicant asking for 09-15 signs a lease that starts, and bills, from
+// 09-15.
 func TestDecideLeaseApplication_TenancyDerivedFromTerms_OverridesListing(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
@@ -2624,8 +2624,8 @@ func TestDecideLeaseApplication_TenancyDerivedFromTerms_BareMoveInDate(t *testin
 
 // TestDecideLeaseApplication_TenancyNoTerms_FallsBackToListing: a bare
 // applicant+unit application (no moveInDate, so no .terms aspect at all) falls
-// back to the unit's own .listing wholesale — the pre-existing behavior, still
-// correct once .terms is the first-choice source.
+// back to the unit's own .listing wholesale — the listing is the term's
+// source wherever .terms carries nothing.
 func TestDecideLeaseApplication_TenancyNoTerms_FallsBackToListing(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
@@ -3039,5 +3039,145 @@ func TestWithdrawLeaseApplication_ApprovedIsAnExecutedLease(t *testing.T) {
 	withdraw(t, ctx, conn, cp, cons, "wdDeclined01", declinedApp, declinedUnit, declined, processor.OutcomeAccepted)
 	if keyExists(t, ctx, conn, declinedApp) {
 		t.Fatalf("a declined application withdraws like an undecided one")
+	}
+}
+
+// submitCreateWithTerms submits CreateLeaseApplication with an arbitrary
+// terms payload against an already-seeded unit and returns the outcome + the
+// application key it would mint — the shape the InvalidTerms vectors below
+// need, where the interesting result is the refusal.
+func submitCreateWithTerms(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, applicantKey, unitKey string, terms map[string]any) (processor.MessageOutcome, *processor.OperationReply, string) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	appID := nanoIDFromRequestID(reqID)
+	payload := map[string]any{"applicant": applicantKey, "unit": unitKey}
+	for k, v := range terms {
+		payload[k] = v
+	}
+	pb, _ := json.Marshal(payload)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseApplication",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(pb),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey), unitKey + ".listing"},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	return outcome, reply, "vtx.leaseapp." + appID
+}
+
+// TestCreateLeaseApplication_MalformedTermsRefused: the terms are what the
+// first approve signs the lease on, so they are refused where they are
+// minted — a zero month count, a fractional one, a non-positive rent offer,
+// and a move-in date that parses as neither RFC3339 nor a bare YYYY-MM-DD.
+// Each refusal mints nothing.
+func TestCreateLeaseApplication_MalformedTermsRefused(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "create-badterms")
+
+	applicantKey := seedApplicant(t, ctx, conn, "HHbadtrapp1ntHJKMNPQ")
+	unitKey := seedUnitWithListing(t, ctx, conn, "HHbadtrunt1ntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050)
+
+	for _, tc := range []struct {
+		label string
+		terms map[string]any
+		want  string
+	}{
+		{"badTermZero01", map[string]any{"moveInDate": "2026-09-15", "leaseTermMonths": 0}, "InvalidTerms"},
+		{"badTermNeg001", map[string]any{"moveInDate": "2026-09-15", "leaseTermMonths": -6}, "InvalidTerms"},
+		{"badTermFrac01", map[string]any{"moveInDate": "2026-09-15", "leaseTermMonths": 2.5}, "InvalidTerms"},
+		{"badRentNeg001", map[string]any{"moveInDate": "2026-09-15", "leaseTermMonths": 12, "requestedRent": -1}, "InvalidTerms"},
+		{"badRentZero01", map[string]any{"moveInDate": "2026-09-15", "leaseTermMonths": 12, "requestedRent": 0}, "InvalidTerms"},
+		{"badDateShape1", map[string]any{"moveInDate": "2026-9-15", "leaseTermMonths": 12}, ""},
+	} {
+		outcome, reply, appKey := submitCreateWithTerms(t, ctx, conn, cp, cons, tc.label, applicantKey, unitKey, tc.terms)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: outcome = %v, want Rejected", tc.label, outcome)
+		}
+		if reply.Error == nil || (tc.want != "" && !strings.Contains(reply.Error.Message, tc.want)) {
+			t.Fatalf("%s: want a %q refusal, got %+v", tc.label, tc.want, reply.Error)
+		}
+		if keyExists(t, ctx, conn, appKey) {
+			t.Fatalf("%s: a refused application must mint nothing", tc.label)
+		}
+	}
+}
+
+// TestCreateLeaseApplication_NormalizesBareMoveInDate: a bare YYYY-MM-DD is
+// accepted and STORED as the RFC3339 instant it reads as (midnight UTC), so
+// .terms always carries the shape the DDL states; a whole-number term is
+// stored as an integer.
+func TestCreateLeaseApplication_NormalizesBareMoveInDate(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "create-baredate")
+
+	applicantKey := seedApplicant(t, ctx, conn, "JJnormapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListing(t, ctx, conn, "JJnormunt1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050)
+	outcome, reply, appKey := submitCreateWithTerms(t, ctx, conn, cp, cons, "normDate0001", applicantKey, unitKey,
+		map[string]any{"moveInDate": "2026-09-15", "leaseTermMonths": 6, "requestedRent": 1900})
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply %+v)", outcome, reply)
+	}
+	tdata, _ := readDoc(t, ctx, conn, appKey+".terms")["data"].(map[string]any)
+	if got, _ := tdata["moveInDate"].(string); got != "2026-09-15T00:00:00Z" {
+		t.Fatalf("terms.moveInDate = %q, want the normalized 2026-09-15T00:00:00Z", got)
+	}
+	if got, _ := tdata["leaseTermMonths"].(float64); got != 6 {
+		t.Fatalf("terms.leaseTermMonths = %v, want 6", tdata["leaseTermMonths"])
+	}
+	if got, _ := tdata["requestedRent"].(float64); got != 1900 {
+		t.Fatalf("terms.requestedRent = %v, want 1900", tdata["requestedRent"])
+	}
+}
+
+// TestDecideLeaseApplication_StoredZeroTermRefused: the approve re-tests the
+// stored term it is about to sign on — a .terms carrying leaseTermMonths 0
+// (seeded directly, the shape a pre-validation writer could have left) is
+// refused InvalidTerms rather than stamped as a lease that ends when it
+// starts, and a non-positive stored requestedRent falls through to the
+// listing's rent instead of reaching rentAmount.
+func TestDecideLeaseApplication_StoredZeroTermRefused(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-zeroterm")
+
+	applicantKey := seedApplicant(t, ctx, conn, "KKzeroapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListing(t, ctx, conn, "KKzerount1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050)
+	appKey := createApplicationForUnit(t, ctx, conn, cp, cons, applicantKey, unitKey)
+	signLease(t, ctx, conn, cp, cons, "decZeroSign1", appKey, "2026-06-26T09:30:00Z")
+
+	stageTerms := func(term any, rent any) {
+		doc := map[string]any{"class": "terms", "isDeleted": false, "vertexKey": appKey, "localName": "terms",
+			"data": map[string]any{"moveInDate": "2026-09-15T00:00:00Z", "leaseTermMonths": term, "requestedRent": rent}}
+		b, _ := json.Marshal(doc)
+		if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, appKey+".terms", b); err != nil {
+			t.Fatalf("stage .terms: %v", err)
+		}
+	}
+	stageTerms(0, 1900)
+	decide(t, ctx, conn, cp, cons, "decZeroApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeRejected)
+	if keyExists(t, ctx, conn, appKey+".tenancy") {
+		t.Fatalf("a refused approve must stamp no .tenancy")
+	}
+	if keyExists(t, ctx, conn, appKey+".decision") {
+		t.Fatalf("a refused approve must record no .decision")
+	}
+
+	stageTerms(6, -1)
+	decide(t, ctx, conn, cp, cons, "decZeroApp2", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+	tdata, _ := readDoc(t, ctx, conn, appKey+".tenancy")["data"].(map[string]any)
+	if got, _ := tdata["leaseEnd"].(string); got != "2027-03-15T00:00:00Z" {
+		t.Fatalf("tenancy.leaseEnd = %q, want 2027-03-15T00:00:00Z", got)
+	}
+	if got, _ := tdata["rentAmount"].(float64); got != 2050 {
+		t.Fatalf("tenancy.rentAmount = %v, want the listing's 2050 — a non-positive offer is not an agreed rent", tdata["rentAmount"])
 	}
 }

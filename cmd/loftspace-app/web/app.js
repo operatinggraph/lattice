@@ -1560,7 +1560,7 @@ function renderCard(row) {
   const meta = document.createElement("div");
   meta.className = "meta";
   const m = [];
-  if (L.availableFrom) m.push("available " + fmtDate(L.availableFrom));
+  if (L.availableFrom) m.push("available " + fmtUTCDate(L.availableFrom));
   if (typeof L.leaseTermMonths === "number") m.push(`${L.leaseTermMonths}-mo term`);
   meta.textContent = m.join("  ·  ");
 
@@ -1966,6 +1966,17 @@ function pendingLeaseTerms(row) {
   return { moveIn, months, offeredRent, listingRent };
 }
 
+// fmtMoney renders a rent-shaped amount in its own currency — a bare `$` for
+// USD (the common case), `<amount> <CUR>` otherwise. Every rent line
+// (fmtRentLine, the recorded-lease line, the landlord's approval hint) goes
+// through this one helper so a non-USD unit never silently renders behind a
+// hardcoded dollar sign. Returns null for a non-number so callers can
+// compose it straight into a template literal.
+function fmtMoney(amount, currency) {
+  if (typeof amount !== "number") return null;
+  return currency && currency !== "USD" ? `${amount.toLocaleString()} ${currency}` : `$${amount.toLocaleString()}`;
+}
+
 // fmtRentLine renders a pendingLeaseTerms rent pair as the offered rent when
 // there is one, else the listing's — with a "(listing asks $X)" courtesy when
 // the two differ, so an applicant sees at a glance that their ask was above or
@@ -1974,12 +1985,9 @@ function pendingLeaseTerms(row) {
 function fmtRentLine(offeredRent, listingRent, currency) {
   const primary = offeredRent !== null ? offeredRent : listingRent;
   if (primary === null) return null;
-  const cur = currency && currency !== "USD" ? ` ${currency}` : "";
-  let rent = currency && currency !== "USD"
-    ? `${primary.toLocaleString()}${cur} / month`
-    : `$${primary.toLocaleString()} / month`;
+  let rent = `${fmtMoney(primary, currency)} / month`;
   if (offeredRent !== null && listingRent !== null && offeredRent !== listingRent) {
-    rent += ` (listing asks $${listingRent.toLocaleString()})`;
+    rent += ` (listing asks ${fmtMoney(listingRent, currency)})`;
   }
   return rent;
 }
@@ -1992,8 +2000,10 @@ function fmtRentLine(offeredRent, listingRent, currency) {
 // applicant reviews the real terms rather than the listing's defaults. A term
 // row renders only when its value is present; if nothing beyond the address is
 // known the panel is omitted entirely (returns null) so it never shows an empty
-// shell. Every `.tenancy` stamp renders by its UTC calendar date (fmtUTCDate);
-// the pre-approval ask keeps fmtDate.
+// shell. Every `.tenancy` stamp AND the pre-approval moveIn (termsMoveInDate /
+// unitAvailableFrom — both midnight-UTC instants, the apply form's own
+// normalization) render by their UTC calendar date (fmtUTCDate), never
+// fmtDate: a west-of-Greenwich reader would otherwise see the day before.
 function renderLeaseTermsPanel(row) {
   const rows = [];
   const addTerm = (label, value) => {
@@ -2013,7 +2023,7 @@ function renderLeaseTermsPanel(row) {
     // Recorded — states the fact the lease was signed on, not the ask.
     addTerm("Lease", `${fmtUTCDate(row.tenancyLeaseStart)} → ${row.tenancyLeaseEnd ? fmtUTCDate(row.tenancyLeaseEnd) : "—"}`);
     if (row.tenancyTermStart) addTerm("Current term", "from " + fmtUTCDate(row.tenancyTermStart));
-    if (typeof row.tenancyRentAmount === "number") addTerm("Rent", `$${row.tenancyRentAmount.toLocaleString()} / month`);
+    if (typeof row.tenancyRentAmount === "number") addTerm("Rent", `${fmtMoney(row.tenancyRentAmount, row.unitCurrency)} / month`);
     head = row.tenancyEndedAt ? "Lease ended " + fmtUTCDate(row.tenancyEndedAt) : "Lease terms";
   } else {
     // Pre-approval — states what the signature commits to.
@@ -2021,9 +2031,9 @@ function renderLeaseTermsPanel(row) {
     const rentLine = fmtRentLine(terms.offeredRent, terms.listingRent, row.unitCurrency);
     if (rentLine) addTerm("Rent", rentLine);
     if (terms.moveIn !== null && terms.months !== null) {
-      addTerm("Lease", `from ${fmtDate(terms.moveIn)}, ${terms.months} months`);
+      addTerm("Lease", `from ${fmtUTCDate(terms.moveIn)}, ${terms.months} months`);
     } else if (terms.moveIn !== null) {
-      addTerm(row.termsMoveInDate ? "Requested move-in" : "Available from", fmtDate(terms.moveIn));
+      addTerm(row.termsMoveInDate ? "Requested move-in" : "Available from", fmtUTCDate(terms.moveIn));
     } else if (terms.months !== null) {
       addTerm("Lease term", `${terms.months} months`);
     }
@@ -2963,7 +2973,7 @@ function renderRenewalCard(row, landlord) {
     bits.push("renewed the term ending " + fmtUTCDate(row.cycleEnd));
     if (row.leaseEnd) bits.push("new term ends " + fmtUTCDate(row.leaseEnd));
   } else if (row.cycleEnd) {
-    bits.push("term ends " + fmtDate(row.cycleEnd));
+    bits.push("term ends " + fmtUTCDate(row.cycleEnd));
   }
   if (row.termsSetAt) bits.push((row.rentAmount != null ? "$" + row.rentAmount + "/mo" : "terms set") + (row.termMonths != null ? " · " + row.termMonths + " mo" : ""));
   if (row.hasGuarantor === true) bits.push(row.guarantorVerifiedAt ? "guarantor verified " + fmtDate(row.guarantorVerifiedAt) : "guarantor pending");
@@ -3788,6 +3798,7 @@ const DISPOSITION = {
   qualified: { label: "Qualified — awaiting decision", cls: "qualified" },
   declined: { label: "Declined", cls: "declined" },
   in_review: { label: "In review", cls: "review" },
+  ended: { label: "Lease ended", cls: "leased" },
 };
 
 // Ranking for the landlord by-unit view: a unit's competing applicants are ordered
@@ -3795,7 +3806,7 @@ const DISPOSITION = {
 // NanoID order. Pure FE over the already-projected disposition + qualification signals
 // (no new lens/data). Tier by status (the resolved winner up top, declined to the
 // bottom), then by a qualification score, then leaseAppKey for a stable order.
-const STATUS_RANK = { leased: 0, approved: 1, qualified: 2, in_review: 3, declined: 4 };
+const STATUS_RANK = { leased: 0, approved: 1, qualified: 2, in_review: 3, declined: 4, ended: 5 };
 
 function qualScore(a) {
   let s = 0;
@@ -4043,6 +4054,20 @@ function renderRLSUnitCard(u) {
   return card;
 }
 
+// decisionOffered reports whether the landlord decide surface should render
+// Approve/Decline for a row: qualified, the unit not already leased to a
+// different applicant, and the application itself not already decided —
+// approved, declined, OR its recorded tenancy already ended. A decided row
+// never re-offers the decision: DecisionFinal refuses a different value once
+// .decision is set, and re-offering Approve on an ended-and-relisted tenant
+// (the unit is available again, so unitLeased alone no longer hides it) would
+// only ever earn a silent same-value no-op. Pure and DOM-free so it is
+// goja-testable.
+function decisionOffered(a, unit) {
+  const unitLeased = (unit && unit.unitStatus) === "leased";
+  return !!(a && a.qualified && !unitLeased && !a.tenancyEndedAt && !a.landlordApproved && !a.landlordDeclined);
+}
+
 // renderRLSApplicantRow renders one RLS-scoped application: the applicant's
 // NAME and CONTACT come from the protected model's Secure-Lens columns
 // (applicantName/applicantEmail/applicantPhone — decrypted at projection into
@@ -4053,7 +4078,8 @@ function renderRLSUnitCard(u) {
 // This row is the landlord's decision surface: `a.qualified` is the lens's own
 // readiness clone (ssn + fresh bgcheck + payment + signature, mirroring the
 // convergence lens's applicantApproved), so Approve/Decline gate on it entirely
-// within the RLS-enforced read.
+// within the RLS-enforced read (see decisionOffered for the full gate,
+// including the already-decided cases).
 function renderRLSApplicantRow(a, unit) {
   const row = document.createElement("div");
   row.className = "applicant";
@@ -4092,7 +4118,7 @@ function renderRLSApplicantRow(a, unit) {
     const lease = document.createElement("div");
     lease.className = "applicant-note";
     const end = a.tenancyLeaseEnd ? fmtUTCDate(a.tenancyLeaseEnd) : "—";
-    const rent = typeof a.tenancyRentAmount === "number" ? ` · $${a.tenancyRentAmount.toLocaleString()}/mo` : "";
+    const rent = typeof a.tenancyRentAmount === "number" ? ` · ${fmtMoney(a.tenancyRentAmount, a.unitCurrency)}/mo` : "";
     lease.textContent = `Lease ${fmtUTCDate(a.tenancyLeaseStart)} → ${end}${rent}`;
     row.append(lease);
   }
@@ -4100,19 +4126,24 @@ function renderRLSApplicantRow(a, unit) {
   row.append(renderQualification(a));
 
   const unitLeased = (unit && unit.unitStatus) === "leased";
-  if (a.qualified && !unitLeased) {
+  if (decisionOffered(a, unit)) {
     // States the terms an approval would sign — the same chain
     // DecideLeaseApplication itself walks (pendingLeaseTerms), so the decision
-    // is never blind to what it commits to.
+    // is never blind to what it commits to. Renders even when neither the
+    // applicant's own .terms nor the unit's .listing carry anything to name
+    // (a bare application to a unit that has since lost its listing) — the
+    // hint states the fallback outright rather than silently vanishing.
     const terms = pendingLeaseTerms(a);
+    const ask = document.createElement("p");
+    ask.className = "hint";
     if (terms.moveIn !== null && terms.months !== null) {
       const primaryRent = terms.offeredRent !== null ? terms.offeredRent : terms.listingRent;
-      const rentPart = primaryRent !== null ? ` at $${primaryRent.toLocaleString()}/month` : "";
-      const ask = document.createElement("p");
-      ask.className = "hint";
-      ask.textContent = `Approving signs a lease from ${fmtDate(terms.moveIn)}, ${terms.months} months${rentPart}.`;
-      row.append(ask);
+      const rentPart = primaryRent !== null ? ` at ${fmtMoney(primaryRent, a.unitCurrency)}/month` : "";
+      ask.textContent = `Approving signs a lease from ${fmtUTCDate(terms.moveIn)}, ${terms.months} months${rentPart}.`;
+    } else {
+      ask.textContent = "Approving signs a lease on the listing's terms.";
     }
+    row.append(ask);
     const actions = document.createElement("div");
     actions.className = "applicant-actions";
     const approve = document.createElement("button");
@@ -4282,7 +4313,8 @@ function renderSearchApplicationRow(a) {
   unit.className = "applicant-name";
   unit.textContent = a.unitAddress || (a.unitKey ? "Unit " + shortKey(a.unitKey) : "—");
   info.append(unit);
-  if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
+  if (a.tenancyEndedAt) info.append(dispChip("Lease ended " + fmtUTCDate(a.tenancyEndedAt), "leased"));
+  else if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
   else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
   else info.append(dispChip("Awaiting decision", "review"));
   if (a.signedAt) {
@@ -4331,19 +4363,23 @@ function renderUnits() {
   $("#units-summary").textContent = `${n} unit${n === 1 ? "" : "s"}`;
 }
 
-// unitTenancyEnded reports whether NO application in a unit's application
-// group is holding a live tenancy — an approved application whose recorded
-// .tenancy has not (yet) ended. A unit with no applications, or whose approved
-// applications have all ended, or that has no approved application at all,
-// reports true; a single approved-and-not-ended application reports false,
-// even alongside others that have ended. Pure and DOM-free so it is
-// goja-testable: the gate on the landlord unit card's manual Relist button for
-// a `leased` unit (§2.2's double-approval edge case, or a unit whose automatic
-// relist has not landed yet) — a leased unit still holding a live tenancy must
-// never offer it (missing_listingLeased would flip it straight back).
-function unitTenancyEnded(apps) {
+// relistOffered gates the landlord unit card's manual Relist button for a
+// `leased` unit: true when SOME approved application on it has ended (§2.2's
+// double-approval tie-break — Winston's adjudication: A ended, B
+// approved-and-live-but-never-leased must still offer the manual Relist, since
+// nothing else ever flips this unit's listing status once A's own
+// missing_relist conjunct is held by B's still-live tenancy), OR when NO
+// approved application on it is still live (nothing to protect — a plain
+// manual relist, e.g. for a unit whose automatic relist has not landed yet).
+// It is false only when every approved application on the unit is live and
+// none has ever ended — the one case a manual relist would be flipped
+// straight back by missing_listingLeased, so no button renders at all. Pure
+// and DOM-free so it is goja-testable.
+function relistOffered(apps) {
   const list = apps || [];
-  return !list.some((a) => a && a.landlordApproved && !a.tenancyEndedAt);
+  const anyEnded = list.some((a) => a && a.landlordApproved && a.tenancyEndedAt);
+  const anyLive = list.some((a) => a && a.landlordApproved && !a.tenancyEndedAt);
+  return anyEnded || !anyLive;
 }
 
 function renderUnitCard(u) {
@@ -4407,17 +4443,24 @@ function renderUnitCard(u) {
     relistBtn.title = "Put this unit back on the market";
     relistBtn.addEventListener("click", () => setListingStatus(u, "available"));
     meta.append(relistBtn);
-  } else if (status === "leased" && unitTenancyEnded(u.applications)) {
-    // The manual fallback for §2.2's double-approval edge case, or for a unit
-    // whose automatic relist has not landed yet — every approved application
-    // here has ended (or none ever carried a tenancy), so this cannot undo a
-    // still-live lease. A leased unit that DOES hold a live tenancy renders no
-    // status button at all: a manual relist there would be flipped straight
-    // back by missing_listingLeased.
+  } else if (status === "leased" && relistOffered(u.applications)) {
+    // The manual Relist fallback. §2.2's double-approval tie-break: when
+    // another approved application on this unit still holds a live lease,
+    // relisting only frees the ENDED tenant's slot — the live approval's own
+    // missing_listingLeased re-fires the moment the unit is available again
+    // and re-takes it automatically, so the button says so. With no live
+    // approval left at all, this is instead the plain manual-relist path for
+    // a unit whose automatic relist has not landed yet. A `leased` unit whose
+    // approved applications are ALL live (none ever ended) renders no status
+    // button here — a manual relist there would be flipped straight back by
+    // missing_listingLeased.
+    const stillLive = (u.applications || []).some((a) => a && a.landlordApproved && !a.tenancyEndedAt);
     const relistBtn = document.createElement("button");
     relistBtn.className = "ghost";
     relistBtn.textContent = "Relist";
-    relistBtn.title = "Put this unit back on the market";
+    relistBtn.title = stillLive
+      ? "Frees the unit; an approved applicant with a live lease re-takes it automatically."
+      : "Put this unit back on the market";
     relistBtn.addEventListener("click", () => setListingStatus(u, "available"));
     meta.append(relistBtn);
   }

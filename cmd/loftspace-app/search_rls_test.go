@@ -90,6 +90,13 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	insRow("app-L", subLarry, "vtx.leaseapp.app-L", subAlice, subLarry, "vtx.unit.unit-L", "1 Main St", "Springfield", "Alice Applicant", subLarry)
 	insRow("app-N", subLinda, "vtx.leaseapp.app-N", subBob, subLinda, "vtx.unit.unit-N", "2 Oak Ave", "Shelbyville", "Bob Tenant", subLinda)
 
+	// app-L's tenancy has ended — the round-trip proof that searchLandlordColumns
+	// (this file's own column pin, separate from selectLandlordApplicationsSQL's)
+	// carries tenancy_ended_at, so renderSearchApplicationRow can read it off a
+	// search hit the same way renderRLSApplicantRow does off the normal by-unit read.
+	exec(`UPDATE read_landlord_lease_applications SET tenancy_ended_at = $1 WHERE app_id = 'app-L'`,
+		"2026-09-15T00:00:00Z")
+
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subLarry)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -120,6 +127,10 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 		}
 		if len(res.People[0].Applications) != 1 || res.People[0].Applications[0].EntityKey != "vtx.leaseapp.app-L" {
 			t.Fatalf("expected Alice's app-L application, got %+v", res.People[0].Applications)
+		}
+		app := res.People[0].Applications[0]
+		if app.TenancyEndedAt == nil || *app.TenancyEndedAt != "2026-09-15T00:00:00Z" {
+			t.Errorf("app-L tenancyEndedAt = %v, want 2026-09-15T00:00:00Z (searchLandlordColumns must carry it)", app.TenancyEndedAt)
 		}
 	})
 

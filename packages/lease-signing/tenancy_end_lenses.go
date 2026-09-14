@@ -105,16 +105,23 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 // unit reads 'leased' again — and this row still carries endedAt, so without
 // the conjunct missing_relist re-opens on the OLD row and Weaver flips the
 // NEW tenant's unit back to available, forever, on every redelivery. The
-// conjunct counts OTHER approved applications on the same unit whose .tenancy
-// exists (leaseStart <> null — an approved row with no tenancy was decided
-// before .tenancy shipped and holds nothing) and is not ended; one such row
-// means the unit is somebody else's now and this row is terminal. The
+// conjunct counts OTHER approved applications on the same unit that are not
+// ended — including an approved application carrying NO .tenancy at all
+// (null = null is true): that row's own missing_listingLeased conjoins only
+// (tenancyEndedAt = null), so it claims the unit the moment it reads
+// 'available', and excluding it here would set the two targets against each
+// other (this row relists, that row re-leases, this row relists…). Whatever
+// leaseApplicationComplete would lease the unit to holds the relist. One such
+// row means the unit is somebody else's now and this row is terminal. The
 // `other.key <> app.key` term is what keeps the anchor's own tenancy out of
 // its own count: the OPTIONAL MATCH back across appliesToUnit binds the anchor
 // itself as one of the unit's applications. A landlord double-approval (two
 // approved, un-ended tenancies on one unit — design §2.2) reads as
 // otherLiveTenancyCount = 1 on each and holds the automatic relist; the
-// landlord's manual Relist breaks the tie.
+// landlord's manual Relist breaks the tie. The converse is also a rule, not a
+// race: a unit an operator hand-marks 'leased' while every approved
+// application on it has ended is flipped back to 'available' on every
+// evaluation — 'withdrawn' is the status that holds a unit off-platform.
 //
 // A null unitKey (the appliesToUnit target tombstoned — the OPTIONAL MATCH
 // drops it and unitKey / unitStatus both project null) must never open
@@ -152,7 +159,7 @@ WITH
   u.listing.data.status            AS unitStatus,
   app.freshnessExpiry.data.byTarget.%[1]s AS lapsedAt,
   count(DISTINCT CASE WHEN rn.data.status = 'open' AND rn.data.cycleEnd = app.tenancy.data.leaseEnd THEN rn.key ELSE null END) AS openRenewalCount,
-  count(DISTINCT CASE WHEN other.key <> app.key AND other.decision.data.value = 'approved' AND other.tenancy.data.leaseStart <> null AND other.tenancy.data.endedAt = null THEN other.key ELSE null END) AS otherLiveTenancyCount
+  count(DISTINCT CASE WHEN other.key <> app.key AND other.decision.data.value = 'approved' AND other.tenancy.data.endedAt = null THEN other.key ELSE null END) AS otherLiveTenancyCount
 RETURN
   entityKey AS actorKey,
   entityKey,

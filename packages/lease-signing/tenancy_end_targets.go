@@ -34,7 +34,9 @@ func tenancyEndTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: TenancyEndTarget,
 		Description: "A signed, landlord-approved lease whose term reaches its end with no open renewal is recorded as " +
-			"ended, and an ended lease's unit is relisted as available unless another tenant now holds it.",
+			"ended, and an ended lease's unit is relisted as available unless another approved application now holds it. " +
+			"A unit marked leased by hand while every approved application on it has ended is flipped back to available " +
+			"on every evaluation; withdrawn is the off-platform hold.",
 		LensRef: TenancyEndTarget,
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_tenancyEnded": {

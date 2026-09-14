@@ -54,19 +54,24 @@ import (
 // payment, and a signed lease — a plain bool the lens always projects (never
 // null), mirroring the trusted console's applicantApproved.
 type protectedLandlordRow struct {
-	EntityKey          string   `json:"entityKey"`
-	Applicant          string   `json:"applicant"`
-	ApplicantName      *string  `json:"applicantName"`
-	ApplicantEmail     *string  `json:"applicantEmail"`
-	ApplicantPhone     *string  `json:"applicantPhone"`
-	LandlordKey        string   `json:"landlordKey"`
-	UnitKey            *string  `json:"unitKey"`
-	UnitAddress        *string  `json:"unitAddress"`
-	UnitCity           *string  `json:"unitCity"`
-	UnitRegion         *string  `json:"unitRegion"`
-	UnitRent           *float64 `json:"unitRent"`
-	UnitCurrency       *string  `json:"unitCurrency"`
-	UnitStatus         *string  `json:"unitStatus"`
+	EntityKey      string   `json:"entityKey"`
+	Applicant      string   `json:"applicant"`
+	ApplicantName  *string  `json:"applicantName"`
+	ApplicantEmail *string  `json:"applicantEmail"`
+	ApplicantPhone *string  `json:"applicantPhone"`
+	LandlordKey    string   `json:"landlordKey"`
+	UnitKey        *string  `json:"unitKey"`
+	UnitAddress    *string  `json:"unitAddress"`
+	UnitCity       *string  `json:"unitCity"`
+	UnitRegion     *string  `json:"unitRegion"`
+	UnitRent       *float64 `json:"unitRent"`
+	UnitCurrency   *string  `json:"unitCurrency"`
+	UnitStatus     *string  `json:"unitStatus"`
+	// UnitAvailableFrom / UnitLeaseTerm are the listing's own fallback economics
+	// (pendingLeaseTerms' listing leg, app.js) — absent from this model until
+	// landlordLeaseApplicationsRead projects them alongside leaseApplicationsRead's.
+	UnitAvailableFrom  *string  `json:"unitAvailableFrom"`
+	UnitLeaseTerm      *float64 `json:"unitLeaseTermMonths"`
 	SignedAt           *string  `json:"signedAt"`
 	LandlordDecision   *string  `json:"landlordDecision"`
 	LandlordApproved   bool     `json:"landlordApproved"`
@@ -120,7 +125,8 @@ type landlordUnitGroup struct {
 const selectLandlordApplicationsSQL = `
 SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        landlord_key, unit_key, unit_address, unit_city,
-       unit_region, unit_rent, unit_currency, unit_status, signed_at,
+       unit_region, unit_rent, unit_currency, unit_status,
+       unit_available_from, unit_lease_term_months, signed_at,
        landlord_decision, decline_reason, terms_move_in_date,
        terms_lease_term_months, terms_requested_rent,
        tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
@@ -164,7 +170,8 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 			&row.ApplicantName, &row.ApplicantEmail, &row.ApplicantPhone,
 			&row.LandlordKey, &row.UnitKey,
 			&row.UnitAddress, &row.UnitCity, &row.UnitRegion, &row.UnitRent,
-			&row.UnitCurrency, &row.UnitStatus, &row.SignedAt, &row.LandlordDecision,
+			&row.UnitCurrency, &row.UnitStatus,
+			&row.UnitAvailableFrom, &row.UnitLeaseTerm, &row.SignedAt, &row.LandlordDecision,
 			&row.DeclineReason, &row.TermsMoveInDate, &row.TermsLeaseTerm,
 			&row.TermsRequestedRent,
 			&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
@@ -211,7 +218,8 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 const selectLandlordApplicationByKeySQL = `
 SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        landlord_key, unit_key, unit_address, unit_city,
-       unit_region, unit_rent, unit_currency, unit_status, signed_at,
+       unit_region, unit_rent, unit_currency, unit_status,
+       unit_available_from, unit_lease_term_months, signed_at,
        landlord_decision, decline_reason, terms_move_in_date,
        terms_lease_term_months, terms_requested_rent,
        tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
@@ -246,7 +254,8 @@ func queryLandlordApplicationByKey(ctx context.Context, pool pgxBeginner, actorI
 		&row.ApplicantName, &row.ApplicantEmail, &row.ApplicantPhone,
 		&row.LandlordKey, &row.UnitKey,
 		&row.UnitAddress, &row.UnitCity, &row.UnitRegion, &row.UnitRent,
-		&row.UnitCurrency, &row.UnitStatus, &row.SignedAt, &row.LandlordDecision,
+		&row.UnitCurrency, &row.UnitStatus,
+		&row.UnitAvailableFrom, &row.UnitLeaseTerm, &row.SignedAt, &row.LandlordDecision,
 		&row.DeclineReason, &row.TermsMoveInDate, &row.TermsLeaseTerm,
 		&row.TermsRequestedRent,
 		&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,

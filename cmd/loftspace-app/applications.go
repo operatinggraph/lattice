@@ -38,6 +38,7 @@ type protectedApplicationRow struct {
 	UnitBedrooms       *float64 `json:"unitBedrooms"`
 	UnitBathrooms      *float64 `json:"unitBathrooms"`
 	UnitAvailableFrom  *string  `json:"unitAvailableFrom"`
+	UnitLeaseTerm      *float64 `json:"unitLeaseTermMonths"`
 	SignedAt           *string  `json:"signedAt"`
 	LandlordDecision   *string  `json:"landlordDecision"`
 	LandlordApproved   bool     `json:"landlordApproved"`
@@ -94,7 +95,7 @@ type protectedApplicationRow struct {
 const selectApplicationsSQL = `
 SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
-       unit_available_from, signed_at, landlord_decision,
+       unit_available_from, unit_lease_term_months, signed_at, landlord_decision,
        decline_reason, terms_move_in_date, terms_lease_term_months,
        terms_requested_rent, tenancy_lease_start, tenancy_lease_end,
        tenancy_term_start, tenancy_rent_amount, tenancy_ended_at,
@@ -142,6 +143,7 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 			&row.EntityKey, &row.Applicant, &row.UnitKey, &row.UnitAddress,
 			&row.UnitCity, &row.UnitRegion, &row.UnitRent, &row.UnitCurrency,
 			&row.UnitStatus, &row.UnitBedrooms, &row.UnitBathrooms, &row.UnitAvailableFrom,
+			&row.UnitLeaseTerm,
 			&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 			&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 			&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
@@ -175,7 +177,7 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 const selectApplicationByKeySQL = `
 SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
-       unit_available_from, signed_at, landlord_decision, decline_reason,
+       unit_available_from, unit_lease_term_months, signed_at, landlord_decision, decline_reason,
        terms_move_in_date, terms_lease_term_months, terms_requested_rent,
        tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
        tenancy_rent_amount, tenancy_ended_at,
@@ -208,6 +210,7 @@ func queryApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entit
 		&row.EntityKey, &row.Applicant, &row.UnitKey, &row.UnitAddress,
 		&row.UnitCity, &row.UnitRegion, &row.UnitRent, &row.UnitCurrency,
 		&row.UnitStatus, &row.UnitBedrooms, &row.UnitBathrooms, &row.UnitAvailableFrom,
+		&row.UnitLeaseTerm,
 		&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 		&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 		&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,

@@ -8,16 +8,18 @@ import (
 )
 
 // leaseTermUIDecls lifts the shipped fmtUTCDate/applicationBannerFor/
-// unitTenancyEnded declarations (plus fmtUTCDate's UTC_MONTH_ABBR dependency)
-// out of the embedded app.js — the rotate_offer_test.go / renewal_ready_test.go
-// pattern: the REAL shipped source runs here, not a copy, so these pins are a
-// statement about what ships. All four are self-contained (no DOM/state), so
-// goja can evaluate them directly.
+// relistOffered/decisionOffered declarations (plus fmtUTCDate's
+// UTC_MONTH_ABBR dependency) out of the embedded app.js — the
+// rotate_offer_test.go / renewal_ready_test.go pattern: the REAL shipped
+// source runs here, not a copy, so these pins are a statement about what
+// ships. All five are self-contained (no DOM/state), so goja can evaluate
+// them directly.
 var leaseTermUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nconst UTC_MONTH_ABBR = \[.*?\];\n`),
 	regexp.MustCompile(`(?s)\nfunction fmtUTCDate\(s\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction applicationBannerFor\(row\) \{\n.*?\n\}\n`),
-	regexp.MustCompile(`(?s)\nfunction unitTenancyEnded\(apps\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction decisionOffered\(a, unit\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction relistOffered\(apps\) \{\n.*?\n\}\n`),
 }
 
 func leaseTermUIVM(t *testing.T) *goja.Runtime {
@@ -82,15 +84,18 @@ func TestFmtUTCDate_ReadsTheUTCCalendarDateSlice(t *testing.T) {
 	}
 }
 
-// TestUnitTenancyEnded_TruthTable pins the landlord unit card's Relist gate
-// against the design's own truth table (loftspace-lease-term-and-tenancy-end-
-// design.md §2.4): a leased unit offers the manual Relist fallback only when
-// NOTHING on it still holds a live tenancy.
-func TestUnitTenancyEnded_TruthTable(t *testing.T) {
+// TestRelistOffered_TruthTable pins the landlord unit card's Relist gate
+// against Winston's §2.2 tie-break adjudication: the manual Relist must be
+// reachable even while another approved application still holds a live
+// lease, whenever SOME approved application on the unit has ended — the
+// double-approval case (A ended, B approved-and-live) that the OLDER
+// "nothing live at all" predicate made unreachable. False only when every
+// approved application is live and none has ever ended.
+func TestRelistOffered_TruthTable(t *testing.T) {
 	vm := leaseTermUIVM(t)
-	fn, ok := goja.AssertFunction(vm.Get("unitTenancyEnded"))
+	fn, ok := goja.AssertFunction(vm.Get("relistOffered"))
 	if !ok {
-		t.Fatal("unitTenancyEnded is not a function after evaluating its declaration")
+		t.Fatal("relistOffered is not a function after evaluating its declaration")
 	}
 	run := func(t *testing.T, apps []map[string]interface{}) bool {
 		t.Helper()
@@ -106,7 +111,7 @@ func TestUnitTenancyEnded_TruthTable(t *testing.T) {
 		}
 		res, err := fn(goja.Undefined(), arg)
 		if err != nil {
-			t.Fatalf("unitTenancyEnded(%v) threw: %v", apps, err)
+			t.Fatalf("relistOffered(%v) threw: %v", apps, err)
 		}
 		return res.ToBoolean()
 	}
@@ -122,14 +127,64 @@ func TestUnitTenancyEnded_TruthTable(t *testing.T) {
 	}{
 		{"no apps", nil, true},
 		{"no apps (empty slice)", []map[string]interface{}{}, true},
-		{"approved live", []map[string]interface{}{approvedLive}, false},
-		{"approved ended", []map[string]interface{}{approvedEnded}, true},
-		{"approved ended + approved live", []map[string]interface{}{approvedEnded, approvedLive}, false},
-		{"only unapproved", []map[string]interface{}{unapproved, unapproved}, true},
+		{"live only", []map[string]interface{}{approvedLive}, false},
+		{"ended only", []map[string]interface{}{approvedEnded}, true},
+		{"ended + live (§2.2 double-approval tie-break) — TRUE now", []map[string]interface{}{approvedEnded, approvedLive}, true},
+		{"unapproved only", []map[string]interface{}{unapproved, unapproved}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := run(t, tc.apps); got != tc.want {
-				t.Errorf("unitTenancyEnded(%v) = %v, want %v", tc.apps, got, tc.want)
+				t.Errorf("relistOffered(%v) = %v, want %v", tc.apps, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecisionOffered pins the landlord decide surface's gate: Approve/Decline
+// render only for a qualified, undecided application on a not-yet-leased unit.
+// The revert-proof case is the ended-and-relisted tenant: once EndTenancy has
+// recorded the term's end and the unit relists (unitLeased goes false again),
+// the OLD gate (`a.qualified && !unitLeased`) alone would re-offer the
+// decision on a row DecisionFinal already closed — Approve would only ever be
+// a silent same-value no-op.
+func TestDecisionOffered(t *testing.T) {
+	vm := leaseTermUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("decisionOffered"))
+	if !ok {
+		t.Fatal("decisionOffered is not a function after evaluating its declaration")
+	}
+	run := func(t *testing.T, a map[string]interface{}, unit map[string]interface{}) bool {
+		t.Helper()
+		unitArg := goja.Value(goja.Undefined())
+		if unit != nil {
+			unitArg = vm.ToValue(unit)
+		}
+		res, err := fn(goja.Undefined(), vm.ToValue(a), unitArg)
+		if err != nil {
+			t.Fatalf("decisionOffered(%v, %v) threw: %v", a, unit, err)
+		}
+		return res.ToBoolean()
+	}
+
+	available := map[string]interface{}{"unitStatus": "available"}
+	leased := map[string]interface{}{"unitStatus": "leased"}
+
+	for _, tc := range []struct {
+		name string
+		a    map[string]interface{}
+		unit map[string]interface{}
+		want bool
+	}{
+		{"qualified, undecided, unit not leased", map[string]interface{}{"qualified": true}, available, true},
+		{"qualified but unit already leased (to someone else)", map[string]interface{}{"qualified": true}, leased, false},
+		{"not qualified yet", map[string]interface{}{"qualified": false}, available, false},
+		{"already approved", map[string]interface{}{"qualified": true, "landlordApproved": true}, available, false},
+		{"already declined", map[string]interface{}{"qualified": true, "landlordDeclined": true}, available, false},
+		{"ended tenancy, unit relisted (available again) — the revert-proof case", map[string]interface{}{"qualified": true, "landlordApproved": true, "tenancyEndedAt": "2026-09-15T00:00:00Z"}, available, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := run(t, tc.a, tc.unit); got != tc.want {
+				t.Errorf("decisionOffered(%v, %v) = %v, want %v", tc.a, tc.unit, got, tc.want)
 			}
 		})
 	}

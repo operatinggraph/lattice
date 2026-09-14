@@ -89,7 +89,7 @@ const searchLandlordColumns = `entity_key, applicant, applicant_name, applicant_
        landlord_key, unit_key, unit_address, unit_city,
        unit_region, unit_rent, unit_currency, unit_status, signed_at,
        landlord_decision, decline_reason, terms_move_in_date,
-       terms_lease_term_months, terms_requested_rent,
+       terms_lease_term_months, terms_requested_rent, tenancy_ended_at,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
        guarantor_income_to_rent_met, COALESCE(qualified, false)`
@@ -123,7 +123,7 @@ func scanLandlordRow(rows interface {
 		&row.UnitAddress, &row.UnitCity, &row.UnitRegion, &row.UnitRent,
 		&row.UnitCurrency, &row.UnitStatus, &row.SignedAt, &row.LandlordDecision,
 		&row.DeclineReason, &row.TermsMoveInDate, &row.TermsLeaseTerm,
-		&row.TermsRequestedRent,
+		&row.TermsRequestedRent, &row.TenancyEndedAt,
 		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 		&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
 		&row.GuarantorIncomeToRentMet, &row.Qualified,

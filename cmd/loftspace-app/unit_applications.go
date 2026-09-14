@@ -80,15 +80,20 @@ type unitApplicationsRow struct {
 
 // applicationStatus reduces a convergence row to the landlord's coarse
 // disposition. declined wins (a standing verification rejection OR a landlord
-// decline — the safest signal to surface). Then the landlord-decision states:
-// landlord-approved + unit leased is the terminal "leased"; landlord-approved with
-// the lease still in flight is "approved"; a qualified-but-undecided application
+// decline — the safest signal to surface). ended is next — EndTenancy has
+// recorded the term's end, a terminal fact that must not read as a live
+// "leased"/"approved" tenancy (the by-unit console's own ledger panel gates on
+// this too). Then the landlord-decision states: landlord-approved + unit
+// leased is the terminal "leased"; landlord-approved with the lease still in
+// flight is "approved"; a qualified-but-undecided application
 // (applicantApproved, no decision) is "qualified" — the state the landlord acts on
 // (Approve/Decline). Everything else is still converging ("in_review").
 func applicationStatus(a applicationRow) string {
 	switch {
 	case a.Declined:
 		return "declined"
+	case a.TenancyEndedAt != "":
+		return "ended"
 	case a.LandlordApproved && a.UnitStatus == "leased":
 		return "leased"
 	case a.LandlordApproved:

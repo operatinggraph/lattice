@@ -205,9 +205,12 @@ func TestTenancyEnd_ReLeasedUnitIsNeverFlippedBack(t *testing.T) {
 }
 
 // TestTenancyEnd_OtherEndedOrUndecidedApplicationsDoNotHoldTheRelist pins what
-// does NOT count as another live tenancy: a rival that was never approved, an
-// approved rival with no .tenancy (decided before the aspect shipped), and an
-// approved rival whose own term has ended. None of them lives there.
+// does NOT count as another live tenancy — a rival that was never approved and
+// an approved rival whose own term has ended — and what DOES: an approved
+// rival carrying no .tenancy at all. That last one is the pin that keeps the
+// two targets from fighting: its own missing_listingLeased claims an
+// 'available' unit (it conjoins only tenancyEndedAt = null), so this row must
+// read it as the unit's holder rather than relist under it.
 func TestTenancyEnd_OtherEndedOrUndecidedApplicationsDoNotHoldTheRelist(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -217,9 +220,6 @@ func TestTenancyEnd_OtherEndedOrUndecidedApplicationsDoNotHoldTheRelist(t *testi
 	endTenancy(t, f, "app")
 	f.vtx(t, "rival", "leaseapp")
 	f.edge(t, "appliesToUnit", "rival", "app_unit")
-	f.vtx(t, "legacy", "leaseapp")
-	f.aspect(t, "legacy", "decision", "decision", map[string]any{"value": "approved"})
-	f.edge(t, "appliesToUnit", "legacy", "app_unit")
 	f.vtx(t, "prior", "leaseapp")
 	f.aspect(t, "prior", "decision", "decision", map[string]any{"value": "approved"})
 	f.aspect(t, "prior", "tenancy", "tenancy", map[string]any{
@@ -227,7 +227,14 @@ func TestTenancyEnd_OtherEndedOrUndecidedApplicationsDoNotHoldTheRelist(t *testi
 	f.edge(t, "appliesToUnit", "prior", "app_unit")
 
 	v := f.projectTenancyEnd(t, "app")
-	require.Equal(t, true, v["missing_relist"], "an undecided rival, a tenancy-less approval and an ended prior term hold nothing")
+	require.Equal(t, true, v["missing_relist"], "an undecided rival and an ended prior term hold nothing")
+
+	f.vtx(t, "legacy", "leaseapp")
+	f.aspect(t, "legacy", "decision", "decision", map[string]any{"value": "approved"})
+	f.edge(t, "appliesToUnit", "legacy", "app_unit")
+	v = f.projectTenancyEnd(t, "app")
+	require.Equal(t, false, v["missing_relist"], "an approved application with no .tenancy would lease the unit the moment it read available — it holds the relist")
+	require.Equal(t, false, v["violating"])
 }
 
 // TestTenancyEnd_AlreadyAvailableUnitOpensNothing: an ended term whose unit is

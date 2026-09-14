@@ -266,6 +266,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "unit_bedrooms", Type: "double precision"},
 				{Name: "unit_bathrooms", Type: "double precision"},
 				{Name: "unit_available_from", Type: "text"},
+				{Name: "unit_lease_term_months", Type: "double precision"},
 				{Name: "signed_at", Type: "text"},
 				{Name: "landlord_decision", Type: "text"},
 				{Name: "decline_reason", Type: "text"},
@@ -343,10 +344,13 @@ func Lenses() []pkgmgr.LensSpec {
 			// change to the application). This is the same staleness class the
 			// applicant lens's unit display columns already accept.
 			//
-			// No unit_bedrooms / unit_bathrooms / unit_available_from here (unlike
-			// leaseApplicationsRead's D1.5 addition above): no landlord-facing view
-			// reads this model for document rendering, so there is nothing pulling
-			// those columns in yet — add them here too if one starts.
+			// No unit_bedrooms / unit_bathrooms here (unlike leaseApplicationsRead's
+			// D1.5 addition above): no landlord-facing view reads this model for
+			// document rendering. unit_available_from / unit_lease_term_months ARE
+			// here: the landlord's decide surface states the terms the approval
+			// signs, and where the application's own .terms carries nothing the
+			// listing is the term's source (DecideLeaseApplication's own fallback),
+			// so the hint needs both halves of that chain.
 			//
 			// doc_store_name / doc_filename / doc_content_type mirror
 			// leaseApplicationsRead's own doc-pointer columns exactly (same source
@@ -427,6 +431,8 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "unit_rent", Type: "double precision"},
 				{Name: "unit_currency", Type: "text"},
 				{Name: "unit_status", Type: "text"},
+				{Name: "unit_available_from", Type: "text"},
+				{Name: "unit_lease_term_months", Type: "double precision"},
 				{Name: "signed_at", Type: "text"},
 				{Name: "landlord_decision", Type: "text"},
 				{Name: "decline_reason", Type: "text"},
@@ -1179,9 +1185,10 @@ RETURN
 //     envelope, so a `.value` hop resolves null for every real ssn — the same
 //     presence-only read leaseApplicationCompleteSpec documents). The
 //     per-application half is the SAME gate leaseApplicationCompleteSpec applies
-//     to its four applicant gaps — `(unitKey <> null) AND ((unitStatus <>
-//     'leased') OR (landlordDecision = 'approved'))` — so an applicant whose only
-//     applications are terminal (the unit tombstoned, or leased to a rival) stops
+//     to its four applicant gaps — `(unitKey <> null) AND (tenancyEndedAt =
+//     null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))` —
+//     so an applicant whose only applications are terminal (the unit
+//     tombstoned, leased to a rival, or a lease whose term has ended) stops
 //     being asked for their SSN, exactly as the per-application target already
 //     stops asking. It is evaluated INSIDE the count CASE, per application, so a
 //     person with one live and one dead application still converges on the live
@@ -1233,7 +1240,7 @@ OPTIONAL MATCH (onbTask)-[:forOperation]->(onbOp:meta)
 WITH
   id.key AS entityKey,
   id.ssn.data AS ssnVal,
-  count(DISTINCT CASE WHEN (u.key <> null) AND ((u.listing.data.status <> 'leased') OR (app.decision.data.value = 'approved')) THEN app.key ELSE null END) AS onboardingApps,
+  count(DISTINCT CASE WHEN (u.key <> null) AND (app.tenancy.data.endedAt = null) AND ((u.listing.data.status <> 'leased') OR (app.decision.data.value = 'approved')) THEN app.key ELSE null END) AS onboardingApps,
   count(DISTINCT CASE WHEN onbOp.data.operationType = 'RecordIdentityPII' THEN onbTask.key ELSE null END) AS onbTaskOpen
 RETURN
   entityKey AS actorKey,
@@ -1403,6 +1410,7 @@ WITH
   u.listing.data.bedrooms        AS unitBedrooms,
   u.listing.data.bathrooms       AS unitBathrooms,
   u.listing.data.availableFrom   AS unitAvailableFrom,
+  u.listing.data.leaseTermMonths AS unitLeaseTermMonths,
   app.signature.data.signedAt    AS signedAt,
   app.decision.data.value        AS landlordDecision,
   app.decision.data.reason       AS declineReason,
@@ -1445,6 +1453,7 @@ RETURN
   unitBedrooms                   AS unit_bedrooms,
   unitBathrooms                  AS unit_bathrooms,
   unitAvailableFrom              AS unit_available_from,
+  unitLeaseTermMonths            AS unit_lease_term_months,
   signedAt                       AS signed_at,
   landlordDecision               AS landlord_decision,
   declineReason                  AS decline_reason,
@@ -1558,6 +1567,8 @@ WITH
   u.listing.data.rentAmount      AS unitRent,
   u.listing.data.rentCurrency    AS unitCurrency,
   u.listing.data.status          AS unitStatus,
+  u.listing.data.availableFrom   AS unitAvailableFrom,
+  u.listing.data.leaseTermMonths AS unitLeaseTermMonths,
   app.signature.data.signedAt    AS signedAt,
   app.decision.data.value        AS landlordDecision,
   app.decision.data.reason       AS declineReason,
@@ -1596,6 +1607,8 @@ RETURN
   unitRent                       AS unit_rent,
   unitCurrency                   AS unit_currency,
   unitStatus                     AS unit_status,
+  unitAvailableFrom              AS unit_available_from,
+  unitLeaseTermMonths            AS unit_lease_term_months,
   signedAt                       AS signed_at,
   landlordDecision               AS landlord_decision,
   declineReason                  AS decline_reason,

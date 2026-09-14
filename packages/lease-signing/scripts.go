@@ -632,8 +632,25 @@ def execute(state, op):
         # requestedRent is optional.
         move_in = optional_string(p, "moveInDate")
         if move_in != None:
-            terms_data = {"moveInDate": move_in, "leaseTermMonths": require_number(p, "leaseTermMonths")}
-            req_rent = optional_number(p, "requestedRent")
+            # The terms are load-bearing: DecideLeaseApplication's first approve
+            # signs the lease on them, so a malformed term is refused where it
+            # is minted. moveInDate is stored NORMALIZED — a bare YYYY-MM-DD
+            # read as midnight UTC, anything else parsed as RFC3339 (a date
+            # that parses as neither is refused by the parse itself) — so
+            # .terms always carries the RFC3339 instant the DDL states.
+            # leaseTermMonths is a whole, positive month count (a fraction
+            # would be silently truncated by the approve's add_months);
+            # requestedRent, when supplied, is a positive amount.
+            move_in = time.rfc3339_utc(as_rfc3339_instant(move_in))
+            term_months = require_number(p, "leaseTermMonths")
+            if term_months != int(term_months) or int(term_months) < 1:
+                fail("InvalidTerms: leaseTermMonths must be a whole, positive month count, got " + str(term_months))
+            terms_data = {"moveInDate": move_in, "leaseTermMonths": int(term_months)}
+            req_rent = None
+            if hasattr(p, "requestedRent") and getattr(p, "requestedRent") != None:
+                req_rent = optional_number(p, "requestedRent")
+                if req_rent == None or req_rent <= 0:
+                    fail("InvalidTerms: requestedRent must be a positive amount, got " + str(getattr(p, "requestedRent")))
             if req_rent == None:
                 # No rent offer from the applicant — fall back to the unit's own
                 # listed rent, so leaseRentSettlementSpec (semantic-contracts) has
@@ -922,6 +939,13 @@ def execute(state, op):
                 term = terms_term_months if terms_term_months != None else term_months
                 if move_in == None or term == None:
                     fail("NoListing: unit " + decide_unit + "'s .listing is missing availableFrom/leaseTermMonths")
+                # The term is signed on these values, so a non-positive count
+                # — whichever source supplied it — is refused rather than
+                # stamped as a lease that ends before it starts.
+                if type(term) != type(0) and type(term) != type(0.0):
+                    fail("InvalidTerms: leaseTermMonths must be a positive month count, got " + str(term))
+                if int(term) < 1:
+                    fail("InvalidTerms: leaseTermMonths must be a positive month count, got " + str(term))
 
                 # moveInDate / availableFrom may be a bare "YYYY-MM-DD" (the FE
                 # normalizes to RFC3339, but seed-showcase / seed-classic-demo
@@ -942,7 +966,12 @@ def execute(state, op):
                 # listing-rent fallback above); omitted entirely when neither
                 # exists, so leaseRentSettlementSpec's coalesce(.tenancy.rentAmount,
                 # .terms.requestedRent) still resolves the same way it does today.
-                rent = terms_rent
+                # Both sources pass the same positive-number test: an offered
+                # rent of zero or less (or a non-number) is not an agreed rent
+                # and falls through to the listing's, never into rentAmount.
+                rent = None
+                if terms_rent != None and (type(terms_rent) == type(0) or type(terms_rent) == type(0.0)) and terms_rent > 0:
+                    rent = terms_rent
                 if rent == None:
                     r = listing.data.get("rentAmount")
                     if r != None and (type(r) == type(0) or type(r) == type(0.0)) and r > 0:

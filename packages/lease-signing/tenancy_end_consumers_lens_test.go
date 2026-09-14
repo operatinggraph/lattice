@@ -13,6 +13,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestRenewalComplete_OpenRenewalOnEndedTenancyProjectsNothingOpen: an
+// operator can EndTenancy under an OPEN renewal (the op does not walk
+// renewals), so the cycle's row must read the ended term as terminal —
+// open false, missing_renewalComplete false, violating false — rather than
+// keep a signRenewal leg the op refuses TenancyEnded and re-dispatch bgchecks
+// on a former tenant.
+func TestRenewalComplete_OpenRenewalOnEndedTenancyProjectsNothingOpen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tenant", "unit1", "larry")
+
+	rows := f.projectRenewalComplete(t, "rn")
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0].Values["open"], "the control: a live tenancy's open cycle is open")
+	require.Equal(t, true, rows[0].Values["missing_renewalComplete"])
+	require.Equal(t, true, rows[0].Values["violating"])
+
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseEnd": "2027-01-01T00:00:00Z", "renewalOpensAt": "2026-11-02T00:00:00Z", "endedAt": "2027-01-01T00:00:00Z"})
+	rows = f.projectRenewalComplete(t, "rn")
+	require.Len(t, rows, 1)
+	require.Equal(t, false, rows[0].Values["open"], "an ended term's open cycle is not open")
+	require.Equal(t, false, rows[0].Values["missing_renewalComplete"])
+	require.Equal(t, false, rows[0].Values["violating"])
+}
+
 // endedApprovedLeaseFixture is approvedAppFixture (qualified, signed, the
 // executed lease attached) approved by the landlord on a unit that tenancyEnd
 // has already RELISTED — .tenancy carries endedAt and the listing reads
@@ -132,4 +160,39 @@ func TestLeaseExpiry_EndedTenancyNeverOpensACycle(t *testing.T) {
 	f.aspect(t, "app", "freshnessExpiry", "freshnessExpiry", map[string]any{"expiredAt": "", "byTarget": map[string]any{}})
 	v = f.projectLeaseExpiry(t, "app")
 	require.Nil(t, v["freshUntil"], "an ended term's unlapsed horizon is not armed either")
+}
+
+// TestApplicantOnboarding_EndedTenancyStopsAsking: an approved, signed
+// applicant who never recorded an ssn is asked for it while the term is live
+// (leaseApplicationComplete's approved escape hatch keeps the application
+// counted after its unit leases) and stops being asked once the term ends —
+// the same terminal reading the per-application target gives the ended row.
+func TestApplicantOnboarding_EndedTenancyStopsAsking(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	f.vtx(t, "alice", "identity")
+	f.vtx(t, "app1", "leaseapp")
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+	f.aspect(t, "app1", "decision", "decision", map[string]any{"value": "approved"})
+	f.aspect(t, "app1", "signature", "signature", map[string]any{"signedAt": "2026-06-10T00:00:00Z"})
+	f.aspect(t, "app1", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-07-01T00:00:00Z", "leaseEnd": "2027-07-01T00:00:00Z", "renewalOpensAt": "2027-05-02T00:00:00Z"})
+	f.edge(t, "applicationFor", "app1", "alice")
+	f.edge(t, "appliesToUnit", "app1", "unit1")
+
+	rows := f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0].Values["missing_onboarding"], "the control: a live approved tenancy with no ssn still asks")
+
+	f.aspect(t, "app1", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-07-01T00:00:00Z", "leaseEnd": "2027-07-01T00:00:00Z", "renewalOpensAt": "2027-05-02T00:00:00Z",
+		"endedAt": "2027-07-01T00:00:00Z"})
+	rows = f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1)
+	require.Equal(t, false, rows[0].Values["missing_onboarding"], "an ended term's applicant is not asked for PII")
+	require.Equal(t, false, rows[0].Values["violating"])
 }

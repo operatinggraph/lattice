@@ -232,9 +232,12 @@ func TestGroupByUnit_CarriesQualificationProfile(t *testing.T) {
 }
 
 // TestGroupByUnit_CarriesTenancyEndedAt proves TenancyEndedAt flows from the
-// convergence row to the landlord applicantSummary — the field
-// unitTenancyEnded (app.js) reads to gate the landlord unit card's manual
-// Relist button. An application that never recorded a tenancy leaves it empty.
+// convergence row to the landlord applicantSummary — the field relistOffered
+// (app.js) reads to gate the landlord unit card's manual Relist button — and
+// that it drives applicationStatus's own "ended" disposition rather than
+// still reading "leased" (which would wrongly keep offering a payment-ledger
+// panel, renderApplicantRow's own gate on status=="leased"). An application
+// that never recorded a tenancy leaves TenancyEndedAt empty.
 func TestGroupByUnit_CarriesTenancyEndedAt(t *testing.T) {
 	apps := []applicationRow{
 		{EntityKey: "vtx.leaseapp.a1", Applicant: "vtx.identity.alice", LandlordApproved: true,
@@ -250,11 +253,43 @@ func TestGroupByUnit_CarriesTenancyEndedAt(t *testing.T) {
 	for _, a := range units[0].Applications {
 		byKey[a.LeaseAppKey] = a
 	}
-	if got := byKey["vtx.leaseapp.a1"].TenancyEndedAt; got != "2026-09-15T00:00:00Z" {
-		t.Errorf("a1 tenancyEndedAt = %q, want 2026-09-15T00:00:00Z", got)
+	a1 := byKey["vtx.leaseapp.a1"]
+	if a1.TenancyEndedAt != "2026-09-15T00:00:00Z" {
+		t.Errorf("a1 tenancyEndedAt = %q, want 2026-09-15T00:00:00Z", a1.TenancyEndedAt)
+	}
+	if a1.Status != "ended" {
+		t.Errorf("a1 status = %q, want ended (never leased, so no ledger panel)", a1.Status)
 	}
 	if got := byKey["vtx.leaseapp.a2"].TenancyEndedAt; got != "" {
 		t.Errorf("a2 (never recorded) tenancyEndedAt = %q, want empty", got)
+	}
+}
+
+// TestApplicationStatus pins the coarse-disposition switch directly,
+// including the "ended" case: EndTenancy having recorded a term's end is
+// terminal and must read as "ended", never "leased"/"approved" — the
+// distinction renderApplicantRow's payment-ledger gate and DISPOSITION's
+// label both depend on. declined still wins over ended (though the two never
+// co-occur: an application that was never approved never carries a tenancy).
+func TestApplicationStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  applicationRow
+		want string
+	}{
+		{"declined wins over everything", applicationRow{Declined: true, TenancyEndedAt: "2026-09-15T00:00:00Z"}, "declined"},
+		{"ended wins over leased", applicationRow{LandlordApproved: true, UnitStatus: "leased", TenancyEndedAt: "2026-09-15T00:00:00Z"}, "ended"},
+		{"ended even if unit not yet relisted", applicationRow{LandlordApproved: true, UnitStatus: "available", TenancyEndedAt: "2026-09-15T00:00:00Z"}, "ended"},
+		{"approved + leased, no end", applicationRow{LandlordApproved: true, UnitStatus: "leased"}, "leased"},
+		{"approved, unit not yet leased", applicationRow{LandlordApproved: true, UnitStatus: "available"}, "approved"},
+		{"qualified, awaiting decision", applicationRow{ApplicantApproved: true}, "qualified"},
+		{"still converging", applicationRow{}, "in_review"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := applicationStatus(tc.row); got != tc.want {
+				t.Errorf("applicationStatus(%+v) = %q, want %q", tc.row, got, tc.want)
+			}
+		})
 	}
 }
 
