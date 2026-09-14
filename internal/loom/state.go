@@ -749,31 +749,22 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 	return nil
 }
 
-// redrive re-pins pattern, flips inst.Status back to running, removes the
-// instance's failed index and abandons the pointer of the step being resumed, in
-// one AtomicBatch, for a manual operator redrive (Engine.RedriveInstance).
-// expectedRevision is the revision the caller read the instance record at
-// (getInstanceAtRevision).
-//
-// abandonToken is the pending token whose reverse pointer this redrive gives
-// up, or "" when there is none. A redrive of a FAILED instance has none — the
-// terminal transition removed it — and passing "" is what keeps this batch from
-// purging an absent subject and minting a marker on a subject that held nothing
-// (the hazard deleteToken documents). A redrive of an instance PARKED on an
-// inconclusive deadline verdict has a live one, and abandoning it is what makes
-// the resume safe: a completion for that token arriving while the redrive runs
-// then resolves no live pointer in handleCompletion and is dropped, instead of
-// advancing the cursor under a re-submission of the same step. The two paths
-// therefore leave the identical intermediate state — running, with an empty
-// pending token — which is the state transition's doc comment already reasons
-// about.
+// redrive re-pins pattern, flips inst.Status back to running and removes the
+// instance's failed index, in one AtomicBatch, for a manual operator redrive of
+// a failed instance (Engine.RedriveInstance). expectedRevision is the revision
+// the caller read the instance record at (getInstanceAtRevision).
 //
 // The index removal rides this batch rather than a read-then-remove because the
 // batch is the only place it can be atomic with the status flip — a redriven
 // instance must never be listed as awaiting a redrive. Removing a marker that is
 // already absent — a cursor reading `failed` with no marker beside it, which the
 // backfill has not reached yet — mints a transient subject that expires with the
-// marker TTL, the cheaper of the two wrong answers.
+// marker TTL, the cheaper of the two wrong answers. Deliberately unguarded, and
+// the one purge in this package that is: the batched read every reader of this
+// family goes through skips marker entries (parseDirectGetEntry's isMarker), so
+// the stray subject is invisible to listInstances and to the backfill and costs
+// only its own lifetime. A purge on a subject a CDC durable filters — the
+// deadline family — has no such luxury, which is why deleteToken guards its own.
 //
 // The race guard for two concurrent redrives of one instance is that CAS on the
 // instance record: both readers see revision R, the winner's batch bumps it, and
@@ -785,7 +776,7 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 // refused by exactly that. The marker is present for the marker's lifetime and
 // the guard must not depend on it, so the pin is written as an ordinary put,
 // guarded by the same batch's CAS.
-func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern, abandonToken string, expectedRevision uint64) error {
+func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern, expectedRevision uint64) error {
 	// A redrive resumes the step from the operator's decision, so any
 	// inconclusive deadline-probe note left on the record is spent: the operator
 	// has answered what the probe could not. Settled in this batch, for the same
@@ -803,14 +794,6 @@ func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Patte
 		{Bucket: s.bucket, Key: instanceKey(inst.InstanceID), Value: body, HasRevision: true, Revision: expectedRevision},
 		{Bucket: s.bucket, Key: patternPinKey(inst.InstanceID), Value: pinBody},
 		{Bucket: s.bucket, Key: failedMarkerKey(inst.InstanceID), Purge: true, TTL: tombstoneTTL},
-	}
-	if abandonToken != "" {
-		ops = append(ops, substrate.BatchOp{
-			Bucket: s.bucket,
-			Key:    tokenKey(abandonToken),
-			Purge:  true,
-			TTL:    tombstoneTTL,
-		})
 	}
 	if _, err := s.conn.AtomicBatch(ctx, ops); err != nil {
 		return fmt.Errorf("loom: redrive instance %q: %w", inst.InstanceID, err)

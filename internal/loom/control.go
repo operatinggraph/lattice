@@ -25,9 +25,10 @@ type InstanceSummary struct {
 	// its own evidence already past the op-status horizon, so the probe could
 	// neither confirm nor deny the step's op and left it running (Instance.
 	// DeadlineProbe). It is the operator's cue that this instance is parked on a
-	// step the engine cannot adjudicate: no further deadline will fire for it, a
-	// healthy one still completes when its completer acts, and a redrive is what
-	// resumes one whose op never ran. Absent (nil) on every other instance.
+	// step the engine cannot adjudicate: no further deadline will fire for it, so
+	// a flow whose completer can still act completes on its own, and a flow whose
+	// op was genuinely rejected holds here — this note being the whole record of
+	// it. Absent (nil) on every other instance.
 	DeadlineProbe *probeNote `json:"deadlineProbe,omitempty"`
 }
 
@@ -70,30 +71,10 @@ var ErrInstanceNotFound = errors.New("not found")
 // command that did nothing.
 var errConsumerNotManaged = errors.New("consumer not managed")
 
-// errInstanceNotFailed reports that a Redrive target is in none of the stalled
-// states Redrive accepts: failed, or running with a standing inconclusive
-// deadline-probe verdict (redrivable). A plain running instance is progressing
-// and still has a live deadline behind it; complete has nothing to resume.
-var errInstanceNotFailed = errors.New("instance is not in a failed or inconclusively-parked state")
-
-// redrivable reports whether an instance is in one of the two states a redrive
-// resumes from.
-//
-// StatusFailed is the ordinary one. The second is a RUNNING instance carrying a
-// DeadlineProbe note: its step deadline expired, the probe found its own
-// evidence older than the op-status horizon and so refused to read the absent
-// tracker as a rejection, and nothing re-arms — so if the step's op was in fact
-// rejected, no completion can ever arrive and the step is as stalled as a failed
-// one, with no other operator verb that reaches it. The note is the whole gate:
-// without one, a running instance is either progressing or still backstopped by
-// a live deadline, and a redrive would re-submit a step whose op may be seconds
-// from committing.
-func redrivable(inst *Instance) bool {
-	if inst.Status == StatusFailed {
-		return true
-	}
-	return inst.Status == StatusRunning && inst.DeadlineProbe != nil
-}
+// errInstanceNotFailed reports that a Redrive target is not in the failed
+// state — the only state Redrive accepts (running is already progressing;
+// complete has nothing to resume).
+var errInstanceNotFailed = errors.New("instance is not in a failed state")
 
 // errPatternNotLoaded reports that a Redrive target's pattern is not (or no
 // longer) registered in the live source — nothing to re-pin against.
@@ -325,9 +306,9 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 	return nil
 }
 
-// RedriveInstance manually resumes a STALLED instance AT ITS RECORDED CURSOR —
+// RedriveInstance manually resumes a FAILED instance AT ITS RECORDED CURSOR —
 // never restarts it under a fresh id. Restarting would re-run every step from
-// 0, re-executing side effects the earlier run already committed; resuming at
+// 0, re-executing side effects the failed run already committed; resuming at
 // cursor re-submits (or re-evaluates the guard of) only the step that never
 // completed, exactly the recovery `resumeStepZero` already performs for a
 // crash before step 0 — this generalizes that same mechanism to any cursor
@@ -336,14 +317,8 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 // Preconditions, each a distinct typed error so the operator sees why a
 // redrive was refused rather than a generic failure:
 //   - the instance must exist (ErrInstanceNotFound);
-//   - the instance must be STALLED (errInstanceNotFailed), which is either of
-//     two states. StatusFailed is the ordinary one. The other is a RUNNING
-//     instance carrying a standing DeadlineProbe note: its step deadline
-//     expired, the probe could not tell a committed-and-aged-out op from a
-//     rejected one, and nothing re-arms — so on the rejected reading no
-//     completion will ever arrive and the step is stalled exactly as a failed
-//     one is. A plain running instance is still refused: it is progressing, and
-//     a live deadline still backstops it. Complete has nothing to resume.
+//   - status must be exactly StatusFailed (errInstanceNotFailed) — running is
+//     already progressing, complete has nothing to resume;
 //   - the instance's pattern must still be loaded in the live source
 //     (errPatternNotLoaded) — the terminal batch purges a FAILED instance's own
 //     pin (§10.3), so redrive re-pins from the CURRENT live definition, not the
@@ -353,43 +328,21 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 //     added/removed/reordered) since the failure, resuming at the old cursor
 //     could run the wrong step; redrive refuses rather than guess.
 //
-// On success: state.redrive re-pins the pattern, flips status back to running
-// and abandons the pending token's reverse pointer in one AtomicBatch,
-// conditioned on the revision this call read the instance record at, domain
-// consumers are reconciled for the pin's completion domain, and the step at the
-// cursor is evaluated exactly like a fresh trigger's step 0 — guard-skip
-// straight to completion if every remaining guard is now false, otherwise
-// re-submit it.
-//
-// That revision condition is the race guard, and it carries both races. Two
-// concurrent redrives: both readers see revision R, the winner's batch bumps it
-// and the loser's expected-R batch is rejected whole. And, for the running
-// arm, a real completion landing between this call's read and its write: the
-// completion's own advance bumps the revision, so the redrive is refused and the
-// instance keeps the progress it just made rather than being re-submitted over
-// it. A completion arriving after the batch resolves nothing — the batch
-// abandoned the pointer it would correlate on, so handleCompletion's
-// resolveToken finds no live token and drops it — which is the honest outcome
-// of an operator declaring the step unanswerable.
+// On success: state.redrive re-pins the pattern and flips status back to
+// running in one AtomicBatch, conditioned on the revision this call read the
+// instance record at (the race guard for two concurrent redrives — the loser's
+// batch is rejected whole), domain consumers are reconciled for the pin's
+// completion domain, and the step at the cursor is evaluated exactly like a
+// fresh trigger's step 0 — guard-skip straight to completion if every
+// remaining guard is now false, otherwise re-submit it.
 //
 // The resumed step's token pointer is written as a put (tokenPutUnderRedriveCAS)
 // rather than create-if-absent. The step token is derived from (instanceId,
-// cursor) by every step kind, so resuming at the recorded cursor re-derives the
-// very token this redrive (or the failing transition before it) just abandoned,
-// onto a subject that carries that removal's marker; create-if-absent would be
-// refused there, after the redrive batch has already flipped the record to
-// running. The guard this path relies on instead is that batch's
-// compare-and-set (transition's doc comment carries the argument). The re-put
-// also restarts the step's epoch, which is what stops the probe from reading a
-// freshly redriven step as one whose evidence has aged out.
-//
-// What a redrive of the parked-and-noted arm cannot promise is at-most-once
-// execution of the step's op. Re-submission is idempotent through the Contract
-// #4 tracker only inside that tracker's lifetime, and this arm exists precisely
-// because the step is older than it — so if the op did commit and merely lost
-// its event, the re-submitted op runs a second time. That is the same exposure
-// a redrive after a false terminal already carries, and it is the operator's
-// decision: the alert names it.
+// cursor), so resuming at the recorded cursor re-derives the very token the
+// failing transition removed, onto a subject that carries that removal's marker;
+// create-if-absent would be refused there, after the redrive batch has already
+// flipped the record to running. The guard this path relies on instead is that
+// batch's compare-and-set (transition's doc comment carries the argument).
 func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 	inst, revision, err := e.state.getInstanceAtRevision(ctx, instanceID)
 	if err != nil {
@@ -398,9 +351,8 @@ func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 	if inst == nil {
 		return fmt.Errorf("loom: instance %q %w", instanceID, ErrInstanceNotFound)
 	}
-	if !redrivable(inst) {
-		return fmt.Errorf("loom: %w: %q (status=%s, deadlineProbe=%t)",
-			errInstanceNotFailed, instanceID, inst.Status, inst.DeadlineProbe != nil)
+	if inst.Status != StatusFailed {
+		return fmt.Errorf("loom: %w: %q (status=%s)", errInstanceNotFailed, instanceID, inst.Status)
 	}
 
 	patternID := patternIDFromRef(inst.PatternRef)
@@ -413,16 +365,9 @@ func (e *Engine) RedriveInstance(ctx context.Context, instanceID string) error {
 			errCursorOutOfRange, instanceID, inst.Cursor, inst.PatternRef, len(pattern.Steps))
 	}
 
-	// The step being resumed gives up its pointer in the redrive batch: for a
-	// failed instance PendingToken is already "" (the terminal transition cleared
-	// it, and passing "" leaves that subject alone), while a parked instance
-	// hands over a live token. Either way the record that lands is running with
-	// an empty pending token, and submitStep below writes the resumed step's
-	// token afresh.
-	abandonToken := inst.PendingToken
 	inst.Status = StatusRunning
-	inst.PendingToken = ""
-	if err := e.state.redrive(ctx, inst, pattern, abandonToken, revision); err != nil {
+	// PendingToken is already "" — fail() cleared it on the terminal transition.
+	if err := e.state.redrive(ctx, inst, pattern, revision); err != nil {
 		return err
 	}
 	e.logger.Info("loom: instance redriven", "instanceId", instanceID, "cursor", inst.Cursor, "patternId", pattern.PatternID)
