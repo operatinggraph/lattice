@@ -49,6 +49,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // to mint a wellnessrefund marker on a studio-initiated release (a no-show fee
 // for a booking already marked noShow, a class-price charge for any other).
 //
+// The fifth hubs on {actor} rather than a row column: actor_holds_operator
+// (ddls.go) pages the DISPATCHING actor's own holdsRole links to confirm this
+// op runs only under the standing operator grant, and the submitter's identity
+// is not a fact the violation row carries — no lens projects it, and each
+// deployment mints its own primordial identity set on first boot, so no
+// literal key could stand in for it either. {actor} is the one hub spelling
+// that names the submitter (Contract #10 §10.8; buildPlan substitutes it to
+// the dispatching engine's own actor key before the hub reaches the ordinary
+// row resolver), which is what lets this confinement walk be declared at all
+// instead of running live and undeclared.
+//
 // The refund marker's own follow-up walk — the charge transaction's postedTo,
 // to find the account to credit — is NOT declarable here: its hub is a
 // transaction key only the settles walk above resolves, so it is a class-(e)
@@ -74,6 +85,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 						{Hub: "row.bookingKey", Relation: "bookedBy", Direction: "out"},
 						{Hub: "row.bookingKey", Relation: "settles", Direction: "in"},
 						{Hub: "row.bookingKey", Relation: "settlesClassPrice", Direction: "in"},
+						{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 					},
 				},
 			},
@@ -106,10 +118,18 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 // Neither is ever null on a violating row — the lens is anchored on the
 // session, and a row with no readable .schedule.capacity cannot violate.
 //
-// Enumerations puts the ONE walk the script runs on the envelope: the
-// session's forSession-in bookings, the candidate set collect_waitlist_candidates
-// pages over (ddls.go), hub-templated off the same row column the payload
-// carries. Its per-candidate .status follow-up reads are class-(e) reads off
+// Enumerations puts both walks the script runs on the envelope. The first is
+// the session's forSession-in bookings, the candidate set
+// collect_waitlist_candidates pages over (ddls.go), hub-templated off the same
+// row column the payload carries. The second hubs on {actor}:
+// actor_holds_operator pages the DISPATCHING actor's own holdsRole links to
+// confirm the op runs under the standing operator grant, and the submitter's
+// identity is not a fact the violation row carries — no lens projects it, and
+// each deployment mints its own primordial identity set on first boot, so no
+// literal key could stand in for it. {actor} is the one hub spelling that
+// names the submitter (Contract #10 §10.8; buildPlan substitutes it to the
+// dispatching engine's own actor key before the hub reaches the ordinary row
+// resolver). Its per-candidate .status follow-up reads are class-(e) reads off
 // that enumeration — data-derived keys no dispatcher can name. The seat-cell
 // reads claim_free_seats runs are neither: their keys are derived from the
 // session's own capacity, not from the row, so they stay bounded lazy live
@@ -131,6 +151,7 @@ func waitlistPromotionTarget() pkgmgr.WeaverTargetSpec {
 				Reads:     []string{"row.sessionKey", "row.sessionKey.schedule"},
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "row.sessionKey", Relation: "forSession", Direction: "in"},
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},
 		},
