@@ -82,13 +82,15 @@ func TestPlatformBuckets_MarkerTTLAtOrAboveTheServerFloor(t *testing.T) {
 // two constants are asserted against each other here rather than each being
 // believed on its own.
 //
-// The margin demanded is an order of magnitude, not a hair, because the
-// failure this guards is silent: a window raised until it crosses the tracker
-// turns the deadline probe's evidence-absence test from "the op was rejected"
-// into "the op is simply old". Raising either constant past what this allows is
-// a decision about that probe, and belongs with the structural fix
-// loom-state-tombstone-sweep-design.md §11.2 files (a durable armed/disarmed
-// fact on the instance record the probe can read) — not with a bigger constant.
+// The margin demanded is an order of magnitude, not a hair, because of what
+// crossing the tracker costs: the deadline probe's evidence-absence test stops
+// meaning "the op was rejected" and starts meaning "the op is simply old". The
+// probe recognises that case and refuses to decide it — past the tracker's life
+// it alerts and parks the instance instead of failing it — so a window raised
+// past this bound does not fail healthy instances; it converts the whole
+// deadline backstop into refusals, which is the loss of a verdict, not a
+// terminal. Raising either constant is therefore a decision about that probe's
+// usefulness, and belongs there rather than in a bigger constant.
 func TestLoomStateMarkerTTL_FitsInsideTheTrackerLifetime(t *testing.T) {
 	widestDelivery := loom.MaxDeadlineArm + bootstrap.LoomStateMarkerTTL
 	require.Less(t, widestDelivery, processor.TrackerTTL,

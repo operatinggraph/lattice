@@ -68,13 +68,17 @@ const triggerSubject = "events.loom.patternStarted"
 // It is a soundness bound, not a taste. A deadline expiry is delivered as a
 // marker that stands for the loom-state bucket's marker TTL, and the probe
 // woken by that marker decides rejected-or-lost from the ABSENCE of the op
-// tracker — which the Processor writes with a 24h TTL. So the whole path,
-// arm plus delivery window, has to finish well inside the tracker's life:
-// past it, the probe reads a committed op's aged-out tracker as "never
-// committed" and fails a healthy instance. An hour of arm against a one-hour
-// window leaves that path an order of magnitude of headroom, and a step that
-// has not reported for an hour is lost rather than slow — waiting longer buys
-// nothing the off-stream backstop is for.
+// tracker — which the Processor writes with opstatus.TrackerTTL. So the whole
+// path, arm plus delivery window, has to finish well inside the tracker's
+// life; an hour of arm against a one-hour window leaves it an order of
+// magnitude of headroom, and a step that has not reported for an hour is lost
+// rather than slow — waiting longer buys nothing the off-stream backstop is
+// for. What this bound buys is a VERDICT: inside it a committed op's tracker
+// is still there to be read, so the probe can tell a rejection from a
+// commitment. Outside it — reachable only by a substrate outage longer than
+// the tracker's life, which no arm bound can shorten — the probe refuses the
+// verdict and parks the instance with an alert rather than failing a healthy
+// one (probeRejectedOrLost).
 const MaxDeadlineArm = 1 * time.Hour
 
 // Config parameterizes the engine. Bucket/stream names default to the
