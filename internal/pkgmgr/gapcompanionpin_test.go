@@ -19,7 +19,8 @@ import (
 //
 // They read it by PATH rather than by import on purpose: every constant
 // involved (inflightColumnPrefix, maxretriesColumnPrefix, gapColumnPrefix, the
-// five action names, typedLiteralPrefix) is unexported in internal/weaver, so
+// five action names, typedLiteralPrefix, actorToken) is unexported in
+// internal/weaver, so
 // even a test-file import — which would not cycle, and would not enter the
 // production package's dependency tree — could not reach a single one of them.
 // Reading the package source keeps the production boundary intact and still
@@ -81,8 +82,9 @@ func weaverStringConsts(t *testing.T) map[string]string {
 // and param-grammar vocabulary this installer re-states against
 // internal/weaver's own constants. Without it a §10.2/§10.3 rename would leave
 // validateGapCompanionPair silently looking for columns no lens can ever
-// declare — a gate that passes everything — and a param-token rename would
-// leave malformedTypedLiteral inspecting a token no playbook writes.
+// declare — a gate that passes everything — and a value-token rename would
+// leave malformedTypedLiteral or actorTokenInStringField inspecting a token no
+// playbook writes.
 func TestGapCompanionPrefixes_MatchWeaverVocabulary(t *testing.T) {
 	t.Parallel()
 	consts := weaverStringConsts(t)
@@ -96,6 +98,7 @@ func TestGapCompanionPrefixes_MatchWeaverVocabulary(t *testing.T) {
 		{"actionProposedOp", actionProposedOp},
 		{"actionSurface", actionSurface},
 		{"typedLiteralPrefix", typedLiteralPrefix},
+		{"actorToken", actorToken},
 	} {
 		canonical, ok := consts[tc.engineName]
 		if !ok {

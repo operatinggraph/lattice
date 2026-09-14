@@ -78,6 +78,31 @@ const rowTemplatePrefix = "row."
 // constant, or for the token inside a params-bag literal.
 const typedLiteralPrefix = "json:"
 
+// actorToken marks a declared enumeration hub that names the DISPATCHING
+// engine's OWN actor key — the identity stamped on the submitted envelope
+// (Contract #10 §10.8). It exists because a declared walk (Contract #2 §2.5
+// class (e)) hubbed on the SUBMITTER rather than the subject — canonically the
+// actor-role confinement walk a dispatched op's script runs — has no other
+// spelling on this surface: the submitter's identity is not a violation-row
+// column (no lens can project it), and each deployment generates its own
+// primordial identity set on first boot, so no package Definition can embed it
+// as a literal.
+//
+// Unlike the two param tokens above it is admitted at exactly ONE field: a gap
+// action's enumerations[].hub, where buildPlan substitutes it before the hub
+// travels the shared key resolver. Every other authored value refuses it
+// outright (resolveStringParam), and the same refusal is re-taken at engine
+// load (validateGapStringFields) and at install (pkgmgr's
+// actorTokenInStringField).
+//
+// Substitution is whole-value, which is why the refusal is too: a value that
+// merely CONTAINS the token is an ordinary literal no resolver on either
+// surface treats as a template. The spelling is the op-descriptor dispatch
+// surface's own (pkgmgr's enumeration-hub vocabulary, internal/testutil's
+// resolveHubTemplate), so an operation declaring the same walk on both
+// dispatching surfaces writes it identically.
+const actorToken = "{actor}"
+
 // errKind classifies a plan failure so the evaluator can route it: a config or
 // data error is alerted and the gap skipped (redelivery cannot fix it); a
 // transient error (a pattern/op reference the registry has not resolved) is
@@ -178,7 +203,13 @@ type plan struct {
 // against the registry at dispatch time. expectedRevision is the candidate
 // row's substrate per-key revision off the CDC message; every remediation op's
 // payload carries it as the OCC revision-condition.
-func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
+//
+// actorKey is the identity the Actuator stamps on the envelope this plan
+// becomes (actuator.actor, from Config.ActorKey) — the ONE value the {actor}
+// enumeration hub resolves to, threaded in rather than re-derived so the hub a
+// walk declares and the actor the op is submitted under cannot come from two
+// sources and disagree.
+func buildPlan(source *targetSource, actorKey, targetID, entityID, gapColumn string,
 	ga GapAction, row map[string]any, expectedRevision uint64) (*plan, *planError) {
 
 	switch ga.Action {
@@ -365,9 +396,32 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 		// does — the kv.Links call is a bounded paged live read either way — it
 		// puts the walk on the envelope instead of leaving it knowable only by
 		// reading the script.
+		//
+		// The hub is additionally the one field admitting {actor}, substituted
+		// to the dispatching engine's own actor key BEFORE the shared resolver
+		// sees it — which is precisely what confines the token to this field,
+		// since resolveStringParam refuses it everywhere it survives to.
 		var enumerations []GapEnumeration
 		for i, en := range ga.Enumerations {
-			hub, perr := resolveReadKey(fmt.Sprintf("enumerations[%d].hub", i), en.Hub, row)
+			name := fmt.Sprintf("enumerations[%d].hub", i)
+			template := en.Hub
+			if template == actorToken {
+				// An empty actor key must fail LOUD rather than substitute "".
+				// An empty hub is not an inert hub: the read-drift guard reads
+				// the hub's vertex root to decide which walks a declaration
+				// covers, and a rootless hub reads as "no root" — so a
+				// silently-empty substitution would ADMIT the undeclared walks
+				// the declaration was written to cover. The engine refuses to
+				// start without an ActorKey (Engine.Start), so reaching here
+				// means a plan built outside that path.
+				if actorKey == "" {
+					return nil, &planError{kind: errConfig,
+						msg: fmt.Sprintf("%s is %s but the dispatching engine has no actor key — the token names the submitter's identity, and there is none to substitute",
+							name, actorToken)}
+				}
+				template = actorKey
+			}
+			hub, perr := resolveReadKey(name, template, row)
 			if perr != nil {
 				return nil, perr
 			}
@@ -394,7 +448,7 @@ func buildPlan(source *targetSource, targetID, entityID, gapColumn string,
 		// resolved through buildProposedOpPlan's own dispatch-time §5
 		// re-validation + materialisation, then a recursive buildPlan call for the
 		// resolved inner action (reusing this same live-registry resolution).
-		return buildProposedOpPlan(source, entityID, row, expectedRevision)
+		return buildProposedOpPlan(source, actorKey, entityID, row, expectedRevision)
 
 	default:
 		return nil, &planError{kind: errConfig, msg: fmt.Sprintf("unknown action %q", ga.Action)}
@@ -899,6 +953,21 @@ func typedLiteralError(name, value string) *planError {
 // name a protected op (or a foreign vertex key) in a spelling no gate
 // recognises. Refusing beats passing the token through untouched, which would
 // merely defer the failure to an unresolvable operationType.
+//
+// The {actor} token is refused here on the same terms, for a reason of its own.
+// It names the SUBMITTER, and only a hub — a walk's starting vertex — has a
+// meaning for the submitter's own identity; buildPlan substitutes it there
+// before the value ever reaches this resolver, so every value that arrives
+// still carrying it is a field the token means nothing on. On an operationType,
+// a pattern ref, an assignee or a target it would name a key the dispatched op
+// does not read, or a value an upstream gate compares raw — the same two
+// raw-equality gates the paragraph above names. On a declared reads /
+// optionalReads key it is worse than useless: a declared read the op never
+// makes is the shape the read-drift guard adjudicates against, so the
+// declaration would retire a baseline row while the walk it names goes on
+// running undeclared. Refusing beats passing it through as the plain literal
+// string it is today, which leaves the author a walk declared on paper and
+// wrong in fact.
 func resolveStringParam(name, value string, row map[string]any) (string, *planError) {
 	if value == "" {
 		return "", &planError{kind: errConfig, msg: fmt.Sprintf("param %q is required", name)}
@@ -907,6 +976,11 @@ func resolveStringParam(name, value string, row map[string]any) (string, *planEr
 		return "", &planError{kind: errConfig,
 			msg: fmt.Sprintf("param %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted here (it is meaningful only in a gap's params bag); write the value directly",
 				name, typedLiteralPrefix)}
+	}
+	if value == actorToken {
+		return "", &planError{kind: errConfig,
+			msg: fmt.Sprintf("param %q must be a key, operationType or pattern ref — always a string — so the %s token is not permitted here (it names the submitting engine's own identity, which is meaningful only on an enumeration hub); write the value directly",
+				name, actorToken)}
 	}
 	v, templated, perr := resolveRowTemplate(name, value, row)
 	if perr != nil {

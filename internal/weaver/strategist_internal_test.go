@@ -2,6 +2,13 @@ package weaver
 
 import "testing"
 
+// fixtureActorKey is the dispatching actor every buildPlan call in this
+// package's internal tests is given — in production the value Config.ActorKey
+// hands the Actuator, which stamps it on the submitted envelope. It is the
+// substitution an {actor} enumeration hub resolves to, so a test that asserts
+// on a resolved hub asserts against this.
+const fixtureActorKey = "vtx.identity.WeaverServiceActor1abc"
+
 // TestBuildPlan_DirectOp_ResolvesReads pins the v1b directOp reads enhancement:
 // a directOp gap action templates row.<column> params into the op payload AND
 // routes row-templated reads into the dispatched op's ContextHint.Reads, so an
@@ -21,7 +28,7 @@ func TestBuildPlan_DirectOp_ResolvesReads(t *testing.T) {
 	}
 
 	// directOp does not use the registry source, so nil is fine.
-	pl, perr := buildPlan(nil, "objectLiveness", "AAobjHJKMNPQRSTUVWX", "missing_owner", ga, row, 99)
+	pl, perr := buildPlan(nil, fixtureActorKey, "objectLiveness", "AAobjHJKMNPQRSTUVWX", "missing_owner", ga, row, 99)
 	if perr != nil {
 		t.Fatalf("buildPlan: %v", perr)
 	}
@@ -56,7 +63,7 @@ func TestBuildPlan_DirectOp_SetsClass(t *testing.T) {
 		Operation: "CreateAccount",
 		Class:     "cafeaccount",
 	}
-	pl, perr := buildPlan(nil, "cafeLedger", "AAentHJKMNPQRSTUVWX", "missing_account", ga, map[string]any{}, 1)
+	pl, perr := buildPlan(nil, fixtureActorKey, "cafeLedger", "AAentHJKMNPQRSTUVWX", "missing_account", ga, map[string]any{}, 1)
 	if perr != nil {
 		t.Fatalf("buildPlan: %v", perr)
 	}
@@ -74,7 +81,7 @@ func TestBuildPlan_DirectOp_MissingReadColumn(t *testing.T) {
 		Operation: "TombstoneObject",
 		Reads:     []string{"row.nope"},
 	}
-	_, perr := buildPlan(nil, "objectLiveness", "e", "missing_owner", ga, map[string]any{"entityKey": "k"}, 1)
+	_, perr := buildPlan(nil, fixtureActorKey, "objectLiveness", "e", "missing_owner", ga, map[string]any{"entityKey": "k"}, 1)
 	if perr == nil {
 		t.Fatalf("expected a planError for a read referencing an absent row column")
 	}
@@ -95,7 +102,7 @@ func TestBuildPlan_DirectOp_ReadsRowColumnAspectSuffix(t *testing.T) {
 		Reads:     []string{"row.unitKey", "row.unitKey.listing"},
 	}
 	row := map[string]any{"unitKey": "vtx.unit.AAunitHJKMNPQRSTUV"}
-	pl, perr := buildPlan(nil, "leaseApplicationComplete", "AAappHJKMNPQRSTUVWXY", "missing_listingLeased", ga, row, 3)
+	pl, perr := buildPlan(nil, fixtureActorKey, "leaseApplicationComplete", "AAappHJKMNPQRSTUVWXY", "missing_listingLeased", ga, row, 3)
 	if perr != nil {
 		t.Fatalf("buildPlan: %v", perr)
 	}
@@ -121,7 +128,7 @@ func TestBuildPlan_DirectOp_ResolvesOptionalReads(t *testing.T) {
 		OptionalReads: []string{"vtx.config.residueGuard", "row.entityKey"},
 	}
 	row := map[string]any{"entityKey": "vtx.object.AAobjHJKMNPQRSTUVWX"}
-	pl, perr := buildPlan(nil, "objectLiveness", "AAobjHJKMNPQRSTUVWX", "missing_owner", ga, row, 1)
+	pl, perr := buildPlan(nil, fixtureActorKey, "objectLiveness", "AAobjHJKMNPQRSTUVWX", "missing_owner", ga, row, 1)
 	if perr != nil {
 		t.Fatalf("buildPlan: %v", perr)
 	}
@@ -151,7 +158,7 @@ func TestBuildPlan_DirectOp_NoOptionalReadsLeavesPlanFieldNil(t *testing.T) {
 		Params:    map[string]string{"objectKey": "row.entityKey"},
 	}
 	row := map[string]any{"entityKey": "vtx.object.AAobjHJKMNPQRSTUVWX"}
-	pl, perr := buildPlan(nil, "objectLiveness", "AAobjHJKMNPQRSTUVWX", "missing_owner", ga, row, 1)
+	pl, perr := buildPlan(nil, fixtureActorKey, "objectLiveness", "AAobjHJKMNPQRSTUVWX", "missing_owner", ga, row, 1)
 	if perr != nil {
 		t.Fatalf("buildPlan: %v", perr)
 	}
@@ -182,7 +189,7 @@ func TestBuildPlan_AssignTask_OptionalReadsMatchPayload(t *testing.T) {
 		"assignee":  "vtx.identity.AAassignHJKMNPQRSTUV",
 		"entityKey": "vtx.leaseApplication.AAleaseHJKMNPQRSTUV",
 	}
-	pl, perr := buildPlan(src, "leaseApproval", "AAleaseHJKMNPQRSTUV", "missing_approval", ga, row, 7)
+	pl, perr := buildPlan(src, fixtureActorKey, "leaseApproval", "AAleaseHJKMNPQRSTUV", "missing_approval", ga, row, 7)
 	if perr != nil {
 		t.Fatalf("buildPlan: %v", perr)
 	}

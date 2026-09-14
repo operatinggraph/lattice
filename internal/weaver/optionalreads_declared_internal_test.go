@@ -308,7 +308,7 @@ func TestResolveGoalAction_CarriesOptionalReadsIntoDispatchedPlan(t *testing.T) 
 	}
 
 	row := map[string]any{"entityKey": "vtx.object.AAobjHJKMNPQRSTUVWX"}
-	pl, perr := buildPlan(nil, "t1", "e1", "missing_x", resolved, row, 1)
+	pl, perr := buildPlan(nil, fixtureActorKey, "t1", "e1", "missing_x", resolved, row, 1)
 	if perr != nil {
 		t.Fatalf("buildPlan: %v", perr)
 	}

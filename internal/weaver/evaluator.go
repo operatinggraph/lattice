@@ -942,7 +942,7 @@ func (e *Engine) planGap(ctx context.Context, target *Target, targetID, entityID
 	}
 	if perr == nil {
 		var pl *plan
-		if pl, perr = buildPlan(e.source, targetID, entityID, col, resolved, row, rowRevision); perr == nil {
+		if pl, perr = buildPlan(e.source, e.actorKey(), targetID, entityID, col, resolved, row, rowRevision); perr == nil {
 			// A plan that BUILT disproves THREE standing facts, whether or not
 			// admission lets it fire on this pass: the playbook resolves (the
 			// config issue), this entity's gap has an attempt left after all (its

@@ -821,8 +821,13 @@ func validateGapParams(where string, params map[string]string) error {
 }
 
 // namedValue pairs one authored dispatch-binding value with the name the
-// resolver reports it under.
-type namedValue struct{ name, value string }
+// resolver reports it under. hub marks the entries that are an enumeration's
+// hub — the one field of the action contract whose grammar admits the {actor}
+// token, and so the one the token's refusal must skip.
+type namedValue struct {
+	name, value string
+	hub         bool
+}
 
 // dispatchStringValues lists every field of one action contract that must
 // resolve to a STRING at dispatch — keys, operationTypes, pattern refs — in
@@ -831,36 +836,52 @@ type namedValue struct{ name, value string }
 // is meaningful.
 func dispatchStringValues(ga GapAction) []namedValue {
 	out := []namedValue{
-		{"subject", ga.Subject},
-		{"pattern", ga.Pattern},
-		{"operation", ga.Operation},
-		{"assignee", ga.Assignee},
-		{"target", ga.Target},
+		{name: "subject", value: ga.Subject},
+		{name: "pattern", value: ga.Pattern},
+		{name: "operation", value: ga.Operation},
+		{name: "assignee", value: ga.Assignee},
+		{name: "target", value: ga.Target},
 	}
 	for i, r := range ga.Reads {
-		out = append(out, namedValue{fmt.Sprintf("reads[%d]", i), r})
+		out = append(out, namedValue{name: fmt.Sprintf("reads[%d]", i), value: r})
 	}
 	for i, r := range ga.OptionalReads {
-		out = append(out, namedValue{fmt.Sprintf("optionalReads[%d]", i), r})
+		out = append(out, namedValue{name: fmt.Sprintf("optionalReads[%d]", i), value: r})
 	}
 	for i, en := range ga.Enumerations {
-		out = append(out, namedValue{fmt.Sprintf("enumerations[%d].hub", i), en.Hub})
+		out = append(out, namedValue{name: fmt.Sprintf("enumerations[%d].hub", i), value: en.Hub, hub: true})
 	}
 	return out
 }
 
-// validateGapStringFields refuses the typed-literal token on any field that
-// must resolve to a string. resolveStringParam refuses it at dispatch for the
-// security reason stated there — the gates upstream compare these fields as
-// raw authored strings — and this makes the refusal one load-time verdict
-// rather than a config error re-raised per violation row forever. No decode
-// is attempted: on these fields the token has no valid form at all, so the
-// check is the leading token alone.
+// validateGapStringFields refuses, on any field that must resolve to a string,
+// the two tokens neither of which can ever resolve to one there.
+//
+// The typed-literal token is refused on EVERY field in the list, hubs
+// included. resolveStringParam refuses it at dispatch for the security reason
+// stated there — the gates upstream compare these fields as raw authored
+// strings — and this makes the refusal one load-time verdict rather than a
+// config error re-raised per violation row forever. No decode is attempted: on
+// these fields the token has no valid form at all, so the check is the leading
+// token alone.
+//
+// The {actor} token is refused on every field EXCEPT an enumeration hub, which
+// is the single field whose grammar admits it (Contract #10 §10.8: "admitted
+// on a hub only — on a param, a reads/optionalReads entry, or any other
+// authored value it is refused at install and at load"). Written at the FIELD
+// LIST rather than at each authoring surface on purpose: a candidate's
+// enumerations and a catalog entry's are copied verbatim into the GapAction
+// buildPlan dispatches (candidateGapAction / catalogEntryGapAction), so the
+// three surfaces share one grammar and must share one verdict.
 func validateGapStringFields(where string, ga GapAction) error {
 	for _, f := range dispatchStringValues(ga) {
 		if strings.HasPrefix(f.value, typedLiteralPrefix) {
 			return fmt.Errorf("%s: %s %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted there (it is meaningful only in a gap's params bag); write the value directly",
 				where, f.name, f.value, typedLiteralPrefix)
+		}
+		if !f.hub && f.value == actorToken {
+			return fmt.Errorf("%s: %s %q must be a key, operationType or pattern ref — always a string — so the %s token is not permitted there (it names the submitting engine's own identity, which is meaningful only on an enumeration hub); write the value directly",
+				where, f.name, f.value, actorToken)
 		}
 	}
 	return nil

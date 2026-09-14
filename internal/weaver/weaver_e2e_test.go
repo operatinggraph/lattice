@@ -173,6 +173,15 @@ type capturedOp struct {
 	AuthContext   struct {
 		Target string `json:"target"`
 	} `json:"authContext"`
+	ContextHint struct {
+		Reads         []string `json:"reads"`
+		OptionalReads []string `json:"optionalReads"`
+		Enumerations  []struct {
+			Hub       string `json:"hub"`
+			Relation  string `json:"relation"`
+			Direction string `json:"direction"`
+		} `json:"enumerations"`
+	} `json:"contextHint"`
 }
 
 func subscribeOps(t *testing.T, nc *nats.Conn) *nats.Subscription {
@@ -1321,6 +1330,78 @@ func TestWeaverE2E_SemanticContracts_MissingCharge_PayloadCarriesAccountKey(t *t
 		"the dispatched DebitAccount payload must carry accountKey — Target only sets authContext.target, never the payload")
 	require.Equal(t, float64(4500), op.Payload["amountCents"])
 	require.Equal(t, clauseKey, op.Payload["clauseRef"])
+}
+
+// TestWeaverE2E_ActorEnumerationHub_MatchesSubmittedEnvelopeActor is the pin
+// that makes the {actor} hub mean what Contract #10 §10.8 says it means:
+// "substituted at dispatch with the dispatching engine's own actor key — the
+// identity stamped on the submitted envelope." Both halves of that sentence are
+// read off ONE captured envelope here, and asserted against each other rather
+// than against a fixture constant, so the two can never drift apart: a
+// substitution taken from any source other than the actor the Actuator stamps
+// would leave a walk declared against an identity that never submitted
+// anything, and the envelope itself is the only place that disagreement shows.
+//
+// The unit vectors cover the grammar (actortoken_internal_test.go); this covers
+// the seam between the two fields, which no unit test can see — buildPlan
+// resolves the hub and actuator.submit stamps the actor, and nothing inside
+// either one knows about the other.
+func TestWeaverE2E_ActorEnumerationHub_MatchesSubmittedEnvelopeActor(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	nc := startNATS(t)
+	conn, err := substrate.Wrap(nc)
+	require.NoError(t, err)
+	provision(t, ctx, conn)
+	ops := subscribeOps(t, nc)
+
+	targetID := "fixtureActorHub"
+	installWeaverTarget(t, ctx, conn, mustNanoID(t), map[string]any{
+		"targetId": targetID,
+		"lensRef":  mustNanoID(t),
+		"gaps": map[string]any{
+			"missing_confinement": gapActionFixtureBody(pkgmgr.GapActionSpec{
+				Action: "directOp", Operation: "Fix",
+				Params: map[string]string{"unitKey": "row.entityKey"},
+				// The hub whose meaning is under test, alongside a literal
+				// relation and direction the playbook states outright.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			}),
+		},
+	})
+
+	engine := newEngine(conn, "e2e-actor-hub-"+mustNanoID(t))
+	engCtx, engCancel := context.WithCancel(ctx)
+	defer engCancel()
+	go func() { _ = engine.Start(engCtx) }()
+
+	waitConsumer(t, ctx, conn, "weaver-target-"+targetID)
+
+	entityID := mustNanoID(t)
+	entityKey := "vtx.unit." + entityID
+	putRow(t, ctx, conn, targetID, entityID, map[string]any{
+		"entityKey":           entityKey,
+		"violating":           true,
+		"missing_confinement": true,
+	})
+
+	op := nextOp(t, ops, 15*time.Second)
+	require.Equal(t, "Fix", op.OperationType)
+	require.Len(t, op.ContextHint.Enumerations, 1,
+		"the declared walk must reach the envelope's contextHint")
+	hub := op.ContextHint.Enumerations[0].Hub
+	require.NotEmpty(t, op.Actor, "an envelope with no actor would make the comparison below vacuous")
+	require.Equal(t, op.Actor, hub,
+		"the {actor} hub must be the very identity this envelope was submitted under")
+	require.Equal(t, "holdsRole", op.ContextHint.Enumerations[0].Relation)
+	require.Equal(t, "out", op.ContextHint.Enumerations[0].Direction)
 }
 
 // installAugurDispatchTarget pins the real augur package's augurDispatch
