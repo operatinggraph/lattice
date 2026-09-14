@@ -2416,6 +2416,54 @@ func TestArrears_EvaluateRearmsOnACoveredHead(t *testing.T) {
 	}
 }
 
+// TestArrears_EvaluateNetsARefundAgainstItsCharge proves arrears_head's
+// netting pre-pass matches the statement's own rule (cmd/cafe-app/ledger.go
+// deriveStatement), not plain FIFO: a refund that names a charge
+// (reversesRef) retires that charge directly, wherever the refund itself
+// happens to sort chronologically — refundEnv fixes SubmittedAt at
+// 2026-07-11, AHEAD of both charges below (a fixture quirk, not something
+// this test chose for its shape), so the refund's own postedAt predates
+// even the charge it names. Under plain FIFO that would make it an
+// ordinary early credit: nothing open yet to apply to, so it would carry
+// forward as surplus and prepay whichever debit posts next (A, the
+// older one) — leaving B open as the head by coincidence of timing, not
+// because the refund named it. The netting pre-pass reads reversesRef
+// independent of row order, so the SAME refund instead retires B
+// specifically, and it is A — untouched by the reversal — that is left
+// open as the head. The dueAt asserted below is the netting rule's
+// answer; no FIFO application of these rows, timing coincidence included,
+// produces it.
+func TestArrears_EvaluateNetsARefundAgainstItsCharge(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsnetref")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRNETLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafearrnetacct000001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "cafearrnetdebita0001", acctKey, "2026-08-01T09:00:00Z", 1000)
+	chargeB := debitAt(t, ctx, conn, cp, cons, "cafearrnetdebitb0001", acctKey, "2026-08-20T09:00:00Z", 1000)
+	refundAs(t, ctx, conn, cp, cons, "cafearrnetrefund0001",
+		ledgerActorKey, acctKey, chargeB, 1000, "", processor.OutcomeAccepted)
+
+	if stale, _ := arrearsData(t, ctx, conn, acctKey)["stale"].(bool); !stale {
+		t.Fatal("fixture precondition: the refund must have marked the state stale")
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "cafearrnetevalXX0001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+
+	data := arrearsData(t, ctx, conn, acctKey)
+	// The refund names B directly and retires it regardless of the refund's
+	// own (earlier) postedAt, leaving A — untouched — as the head. A plain
+	// FIFO reading of these rows would have the refund arrive before A even
+	// posts, so it would carry forward as surplus and prepay A instead,
+	// leaving B as the head: the opposite of what netting produces here.
+	wantDue := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC).
+		AddDate(0, 0, cafeledger.ArrearsGraceDays).Format(time.RFC3339)
+	if got, _ := data["dueAt"].(string); got != wantDue {
+		t.Fatalf("dueAt = %q, want %q — the reversal retires B directly, leaving A (Aug 1) as the head", got, wantDue)
+	}
+}
+
 // TestArrears_OneNotificationPerEpisodeNotPerHead (f2) is the once-per-episode
 // guarantee at its only hard case. An EPISODE is the stretch from the charge
 // that takes the account from square to owing until the balance comes back to

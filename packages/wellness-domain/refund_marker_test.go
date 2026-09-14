@@ -717,6 +717,122 @@ func TestReleaseOrphanedBooking_ReleasesNoShowAndRefundsBothChargeShapes(t *test
 	assertTrackerEvent(t, ctx, conn, releaseReqID, "wellness.noShowFeeRefundQueued")
 }
 
+// seedReversingRefundMarker directly seeds a wellnessrefund marker + its
+// .detail aspect + its reverses link onto chargeTxKey — the exact shape
+// CancelBooking/SetBookingAttendance/ReleaseOrphanedBooking's own mint sites
+// leave, seeded raw (wellness-ledger is not installed in this harness) so a
+// test can start from "this charge has already been reversed once" without
+// driving the op that would normally have reversed it.
+func seedReversingRefundMarker(t *testing.T, ctx context.Context, conn *substrate.Conn, refundID, acctKey, bookingKey, chargeTxKey, memo string, amountCents float64) string {
+	t.Helper()
+	_, chargeTxID, _ := substrate.ParseVertexKey(chargeTxKey)
+	refundKey := "vtx.wellnessrefund." + refundID
+	seedVertex(t, ctx, conn, refundKey, "wellnessrefund", nil)
+	seedAspect(t, ctx, conn, refundKey, "detail", "wellnessRefundDetail", map[string]any{
+		"accountKey": acctKey, "amountCents": amountCents, "bookingKey": bookingKey, "memo": memo,
+	})
+	seedLink(t, ctx, conn, "lnk.wellnessrefund."+refundID+".reverses.wellnesstransaction."+chargeTxID,
+		refundKey, chargeTxKey, "reverses", "reverses")
+	return refundKey
+}
+
+// TestReleaseOrphanedBooking_NoDoubleRefundWhenNoShowFeeAlreadyReversed is
+// the release-side twin of TestSetBookingAttendance_NoDoubleRefundOnRepeatedNoShowAttendedCycle:
+// a booking that reaches ReleaseOrphanedBooking still "noShow" can carry a
+// no-show-fee charge some EARLIER attendance correction already reversed
+// (fee charged on noShow -> corrected to attended, reversing it -> marked
+// noShow again -- the settles gate is single-fire, so no second charge ever
+// posts -> the class is then called off and this booking drains here). The
+// settles link this op walks is the SAME one that correction already
+// resolved and reversed; without the idempotency guard mirrored from
+// SetBookingAttendance, this release would mint a SECOND marker reversing
+// money already credited back once.
+func TestReleaseOrphanedBooking_NoDoubleRefundWhenNoShowFeeAlreadyReversed(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "orphanalreadyrev")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdorphnarstudio0001", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdorphnarsessio0001", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLURPHNAR1HJKMNP")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdorphnarbookin0001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+	seat, _ := attendanceStatus(t, ctx, conn, bookingKey)["seat"].(float64)
+
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdorphnarattend0001", bookingKey, sessionKey, "noShow", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got, _ := attendanceStatus(t, ctx, conn, bookingKey)["value"].(string); got != "noShow" {
+		t.Fatalf("booking status = %q, want noShow", got)
+	}
+
+	acctKey := "vtx.wellnessaccount.BBWELLURPHNARACTHJKM"
+	seedVertex(t, ctx, conn, acctKey, "wellnessaccount", nil)
+	noShowTxKey := seedPostedNoShowFeeCharge(t, ctx, conn, bookingKey, acctKey, "BBWELLURPHNARTXNHJKM", 2500.0)
+	_, noShowTxID, _ := substrate.ParseVertexKey(noShowTxKey)
+
+	// This charge was already reversed once, by a process this test does not
+	// replay — only the resulting shape matters to the guard.
+	priorRefundKey := seedReversingRefundMarker(t, ctx, conn, "BBWELLURPHNARPRRHJKM", acctKey, bookingKey, noShowTxKey, "No-show fee refund", 2500.0)
+
+	tombstoneReqID := testutil.GenReqID("wdorphnartombst0001")
+	tombstoneEnv := &processor.OperationEnvelope{
+		RequestID:     tombstoneReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T09:35:00Z",
+		Class:         "session",
+		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			sessionKey, sessionKey + ".schedule",
+			atStudioLnkKey(t, sessionKey, studioKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, tombstoneEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	releaseReqID := testutil.GenReqID("wdorphnarreleas0001")
+	releaseEnv := &processor.OperationEnvelope{
+		RequestID:     releaseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReleaseOrphanedBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-08T09:40:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:        []string{bookingKey, bookingKey + ".status", sessionKey},
+			Enumerations: wdReleaseEnumerations(bookingKey),
+		},
+	}
+	testutil.PublishOp(t, conn, releaseEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("booking must be tombstoned after ReleaseOrphanedBooking")
+	}
+	if seatCellKey := sessionKey + ".seat" + strconv.Itoa(int(seat)); keyExists(t, ctx, conn, seatCellKey) {
+		t.Fatalf("seat cell must be released: %s", seatCellKey)
+	}
+
+	// The release must have minted NOTHING for this charge: no new refund
+	// marker at the id it would otherwise have consumed, and no
+	// noShowFeeRefundQueued event on the release's own request.
+	wouldBeRefundKey := "vtx.wellnessrefund." + nanoIDsFromRequestID(releaseReqID, 1)[0]
+	if keyExists(t, ctx, conn, wouldBeRefundKey) {
+		t.Fatalf("release must not mint a second refund marker for an already-reversed charge, found %s", wouldBeRefundKey)
+	}
+	assertNoTrackerEvent(t, ctx, conn, releaseReqID, "wellness.noShowFeeRefundQueued")
+
+	// Exactly one reverses link ever points at the charge — the one seeded
+	// before the release ran.
+	_, priorRefundID, _ := substrate.ParseVertexKey(priorRefundKey)
+	if !keyExists(t, ctx, conn, "lnk.wellnessrefund."+priorRefundID+".reverses.wellnesstransaction."+noShowTxID) {
+		t.Fatalf("the pre-existing reverses link must still be the only one")
+	}
+}
+
 // TestReleaseOrphanedBooking_ResolvesSessionAndBookerFromLinks proves the drain
 // stands on the booking's LINKS, not on the .status anchors: a booking whose
 // aspect carries only value/rate/seat — the at-rest shape of one minted before

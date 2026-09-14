@@ -276,6 +276,14 @@ walk	DecideLeaseApplication	vtx.unit.<id> containedIn out
 walk	EndVisitSeries	vtx.building.<id> containedIn out
 walk	EndVisitSeries	vtx.provider.<id> practicesAt out
 walk	EndVisitSeries	vtx.visitseries.<id> withProvider out
+# arrears_entries (packages/cafe-ledger/scripts.go) follows reverses off each
+# CREDIT transaction its own bounded postedTo replay discovers, to net a
+# refund against the specific charge it names (arrears_head's rule) instead
+# of aging by plain FIFO order. The transaction key only exists once that
+# postedTo walk resolves it, so — like the postedTo walk's own per-candidate
+# .entry read this target's own doc comment (targets.go) already carries —
+# no dispatcher can name it up front.
+walk	EvaluateCafeArrears	vtx.cafetransaction.<id> reverses out
 walk	LoftspaceCreateAccount	vtx.building.<id> containedIn out
 walk	LoftspaceCreateAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	LoftspaceCreateAccount	vtx.unit.<id> containedIn out
@@ -299,6 +307,15 @@ walk	ReassignSessionSeries	vtx.session.<id> ledBy out
 walk	ReassignSessionSeries	vtx.studio.<id> locatedAt out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
 walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> postedTo out
+# Idempotency guard on the no-show-fee charge this op's own `settles in`
+# walk discovers, mirroring SetBookingAttendance's identical probe below: an
+# attendance correction can already have reversed this same charge before
+# TombstoneSession ever ran (fee charged on noShow -> corrected to attended,
+# reversing it -> marked noShow again, no second charge posts -> the class
+# is then called off), so this release re-walks a settles link a DIFFERENT
+# op already resolved. The hub is link-discovered off that walk, so no
+# dispatcher can name it up front.
+walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> reverses in
 # RefundCafeCharge's half of CreditCafeAccount's confinement walk (see the read
 # rows above). The heldFor and appliesToUnit hubs are payload-reachable and the
 # descriptor could name them, but the containedIn hubs are link-discovered — a
@@ -332,10 +349,15 @@ walk	SetAppointmentStatus	vtx.provider.<id> practicesAt out
 # op is a Weaver gap whose GapActionSpec declares the walk on every envelope
 # (wellness-domain/targets.go), while this one reaches the Processor from a
 # front-desk caller under a descriptor that names no enumeration. `reverses in`
-# has none either: unlike CancelBooking/ReleaseOrphanedBooking (each dispatched
-# at most once per booking), SetBookingAttendance is re-markable,
-# so this walk is an idempotency check guarding against walking into the
-# same settles-linked transaction twice and double-crediting it.
+# has none either: CancelBooking is exempt (it tombstones the booking in the
+# same batch, so it dispatches at most once and nothing re-walks its settles
+# link afterward), but SetBookingAttendance is re-markable, so this walk is
+# an idempotency check guarding against walking into the same settles-linked
+# transaction twice and double-crediting it — and ReleaseOrphanedBooking
+# carries the identical guard for the identical reason (its own row above):
+# an attendance cycle can reverse this charge before the session is ever
+# tombstoned, so release re-walks the same settles link with no memory of
+# that.
 walk	SetBookingAttendance	vtx.booking.<id> settles in
 walk	SetBookingAttendance	vtx.building.<id> containedIn out
 walk	SetBookingAttendance	vtx.session.<id> atStudio out

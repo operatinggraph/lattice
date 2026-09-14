@@ -362,11 +362,23 @@ RETURN
 // several optionally-bound copies of one variable back to a single name
 // (internal/refractor/ruleengine/full/expr_eval.go).
 //
+// Two more OPTIONAL MATCHes walk `reverses`, the relation a wellnessrefund
+// marker carries to the charge it gives back (written unconditionally at
+// every mint site — CancelBooking (:4845), SetBookingAttendance (:5097),
+// and ReleaseOrphanedBooking's class-price and no-show branches (:5235,
+// :5287), wellness-domain/ddls.go): `(rf)-[:reverses]->(rtx)` off THIS row's own
+// settlesRefund-linked marker projects reversesKey when this row IS the
+// refund credit, and `(t)<-[:reverses]-(rrf)` off this row's transaction
+// directly projects rrf when this row IS the reversed charge — the two
+// hops read opposite directions off the same relation because a single row
+// can be either end of it, never both.
+//
 // className/classStartsAt are read off the matched booking's own .status
 // snapshot (nsbk.status / cpbk.status — bookingStatusAspectTypeDDL,
-// wellness-domain/ddls.go) or the matched refund's own .detail snapshot
-// (rf.detail — refundDetailAspectTypeDDL, same file), never by walking
-// forSession to the session: CreateBooking/JoinWaitlist snapshot the
+// wellness-domain/ddls.go), the matched refund's own .detail snapshot
+// (rf.detail — refundDetailAspectTypeDDL, same file), or — last —
+// the reversing marker's own .detail snapshot (rrf.detail): never by
+// walking forSession to the session. CreateBooking/JoinWaitlist snapshot the
 // session's .schedule.name/.schedule.startsAt onto the booking at booking
 // time, and CancelBooking copies that same snapshot onto a refund marker it
 // mints, precisely because the session a charge or refund was for can later
@@ -375,7 +387,12 @@ RETURN
 // the class name from every transaction it ever charged (mirrors
 // clinic-reminders' atSite link precedent, commit 4da005a0 — write the
 // snapshot once, at op time, onto state that survives the tombstone, instead
-// of re-deriving it from a vertex that might not). Projecting a real class
+// of re-deriving it from a vertex that might not). A charge whose OWN
+// settles/settlesClassPrice booking has since been tombstoned still needs
+// its class name for the reader, and the marker that reverses it carries
+// the same snapshot the marker's own credit row reads — rrf.detail is the
+// last fallback precisely because it is the only one of the three that
+// names a charge rather than the refund itself. Projecting a real class
 // name — not just a date, since wellness has one to give a reader (clinic's
 // appointment has none) — is what lets a member's billing history tell two
 // otherwise identical "No-show fee" lines apart by which class each one
@@ -386,6 +403,8 @@ MATCH (a)-[:heldFor]->(id:identity)
 OPTIONAL MATCH (t)-[:settles]->(nsbk:booking)
 OPTIONAL MATCH (t)-[:settlesClassPrice]->(cpbk:booking)
 OPTIONAL MATCH (t)-[:settlesRefund]->(rf:wellnessrefund)
+OPTIONAL MATCH (rf)-[:reverses]->(rtx:wellnesstransaction)
+OPTIONAL MATCH (t)<-[:reverses]-(rrf:wellnessrefund)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -397,8 +416,9 @@ RETURN
   t.entry.data.postedAt AS postedAt,
   t.entry.data.reason AS reason,
   coalesce(nsbk.key, cpbk.key) AS bookingKey,
-  coalesce(nsbk.status.data.className, cpbk.status.data.className, rf.detail.data.className) AS className,
-  coalesce(nsbk.status.data.classStartsAt, cpbk.status.data.classStartsAt, rf.detail.data.classStartsAt) AS classStartsAt`
+  coalesce(nsbk.status.data.className, cpbk.status.data.className, rf.detail.data.className, rrf.detail.data.className) AS className,
+  coalesce(nsbk.status.data.classStartsAt, cpbk.status.data.classStartsAt, rf.detail.data.classStartsAt, rrf.detail.data.classStartsAt) AS classStartsAt,
+  rtx.key AS reversesKey`
 
 // memberAccountsSpec projects one row per identity that has ever BOOKED —
 // anchored on the identity itself, with the inbound bookedBy walk from

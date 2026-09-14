@@ -5053,14 +5053,18 @@ def execute(state, op):
                 noshow_tx_key = nlk.sourceVertex
                 _, noshow_tx_id = parts_of(noshow_tx_key, "chargeTransactionKey", "wellnesstransaction")
                 # read-posture: (e) relation=reverses epoch=none -- idempotency
-                # guard. Unlike CancelBooking/ReleaseOrphanedBooking (each
-                # dispatched at most once per booking, so refundSettlementSpec's
-                # own doc comment notes there is "no later re-violation to
-                # guard against"), SetBookingAttendance is re-markable: a
-                # second noShow->attended cycle would walk into the SAME
-                # settles-linked transaction (the gate above never lets a
-                # second one post) and, without this check, mint a second
-                # refund for money already credited back once.
+                # guard. CancelBooking is exempt (it tombstones the booking
+                # in the same batch, so there is no later dispatch left to
+                # re-walk this settles link at all). SetBookingAttendance
+                # itself is re-markable: a second noShow->attended cycle
+                # would walk into the SAME settles-linked transaction (the
+                # gate above never lets a second one post) and, without this
+                # check, mint a second refund for money already credited
+                # back once. ReleaseOrphanedBooking's own noShow branch
+                # carries the identical guard for the identical reason: an
+                # attendance cycle can reverse this same charge before the
+                # session is ever tombstoned, and release re-walks the same
+                # settles link with no memory of that.
                 already_refunded_page, _ = kv.Links(noshow_tx_key, "reverses", "in", None, 1)
                 already_refunded = False
                 for arlk in already_refunded_page:
@@ -5261,6 +5265,26 @@ def execute(state, op):
                 continue
             noshow_tx_key = nlk.sourceVertex
             _, noshow_tx_id = parts_of(noshow_tx_key, "chargeTransactionKey", "wellnesstransaction")
+            # read-posture: (e) relation=reverses epoch=none -- idempotency
+            # guard, mirroring SetBookingAttendance's identical probe on
+            # this same settles-linked transaction above. Unlike the
+            # class-price branch above (settlesClassPrice's charge can only
+            # ever be reversed HERE, by this op), a no-show fee can already
+            # have been reversed by an attended re-mark before the session
+            # was ever tombstoned: fee charged on noShow -> attended
+            # (SetBookingAttendance mints a marker reversing it) -> noShow
+            # again (the settles gate is single-fire, so no second charge
+            # posts) -> TombstoneSession -> this release walks the SAME
+            # settles link and, without this check, would mint a second
+            # marker reversing the same already-reversed charge.
+            noshow_already_refunded_page, _ = kv.Links(noshow_tx_key, "reverses", "in", None, 1)
+            noshow_already_refunded = False
+            for narlk in noshow_already_refunded_page:
+                if not narlk.isDeleted:
+                    noshow_already_refunded = True
+                    break
+            if noshow_already_refunded:
+                continue
             # read-posture: (e) per-candidate follow-up read off the
             # enumeration above (data-derived key).
             noshow_entry = kv.Read(noshow_tx_key + ".entry")
