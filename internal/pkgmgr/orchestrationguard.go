@@ -52,6 +52,16 @@ const reservedGapParam = "expectedRevision"
 // too" posture as reservedGapParam above.
 const optionalReadsAction = actionDirectOp
 
+// enumerationsAction is the only §10.8 action whose dispatch reads a declared
+// Enumerations set at all: buildPlan builds ContextHint.Enumerations in its
+// directOp arm and in no other. A walk declared on any other action is not
+// redundant but silently DROPPED — the envelope goes out with no declaration,
+// the script's kv.Links runs undeclared, and the package source says
+// otherwise. The engine's validateTarget rejects it at load
+// (validateEnumerationsScope); install rejects it first for a clearer author
+// error, the same dual posture reservedGapParam and optionalReadsAction carry.
+const enumerationsAction = actionDirectOp
+
 // typedLiteralPrefix is the playbook param-value token that carries a JSON
 // type: json:<literal> dispatches as whatever encoding/json decodes the suffix
 // into, so a map[string]string params bag can still deliver a number or a
@@ -215,9 +225,17 @@ func (def Definition) validateWeaverTargets() error {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q declares optionalReads, but optionalReads is only meaningful for %s — every other action's ContextHint.OptionalReads is set by the engine's own dispatch and a declared value would collide with it",
 					idx, t.TargetID, col, ga.Action, optionalReadsAction)
 			}
+			if len(ga.Enumerations) > 0 && ga.Action != enumerationsAction {
+				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q declares enumerations, but enumerations are only meaningful for %s — every other action's dispatch ignores them, so the declared walk would be dropped from the envelope and run undeclared",
+					idx, t.TargetID, col, ga.Action, enumerationsAction)
+			}
 			if name, err := malformedTypedLiteral(ga.Params); err != nil {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q param %q: %w",
 					idx, t.TargetID, col, name, err)
+			}
+			if name, found := actorTokenParam(ga.Params); found {
+				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q param %q carries the %s token, which the params bag does not resolve (it names the submitting engine's own identity, and is meaningful only on an enumeration hub) — it would dispatch to the op as that literal string; the op already receives the submitter as the envelope's actor",
+					idx, t.TargetID, col, name, actorToken)
 			}
 			stringFields := dispatchStringFields(
 				ga.Subject, ga.Pattern, ga.Operation, ga.Assignee, ga.Target,
@@ -229,6 +247,10 @@ func (def Definition) validateWeaverTargets() error {
 			if f, found := actorTokenInStringField(stringFields); found {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: %s %q must be a key, operationType or pattern ref — always a string — so the %s token is not permitted there (it names the submitting engine's own identity, which is meaningful only on an enumeration hub); write the value directly",
 					idx, t.TargetID, col, f.name, f.value, actorToken)
+			}
+			if f, found := hubPlaceholderInStringField(stringFields); found {
+				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: %s %q carries a placeholder outside the enumeration-hub vocabulary (%s, a row.<column> template, or a literal key) — a hub resolves to a WHOLE vertex key, so %s is the entire value or it is not a placeholder; a brace form nothing resolves would land on the envelope naming nothing the walk enumerates from",
+					idx, t.TargetID, col, f.name, f.value, actorToken, actorToken)
 			}
 			// A goal-authored gap (R1) legitimately declares no top-level
 			// Action — dispatch comes entirely from the Actions catalog via
@@ -304,6 +326,31 @@ func malformedTypedLiteral(params map[string]string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// actorTokenParam returns the first param (in name order) whose value is the
+// actorToken. Nothing in the params bag resolves the token — it is admitted on
+// an enumeration hub alone (Contract #10 §10.8) — so an authored
+// actorKey: "{actor}" is not a malformed value that fails later but a
+// well-formed one that dispatches to the op as its own literal text, to be read
+// there as a vertex key naming nothing. An op that genuinely needs the
+// submitter's identity already has it: every envelope carries actor.
+//
+// Name order for the same reason malformedTypedLiteral uses it: Go randomizes
+// map range, and two offending params on one gap would otherwise name a
+// different one on each run.
+func actorTokenParam(params map[string]string) (string, bool) {
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if params[name] == actorToken {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // typedLiteralValueError is malformedTypedLiteral's per-value rule, split out
@@ -457,6 +504,35 @@ func typedLiteralInStringField(fields []namedValue) (namedValue, bool) {
 func actorTokenInStringField(fields []namedValue) (namedValue, bool) {
 	for _, f := range fields {
 		if !f.hub && f.value == actorToken {
+			return f, true
+		}
+	}
+	return namedValue{}, false
+}
+
+// hubPlaceholderInStringField returns the first enumeration hub carrying a
+// brace form that is not exactly the actorToken, closing the hub's placeholder
+// vocabulary by DEFAULT-DENY rather than letting an unrecognised one fall
+// through to the literal arm.
+//
+// The fall-through is what makes this worth a gate. A hub resolves to a whole
+// vertex key — kv.Links walks from exactly one of those — so on a hub a
+// placeholder occupies the entire value or it is not a placeholder at all. A
+// near-miss spelling ({Actor}, { actor }), a modifier this surface has no
+// resolver for ({actor:id}), or a placeholder embedded in a longer string
+// (vtx.identity.{actor}) would each install, load and dispatch as a literal
+// hub: syntactically a key, semantically nothing. It lands on the envelope,
+// matches no walk the script makes, and leaves the declaration covering zero of
+// what it names while the package source reads as though it covers the walk —
+// the precise outcome declaring the walk exists to prevent.
+//
+// This mirrors the op-descriptor dispatch surface, whose enumeration-hub
+// vocabulary is closed the same way (opdispatchtemplates.go's
+// enumerationHubRules), so the two dispatching surfaces refuse the same
+// spellings.
+func hubPlaceholderInStringField(fields []namedValue) (namedValue, bool) {
+	for _, f := range fields {
+		if f.hub && f.value != actorToken && strings.ContainsAny(f.value, "{}") {
 			return f, true
 		}
 	}

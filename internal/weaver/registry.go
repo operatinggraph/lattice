@@ -728,6 +728,9 @@ func validateTarget(t *Target) error {
 		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q", col), ga.Action, ga.OptionalReads); err != nil {
 			return err
 		}
+		if err := validateEnumerationsScope(fmt.Sprintf("gaps key %q", col), ga.Action, ga.Enumerations); err != nil {
+			return err
+		}
 		if err := validateGapParams(fmt.Sprintf("gaps key %q", col), ga.Params); err != nil {
 			return err
 		}
@@ -784,6 +787,29 @@ func validateGapEnumerations(where string, ens []GapEnumeration) error {
 	return nil
 }
 
+// hubPlaceholderRefusal is the one wording every refusal of an unresolvable
+// enumeration-hub placeholder carries, so the verdict an author meets at
+// install, at engine load and at dispatch reads identically wherever they hit
+// it first.
+//
+// The hub's brace vocabulary is CLOSED to the single token {actor}: a hub
+// resolves to a whole vertex key, because kv.Links walks from exactly one of
+// those, so a placeholder on a hub occupies the whole value or it is not a
+// placeholder at all. Everything else that carries a brace — a near-miss
+// spelling ({Actor}, { actor }), a modifier the weaver surface has no resolver
+// for ({actor:id}), or a placeholder embedded in a larger string
+// (vtx.identity.{actor}) — is refused outright rather than passed to the
+// literal arm. Falling through would hand the op a hub that is syntactically a
+// key and semantically nothing: it lands on the envelope, matches no walk the
+// script makes, and leaves the declaration covering exactly zero of what it
+// names while looking, in the package source, like it covers the walk. This
+// mirrors the op-descriptor dispatch surface, which closes its own hub
+// vocabulary by default-deny (pkgmgr's opdispatchtemplates.go).
+func hubPlaceholderRefusal(name, hub string) string {
+	return fmt.Sprintf("%s %q carries a placeholder outside the enumeration-hub vocabulary (%s, a row.<column> template, or a literal key) — a hub resolves to a WHOLE vertex key, so %s is the entire value or it is not a placeholder; a brace form nothing resolves would land on the envelope naming nothing the walk enumerates from",
+		name, hub, actorToken, actorToken)
+}
+
 // validateOptionalReadsScope refuses a declared OptionalReads set on any
 // action arm other than directOp. Every other arm's ContextHint.OptionalReads
 // is the engine's OWN to set at dispatch (buildPlan's assignTask arm already
@@ -798,14 +824,39 @@ func validateOptionalReadsScope(where, action string, optionalReads []string) er
 	return fmt.Errorf("%s: action %q declares optionalReads, but optionalReads is only meaningful for directOp — every other action's ContextHint.OptionalReads is set by the engine's own dispatch and a declared value would collide with it", where, action)
 }
 
-// validateGapParams refuses a params bag carrying a malformed json:<literal>
-// typed literal. Whether that suffix decodes is a property of the AUTHORED
-// value alone — no row participates — so the defect is permanent: the gap
-// could never dispatch, for any row, ever. Refusing it here makes it one loud
-// load-time verdict instead of a config error re-raised per violation row
-// forever. Params are visited in name order because Go randomizes map range,
-// and two malformed values on one gap would otherwise name a different param
-// on each run.
+// validateEnumerationsScope refuses a declared Enumerations set on any action
+// arm other than directOp, the exact counterpart of validateOptionalReadsScope
+// above and refused for a sharper reason: buildPlan reads ga.Enumerations in
+// its directOp arm and nowhere else, so a walk declared on a triggerLoom, an
+// assignTask, a proposedOp or a surface gap is not merely redundant — it is
+// silently DROPPED at dispatch. The envelope goes out with no contextHint
+// enumerations, the script's walk runs undeclared, and the package source says
+// otherwise. A declaration that cannot possibly take effect must fail at the
+// author, not disappear.
+func validateEnumerationsScope(where, action string, ens []GapEnumeration) error {
+	if len(ens) == 0 || action == actionDirectOp {
+		return nil
+	}
+	return fmt.Errorf("%s: action %q declares enumerations, but enumerations are only meaningful for directOp — every other action's dispatch ignores them, so the declared walk would be dropped from the envelope and run undeclared", where, action)
+}
+
+// validateGapParams refuses a params bag carrying either of the two values no
+// row can rescue: a malformed json:<literal> typed literal, and the {actor}
+// token.
+//
+// Whether a typed literal's suffix decodes is a property of the AUTHORED value
+// alone — no row participates — so the defect is permanent: the gap could never
+// dispatch, for any row, ever. The {actor} token is permanent in the opposite
+// way: nothing in the params bag resolves it, so it WOULD dispatch, silently,
+// as its own literal text. The token is admitted on an enumeration hub alone
+// (Contract #10 §10.8), and the params bag is the one field list
+// dispatchStringValues below deliberately does not cover, so the refusal is
+// taken here.
+//
+// Refusing both here makes them one loud load-time verdict instead of a config
+// error re-raised per violation row forever. Params are visited in name order
+// because Go randomizes map range, and two offending values on one gap would
+// otherwise name a different param on each run.
 func validateGapParams(where string, params map[string]string) error {
 	names := make([]string, 0, len(params))
 	for name := range params {
@@ -815,6 +866,10 @@ func validateGapParams(where string, params map[string]string) error {
 	for _, name := range names {
 		if perr := typedLiteralError(name, params[name]); perr != nil {
 			return fmt.Errorf("%s: %s", where, perr.msg)
+		}
+		if params[name] == actorToken {
+			return fmt.Errorf("%s: param %q carries the %s token, which the params bag does not resolve (it names the submitting engine's own identity, and is meaningful only on an enumeration hub) — it would dispatch to the op as that literal string; the op already receives the submitter as the envelope's actor",
+				where, name, actorToken)
 		}
 	}
 	return nil
@@ -854,8 +909,9 @@ func dispatchStringValues(ga GapAction) []namedValue {
 	return out
 }
 
-// validateGapStringFields refuses, on any field that must resolve to a string,
-// the two tokens neither of which can ever resolve to one there.
+// validateGapStringFields holds every field that must resolve to a string to
+// the value grammar that field actually has. Three refusals, each scoped
+// differently, and the scopes are the point.
 //
 // The typed-literal token is refused on EVERY field in the list, hubs
 // included. resolveStringParam refuses it at dispatch for the security reason
@@ -868,11 +924,19 @@ func dispatchStringValues(ga GapAction) []namedValue {
 // The {actor} token is refused on every field EXCEPT an enumeration hub, which
 // is the single field whose grammar admits it (Contract #10 §10.8: "admitted
 // on a hub only — on a param, a reads/optionalReads entry, or any other
-// authored value it is refused at install and at load"). Written at the FIELD
-// LIST rather than at each authoring surface on purpose: a candidate's
-// enumerations and a catalog entry's are copied verbatim into the GapAction
-// buildPlan dispatches (candidateGapAction / catalogEntryGapAction), so the
-// three surfaces share one grammar and must share one verdict.
+// authored value it is refused at install and at load"). The params bag is not
+// in this list at all and takes the same refusal in validateGapParams.
+//
+// A hub carrying any OTHER brace form is refused as well, closing that field's
+// vocabulary by default-deny rather than letting an unrecognised placeholder
+// fall through to the literal arm — see hubPlaceholderRefusal for why a hub in
+// particular cannot afford that fall-through.
+//
+// All three are written at the FIELD LIST rather than at each authoring
+// surface on purpose: a candidate's fields and a catalog entry's are copied
+// verbatim into the GapAction buildPlan dispatches (candidateGapAction /
+// catalogEntryGapAction), so the three surfaces share one grammar and must
+// share one verdict.
 func validateGapStringFields(where string, ga GapAction) error {
 	for _, f := range dispatchStringValues(ga) {
 		if strings.HasPrefix(f.value, typedLiteralPrefix) {
@@ -882,6 +946,9 @@ func validateGapStringFields(where string, ga GapAction) error {
 		if !f.hub && f.value == actorToken {
 			return fmt.Errorf("%s: %s %q must be a key, operationType or pattern ref — always a string — so the %s token is not permitted there (it names the submitting engine's own identity, which is meaningful only on an enumeration hub); write the value directly",
 				where, f.name, f.value, actorToken)
+		}
+		if f.hub && f.value != actorToken && strings.ContainsAny(f.value, "{}") {
+			return fmt.Errorf("%s: %s", where, hubPlaceholderRefusal(f.name, f.value))
 		}
 	}
 	return nil
@@ -1010,6 +1077,9 @@ func validateGapPlannerFields(col string, ga GapAction) (GapAction, error) {
 		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), cand.Action, cand.OptionalReads); err != nil {
 			return ga, err
 		}
+		if err := validateEnumerationsScope(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), cand.Action, cand.Enumerations); err != nil {
+			return ga, err
+		}
 		if len(cand.Pre) > 0 {
 			g, err := guardgrammar.Parse(cand.Pre)
 			if err != nil {
@@ -1090,6 +1160,9 @@ func validateActionsCatalog(col string, ga *GapAction) error {
 			return err
 		}
 		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Action, entry.OptionalReads); err != nil {
+			return err
+		}
+		if err := validateEnumerationsScope(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Action, entry.Enumerations); err != nil {
 			return err
 		}
 		if err := validateGapParams(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), entry.Params); err != nil {

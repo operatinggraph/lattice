@@ -51,14 +51,244 @@ func TestBuildPlan_ActorTokenHubResolvesToDispatchingActor(t *testing.T) {
 	require.Equal(t, tpUnitKey, pl.enumerations[0].Hub,
 		"a row template must resolve from the row, not from the actor")
 
-	// The token is one whole value, not a prefix: a hub that merely contains it
-	// is an ordinary literal, exactly as it was before the token existed.
+	// A real declaration is a LIST, and the token is one entry of it rather
+	// than the whole list's shape — the shipped use (a confinement walk
+	// alongside the subject's own walks) is exactly this mix. Two things only
+	// a multi-entry list can show: each entry resolves on its own arm, and the
+	// resolved list keeps the authored order, so the hub an envelope carries
+	// at index i is the one the playbook wrote at index i.
 	pl, perr = buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
-		GapAction{Action: actionDirectOp, Operation: "Fix", Enumerations: atHub("vtx.identity." + actorToken)},
-		map[string]any{}, 7)
-	require.Nil(t, perr)
-	require.Equal(t, "vtx.identity."+actorToken, pl.enumerations[0].Hub,
-		"substitution is whole-value; an embedded token is a literal no resolver treats as a template")
+		GapAction{Action: actionDirectOp, Operation: "Fix", Enumerations: []GapEnumeration{
+			{Hub: "row.entityKey", Relation: "forSession", Direction: "out"},
+			{Hub: tpUnitKey, Relation: "settles", Direction: "in"},
+			{Hub: actorToken, Relation: "holdsRole", Direction: "out"},
+		}},
+		map[string]any{"entityKey": tpIdentity}, 7)
+	require.Nil(t, perr, "a mixed list must resolve every arm")
+	require.Equal(t, []GapEnumeration{
+		{Hub: tpIdentity, Relation: "forSession", Direction: "out"},
+		{Hub: tpUnitKey, Relation: "settles", Direction: "in"},
+		{Hub: fixtureActorKey, Relation: "holdsRole", Direction: "out"},
+	}, pl.enumerations, "each hub resolves on its own arm, in the authored order")
+}
+
+// TestBuildPlan_HubBracePlaceholderVocabularyIsClosed pins the hub's grammar as
+// DEFAULT-DENY over brace forms: {actor} resolves, and every other placeholder
+// shape is refused rather than falling through to the literal arm.
+//
+// The fall-through is the whole hazard. Each spelling below is syntactically a
+// fine key, so without the refusal it installs, loads and dispatches — and
+// lands on the envelope naming nothing the script's kv.Links walks from. The
+// declaration then covers zero of what it names while the package source reads
+// as though it covers the walk, which is the exact outcome declaring a walk
+// exists to prevent. It is also why the near-miss cases matter more than the
+// nonsense ones: {Actor} and { actor } are what an author actually writes.
+func TestBuildPlan_HubBracePlaceholderVocabularyIsClosed(t *testing.T) {
+	t.Parallel()
+
+	for _, hub := range []string{
+		"{Actor}",                    // wrong case
+		"{ actor }",                  // padded
+		"{actor:id}",                 // a modifier this surface has no resolver for
+		"vtx.identity." + actorToken, // whole segment, but not the whole value
+		"{payload.bookingKey}",       // op-descriptor vocabulary, not weaver's
+		"{bogus}",
+	} {
+		_, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
+			GapAction{Action: actionDirectOp, Operation: "Fix", Enumerations: atHub(hub)},
+			map[string]any{}, 7)
+		require.NotNil(t, perr, "hub %q carries a brace form nothing resolves and must be refused", hub)
+		require.Equal(t, errConfig, perr.kind,
+			"hub %q: the refusal must be a config error, not a per-row data error: %v", hub, perr.msg)
+		require.Contains(t, perr.msg, "enumerations[0].hub", "the refusal must name the offending field")
+		require.Contains(t, perr.msg, hub, "the refusal must quote the offending hub")
+		require.Contains(t, perr.msg, "WHOLE vertex key", "the refusal must say why a hub cannot carry a fragment")
+	}
+
+	// The refusal names the offending ENTRY: a list whose first hub is fine and
+	// whose second is a near-miss must report index 1, not a hardcoded zero.
+	_, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
+		GapAction{Action: actionDirectOp, Operation: "Fix", Enumerations: []GapEnumeration{
+			{Hub: actorToken, Relation: "holdsRole", Direction: "out"},
+			{Hub: "{Actor}", Relation: "settles", Direction: "in"},
+		}}, map[string]any{}, 7)
+	require.NotNil(t, perr, "a valid first hub must not excuse a broken second")
+	require.Contains(t, perr.msg, "enumerations[1].hub", "the refusal must name the offending entry's index")
+
+	// The same vectors at load, where a package author meets the verdict
+	// first — and on all three authoring surfaces, since they share one grammar.
+	gapTarget := func(ga GapAction) *Target {
+		return &Target{TargetID: "fixtureActorHubVocab", Gaps: map[string]GapAction{"missing_a": ga}}
+	}
+	require.ErrorContains(t,
+		validateTarget(gapTarget(GapAction{Action: actionDirectOp, Operation: "Fix", Enumerations: atHub("{Actor}")})),
+		"enumerations[0].hub", "a near-miss hub must be refused at load")
+	require.ErrorContains(t,
+		validateTarget(&Target{TargetID: "fixtureActorHubVocabCand", Gaps: map[string]GapAction{
+			"missing_a": {Candidates: []GapCandidate{{Action: actionDirectOp, Operation: "Fix",
+				Enumerations: atHub("vtx.identity." + actorToken)}}},
+		}}),
+		"candidates[0]", "a candidate's hub must be refused too")
+	require.ErrorContains(t,
+		validateTarget(&Target{TargetID: "fixtureActorHubVocabCat", Gaps: map[string]GapAction{
+			"missing_a": {
+				Goal: json.RawMessage(`{"present":"subject.data.done"}`),
+				Actions: []ActionCatalogEntry{{
+					Ref: "sweep", Action: actionDirectOp, Operation: "Sweep",
+					Enumerations: atHub("{actor:id}"),
+					Effects:      []json.RawMessage{json.RawMessage(`{"present":"subject.data.done"}`)},
+				}},
+			},
+		}}),
+		"actions[0]", "a catalog entry's hub must be refused too")
+
+	// Positive controls: the vocabulary is closed, not empty. The one admitted
+	// brace form and both brace-free arms still resolve.
+	for _, tc := range []struct{ hub, want string }{
+		{actorToken, fixtureActorKey},
+		{tpUnitKey, tpUnitKey},
+		{"row.entityKey", tpUnitKey},
+	} {
+		pl, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
+			GapAction{Action: actionDirectOp, Operation: "Fix", Enumerations: atHub(tc.hub)},
+			map[string]any{"entityKey": tpUnitKey}, 7)
+		require.Nil(t, perr, "hub %q must still resolve", tc.hub)
+		require.Equal(t, tc.want, pl.enumerations[0].Hub)
+	}
+}
+
+// TestActorToken_RefusedInTheParamsBag closes the last field the token could
+// reach. Contract #10 §10.8 admits it "on a hub only — on a param, a
+// reads/optionalReads entry, or any other authored value it is refused at
+// install and at load", and the params bag is the one list the string-field
+// refusal deliberately does not cover: it is the typed literal's home, and so
+// the field list validateGapStringFields walks omits it by design.
+//
+// Nothing in the bag resolves the token, so the failure it prevents is silent
+// rather than loud: an authored actorKey: "{actor}" dispatches the literal
+// brace string into the op's payload, where a script reads it as a vertex key
+// that names nothing. An op that genuinely needs the submitter already has it
+// on the envelope.
+func TestActorToken_RefusedInTheParamsBag(t *testing.T) {
+	t.Parallel()
+
+	bag := map[string]string{"actorKey": actorToken}
+
+	_, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
+		GapAction{Action: actionDirectOp, Operation: "Fix", Params: bag}, map[string]any{}, 7)
+	require.NotNil(t, perr, "a params-bag %s must be refused at dispatch", actorToken)
+	require.Equal(t, errConfig, perr.kind,
+		"the refusal must be a config error, not a per-row data error: %v", perr.msg)
+	require.Contains(t, perr.msg, "actorKey", "the refusal must name the offending param")
+	require.Contains(t, perr.msg, "enumeration hub", "the refusal must say where the token IS meaningful")
+
+	gapTarget := func(ga GapAction) *Target {
+		return &Target{TargetID: "fixtureActorParam", Gaps: map[string]GapAction{"missing_a": ga}}
+	}
+	err := validateTarget(gapTarget(GapAction{Action: actionDirectOp, Operation: "Fix", Params: bag}))
+	require.Error(t, err, "a params-bag %s must be refused at load", actorToken)
+	require.ErrorContains(t, err, "actorKey")
+	require.ErrorContains(t, err, "enumeration hub")
+
+	// Both planner surfaces carry a params bag of their own and the same rule.
+	require.ErrorContains(t, validateTarget(&Target{
+		TargetID: "fixtureActorParamCand",
+		Gaps: map[string]GapAction{
+			"missing_a": {Candidates: []GapCandidate{{Action: actionDirectOp, Operation: "Fix", Params: bag}}},
+		},
+	}), "candidates[0]", "a candidate's params bag must be refused too")
+
+	require.ErrorContains(t, validateTarget(&Target{
+		TargetID: "fixtureActorParamCat",
+		Gaps: map[string]GapAction{
+			"missing_a": {
+				Goal: json.RawMessage(`{"present":"subject.data.done"}`),
+				Actions: []ActionCatalogEntry{{
+					Ref: "sweep", Action: actionDirectOp, Operation: "Sweep", Params: bag,
+					Effects: []json.RawMessage{json.RawMessage(`{"present":"subject.data.done"}`)},
+				}},
+			},
+		},
+	}), "actions[0]", "a catalog entry's params bag must be refused too")
+
+	// Positive controls: the bag keeps all three of its own arms, and the
+	// refusal is whole-value like the hub's — a param that merely mentions the
+	// token in a larger string is an ordinary literal, since nothing in the bag
+	// would have substituted it either way.
+	pl, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
+		GapAction{Action: actionDirectOp, Operation: "Fix", Params: map[string]string{
+			"literal":   tpUnitKey,
+			"templated": "row.entityKey",
+			"typed":     "json:5",
+			"mentions":  "see " + actorToken + " in the design",
+		}}, map[string]any{"entityKey": tpUnitKey}, 7)
+	require.Nil(t, perr, "the params bag must keep every arm it had")
+	payload := pl.payload("")
+	require.Equal(t, tpUnitKey, payload["literal"])
+	require.Equal(t, tpUnitKey, payload["templated"])
+	require.Equal(t, float64(5), payload["typed"])
+	require.Equal(t, "see "+actorToken+" in the design", payload["mentions"])
+}
+
+// TestValidateEnumerationsScope_DirectOpOnly pins the action-scope gate on the
+// declared-walk list, the exact counterpart of the one OptionalReads carries.
+// buildPlan reads ga.Enumerations in its directOp arm and in no other, so a
+// walk declared on any other action is not redundant but silently DROPPED: the
+// envelope goes out with no contextHint enumerations, the script's kv.Links
+// runs undeclared, and the package source says otherwise. The token's canonical
+// use — an actor-role confinement walk — is exactly the kind an author would
+// plausibly hang off an assignTask or a triggerLoom gap.
+func TestValidateEnumerationsScope_DirectOpOnly(t *testing.T) {
+	t.Parallel()
+
+	gapTarget := func(ga GapAction) *Target {
+		return &Target{TargetID: "fixtureEnumScope", Gaps: map[string]GapAction{"missing_a": ga}}
+	}
+
+	for _, ga := range []GapAction{
+		{Action: actionTriggerLoom, Pattern: "onboarding", Subject: tpUnitKey, Enumerations: atHub(actorToken)},
+		{Action: actionAssignTask, Operation: "ApproveX", Assignee: tpIdentity, Target: tpUnitKey,
+			Enumerations: atHub(actorToken)},
+		{Action: actionProposedOp, Enumerations: atHub(actorToken)},
+		{Action: actionSurface, IssueCode: "SomethingStalled", Enumerations: atHub(actorToken)},
+	} {
+		err := validateTarget(gapTarget(ga))
+		require.Error(t, err, "action %q must not be able to declare enumerations", ga.Action)
+		require.ErrorContains(t, err, "only meaningful for directOp")
+		require.ErrorContains(t, err, ga.Action)
+	}
+
+	// Positive control, both halves: directOp may declare them, and every other
+	// action may still dispatch — the gate is about the pairing, not the action.
+	require.NoError(t, validateTarget(gapTarget(GapAction{
+		Action: actionDirectOp, Operation: "Fix", Enumerations: atHub(actorToken)})),
+		"directOp must still declare its walks")
+	require.NoError(t, validateTarget(gapTarget(GapAction{
+		Action: actionAssignTask, Operation: "ApproveX", Assignee: tpIdentity, Target: tpUnitKey})),
+		"an action declaring no enumerations must be untouched by the gate")
+
+	// And on both planner surfaces, which share the same dispatch.
+	require.ErrorContains(t, validateTarget(&Target{
+		TargetID: "fixtureEnumScopeCand",
+		Gaps: map[string]GapAction{
+			"missing_a": {Candidates: []GapCandidate{{Action: actionAssignTask, Operation: "ApproveX",
+				Assignee: tpIdentity, Target: tpUnitKey, Enumerations: atHub(actorToken)}}},
+		},
+	}), "candidates[0]", "a candidate's enumerations carry the same scope rule")
+
+	require.ErrorContains(t, validateTarget(&Target{
+		TargetID: "fixtureEnumScopeCat",
+		Gaps: map[string]GapAction{
+			"missing_a": {
+				Goal: json.RawMessage(`{"present":"subject.data.done"}`),
+				Actions: []ActionCatalogEntry{{
+					Ref: "assign", Action: actionAssignTask, Operation: "ApproveX",
+					Assignee: tpIdentity, Target: tpUnitKey, Enumerations: atHub(actorToken),
+					Effects: []json.RawMessage{json.RawMessage(`{"present":"subject.data.done"}`)},
+				}},
+			},
+		},
+	}), "actions[0]", "a catalog entry's enumerations carry the same scope rule")
 }
 
 // TestBuildPlan_ActorTokenHubEmptyActorIsConfigError pins the one condition the
@@ -82,6 +312,19 @@ func TestBuildPlan_ActorTokenHubEmptyActorIsConfigError(t *testing.T) {
 		"the refusal must be a config error, not a per-row data error: %v", perr.msg)
 	require.Contains(t, perr.msg, "enumerations[0].hub", "the refusal must name the offending field")
 	require.Contains(t, perr.msg, "no actor key", "the refusal must name the condition")
+
+	// The refusal names the offending ENTRY, not just the field: a list whose
+	// first hub is fine and whose second is the token must report index 1. The
+	// single-entry vectors above cannot tell a correct index from a hardcoded
+	// zero, and a message pointing at the wrong entry sends an author to a
+	// declaration that is not the broken one.
+	_, perr = buildPlan(nil, "", "typedParams", tpEntityID, "missing_a",
+		GapAction{Action: actionDirectOp, Operation: "Fix", Enumerations: []GapEnumeration{
+			{Hub: tpUnitKey, Relation: "settles", Direction: "in"},
+			{Hub: actorToken, Relation: "holdsRole", Direction: "out"},
+		}}, map[string]any{}, 7)
+	require.NotNil(t, perr)
+	require.Contains(t, perr.msg, "enumerations[1].hub", "the refusal must name the offending entry's index")
 
 	// Control: with no {actor} hub to substitute, an empty actor key changes
 	// nothing — the condition is scoped to the token, not to dispatch at large.

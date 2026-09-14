@@ -140,9 +140,17 @@ func validateActionsCatalogSpec(targetIdx int, targetID, col string, ga GapActio
 			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q) action %q declares optionalReads, but optionalReads is only meaningful for %s — every other action's ContextHint.OptionalReads is set by the engine's own dispatch and a declared value would collide with it",
 				targetIdx, targetID, col, i, entry.Ref, entry.Action, optionalReadsAction)
 		}
+		if len(entry.Enumerations) > 0 && entry.Action != enumerationsAction {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q) action %q declares enumerations, but enumerations are only meaningful for %s — every other action's dispatch ignores them, so the declared walk would be dropped from the envelope and run undeclared",
+				targetIdx, targetID, col, i, entry.Ref, entry.Action, enumerationsAction)
+		}
 		if name, err := malformedTypedLiteral(entry.Params); err != nil {
 			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q) param %q: %w",
 				targetIdx, targetID, col, i, entry.Ref, name, err)
+		}
+		if name, found := actorTokenParam(entry.Params); found {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q) param %q carries the %s token, which the params bag does not resolve (it names the submitting engine's own identity, and is meaningful only on an enumeration hub) — it would dispatch to the op as that literal string; the op already receives the submitter as the envelope's actor",
+				targetIdx, targetID, col, i, entry.Ref, name, actorToken)
 		}
 		stringFields := dispatchStringFields(
 			entry.Subject, entry.Pattern, entry.Operation, entry.Assignee, entry.Target,
@@ -154,6 +162,10 @@ func validateActionsCatalogSpec(targetIdx int, targetID, col string, ga GapActio
 		if f, found := actorTokenInStringField(stringFields); found {
 			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q): %s %q must be a key, operationType or pattern ref — always a string — so the %s token is not permitted there (it names the submitting engine's own identity, which is meaningful only on an enumeration hub); write the value directly",
 				targetIdx, targetID, col, i, entry.Ref, f.name, f.value, actorToken)
+		}
+		if f, found := hubPlaceholderInStringField(stringFields); found {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q): %s %q carries a placeholder outside the enumeration-hub vocabulary (%s, a row.<column> template, or a literal key) — a hub resolves to a WHOLE vertex key, so %s is the entire value or it is not a placeholder; a brace form nothing resolves would land on the envelope naming nothing the walk enumerates from",
+				targetIdx, targetID, col, i, entry.Ref, f.name, f.value, actorToken, actorToken)
 		}
 		if len(entry.Pre) > 0 {
 			g, err := guardgrammar.Parse(entry.Pre)

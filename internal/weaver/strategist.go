@@ -90,17 +90,20 @@ const typedLiteralPrefix = "json:"
 //
 // Unlike the two param tokens above it is admitted at exactly ONE field: a gap
 // action's enumerations[].hub, where buildPlan substitutes it before the hub
-// travels the shared key resolver. Every other authored value refuses it
-// outright (resolveStringParam), and the same refusal is re-taken at engine
-// load (validateGapStringFields) and at install (pkgmgr's
-// actorTokenInStringField).
+// travels the shared key resolver. Every other authored value — the params bag
+// included — refuses it outright (resolveParam, resolveStringParam), and the
+// same refusal is re-taken at engine load (validateGapParams,
+// validateGapStringFields) and at install.
 //
-// Substitution is whole-value, which is why the refusal is too: a value that
-// merely CONTAINS the token is an ordinary literal no resolver on either
-// surface treats as a template. The spelling is the op-descriptor dispatch
-// surface's own (pkgmgr's enumeration-hub vocabulary, internal/testutil's
-// resolveHubTemplate), so an operation declaring the same walk on both
-// dispatching surfaces writes it identically.
+// Substitution is whole-value: the token IS the hub, never a fragment
+// assembled into one, because what it resolves to is a whole vertex key and
+// kv.Links walks from exactly one of those. That is a rule the hub grammar has
+// to state rather than infer, which is why a hub carrying any other brace form
+// — {Actor}, {actor:id}, vtx.identity.{actor} — is refused outright instead of
+// falling through to the literal arm (hubPlaceholderInStringField). The
+// spelling and the whole-value rule are the op-descriptor dispatch surface's
+// own (pkgmgr's enumeration-hub vocabulary), so an operation declaring the same
+// walk on both dispatching surfaces writes it identically.
 const actorToken = "{actor}"
 
 // errKind classifies a plan failure so the evaluator can route it: a config or
@@ -400,26 +403,33 @@ func buildPlan(source *targetSource, actorKey, targetID, entityID, gapColumn str
 		// The hub is additionally the one field admitting {actor}, substituted
 		// to the dispatching engine's own actor key BEFORE the shared resolver
 		// sees it — which is precisely what confines the token to this field,
-		// since resolveStringParam refuses it everywhere it survives to.
+		// since resolveStringParam refuses it everywhere it survives to. The
+		// hub's brace vocabulary is closed to that one token and nothing else;
+		// both refusals below are load-time verdicts too, re-taken here because
+		// a GapAction can reach dispatch without having passed validateTarget.
 		var enumerations []GapEnumeration
 		for i, en := range ga.Enumerations {
 			name := fmt.Sprintf("enumerations[%d].hub", i)
 			template := en.Hub
-			if template == actorToken {
+			switch {
+			case template == actorToken:
 				// An empty actor key must fail LOUD rather than substitute "".
-				// An empty hub is not an inert hub: the read-drift guard reads
-				// the hub's vertex root to decide which walks a declaration
-				// covers, and a rootless hub reads as "no root" — so a
-				// silently-empty substitution would ADMIT the undeclared walks
-				// the declaration was written to cover. The engine refuses to
-				// start without an ActorKey (Engine.Start), so reaching here
-				// means a plan built outside that path.
+				// A substituted "" is not an inert declaration but a silently
+				// EMPTY one: the read-drift guard matches a walk against the
+				// declared hints by exact normalized string, so an empty hub
+				// matches no walk the op actually makes — every one of them is
+				// then reported as undeclared, far from the author, long after
+				// the gap shipped. The engine refuses to start without an
+				// ActorKey (Engine.Start), so reaching here means a plan built
+				// outside that path; say so where the author can act on it.
 				if actorKey == "" {
 					return nil, &planError{kind: errConfig,
 						msg: fmt.Sprintf("%s is %s but the dispatching engine has no actor key — the token names the submitter's identity, and there is none to substitute",
 							name, actorToken)}
 				}
 				template = actorKey
+			case strings.ContainsAny(template, "{}"):
+				return nil, &planError{kind: errConfig, msg: hubPlaceholderRefusal(name, template)}
 			}
 			hub, perr := resolveReadKey(name, template, row)
 			if perr != nil {
@@ -816,9 +826,24 @@ func resolveRowTemplate(name, value string, row map[string]any) (v any, template
 // (pkgmgr's authored-dispatch scope check, the Augur proposal scope check)
 // compare those fields as RAW authored strings, so a field that decoded at
 // dispatch would be one the gate never saw.
+//
+// The {actor} token runs the other way. Its home is the enumeration hub, and
+// the bag is one of the places Contract #10 §10.8 names outright — "admitted
+// on a hub only ... on a param ... refused" — so it is refused here too. The
+// refusal matters because nothing downstream would raise one: no arm of this
+// resolver substitutes the token, so an authored actorKey: "{actor}" is a
+// perfectly well-formed plain string that dispatches into the op's payload as
+// its own literal text, to be read there as a vertex key that names nothing.
+// An op that genuinely needs the submitter's identity already has it: every
+// envelope carries actor, and the Processor hands its script that identity
+// directly.
 func resolveParam(name, value string, row map[string]any) (any, *planError) {
 	if value == "" {
 		return nil, &planError{kind: errConfig, msg: fmt.Sprintf("param %q is required", name)}
+	}
+	if value == actorToken {
+		return nil, &planError{kind: errConfig, msg: fmt.Sprintf("param %q carries the %s token, which the params bag does not resolve (it names the submitting engine's own identity, and is meaningful only on an enumeration hub) — it would dispatch to the op as that literal string; the op already receives the submitter as the envelope's actor",
+			name, actorToken)}
 	}
 	if v, templated, perr := resolveRowTemplate(name, value, row); templated {
 		return v, perr

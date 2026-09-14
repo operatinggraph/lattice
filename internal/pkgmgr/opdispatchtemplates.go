@@ -233,8 +233,16 @@ type templateListRules struct {
 //     kv.Links walks from one, so a hub truncated to a bare NanoID resolves,
 //     passes the client's wholeKey check, lands on the envelope, and can never
 //     match the walk it declares.
-//   - a mid-segment placeholder is refused for the same reason: the hub is one
-//     key, not a fragment assembled into one.
+//   - a placeholder that is not the ENTIRE hub is refused for the same reason,
+//     and it is a stricter rule than the whole-segment one the other two lists
+//     use. What a hub placeholder resolves to is already a whole key, and every
+//     shipped descriptor-driven client substitutes placeholders mid-string
+//     through a global regex, so surrounding one composes two keys into a third
+//     that names nothing: an {actor} hub written vtx.identity.{actor} reaches
+//     the envelope as vtx.identity.vtx.identity.<id>. The engine-side weaver
+//     surface closes its hub vocabulary the same way (registry.go's
+//     hubPlaceholderRefusal), which is what lets Contract #10 §10.8 say the
+//     token spells and means the same on both dispatching surfaces.
 var (
 	readsRules = templateListRules{
 		clientOnlyClause:     readsClientOnlyClause,
@@ -336,9 +344,9 @@ func validateReadTemplateList(pkgName, opType, listName string, entries []string
 					"pkgmgr: package %q op %q Dispatch.%s entry %q: placeholder %q carries the `:id` modifier, which truncates the substituted value to a bare NanoID — a hub is a WHOLE vertex key, because kv.Links walks from one, so an `:id` hub resolves, passes the client's wholeKey check, lands on the envelope and still names nothing the walk enumerates from; drop the `:id` and name the whole key",
 					pkgName, opType, listName, entry, placeholder)
 			}
-			if !occupiesWholeSegment(entry, start, end) {
+			if start != 0 || end != len(entry) {
 				return fmt.Errorf(
-					"pkgmgr: package %q op %q Dispatch.%s entry %q: placeholder %q does not occupy a whole dot-delimited segment of the hub — a hub is a whole vertex key, not a fragment assembled into one; give the placeholder its own segment, or name a literal key",
+					"pkgmgr: package %q op %q Dispatch.%s entry %q: placeholder %q is not the whole hub — a hub placeholder resolves to a WHOLE vertex key, not a segment of one, so a hub that surrounds it composes two keys into a string that names nothing (a {actor} hub written vtx.identity.{actor} substitutes to vtx.identity.vtx.identity.<id> in every shipped descriptor-driven client, each of which replaces placeholders mid-string); make the placeholder the entire value, or name a literal key",
 					pkgName, opType, listName, entry, placeholder)
 			}
 		}
