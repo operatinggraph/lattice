@@ -303,6 +303,31 @@ date exists."*
    occurrence, so the Book calendar blocks those days with a reason and the lead line says "on or after <date>";
    the floor clears on submit / patient change / leaving Book. Pure predicate goja-pinned.
 
+**Amended at build (2026-09-13, from the cold review — supersedes decisions 1–2 where they differ).**
+- **The run is credited by its LATEST qualifying visit** (`handledAt = max(...)`, not `min`): Weaver's episode
+  model treats a gap that stays violating with changed params as one stuck episode (the anti-storm mark Acks the
+  re-projected row, the 30-min mark lease reclaims it, the 3-attempt directOp budget wedges the series at the 4th
+  visit booked ahead — `GapBudgetExhausted`). One advance therefore consumes the whole booked run:
+  `nextDueAt = latest + intervalDays` leaves every booked visit `< nextDueAt`, the gap closes, the mark clears.
+  Decision 2's "two visits booked ahead credit two occurrences one evaluation apart" is withdrawn — they credit
+  ONE occurrence, due `intervalDays` after the last of them ("every N days from the last visit").
+- **The op reads `.progress` and refuses a stale row.** The playbook declares `row.entityKey.progress`; the op
+  refuses `StaleRow` unless `.progress.nextDueAt == dueFor` and writes with `make_aspect_upsert_occ` pinned to
+  the hydrated revision — a redelivered older row can no longer roll the series back. A same-params replay after
+  the advance landed is refused `StaleRow` (the Processor dedups a same-requestId redelivery before the script).
+- **FE floor is instant-granular where it matters:** the calendar blocks whole days before the floor; the slot
+  list, the "Soonest available" picker and `#startsAt`'s `min` drop slots before the floor instant
+  (`nextDueAt` carries the crediting visit's time-of-day after the first advance); `submitBook` refuses a
+  `startsAt < floor` as the backstop (`beforeSeriesFloor`, goja-pinned).
+- **Known platform ceiling (not a defect of this package):** the `apr` hop makes the provider a transit position
+  for Refractor's affected-anchor derivation — one appointment event re-derives every series of every patient
+  sharing that provider (past the 2000-read cap, the BFS fallback with the same walk scope). Negligible on the
+  demo box; O(all series) per appointment event in a real clinic. The fix is a Lattice primitive (a walk seeded
+  at (position X, vertex V) never needs to re-enter (X, V′≠V)) — chip filed for the Surveyor to row it in
+  `lattice.md`; this lane cannot write that file.
+- Live-upgrade residue: `@at` timers already armed under the old `freshUntil` fire once at their old `nextDueAt`
+  and write a `freshnessExpiry.byTarget.visitSeriesDue` entry nothing reads (one harmless reprojection each).
+
 **Verified touch-list** (live 2026-09-13):
 - `packages/clinic-reminders/visitseries.go` — `visitSeriesDueSpec` :1114–1129 (add
   `OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)` + `OPTIONAL MATCH (a)-[:withProvider]->(apr:provider)`,
@@ -383,3 +408,5 @@ asked). (c) No adjacent defects found by the scout.
 + the `>= nextDueAt` arithmetic is the consumption record; a link would add a second writer of relationship state
 for no reader. No skip-to-latest / catch-up semantics. No change to `PauseVisitSeries` / `EndVisitSeries` /
 `StartVisitSeries`. No new op.
+
+**Shipped 2026-09-13 · `a2724692` (merge `e7593e03`).** Live: `make reinstall-package` 0.10.10→0.11.0 at 19:35:47; within a second Weaver dispatched `AdvanceVisitSeries` for Riley's series off its already-booked 09-17 16:00Z visit with Dr Osei (`.progress` → `lastOccurrenceAt 2026-09-17T16:00:00Z`, `nextDueAt 2026-10-17T16:00:00Z`, `occurrenceCount 3`), the row closed (`violating false`, `handledAt null`, no `freshUntil`); `bin/clinic-app` cycled, the desk's Book flow shows the floor lead line, the calendar blocks pre-10-17 days with the reason, `#startsAt.min` = the floor. Close-pass classes: Weaver-episode wedge (design-gap → `_packages.md` budget entry, second shape); stale-row rollback (convention → OCC entry, sixth sighting); floor granularity (implementation-bug, fixed); derivation transit hub (platform ceiling → Surveyor chip).

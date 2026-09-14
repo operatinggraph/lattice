@@ -585,7 +585,10 @@ sibling groups, label set, grouping key, walk scope, hop index) fail by lens nam
   acts on from a walk at execution time (the earliest still-upcoming occurrence) re-derives it on the OCC re-execute —
   the revision pin on the aspect held, the premise did not, and a stale roster or a concurrent single-class move flipped
   the whole run's shift; caught cold as BLOCKING. Pin the subject the caller saw in the payload (`anchorKey` +
-  `anchorStartsAt`) and refuse on mismatch (`AnchorMoved`).
+  `anchorStartsAt`) and refuse on mismatch (`AnchorMoved`). Sixth sighting (clinic `AdvanceVisitSeries`, 2026-09-13, caught cold): a directOp
+  rewrote a maintained aspect (`.progress`) off the Weaver row alone, hydrating only the vertex root — a redelivered older
+  row rolled the series back. The playbook declares `row.entityKey.<aspect>`, the op refuses `StaleRow` unless the recorded
+  value matches the row's, and writes `_occ` on the hydrated revision.
 - **A declared sensitive read is decrypted BEFORE the script runs, so declaring it unconditionally can
   break the very population the op exists for** — step 4 hydrates every declared aspect, and a sensitive
   one decrypts under its owner's DEK. An op whose whole purpose is cleaning up after an erased owner
@@ -616,7 +619,7 @@ sibling groups, label set, grouping key, walk scope, hop index) fail by lens nam
   Check: for every op granted to a staff role that names an identity (or any actor-bearing vertex) by key, ask
   which `.state` values the script refuses and whether the caller could name themselves.
 - **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
-
+ **Second shape (clinic `visitSeriesDue`, 2026-09-13, caught cold as BLOCKING):** a gap that stays OPEN across dispatches with CHANGED params is one stuck episode — the anti-storm mark Acks the re-projected row, the 30-min mark lease reclaims it, and the 3-attempt directOp budget wedges the anchor at the 4th cycle (`GapBudgetExhausted`) even though every dispatch succeeded. Check: for a level-triggered gap over a growing set, prove the FIRST dispatch closes it (aggregate to the run's extreme — `max`, not `min` — and pin a re-projection after the op's write showing the gap shut); a gap that is designed to re-open on the next member needs its own episode boundary, which Weaver does not have.
 - **A confinement guard tested only as the operator has never run** — `actor_holds_operator` returns before the
   worksAt walk, so a suite whose every vector for an op runs as the operator measures none of that op's guard reads
   and cannot see a doubled walk on the staff path. Minted: café `Charge` (2026-09-13) — the first staff-confined
