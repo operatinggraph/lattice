@@ -147,6 +147,37 @@ func TestLeaseApplicationsRead_AnchorScopesPerApplicant(t *testing.T) {
 	require.NotContains(t, byApp[f.ids["appB"]], f.ids["alice"], "B's row must NOT carry A's anchor")
 }
 
+// TestLeaseApplicationsRead_ProjectsTenancyColumns — the FIRST-approve-derived
+// .tenancy aspect projects its five display columns (R4): tenancy_lease_start/
+// end/term_start/rent_amount read straight off app.tenancy.data.<field>,
+// carried through the aggregating WITH the same way app.terms.data.moveInDate
+// already is. tenancy_ended_at is null on every live row — EndTenancy (a
+// later increment) is its only writer.
+func TestLeaseApplicationsRead_ProjectsTenancyColumns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedApplication(t, "app", "alice", "unit1")
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseStart":     "2026-09-15T00:00:00Z",
+		"leaseEnd":       "2027-03-15T00:00:00Z",
+		"renewalOpensAt": "2027-02-15T00:00:00Z",
+		"termStart":      "2027-03-15T00:00:00Z",
+		"rentAmount":     1900,
+	})
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+
+	require.Equal(t, "2026-09-15T00:00:00Z", v["tenancy_lease_start"])
+	require.Equal(t, "2027-03-15T00:00:00Z", v["tenancy_lease_end"])
+	require.Equal(t, "2027-03-15T00:00:00Z", v["tenancy_term_start"])
+	require.EqualValues(t, 1900, v["tenancy_rent_amount"])
+	require.Nil(t, v["tenancy_ended_at"], "tenancy_ended_at is null on every live row")
+}
+
 // TestLeaseApplicationsRead_BareShellProducesNoRow — a malformed application with
 // no applicationFor link projects NO row at all (applicationFor is a required
 // MATCH). A shell that no applicant anchor would protect never enters the read

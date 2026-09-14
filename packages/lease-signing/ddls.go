@@ -132,14 +132,20 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"listing-flip waits behind: the convergence lens reads .decision.value so an approval opens missing_listingLeased " +
 			"(the unit leases) while a decline is a terminal disposition — nothing auto-leases on applicant-readiness alone. " +
 			"On the FIRST approve only, it additionally CREATE-ONLY-stamps the .tenancy aspect {leaseStart, leaseEnd, " +
-			"renewalOpensAt} (the tenancy-term fact the renewal target reads) from the unit's .listing.availableFrom + " +
-			"leaseTermMonths (required alongside unit on that call; the unit is verified against the leaseapp's own " +
-			"appliesToUnit link, never trusted from the payload alone): leaseStart = availableFrom; leaseEnd = leaseStart " +
-			"+ leaseTermMonths (calendar months); renewalOpensAt = leaseEnd - the package's renewalWindow. Idempotent " +
-			"re-approves and declines never touch .tenancy once it exists, so a landlord who approved, and a tenant who " +
-			"later signs a renewal extending leaseEnd, is never silently truncated back to the original term. " +
-			"(SignRenewal also records termStart + rentAmount on .tenancy; this op never writes either — their " +
-			"absence means the original term at the application's requestedRent.) " +
+			"renewalOpensAt, rentAmount?} (the tenancy-term fact the renewal target reads) derived from the " +
+			"application's OWN .terms {moveInDate, leaseTermMonths, requestedRent} first, falling back field-by-field " +
+			"to the unit's .listing.availableFrom / leaseTermMonths / rentAmount wherever .terms carries nothing (a " +
+			"bare applicant+unit application with no moveInDate; unit is required alongside on that call as the " +
+			"fallback source, verified against the leaseapp's own appliesToUnit link, never trusted from the payload " +
+			"alone): leaseStart = terms.moveInDate else listing.availableFrom (a bare YYYY-MM-DD is read as midnight " +
+			"UTC); leaseEnd = leaseStart + leaseTermMonths (calendar months, terms.leaseTermMonths else " +
+			"listing.leaseTermMonths); renewalOpensAt = leaseEnd - the package's renewalWindow; rentAmount = " +
+			"terms.requestedRent else listing.rentAmount (numeric > 0), omitted from .tenancy entirely when neither " +
+			"exists. The approval commits to what the applicant actually asked for — never silently clamped to the " +
+			"listing's availableFrom. Idempotent re-approves and declines never touch .tenancy once it exists, so a " +
+			"landlord who approved, and a tenant who later signs a renewal extending leaseEnd, is never silently " +
+			"truncated back to the original term. (SignRenewal also records termStart on .tenancy and may rewrite " +
+			"rentAmount; this op writes rentAmount only from the sources above.) " +
 			"On the FIRST decision of EITHER value (approve or decline), it also CREATE-ONLY-stamps a .decidedProfileSnapshot " +
 			"aspect (class decidedProfileSnapshot, SENSITIVE, same underwritingRecord retention class as .profile) copying the " +
 			"then-current .profile / .underwritingParties / .applicationSignals data maps (each keyed under its own name, " +
@@ -197,7 +203,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
-			`"unit":{"type":"string","description":"vtx.unit.<NanoID> of the location-domain unit this application is to lease (CreateLeaseApplication; required, validated alive). Also required on the FIRST DecideLeaseApplication approve (verified via the appliesToUnit link) so the op can read the unit's .listing economics and stamp the .tenancy aspect."},` +
+			`"unit":{"type":"string","description":"vtx.unit.<NanoID> of the location-domain unit this application is to lease (CreateLeaseApplication; required, validated alive). Also required on the FIRST DecideLeaseApplication approve (verified via the appliesToUnit link) so the op can read the unit's .listing as the fallback source for the .tenancy aspect (derived from the application's own .terms first)."},` +
 			`"moveInDate":{"type":"string","description":"Requested move-in date, RFC3339 (CreateLeaseApplication; optional — present ⇒ writes the .terms aspect and requires leaseTermMonths)."},` +
 			`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months (CreateLeaseApplication; required when moveInDate is supplied)."},` +
 			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent (CreateLeaseApplication; optional, only with moveInDate). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
@@ -222,7 +228,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`{"primaryKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the created or signed application (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
 			"applicant":             "Full vtx.identity.<NanoID> key of the applicant this application is for. CreateLeaseApplication requires it, validates the identity is alive, and writes the applicationFor link (the convergence link the lens walks). WithdrawLeaseApplication also requires it (verified via the applicationFor link) to reconstruct + free the per-(applicant, unit) guard link.",
-			"unit":                  "Full vtx.unit.<NanoID> key of the location-domain unit being applied for. CreateLeaseApplication requires it, validates it is alive, and writes the appliesToUnit link (leaseapp→unit). The convergence lens walks it and projects the unit's address / rent as informational columns. Required (no unit-less application). WithdrawLeaseApplication also requires it (verified via the appliesToUnit link) to reconstruct + free the per-(applicant, unit) guard link. DecideLeaseApplication requires it on the FIRST approve only (verified the same way) to read the unit's .listing.availableFrom/leaseTermMonths and stamp the .tenancy aspect {leaseStart, leaseEnd, renewalOpensAt} — omitted on a decline or a re-approve (the .tenancy write is create-only).",
+			"unit":                  "Full vtx.unit.<NanoID> key of the location-domain unit being applied for. CreateLeaseApplication requires it, validates it is alive, and writes the appliesToUnit link (leaseapp→unit). The convergence lens walks it and projects the unit's address / rent as informational columns. Required (no unit-less application). WithdrawLeaseApplication also requires it (verified via the appliesToUnit link) to reconstruct + free the per-(applicant, unit) guard link. DecideLeaseApplication requires it on the FIRST approve only (verified the same way) as the fallback source for the .tenancy aspect {leaseStart, leaseEnd, renewalOpensAt, rentAmount?} — derived from the application's own .terms first, the unit's .listing.availableFrom/leaseTermMonths/rentAmount only where .terms carries nothing — omitted on a decline or a re-approve (the .tenancy write is create-only).",
 			"moveInDate":            "Optional requested move-in date (RFC3339). When supplied, CreateLeaseApplication writes the .terms aspect {moveInDate, leaseTermMonths, requestedRent?} and requires leaseTermMonths. Informational application detail (not read by the convergence lens).",
 			"leaseTermMonths":       "Requested lease term in months. Required when moveInDate is supplied; written to the .terms aspect.",
 			"requestedRent":         "Optional monthly rent the applicant offers. Written to the .terms aspect when supplied (only meaningful alongside moveInDate).",
@@ -287,9 +293,11 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"A recorded decision is terminal: the same value re-submits idempotently, a different value is rejected " +
 					"(DecisionFinal); approve is rejected (NotReadyToApprove) unless the application is signed. approved opens the " +
 					"listing-leased convergence (the unit leases). Because no .tenancy aspect exists yet, this FIRST approve also " +
-					"verifies unit against the appliesToUnit link, reads the unit's .listing {availableFrom, leaseTermMonths}, and " +
-					"CREATE-ONLY-writes .tenancy {leaseStart: availableFrom, leaseEnd: availableFrom + leaseTermMonths, " +
-					"renewalOpensAt: leaseEnd - renewalWindow} — the fact the leaseExpiry/renewalComplete targets read. Emits " +
+					"verifies unit against the appliesToUnit link, reads the application's own .terms and the unit's .listing " +
+					"{availableFrom, leaseTermMonths, rentAmount}, and CREATE-ONLY-writes .tenancy {leaseStart: terms.moveInDate " +
+					"else availableFrom, leaseEnd: leaseStart + (terms.leaseTermMonths else leaseTermMonths), " +
+					"renewalOpensAt: leaseEnd - renewalWindow, rentAmount: terms.requestedRent else listing.rentAmount (omitted " +
+					"when neither exists)} — the fact the leaseExpiry/renewalComplete targets read. Emits " +
 					"leaseapp.applicationDecided{leaseAppKey, decision}. Returns primaryKey. Rejects a non-existent application " +
 					"(UnknownLeaseApplication), an out-of-enum decision (BadDecision), or (on the first approve) a unit that is not " +
 					"this application's unit (UnitMismatch) or one with no .listing (NoListing).",

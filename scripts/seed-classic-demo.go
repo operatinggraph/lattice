@@ -205,7 +205,7 @@ func main() {
 				Reads: []string{leaseAppKey},
 				OptionalReads: []string{
 					leaseAppKey + ".decision", leaseAppKey + ".signature", leaseAppKey + ".tenancy",
-					leaseAppKey + ".decidedProfileSnapshot", leaseAppKey + ".profile",
+					leaseAppKey + ".terms", leaseAppKey + ".decidedProfileSnapshot", leaseAppKey + ".profile",
 					leaseAppKey + ".underwritingParties", leaseAppKey + ".applicationSignals",
 				},
 			})

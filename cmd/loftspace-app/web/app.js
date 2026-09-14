@@ -4432,15 +4432,18 @@ async function decideApplication(a, decision) {
   // call — the terminal-decision guard's prior-value check; absent is the
   // common first-decide case. .signature is read only on an approve (the
   // readiness floor); .tenancy only on an approve too (hard case 4, above).
-  // .decidedProfileSnapshot is read on EVERY call (both approve and
-  // decline) — it is its OWN create-only guard (scripts.go), read
-  // independently of .decision so a concurrent double-decide (e.g. a
-  // double-clicked approve/decline button, which this UI does not yet
-  // disable during submit) has its losing create gracefully retry/no-op at
-  // commit instead of hard-rejecting the whole batch. .profile /
-  // .underwritingParties / .applicationSignals are read on every call too —
-  // the data the snapshot copies on the first decision; absent is the
-  // common case when a landlord decides before a profile was ever
+  // .terms is read only on an approve too — the FIRST approve derives
+  // .tenancy from the application's own .terms first, falling back to the
+  // unit's .listing wherever .terms carries nothing (a bare applicant+unit
+  // application with no moveInDate). .decidedProfileSnapshot is read on
+  // EVERY call (both approve and decline) — it is its OWN create-only guard
+  // (scripts.go), read independently of .decision so a concurrent
+  // double-decide (e.g. a double-clicked approve/decline button, which this
+  // UI does not yet disable during submit) has its losing create gracefully
+  // retry/no-op at commit instead of hard-rejecting the whole batch.
+  // .profile / .underwritingParties / .applicationSignals are read on every
+  // call too — the data the snapshot copies on the first decision; absent is
+  // the common case when a landlord decides before a profile was ever
   // submitted.
   const optionalReads = [
     a.leaseAppKey + ".decision",
@@ -4449,7 +4452,9 @@ async function decideApplication(a, decision) {
     a.leaseAppKey + ".underwritingParties",
     a.leaseAppKey + ".applicationSignals",
   ];
-  if (decision === "approved") optionalReads.push(a.leaseAppKey + ".signature", a.leaseAppKey + ".tenancy");
+  if (decision === "approved") {
+    optionalReads.push(a.leaseAppKey + ".signature", a.leaseAppKey + ".tenancy", a.leaseAppKey + ".terms");
+  }
   try {
     const reply = await submitOp({
       operationType: "DecideLeaseApplication",

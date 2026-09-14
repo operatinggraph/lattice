@@ -1196,7 +1196,7 @@ func seedResidentTenancies(ctx context.Context, conn *substrate.Conn, adminKey, 
 					Reads: []string{leaseAppKey},
 					OptionalReads: []string{
 						leaseAppKey + ".decision", leaseAppKey + ".signature", leaseAppKey + ".tenancy",
-						leaseAppKey + ".decidedProfileSnapshot", leaseAppKey + ".profile",
+						leaseAppKey + ".terms", leaseAppKey + ".decidedProfileSnapshot", leaseAppKey + ".profile",
 						leaseAppKey + ".underwritingParties", leaseAppKey + ".applicationSignals",
 					},
 				})
@@ -1785,7 +1785,7 @@ func seedRenewalDemoTenancy(ctx context.Context, conn *substrate.Conn, adminKey,
 				Reads: []string{leaseApp5Key},
 				OptionalReads: []string{
 					leaseApp5Key + ".decision", leaseApp5Key + ".signature", leaseApp5Key + ".tenancy",
-					leaseApp5Key + ".decidedProfileSnapshot", leaseApp5Key + ".profile",
+					leaseApp5Key + ".terms", leaseApp5Key + ".decidedProfileSnapshot", leaseApp5Key + ".profile",
 					leaseApp5Key + ".underwritingParties", leaseApp5Key + ".applicationSignals",
 				},
 			})

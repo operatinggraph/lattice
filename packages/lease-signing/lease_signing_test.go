@@ -2265,6 +2265,7 @@ func decideReadsFor(leaseAppKey, unit string) *processor.ContextHint {
 		Reads: []string{leaseAppKey},
 		OptionalReads: []string{
 			leaseAppKey + ".tenancy",
+			leaseAppKey + ".terms",
 			leaseAppKey + ".decision",
 			leaseAppKey + ".signature",
 			leaseAppKey + ".decidedProfileSnapshot",
@@ -2457,6 +2458,232 @@ func TestDecideLeaseApplication_Reason(t *testing.T) {
 	ddata, _ = readDoc(t, ctx, conn, appKey+".decision")["data"].(map[string]any)
 	if _, present := ddata["reason"]; present {
 		t.Fatalf("a reasonless re-decline must clear the reason key, got %v", ddata["reason"])
+	}
+}
+
+// seedUnitWithListing seeds a live unit (vtx.unit.<id>) with a caller-chosen
+// .listing {availableFrom, leaseTermMonths, rentAmount} — the Decide tenancy-
+// derivation vectors below each need numbers that disagree with seedUnit's
+// shared fixed fixture (2026-08-01 / 12 / 2400), so each vector controls its
+// own unit rather than reusing it.
+func seedUnitWithListing(t *testing.T, ctx context.Context, conn *substrate.Conn, id, availableFrom string, leaseTermMonths int, rentAmount float64) string {
+	t.Helper()
+	key := "vtx.unit." + id
+	seedVertex(t, ctx, conn, key, "location", map[string]any{})
+	setListingAspect(t, ctx, conn, key, availableFrom, leaseTermMonths, rentAmount)
+	return key
+}
+
+// setListingAspect writes (or overwrites) unitKey's .listing aspect. Used by
+// seedUnitWithListing above, and on its own to give a unit a listing AFTER an
+// application already exists against it (the Decide rentAmount-fallback
+// vector: a bare application created before the unit had any listing to fall
+// back to, decided after one lands).
+func setListingAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, unitKey, availableFrom string, leaseTermMonths int, rentAmount float64) {
+	t.Helper()
+	listing := map[string]any{
+		"class": "listing", "isDeleted": false, "vertexKey": unitKey, "localName": "listing",
+		"data": map[string]any{
+			"availableFrom":   availableFrom,
+			"leaseTermMonths": leaseTermMonths,
+			"rentAmount":      rentAmount,
+			"rentCurrency":    "USD",
+		},
+	}
+	lb, _ := json.Marshal(listing)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, unitKey+".listing", lb); err != nil {
+		t.Fatalf("set unit .listing %s: %v", unitKey, err)
+	}
+}
+
+// createApplicationWithTerms submits CreateLeaseApplication with an
+// applicant-supplied moveInDate/leaseTermMonths/requestedRent? against an
+// ALREADY-SEEDED unit, so the Decide tenancy-derivation vectors below have a
+// live .terms aspect to read. requestedRent is omitted from the payload
+// entirely when nil (CreateLeaseApplication's own listing-rent fallback then
+// applies at CREATE time, exactly as a real applicant who names no rent
+// offer).
+func createApplicationWithTerms(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, applicantKey, unitKey, moveInDate string, leaseTermMonths int, requestedRent *float64) string {
+	t.Helper()
+	reqID := testutil.GenReqID("createTerm" + applicantKey[len(applicantKey)-4:])
+	appID := nanoIDFromRequestID(reqID)
+	payload := map[string]any{
+		"applicant":       applicantKey,
+		"unit":            unitKey,
+		"moveInDate":      moveInDate,
+		"leaseTermMonths": leaseTermMonths,
+	}
+	if requestedRent != nil {
+		payload["requestedRent"] = *requestedRent
+	}
+	pb, _ := json.Marshal(payload)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseApplication",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(pb),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey), unitKey + ".listing"},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	return "vtx.leaseapp." + appID
+}
+
+// createApplicationForUnit submits a bare applicant+unit CreateLeaseApplication
+// (no moveInDate) against an ALREADY-SEEDED unit — createApplication's own
+// shape, but against a caller-controlled unit rather than one it seeds itself,
+// so a Decide tenancy-derivation vector can pick its own listing numbers.
+func createApplicationForUnit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, applicantKey, unitKey string) string {
+	t.Helper()
+	reqID := testutil.GenReqID("createBare" + applicantKey[len(applicantKey)-4:])
+	appID := nanoIDFromRequestID(reqID)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateLeaseApplication",
+		Actor:         lsActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{applicantKey, unitKey},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey)},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	return "vtx.leaseapp." + appID
+}
+
+// TestDecideLeaseApplication_TenancyDerivedFromTerms_OverridesListing: the
+// applicant's own .terms disagree with the unit's .listing on every field —
+// the FIRST approve stamps .tenancy from .terms, never silently clamped to
+// the listing's availableFrom (the verified live bug: every listing is
+// available-from 2026-08-23, so an applicant asking to move in 2026-09-15 was
+// billed from 08-23).
+func TestDecideLeaseApplication_TenancyDerivedFromTerms_OverridesListing(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-terms-override")
+
+	applicantKey := seedApplicant(t, ctx, conn, "EEtermapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListing(t, ctx, conn, "EEtermunt1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050)
+	rent := 1900.0
+	appKey := createApplicationWithTerms(t, ctx, conn, cp, cons, applicantKey, unitKey, "2026-09-15T00:00:00Z", 6, &rent)
+	signLease(t, ctx, conn, cp, cons, "decTermsSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decTermsApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	tdata, _ := readDoc(t, ctx, conn, appKey+".tenancy")["data"].(map[string]any)
+	if got, _ := tdata["leaseStart"].(string); got != "2026-09-15T00:00:00Z" {
+		t.Fatalf("tenancy.leaseStart = %q, want 2026-09-15T00:00:00Z (the applicant's own .terms, not the listing's availableFrom)", got)
+	}
+	if got, _ := tdata["leaseEnd"].(string); got != "2027-03-15T00:00:00Z" {
+		t.Fatalf("tenancy.leaseEnd = %q, want 2027-03-15T00:00:00Z (leaseStart + terms.leaseTermMonths)", got)
+	}
+	if got, _ := tdata["rentAmount"].(float64); got != 1900 {
+		t.Fatalf("tenancy.rentAmount = %v, want 1900 (the applicant's own offered rent, not the listing's 2050)", tdata["rentAmount"])
+	}
+}
+
+// TestDecideLeaseApplication_TenancyDerivedFromTerms_BareMoveInDate: the same
+// vector as above, but moveInDate is a bare "YYYY-MM-DD" (the FE's <input
+// type=date> shape, and what seed-showcase/seed-classic-demo write) rather
+// than a full RFC3339 instant — as_rfc3339_instant anchors it to midnight UTC
+// before time.rfc3339_utc (which rejects a bare date) ever sees it, so the
+// result is byte-identical to the full-instant vector.
+func TestDecideLeaseApplication_TenancyDerivedFromTerms_BareMoveInDate(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-terms-baredate")
+
+	applicantKey := seedApplicant(t, ctx, conn, "FFbareapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListing(t, ctx, conn, "FFbareunt1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050)
+	rent := 1900.0
+	appKey := createApplicationWithTerms(t, ctx, conn, cp, cons, applicantKey, unitKey, "2026-09-15", 6, &rent)
+	signLease(t, ctx, conn, cp, cons, "decBareSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decBareApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	tdata, _ := readDoc(t, ctx, conn, appKey+".tenancy")["data"].(map[string]any)
+	if got, _ := tdata["leaseStart"].(string); got != "2026-09-15T00:00:00Z" {
+		t.Fatalf("tenancy.leaseStart = %q, want 2026-09-15T00:00:00Z (a bare moveInDate reads as midnight UTC)", got)
+	}
+	if got, _ := tdata["leaseEnd"].(string); got != "2027-03-15T00:00:00Z" {
+		t.Fatalf("tenancy.leaseEnd = %q, want 2027-03-15T00:00:00Z", got)
+	}
+	if got, _ := tdata["rentAmount"].(float64); got != 1900 {
+		t.Fatalf("tenancy.rentAmount = %v, want 1900", tdata["rentAmount"])
+	}
+}
+
+// TestDecideLeaseApplication_TenancyNoTerms_FallsBackToListing: a bare
+// applicant+unit application (no moveInDate, so no .terms aspect at all) falls
+// back to the unit's own .listing wholesale — the pre-existing behavior, still
+// correct once .terms is the first-choice source.
+func TestDecideLeaseApplication_TenancyNoTerms_FallsBackToListing(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-terms-nofallback")
+
+	applicantKey := seedApplicant(t, ctx, conn, "GGnotrapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListing(t, ctx, conn, "GGnotrunt1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050)
+	appKey := createApplicationForUnit(t, ctx, conn, cp, cons, applicantKey, unitKey)
+	if keyExists(t, ctx, conn, appKey+".terms") {
+		t.Fatalf("a bare applicant+unit application must write no .terms aspect")
+	}
+	signLease(t, ctx, conn, cp, cons, "decNoTrmSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decNoTrmApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	tdata, _ := readDoc(t, ctx, conn, appKey+".tenancy")["data"].(map[string]any)
+	if got, _ := tdata["leaseStart"].(string); got != "2026-08-23T00:00:00Z" {
+		t.Fatalf("tenancy.leaseStart = %q, want 2026-08-23T00:00:00Z (the listing's availableFrom, no .terms to prefer)", got)
+	}
+	if got, _ := tdata["leaseEnd"].(string); got != "2027-08-23T00:00:00Z" {
+		t.Fatalf("tenancy.leaseEnd = %q, want 2027-08-23T00:00:00Z", got)
+	}
+	if got, _ := tdata["rentAmount"].(float64); got != 2050 {
+		t.Fatalf("tenancy.rentAmount = %v, want 2050 (the listing's own rent)", tdata["rentAmount"])
+	}
+}
+
+// TestDecideLeaseApplication_TenancyRent_FallsBackToListing_WhenTermsOmitRent:
+// .terms carries moveInDate/leaseTermMonths but no requestedRent (the unit had
+// no listing yet when the application was created, so CreateLeaseApplication's
+// OWN listing-rent fallback also found nothing to offer), and a listing lands
+// on the unit before the landlord decides — Decide's rentAmount falls back to
+// the unit's listed rent, independent of and exercised separately from
+// CreateLeaseApplication's own identical-shaped fallback.
+func TestDecideLeaseApplication_TenancyRent_FallsBackToListing_WhenTermsOmitRent(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-terms-rentfallback")
+
+	applicantKey := seedApplicant(t, ctx, conn, "HHrentapp1cntHJKMNPQ")
+	unitKey := "vtx.unit.HHrentunt1cntHJKMNPQ"
+	seedVertex(t, ctx, conn, unitKey, "location", map[string]any{}) // no .listing yet
+	appKey := createApplicationWithTerms(t, ctx, conn, cp, cons, applicantKey, unitKey, "2026-09-15T00:00:00Z", 6, nil)
+	tdata, _ := readDoc(t, ctx, conn, appKey+".terms")["data"].(map[string]any)
+	if _, present := tdata["requestedRent"]; present {
+		t.Fatalf("terms.requestedRent should stay unset with no unit listing to fall back to at create time, got %v", tdata["requestedRent"])
+	}
+
+	// The listing lands AFTER the application, before the decision.
+	setListingAspect(t, ctx, conn, unitKey, "2026-08-23T00:00:00Z", 12, 2050)
+
+	signLease(t, ctx, conn, cp, cons, "decRentSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decRentApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	tdata, _ = readDoc(t, ctx, conn, appKey+".tenancy")["data"].(map[string]any)
+	if got, _ := tdata["leaseStart"].(string); got != "2026-09-15T00:00:00Z" {
+		t.Fatalf("tenancy.leaseStart = %q, want 2026-09-15T00:00:00Z (terms.moveInDate)", got)
+	}
+	if got, _ := tdata["rentAmount"].(float64); got != 2050 {
+		t.Fatalf("tenancy.rentAmount = %v, want 2050 (the unit's listed rent, .terms carries none)", tdata["rentAmount"])
 	}
 }
 

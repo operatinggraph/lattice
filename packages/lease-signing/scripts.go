@@ -144,6 +144,16 @@ def optional_number(p, name):
         return None
     return v
 
+def as_rfc3339_instant(s):
+    # A bare "YYYY-MM-DD" (the FE's <input type=date> shape, and what
+    # seed-showcase / seed-classic-demo write for moveInDate / availableFrom)
+    # anchors to midnight UTC. time.rfc3339_utc itself rejects a bare date, so
+    # every caller normalizes through this first; an already-RFC3339 value
+    # passes through unchanged.
+    if len(s) == 10:
+        return s + "T00:00:00Z"
+    return s
+
 def optional_bool(p, name):
     # An optional boolean flag (hasCoApplicant / hasGuarantor). Absent / null /
     # non-bool degrades to False — a flag the applicant did not set is "no".
@@ -847,7 +857,12 @@ def execute(state, op):
         # field, so a caller cannot forge which unit's listing feeds the term
         # math (Standard §readTemplateDebt: a payload-conditional unit field
         # can only ever build a malformed read key on a decline or re-approve,
-        # where it is absent by design).
+        # where it is absent by design). The term itself is derived from the
+        # APPLICANT'S OWN .terms first — the approval commits to what the
+        # applicant asked for, never silently clamped to the listing's
+        # availableFrom — and falls back field-by-field to the unit's
+        # .listing only where .terms carries nothing (a bare applicant+unit
+        # application with no moveInDate).
         if decision == "approved":
             # read-posture: (d) declared optionalReads at DecideLeaseApplication
             # dispatch — None is the expected, common first-approve case.
@@ -863,27 +878,64 @@ def execute(state, op):
                 # unlistable unit rather than crash on a missing .listing read.
                 if decide_unit == None:
                     fail("NoListing: application " + app_key + " names no live unit; cannot compute a tenancy term")
+
+                # read-posture: (d) declared optionalReads at DecideLeaseApplication
+                # dispatch — absent is the bare applicant+unit application.
+                terms = kv.Read(app_key + ".terms")
+                terms_move_in = None
+                terms_term_months = None
+                terms_rent = None
+                if terms != None and not terms.isDeleted:
+                    terms_move_in = terms.data.get("moveInDate")
+                    terms_term_months = terms.data.get("leaseTermMonths")
+                    terms_rent = terms.data.get("requestedRent")
+
                 # read-posture: (e) per-candidate follow-up read off the
                 # appliesToUnit enumeration leaseapp_unit() already walked
                 # above — decide_unit is the resolved, live unit key, not a
                 # payload placeholder that would build a malformed key when
-                # absent.
+                # absent. Still read even when .terms supplies every field —
+                # the listing is the fallback, and rentAmount's own fallback
+                # (below) always needs it.
                 listing = kv.Read(decide_unit + ".listing")
                 if listing == None or listing.isDeleted:
                     fail("NoListing: unit " + decide_unit + " has no .listing aspect; cannot compute a tenancy term")
                 available_from = listing.data.get("availableFrom")
                 term_months = listing.data.get("leaseTermMonths")
-                if available_from == None or term_months == None:
+
+                move_in = terms_move_in if terms_move_in != None else available_from
+                term = terms_term_months if terms_term_months != None else term_months
+                if move_in == None or term == None:
                     fail("NoListing: unit " + decide_unit + "'s .listing is missing availableFrom/leaseTermMonths")
-                lease_start = time.rfc3339_utc(available_from)
+
+                # moveInDate / availableFrom may be a bare "YYYY-MM-DD" (the FE
+                # normalizes to RFC3339, but seed-showcase / seed-classic-demo
+                # and Priya Raman's live pending application do not) —
+                # time.rfc3339_utc itself rejects a bare date.
+                lease_start = time.rfc3339_utc(as_rfc3339_instant(move_in))
                 # A lease term is a calendar-month count (12 months from Jan
                 # 31 is Jan 31 of next year, never a fixed hour count), and
                 # the builtin clamps the day-of-month to the target month's
                 # length (Jan 31 + 1 month = Feb 28/29).
-                lease_end = time.rfc3339_add_months(lease_start, int(term_months))
+                lease_end = time.rfc3339_add_months(lease_start, int(term))
                 renewal_opens_at = time.rfc3339_add(lease_end, "-__RENEWAL_WINDOW__")
-                mutations.append(make_aspect(app_key, "tenancy", "tenancy",
-                    {"leaseStart": lease_start, "leaseEnd": lease_end, "renewalOpensAt": renewal_opens_at}))
+
+                tenancy_data = {"leaseStart": lease_start, "leaseEnd": lease_end, "renewalOpensAt": renewal_opens_at}
+
+                # rentAmount: the applicant's own offered rent first, else the
+                # unit's listed rent (mirroring CreateLeaseApplication's own
+                # listing-rent fallback above); omitted entirely when neither
+                # exists, so leaseRentSettlementSpec's coalesce(.tenancy.rentAmount,
+                # .terms.requestedRent) still resolves the same way it does today.
+                rent = terms_rent
+                if rent == None:
+                    r = listing.data.get("rentAmount")
+                    if r != None and (type(r) == type(0) or type(r) == type(0.0)) and r > 0:
+                        rent = r
+                if rent != None:
+                    tenancy_data["rentAmount"] = rent
+
+                mutations.append(make_aspect(app_key, "tenancy", "tenancy", tenancy_data))
 
         # .decidedProfileSnapshot: the fair-housing preservation record —
         # stamped exactly once, on the FIRST .decision write of EITHER value

@@ -109,6 +109,30 @@ func TestRenewalsRead_ProjectsDualAnchor(t *testing.T) {
 		"authz_anchors must carry BOTH the tenant's and the managing landlord's bare NanoID")
 }
 
+// TestRenewalsRead_ProjectsLeaseEnd — lease_end reads the renewed leaseapp's
+// CURRENT app.tenancy.data.leaseEnd, not this renewal's own cycleEnd (the
+// cycle that OPENED the renewal): a signed renewal's new term extends
+// leaseEnd past cycleEnd, and the card must show the tenant's actual current
+// end.
+func TestRenewalsRead_ProjectsLeaseEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-09-15T00:00:00Z",
+		"leaseEnd":   "2028-01-01T00:00:00Z",
+	})
+
+	rows := f.projectRenewalsRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+
+	require.Equal(t, "2027-01-01T00:00:00Z", v["cycle_end"], "cycle_end stays the renewal's own cycle-close date")
+	require.Equal(t, "2028-01-01T00:00:00Z", v["lease_end"], "lease_end reads the leaseapp's current tenancy, past the cycle that opened this renewal")
+}
+
 // TestRenewalsRead_ProjectsTenantNameEnvelopeWhole — the Secure-Lens contract
 // (Contract #3 §3.10), same shape as
 // TestLandlordLeaseApplicationsRead_ProjectsContactEnvelopesWhole:
