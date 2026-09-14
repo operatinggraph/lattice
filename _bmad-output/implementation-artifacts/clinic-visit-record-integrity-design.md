@@ -89,13 +89,21 @@ only reader of its clinical reason; a badge check with another provider is not i
 
 - **Lens** (`followUpRemindersSpec`): adds `OPTIONAL MATCH (p)<-[:forPatient]-(g:appointment)` +
   `OPTIONAL MATCH (g)-[:withProvider]->(gpr:provider)` and a `WITH a, p, pr, min(CASE WHEN g.key <> a.key AND
-  status-qualifying AND g.schedule.data.startsAt >= a.documentation.data.followUpDate AND same-provider THEN
-  g.schedule.data.startsAt ELSE null END) AS addressedAt` (the EARLIEST qualifying visit — the one the reminder
-  would have asked for). `freshUntil`, `missing_followup_reminder` and `violating` each gain
-  `(addressedAt = null)`; `addressedAt` is projected as an informational BodyColumn. Cancelling the addressing
-  visit re-arms the timer (a past `followUpDate` fires at once) — level-triggered on the booked visit, the
-  `visitSeriesDue` shape. Cost: one bounded walk over the patient's appointments per anchor projection, the same
-  walk `visitSeriesDue` already pays.
+  status-qualifying AND g.schedule.data.startsAt > a.schedule.data.startsAt AND g.schedule.data.startsAt >=
+  a.documentation.data.followUpDate AND same-provider THEN g.schedule.data.startsAt ELSE null END) AS
+  addressedAt` (the EARLIEST qualifying visit — the one the reminder would have asked for; a visit that predates
+  the documented visit cannot have answered it — `RecordEncounter` accepts a `followUpDate` at or before the
+  visit's own start and the lens projects it verbatim, so the lower bound is the same conjunct `hasLaterVisit`
+  carries). `freshUntil`, `missing_followup_reminder` and `violating` each gain `(addressedAt = null)` and
+  `(status <> 'noShow')` — a documented visit corrected to `noShow` is a visit that did not take place
+  (`VisitNotHeld`'s set), never reminded; `addressedAt` is projected as an informational BodyColumn. Cancelling
+  the addressing visit re-arms the timer (a past `followUpDate` fires at once) — level-triggered on the booked
+  visit, the `visitSeriesDue` shape: a sibling appointment's event seeds every position binding `appointment`
+  (`internal/refractor/pipeline/anchor_derivation.go` `deriveAnchorsForVertex`) and walks `g→p→a` to every
+  appointment of the patient. Cost: one bounded walk over the patient's appointments per anchor projection, the
+  walk `visitSeriesDue` already pays — plus the fan-out the new `gpr` position adds: a PROVIDER aspect event
+  (`SetProviderTimeOff` / `SetProviderHours`) now re-derives every appointment of every patient that provider
+  has seen, the same platform ceiling the visit-series design filed to the Surveyor, over the larger anchor set.
 - **Worklist** (`hasLaterVisit`): gains `g.providerKey === f.providerKey` (or `!f.providerKey` → any), keeping
   the existing status / date conjuncts. The addressed badge names the visit: "Addressed by the <date> visit". The
   rule lives twice — cypher in the package, JS in the app — **deliberately**: projecting `addressedAt` from the
@@ -180,7 +188,11 @@ Standing checklist (`agents/fire-brief-template.md`) walked: #3 binds each new r
 conjunct and watching its pin fail; #4 is why §2.1 adds the observer section; #6 — `hasLaterVisit`'s
 `g.startsAt > f.startsAt` conjunct is kept, not re-derived.
 
-**Adjacent finds:** none new — the ledger row (★★ M) was filed with these and stays 📋 for its own fire.
+**Adjacent finds:** `scripts/seed-showcase.go`'s `RecordEncounter` asked for a follow-up with no `followUpDate`
+— refused `MissingFollowUpDate` on every fresh seed since `785b446b` (absorbed: the seed names the brace check,
++28 d). `scripts/backfill-clinic-encounter-documentation.go` is a one-shot repair that has already run; a
+residual cancelled / noShow legacy row would now be refused `VisitNotHeld` if it were ever re-run (declared
+reads updated; nothing else to do). The ledger row (★★ M) was filed with these and stays 📋 for its own fire.
 
 **Non-goals:** a `fulfills` link from a booked visit to the follow-up it answers · auto-completing a stale
 `checkedIn` visit · recording the pre-sweep status on an auto no-show · specialty-based addressing · any
@@ -190,8 +202,13 @@ conjunct and watching its pin fail; #4 is why §2.1 adds the observer section; #
 section; R2: rows 4–9 + the seed/backfill dispatchers + the FE read declaration; R3: rows 10–14 + the goja pin).
 Nothing widens; the observer section is the removal rule's obligation, not a new feature.
 
-## 4. Checkpoint
+## 4. Build note (2026-09-14)
 
-Worktree `/tmp/lattice-worktrees/verticals-clinic-visit-record-1789419207` (branch
-`steward-verticals-clinic-visit-record`). Landing shape: **hold the worktree, merge once when the four increments
-are green** — the two packages version-bump together and the FE reads the op's new declaration. Next: Inc 1.
+Landed as one merge (hold-the-worktree shape). Deviations from §3: none in scope; the cold review's
+non-blocking findings were absorbed before merge — the `g.startsAt > a.startsAt` lower bound and the anchor's
+own `<> 'noShow'` conjunct (§2.3, both pinned and revert-proved), a provider line on the arrived-never-closed
+card, and the seed's `followUpDate`. Refractor corpus-census pins re-pinned for `followUpReminders`'s new shape
+(`oneKey → walkMultiPosition`; branch `g2/o4[g,gpr] g0/o0`; grouping `key(a p pr) p!a`) — the visit-series
+shapes with the extra OPTIONAL counted. Review classes: design-gap ×2 (the two conjuncts — a copied predicate's
+lower bound dropped when its sibling was re-derived; a refusal's set not carried into the lens that gates on the
+same fact), convention ×1 (a change-narrating comment), review-over-reach ×0.

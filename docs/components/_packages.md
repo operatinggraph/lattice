@@ -745,6 +745,11 @@ the op now applies (`ensureApprovedTenancy` now skips an ended term), found at t
   test asserted that acceptance. Minted: lease-signing `RecordApplicationLoss` (2026-09-14), caught cold. Check:
   `grep -n '\.decision\|decision_value\|\.get("value")'` across the package's scripts and decide the new value's
   arm at every guard; a guard that reads the premise a recorded fact replaces takes the fact as its own conjunct.
+  **Second sighting (clinic `RecordEncounter`, 2026-09-14), on the reverse axis:** a new op refusal named a SET of
+  statuses (`VisitNotHeld` = cancelled ∪ noShow) while the sibling package's lens gating on the same fact read
+  `<> 'cancelled'` alone, so a documented visit corrected to noShow kept its follow-up reminder armed — caught
+  cold. The census runs both ways: a new value walks the op guards, a new refused set walks every
+  `status.data.value <>` conjunct in the lenses that gate on that status. Mechanize on the next sighting.
 - **A field a self-scoped op stores as informational becomes load-bearing the moment another op derives from it —
   validate at the mint, not the reader.** `.terms.leaseTermMonths` / `requestedRent` / `moveInDate` were free text
   the applicant wrote through `require_number` / `optional_string`; once `DecideLeaseApplication` derived the

@@ -2,6 +2,10 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-13 · `67799a7d` · Rent bills from leaseStart to leaseEnd — the clause carries its term, dues walk the anniversary grid; six live clauses termed by `BackfillClauseTerm`, four pre-/post-term charges reversed.
+- 2026-09-13 · `67799a7d` · A signed renewal's rent reaches the bill — `SignRenewal` records `termStart`/`rentAmount` on `.tenancy` and `leaseRentSettlement` mints the renewal's own clause for [termStart, leaseEnd).
+- 2026-09-13 · `ee354831` · Vertical-apps dossier censused — a `rentCurrency` stored XSS, 4 secret-losing ceremony catches, 5 stale-render writes fixed; four classes gated ([census](../../../docs/reviews/verticals-dossier-census-2026-09-13.md)).
+- 2026-09-13 · `64ee009c` · Three twice-seen `_packages.md` dossier classes become CI gates — `lint-link-target-count`, the retry-cap rule in `lint-gap-column-declaration`, `lint-loupe-console-grants` (one live gap pinned); dossier 14 → 12.
 - 2026-09-13 · `7d9111b7` · Café's FE gates reach their siblings — wellness `esc()` escapes both quotes, goja-pinned; the `KNOWN_CATALOG_OPS` coverage test lands in wellness + clinic as a closed-set classifier; two dossier classes retire.
 - 2026-09-13 · `3658dadb` · A kernel root is not a member — `CreateBooking`/`JoinWaitlist` refuse a `data.protected` booker (`ProtectedBooker`) before any slot cell lands on its hub; 0.27.1 refreshed live, both ops refuse the admin.
 - 2026-09-13 · `fc2c1f68` · 15 appointments carry no site — `BackfillAppointmentSite` counts LIVE sites (a `practicesAt` link to a tombstoned building is not a second site); 0.34.26 refreshed live, the replay backfilled all 15.
