@@ -902,7 +902,7 @@ func seedClinicProvider(ctx context.Context, conn *substrate.Conn, adminKey stri
 				// The per-pair link is read on demand by the script (create /
 				// revive / no-op), so it is declared optional, mirroring
 				// clinic-domain's own site_integration_test submit.
-				OptionalReads: []string{practicesLnk},
+				OptionalReads: []string{linkKey(providerKey, "practicesAt", buildingKey)},
 			})
 	}
 	// SetSiteProfile is an unconditioned full-replace upsert (site.go), so it's
@@ -952,7 +952,7 @@ func seedOseiProvider(ctx context.Context, conn *substrate.Conn, adminKey, provi
 			map[string]any{"provider": oseiProviderKey, "building": buildingKey},
 			&processor.ContextHint{
 				Reads:         []string{oseiProviderKey, buildingKey},
-				OptionalReads: []string{practicesLnk},
+				OptionalReads: []string{linkKey(oseiProviderKey, "practicesAt", buildingKey)},
 			})
 	}
 	submitOp(ctx, conn, adminKey, "SetProviderHours", "provider",
@@ -1177,12 +1177,17 @@ func seedResidentTenancies(ctx context.Context, conn *substrate.Conn, adminKey, 
 			submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
 				map[string]any{"applicant": t.applicantKey, "unit": t.unitKey, "leaseAppId": t.fixedLeaseAppID,
 					"moveInDate": moveIn.Format("2006-01-02"), "leaseTermMonths": 12, "requestedRent": t.rent},
-				&processor.ContextHint{Reads: []string{t.applicantKey, t.unitKey}})
+				&processor.ContextHint{
+					Reads: []string{t.applicantKey, t.unitKey},
+					OptionalReads: []string{
+						linkKey(t.applicantKey, "appliedToUnit", t.unitKey), t.unitKey + ".listing",
+					},
+				})
 		}
 		if !alive(ctx, conn, leaseAppKey+".signature") {
 			submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
 				map[string]any{"leaseAppKey": leaseAppKey},
-				&processor.ContextHint{Reads: []string{leaseAppKey}})
+				&processor.ContextHint{Reads: []string{leaseAppKey}, OptionalReads: []string{leaseAppKey + ".decision"}})
 		}
 		if !alive(ctx, conn, leaseAppKey+".tenancy") {
 			submitOp(ctx, conn, adminKey, "DecideLeaseApplication", "leaseapp",
@@ -1191,6 +1196,8 @@ func seedResidentTenancies(ctx context.Context, conn *substrate.Conn, adminKey, 
 					Reads: []string{leaseAppKey},
 					OptionalReads: []string{
 						leaseAppKey + ".decision", leaseAppKey + ".signature", leaseAppKey + ".tenancy",
+						leaseAppKey + ".decidedProfileSnapshot", leaseAppKey + ".profile",
+						leaseAppKey + ".underwritingParties", leaseAppKey + ".applicationSignals",
 					},
 				})
 		}
@@ -1570,7 +1577,10 @@ func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adm
 	if !alive(ctx, conn, managesLnk) {
 		submitOp(ctx, conn, adminKey, "AssignUnitOwner", "loftspaceOwnership",
 			map[string]any{"landlord": staffKey, "unit": unit3Key},
-			&processor.ContextHint{Reads: []string{staffKey, unit3Key}})
+			&processor.ContextHint{
+				Reads:         []string{staffKey, unit3Key},
+				OptionalReads: []string{linkKey(staffKey, "manages", unit3Key)},
+			})
 	}
 	if !alive(ctx, conn, unit3Key+".address") {
 		submitOp(ctx, conn, adminKey, "SetUnitAddress", "loftspaceListing",
@@ -1602,12 +1612,17 @@ func seedStaffWorklistApplication(ctx context.Context, conn *substrate.Conn, adm
 			map[string]any{"applicant": applicantKey, "unit": unit3Key, "leaseAppId": leaseApp3ID,
 				"moveInDate":      time.Now().UTC().AddDate(0, 0, 30).Format("2006-01-02"),
 				"leaseTermMonths": 12, "requestedRent": 2100},
-			&processor.ContextHint{Reads: []string{applicantKey, unit3Key}})
+			&processor.ContextHint{
+				Reads: []string{applicantKey, unit3Key},
+				OptionalReads: []string{
+					linkKey(applicantKey, "appliedToUnit", unit3Key), unit3Key + ".listing",
+				},
+			})
 	}
 	if !alive(ctx, conn, leaseApp3Key+".signature") {
 		submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
 			map[string]any{"leaseAppKey": leaseApp3Key},
-			&processor.ContextHint{Reads: []string{leaseApp3Key}})
+			&processor.ContextHint{Reads: []string{leaseApp3Key}, OptionalReads: []string{leaseApp3Key + ".decision"}})
 	}
 	fmt.Println("==> staff worklist:  " + leaseApp3Key + " (" + applicant3Name + " → Unit 3, signed, awaiting decision)")
 }
@@ -1683,12 +1698,17 @@ func seedLandlordWorld(ctx context.Context, conn *substrate.Conn, adminKey, cons
 			map[string]any{"applicant": applicantKey, "unit": unit4Key, "leaseAppId": leaseApp4ID,
 				"moveInDate":      time.Now().UTC().AddDate(0, 0, 45).Format("2006-01-02"),
 				"leaseTermMonths": 12, "requestedRent": 2400},
-			&processor.ContextHint{Reads: []string{applicantKey, unit4Key}})
+			&processor.ContextHint{
+				Reads: []string{applicantKey, unit4Key},
+				OptionalReads: []string{
+					linkKey(applicantKey, "appliedToUnit", unit4Key), unit4Key + ".listing",
+				},
+			})
 	}
 	if !alive(ctx, conn, leaseApp4Key+".signature") {
 		submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
 			map[string]any{"leaseAppKey": leaseApp4Key},
-			&processor.ContextHint{Reads: []string{leaseApp4Key}})
+			&processor.ContextHint{Reads: []string{leaseApp4Key}, OptionalReads: []string{leaseApp4Key + ".decision"}})
 	}
 	fmt.Println("==> landlord queue:  " + leaseApp4Key + " (" + applicant4Name + " → Unit 4, signed, awaiting decision)")
 	return landlordKey
@@ -1746,12 +1766,17 @@ func seedRenewalDemoTenancy(ctx context.Context, conn *substrate.Conn, adminKey,
 		submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
 			map[string]any{"applicant": applicantKey, "unit": unit5Key, "leaseAppId": leaseApp5ID,
 				"moveInDate": moveIn.Format("2006-01-02"), "leaseTermMonths": 12, "requestedRent": 2050},
-			&processor.ContextHint{Reads: []string{applicantKey, unit5Key}})
+			&processor.ContextHint{
+				Reads: []string{applicantKey, unit5Key},
+				OptionalReads: []string{
+					linkKey(applicantKey, "appliedToUnit", unit5Key), unit5Key + ".listing",
+				},
+			})
 	}
 	if !alive(ctx, conn, leaseApp5Key+".signature") {
 		submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
 			map[string]any{"leaseAppKey": leaseApp5Key},
-			&processor.ContextHint{Reads: []string{leaseApp5Key}})
+			&processor.ContextHint{Reads: []string{leaseApp5Key}, OptionalReads: []string{leaseApp5Key + ".decision"}})
 	}
 	if !alive(ctx, conn, leaseApp5Key+".tenancy") {
 		submitOp(ctx, conn, adminKey, "DecideLeaseApplication", "leaseapp",
@@ -1760,6 +1785,8 @@ func seedRenewalDemoTenancy(ctx context.Context, conn *substrate.Conn, adminKey,
 				Reads: []string{leaseApp5Key},
 				OptionalReads: []string{
 					leaseApp5Key + ".decision", leaseApp5Key + ".signature", leaseApp5Key + ".tenancy",
+					leaseApp5Key + ".decidedProfileSnapshot", leaseApp5Key + ".profile",
+					leaseApp5Key + ".underwritingParties", leaseApp5Key + ".applicationSignals",
 				},
 			})
 	}

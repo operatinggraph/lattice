@@ -188,7 +188,12 @@ func main() {
 
 		leaseReply := submitOp(ctx, conn, adminKey, "CreateLeaseApplication", "leaseapp",
 			map[string]any{"applicant": consumerKey, "unit": unitKey},
-			&processor.ContextHint{Reads: []string{consumerKey, unitKey}})
+			&processor.ContextHint{
+				Reads: []string{consumerKey, unitKey},
+				OptionalReads: []string{
+					linkKey(consumerKey, "appliedToUnit", unitKey), unitKey + ".listing",
+				},
+			})
 		leaseAppKey = leaseReply.PrimaryKey
 		fmt.Printf("==> lease app:       %s\n", leaseAppKey)
 		submitOp(ctx, conn, adminKey, "SignLease", "leaseapp",
@@ -200,6 +205,8 @@ func main() {
 				Reads: []string{leaseAppKey},
 				OptionalReads: []string{
 					leaseAppKey + ".decision", leaseAppKey + ".signature", leaseAppKey + ".tenancy",
+					leaseAppKey + ".decidedProfileSnapshot", leaseAppKey + ".profile",
+					leaseAppKey + ".underwritingParties", leaseAppKey + ".applicationSignals",
 				},
 			})
 		fmt.Printf("==> lease decided:   %s (signed, approved)\n", leaseAppKey)
@@ -857,7 +864,10 @@ func backfillClinicProviderSiteLive(ctx context.Context, conn *substrate.Conn, a
 	if !alive(ctx, conn, linkKey(providerKey, "practicesAt", riversideBuildingKey)) {
 		submitOp(ctx, conn, adminKey, "AssignProviderSite", "clinicSiteAssignment",
 			map[string]any{"provider": providerKey, "building": riversideBuildingKey},
-			&processor.ContextHint{Reads: []string{providerKey, riversideBuildingKey}})
+			&processor.ContextHint{
+				Reads:         []string{providerKey, riversideBuildingKey},
+				OptionalReads: []string{linkKey(providerKey, "practicesAt", riversideBuildingKey)},
+			})
 		fmt.Printf("==> assigned site:   %s practicesAt %s\n", providerKey, riversideBuildingKey)
 	}
 

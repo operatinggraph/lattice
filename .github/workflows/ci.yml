@@ -19,7 +19,7 @@ on:
 # the sum. Every gate that ran in the old single serial job still runs, each in
 # exactly one job:
 #   lint-build         — build, build-wasm, nats-confinement, vet, gofmt (no Docker)
-#   lint-static        — golangci + the 25 STRICT scripts/lint-*.go gates,
+#   lint-static        — golangci + the 26 STRICT scripts/lint-*.go gates,
 #                         split off lint-build so the compile/vet half and the
 #                         static-analysis half run in parallel instead of
 #                         serially — lint-build's own wall-clock (Build+Vet+
@@ -512,6 +512,17 @@ jobs:
         # grant lands. Self-tests on every run and refuses an all-clear over
         # zero examined sites.
         run: STRICT=1 go run ./scripts/lint-loupe-console-grants.go
+
+      - name: Seed declared-reads lint (a hand-built envelope tracks its op's descriptor)
+        # A scripts/ seed or verify tool that dispatches an op must declare the
+        # optional reads the op's OpMetaSpec.Dispatch declares — the op's
+        # refusals read them, and an envelope that stopped tracking the
+        # descriptor is a fixture the op may now refuse, aborting the seed.
+        # Twice-seen (wellness SessionStarted, café TenancyEnded — 2026-09-14).
+        # Parses scripts/*.go with go/ast against the compiled descriptors;
+        # self-scope probes and probes on optional payload fields are not
+        # required; a non-literal OptionalReads is listed, not judged.
+        run: STRICT=1 go run ./scripts/lint-seed-declared-reads.go
 
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,

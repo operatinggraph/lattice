@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/operatinggraph/lattice/cmd/lattice/output"
@@ -66,7 +67,13 @@ func main() {
 		key := "vtx.leaseapp." + id
 		expect(submit(ctx, conn, admin, "CreateLeaseApplication", "leaseapp",
 			map[string]any{"leaseAppId": id, "applicant": admin, "unit": unitKey},
-			&processor.ContextHint{Reads: []string{admin, unitKey}}),
+			&processor.ContextHint{
+				Reads: []string{admin, unitKey},
+				OptionalReads: []string{
+					"lnk.identity." + strings.TrimPrefix(admin, "vtx.identity.") + ".appliedToUnit.unit." + strings.TrimPrefix(unitKey, "vtx.unit."),
+					unitKey + ".listing",
+				},
+			}),
 			"accepted", "mint leaseapp at "+label)
 		return key
 	}
