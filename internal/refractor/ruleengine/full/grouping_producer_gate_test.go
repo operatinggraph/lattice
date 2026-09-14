@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	edgemanifest "github.com/operatinggraph/lattice/packages/edge-manifest"
 )
 
@@ -99,6 +100,39 @@ func countGroupingClauses(q *Query) int {
 	return n
 }
 
+// producerNamePerDomain maps each declared read-grant domain to the canonical
+// name of the producer lens the generator emitted for it, read off the EXPANDED
+// definition rather than re-derived from the domain name.
+//
+// The generator honours ReadGrantDomainSpec.CanonicalName when a domain sets
+// one, so a gate that rebuilt `<domain>ReadGrants` itself would key its map on
+// a name no producer carries the moment a domain overrides. The join is the one
+// thing a producer's identity is truly pinned to: its Output key pattern is
+// `cap-read.<domain>.{actorSuffix}` whatever the lens is called.
+func producerNamePerDomain(t testing.TB) map[string]string {
+	t.Helper()
+	expanded, err := edgemanifest.Package.ExpandReadGrantWalks()
+	require.NoError(t, err, "the shipped edge-manifest package must expand cleanly")
+	out := make(map[string]string, len(expanded.ReadGrantDomains))
+	for _, d := range expanded.ReadGrantDomains {
+		want := "cap-read." + d.Name + ".{actorSuffix}"
+		for _, l := range expanded.Lenses {
+			if l.ProjectionKind != pkgmgr.ActorAggregateProjectionKind || l.Output == nil {
+				continue
+			}
+			if l.Output.OutputKeyPattern != want {
+				continue
+			}
+			require.NotContainsf(t, out, d.Name,
+				"two actorAggregate lenses claim domain %q: %s and %s", d.Name, out[d.Name], l.CanonicalName)
+			out[d.Name] = l.CanonicalName
+		}
+		require.Containsf(t, out, d.Name,
+			"domain %q declares no producer writing %s", d.Name, want)
+	}
+	return out
+}
+
 // declaredWalkCounts maps each generated producer to the number of Walks its
 // domain collects, read from the same Definition the generator compiles. It is
 // the exact form of "one staging clause per declared walk": a floor would let a
@@ -106,14 +140,14 @@ func countGroupingClauses(q *Query) int {
 // equality beside it is vacuous at a single stage.
 func declaredWalkCounts(t testing.TB) map[string]int {
 	t.Helper()
-	out := map[string]int{}
-	for _, d := range edgemanifest.Package.ReadGrantDomains {
-		out[d.Name+"ReadGrants"] = 0
+	producer := producerNamePerDomain(t)
+	out := make(map[string]int, len(producer))
+	for _, name := range producer {
+		out[name] = 0
 	}
 	for _, l := range edgemanifest.Package.Lenses {
 		for _, w := range l.Walks {
-			name := w.GrantDomain + "ReadGrants"
-			_, declared := out[name]
+			name, declared := producer[w.GrantDomain]
 			require.Truef(t, declared,
 				"lens %s names GrantDomain %q, which declares no producer", l.CanonicalName, w.GrantDomain)
 			out[name]++
