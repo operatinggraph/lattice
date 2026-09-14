@@ -121,7 +121,10 @@ func main() {
 		}
 
 		submitOp(ctx, conn, adminKey, "RecordEncounter", "appointment", payload,
-			&processor.ContextHint{Reads: []string{apptKey}})
+			&processor.ContextHint{
+				Reads:         []string{apptKey, apptKey + ".schedule"},
+				OptionalReads: []string{apptKey + ".status"},
+			})
 		fmt.Printf("==> backfilled documentation: %s\n", apptKey)
 		fixed++
 	}

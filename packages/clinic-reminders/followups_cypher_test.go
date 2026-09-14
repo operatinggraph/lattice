@@ -11,6 +11,11 @@ package clinicreminders
 //   - REDOCUMENTED (remindedFor = old date, followUpDate = new future date): re-opens
 //     + freshUntil = new date re-arms.
 //   - NO FOLLOW-UP / NO ENCOUNTER / CANCELLED: never violating; freshUntil null.
+//   - ADDRESSED (a later, non-cancelled/non-noShow visit with the follow-up's own
+//     provider — or any provider when the follow-up carries none — at or after
+//     followUpDate): never violating regardless of the recorded lapse; addressedAt
+//     names the EARLIEST such visit. A different provider, an earlier visit, or a
+//     cancelled/noShow one does not address it (visitSeriesDueSpec's own rule).
 
 import (
 	"context"
@@ -309,4 +314,179 @@ func TestFollowUpReminders_Cancelled(t *testing.T) {
 	require.Equal(t, false, v["missing_followup_reminder"], "cancelled → never reminded, even with the lapse recorded")
 	require.Equal(t, false, v["violating"])
 	require.Nil(t, v["freshUntil"])
+}
+
+// TestFollowUpReminders_AddressedBySameProviderLaterVisit — a later,
+// non-cancelled/non-noShow visit at/after followUpDate with the follow-up's
+// OWN provider addresses it: never violating even with the lapse recorded,
+// and addressedAt names that visit's startsAt.
+func TestFollowUpReminders_AddressedBySameProviderLaterVisit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkFollowUpAppt(t, "appt", "completed", true, true, "2026-06-29T09:00:00Z", "", "")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+	f.linkAppointment(t, "alice", "g1", "2026-07-05T10:00:00Z", "confirmed", "drsam")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2026-06-29T09:00:00Z"})
+
+	v := f.projectFollowUp(t, "appt")[0].Values
+	require.Equal(t, false, v["missing_followup_reminder"], "a same-provider qualifying visit addresses the follow-up, even with the lapse recorded")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"])
+	require.Equal(t, "2026-07-05T10:00:00Z", v["addressedAt"])
+}
+
+// TestFollowUpReminders_NotAddressedByOtherProviderVisit — a later qualifying
+// visit with a DIFFERENT provider than the follow-up's own does not address
+// it: still violating, addressedAt null.
+func TestFollowUpReminders_NotAddressedByOtherProviderVisit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkFollowUpAppt(t, "appt", "completed", true, true, "2026-06-29T09:00:00Z", "", "")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.vtx(t, "drjones", "provider")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+	f.linkAppointment(t, "alice", "g1", "2026-07-05T10:00:00Z", "confirmed", "drjones")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2026-06-29T09:00:00Z"})
+
+	v := f.projectFollowUp(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_followup_reminder"], "a later visit with a DIFFERENT provider does not address the follow-up")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"], "already lapsed → no armed timer")
+	require.Nil(t, v["addressedAt"])
+}
+
+// TestFollowUpReminders_NotAddressedByCancelledOrNoShowVisit — a same-provider
+// later visit that is cancelled, or one that is noShow, does not address the
+// follow-up: still violating.
+func TestFollowUpReminders_NotAddressedByCancelledOrNoShowVisit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkFollowUpAppt(t, "appt", "completed", true, true, "2026-06-29T09:00:00Z", "", "")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+	f.linkAppointment(t, "alice", "g1", "2026-07-05T10:00:00Z", "cancelled", "drsam")
+	f.linkAppointment(t, "alice", "g2", "2026-07-06T10:00:00Z", "noShow", "drsam")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2026-06-29T09:00:00Z"})
+
+	v := f.projectFollowUp(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_followup_reminder"], "a cancelled or noShow same-provider visit does not address the follow-up")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["addressedAt"])
+}
+
+// TestFollowUpReminders_NullProviderFollowUpAddressedByAnyProvider — a
+// follow-up appointment carrying no withProvider link (the series' own
+// null-provider arm) is addressed by ANY provider's qualifying later visit.
+func TestFollowUpReminders_NullProviderFollowUpAddressedByAnyProvider(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkFollowUpAppt(t, "appt", "completed", true, true, "2026-06-29T09:00:00Z", "", "")
+	f.vtx(t, "alice", "patient")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.vtx(t, "drjones", "provider")
+	f.linkAppointment(t, "alice", "g1", "2026-07-05T10:00:00Z", "confirmed", "drjones")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2026-06-29T09:00:00Z"})
+
+	v := f.projectFollowUp(t, "appt")[0].Values
+	require.Equal(t, false, v["missing_followup_reminder"], "a follow-up with no bound provider is addressed by ANY provider's qualifying visit")
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, "2026-07-05T10:00:00Z", v["addressedAt"])
+}
+
+// TestFollowUpReminders_VisitBeforeFollowUpDateDoesNotAddress — a
+// same-provider visit BEFORE followUpDate is not a later, addressing visit:
+// still violating.
+func TestFollowUpReminders_VisitBeforeFollowUpDateDoesNotAddress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkFollowUpAppt(t, "appt", "completed", true, true, "2026-06-29T09:00:00Z", "", "")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+	f.linkAppointment(t, "alice", "g1", "2026-06-15T10:00:00Z", "confirmed", "drsam")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2026-06-29T09:00:00Z"})
+
+	v := f.projectFollowUp(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_followup_reminder"], "a visit BEFORE followUpDate does not address it")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["addressedAt"])
+}
+
+// TestFollowUpReminders_VisitBetweenFollowUpDateAndTheVisitDoesNotAddress — a
+// followUpDate at or before the documented visit's own start is accepted and
+// projected verbatim; a same-provider visit after that date but BEFORE the
+// documented visit predates the request and cannot have answered it.
+func TestFollowUpReminders_VisitBetweenFollowUpDateAndTheVisitDoesNotAddress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkFollowUpAppt(t, "appt", "completed", true, true, "2026-06-10T09:00:00Z", "", "")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+	f.linkAppointment(t, "alice", "g1", "2026-06-15T10:00:00Z", "completed", "drsam")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2026-06-10T09:00:00Z"})
+
+	v := f.projectFollowUp(t, "appt")[0].Values
+	require.Equal(t, true, v["missing_followup_reminder"], "a visit before the documented visit itself predates the request")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["addressedAt"])
+}
+
+// TestFollowUpReminders_NoShow — a documented visit later corrected to noShow
+// is a visit that did not take place: never reminded, freshUntil null.
+func TestFollowUpReminders_NoShow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkFollowUpAppt(t, "appt", "noShow", true, true, "2026-06-29T09:00:00Z", "", "")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2026-06-29T09:00:00Z"})
+
+	v := f.projectFollowUp(t, "appt")[0].Values
+	require.Equal(t, false, v["missing_followup_reminder"], "noShow → never reminded, even with the lapse recorded")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestFollowUpReminders_AddressedAtIsEarliestQualifyingVisit — two qualifying
+// visits: addressedAt names the EARLIEST one, not the later or the
+// first-seeded.
+func TestFollowUpReminders_AddressedAtIsEarliestQualifyingVisit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkFollowUpAppt(t, "appt", "completed", true, true, "2026-06-29T09:00:00Z", "", "")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+	f.linkAppointment(t, "alice", "g1", "2026-07-10T10:00:00Z", "confirmed", "drsam")
+	f.linkAppointment(t, "alice", "g2", "2026-07-05T10:00:00Z", "confirmed", "drsam")
+	f.recordLapse(t, "appt", map[string]string{FollowUpRemindersTarget: "2026-06-29T09:00:00Z"})
+
+	v := f.projectFollowUp(t, "appt")[0].Values
+	require.Equal(t, "2026-07-05T10:00:00Z", v["addressedAt"], "addressedAt is the EARLIEST qualifying visit, not the first seeded (g1)")
+	require.Equal(t, false, v["violating"])
 }

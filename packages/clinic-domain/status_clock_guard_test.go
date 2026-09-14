@@ -24,6 +24,12 @@ import (
 //  2. TestClinic_RescheduleTerminalRejected — a cancelled / completed appointment
 //     is never moved (TerminalStatus): its cells were released at the terminal
 //     transition, so the move would re-claim them for a visit nobody holds.
+//  3. TestClinic_PastDueCheckedInNoOp — MarkPastDueNoShow no-ops with zero
+//     mutations on a checkedIn appointment (the recorded arrival stays put);
+//     the same op still converges a confirmed appointment to noShow normally.
+//  4. TestClinic_RecordEncounterClock — RecordEncounter refuses a future visit
+//     (NotYetStarted) and a cancelled / noShow one (VisitNotHeld); a completed
+//     or checkedIn visit past its start is accepted and writes .documentation.
 
 // clStaffReason submits op as the staff actor with an explicit submittedAt and
 // returns the script's failure text — the rejection REASON is what these tests
@@ -183,5 +189,163 @@ func TestClinic_RescheduleTerminalRejected(t *testing.T) {
 		clRescheduleReads(appt2Key, providerKey, patientKey), clRescheduleOptionalReads(appt2Key))
 	if !strings.HasPrefix(reason, "TerminalStatus:") {
 		t.Fatalf("reschedule of a completed appointment: reason = %q, want TerminalStatus", reason)
+	}
+}
+
+// TestClinic_PastDueCheckedInNoOp proves MarkPastDueNoShow's write-path half of
+// R1 (the lens's own dispatch-narrowing is pastdue_cypher_test.go's
+// TestPastDue_CheckedIn): a checkedIn appointment past its endsAt no-ops with
+// zero mutations rather than being swept to noShow — the recorded arrival and
+// its held slot-claim cells are untouched. The positive vector — a DIFFERENT,
+// still-confirmed appointment past its end — proves the exclusion is narrow:
+// the same op still converges it to noShow normally.
+func TestClinic_PastDueCheckedInNoOp(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "status-pastdue-checkedin")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "pdcipat01", "CheckedIn Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "pdciprv01", "Dr. Arrived", "Family")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "pdciappt01", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-21T09:00:00Z","endsAt":"2026-07-21T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	// The desk records arrival — checkedIn carries no clock, so this lands well
+	// before startsAt.
+	{
+		reads, optionalReads := clStatusReads(apptKey, false, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "pdcichk0001", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey+`","status":"checkedIn"}`, reads, optionalReads, processor.OutcomeAccepted)
+	}
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-21T09:00:00Z")
+
+	// endsAt has passed with no further staff update — the sweep dispatches and
+	// must no-op, leaving the recorded arrival and its held cells alone.
+	clSubmit(t, ctx, conn, cp, cons, "pdcisweep01", "MarkPastDueNoShow", "appointment",
+		`{"appointmentKey":"`+apptKey+`"}`,
+		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, processor.OutcomeAccepted)
+	status := clReadDoc(t, ctx, conn, apptKey+".status")
+	if st, _ := status["data"].(map[string]any); st["value"] != "checkedIn" {
+		t.Fatalf("status = %v, want checkedIn (the sweep must never overwrite a recorded arrival)", st["value"])
+	}
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-21T09:00:00Z")
+
+	// Positive vector: a DIFFERENT, still-confirmed appointment past its end
+	// still converges to noShow normally.
+	apptID2 := clSubmit(t, ctx, conn, cp, cons, "pdciappt02", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-23T09:00:00Z","endsAt":"2026-07-23T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey2 := "vtx.appointment." + apptID2
+	{
+		reads, optionalReads := clStatusReads(apptKey2, false, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "pdciconf0001", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey2+`","status":"confirmed"}`, reads, optionalReads, processor.OutcomeAccepted)
+	}
+	clSubmit(t, ctx, conn, cp, cons, "pdcisweep02", "MarkPastDueNoShow", "appointment",
+		`{"appointmentKey":"`+apptKey2+`"}`,
+		[]string{apptKey2, apptKey2 + ".schedule", apptKey2 + ".status"}, processor.OutcomeAccepted)
+	status2 := clReadDoc(t, ctx, conn, apptKey2+".status")
+	if st2, _ := status2["data"].(map[string]any); st2["value"] != "noShow" {
+		t.Fatalf("status2 = %v, want noShow (a confirmed, non-checkedIn visit still auto-no-shows normally)", st2["value"])
+	}
+}
+
+// TestClinic_RecordEncounterClock proves R2: a visit that never happened
+// cannot be documented, and neither can one that hasn't started yet.
+// RecordEncounter is refused NotYetStarted ahead of the visit's own startsAt,
+// and VisitNotHeld against a cancelled or noShow appointment — completed and
+// checkedIn visits past their start are accepted and write .documentation.
+func TestClinic_RecordEncounterClock(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "status-recordencounter-clock")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "reclkpat01", "Clock Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "reclkprv01", "Dr. Clock", "Family")
+
+	// A future visit: refused NotYetStarted.
+	apptID := clSubmit(t, ctx, conn, cp, cons, "reclkappt01", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-24T09:00:00Z","endsAt":"2026-07-24T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+	encReads, encOptionalReads := clRecordEncounterReads(apptKey)
+	reason := clStaffReason(t, ctx, conn, cp, cons, "reclknys01", "RecordEncounter",
+		`{"appointmentKey":"`+apptKey+`","summary":"Too early."}`, "2026-07-24T08:59:59Z", encReads, encOptionalReads)
+	if !strings.HasPrefix(reason, "NotYetStarted:") {
+		t.Fatalf("RecordEncounter before startsAt: reason = %q, want NotYetStarted", reason)
+	}
+
+	// Cancel it (cancel carries no clock) — a visit that never happened cannot
+	// be documented, even once its startsAt has passed.
+	{
+		reads, optionalReads := clStatusReads(apptKey, true, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "reclkcanc01", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+apptKey+`","status":"cancelled","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
+	reason = clStaffReason(t, ctx, conn, cp, cons, "reclkvnh01", "RecordEncounter",
+		`{"appointmentKey":"`+apptKey+`","summary":"Never happened."}`, "2026-07-24T09:00:00Z", encReads, encOptionalReads)
+	if !strings.HasPrefix(reason, "VisitNotHeld:") {
+		t.Fatalf("RecordEncounter on a cancelled visit: reason = %q, want VisitNotHeld", reason)
+	}
+
+	// A DIFFERENT appointment walked to noShow: RecordEncounter is refused the
+	// same way.
+	apptID2 := clSubmit(t, ctx, conn, cp, cons, "reclkappt02", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-25T09:00:00Z","endsAt":"2026-07-25T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	appt2Key := "vtx.appointment." + apptID2
+	encReads2, encOptionalReads2 := clRecordEncounterReads(appt2Key)
+	{
+		reads, optionalReads := clStatusReads(appt2Key, true, providerKey, patientKey)
+		clSubmitAt(t, ctx, conn, cp, cons, "reclkns01", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+appt2Key+`","status":"noShow","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			"2026-07-25T09:30:00Z", reads, optionalReads, processor.OutcomeAccepted)
+	}
+	reason = clStaffReason(t, ctx, conn, cp, cons, "reclkvnh02", "RecordEncounter",
+		`{"appointmentKey":"`+appt2Key+`","summary":"Never happened either."}`, "2026-07-25T09:30:00Z", encReads2, encOptionalReads2)
+	if !strings.HasPrefix(reason, "VisitNotHeld:") {
+		t.Fatalf("RecordEncounter on a noShow visit: reason = %q, want VisitNotHeld", reason)
+	}
+
+	// Positive vector: a checkedIn visit past its start is accepted and writes
+	// .documentation — the provider documenting a started visit is the
+	// evidence it happened; closing the desk's record stays the desk's own job.
+	apptID3 := clSubmit(t, ctx, conn, cp, cons, "reclkappt03", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-26T09:00:00Z","endsAt":"2026-07-26T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	appt3Key := "vtx.appointment." + apptID3
+	{
+		reads, optionalReads := clStatusReads(appt3Key, false, providerKey, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "reclkchk01", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+appt3Key+`","status":"checkedIn"}`, reads, optionalReads, processor.OutcomeAccepted)
+	}
+	encReads3, encOptionalReads3 := clRecordEncounterReads(appt3Key)
+	clSubmitAt(t, ctx, conn, cp, cons, "reclkdoc01", "RecordEncounter", "appointment",
+		`{"appointmentKey":"`+appt3Key+`","summary":"Seen, still checked in."}`,
+		"2026-07-26T09:00:00Z", encReads3, encOptionalReads3, processor.OutcomeAccepted)
+	if doc3, _ := clReadDoc(t, ctx, conn, appt3Key+".documentation")["data"].(map[string]any); doc3["documentedAt"] != "2026-07-26T09:00:00Z" {
+		t.Fatalf(".documentation after RecordEncounter on a checkedIn visit = %v, want documentedAt 2026-07-26T09:00:00Z", doc3)
+	}
+
+	// Positive vector: a completed visit past its start is accepted the same
+	// way.
+	apptID4 := clSubmit(t, ctx, conn, cp, cons, "reclkappt04", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-27T09:00:00Z","endsAt":"2026-07-27T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	appt4Key := "vtx.appointment." + apptID4
+	{
+		reads, optionalReads := clStatusReads(appt4Key, true, providerKey, patientKey)
+		clSubmitAt(t, ctx, conn, cp, cons, "reclkcompl01", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+appt4Key+`","status":"completed","provider":"`+providerKey+`","patient":"`+patientKey+`"}`,
+			"2026-07-27T09:30:00Z", reads, optionalReads, processor.OutcomeAccepted)
+	}
+	encReads4, encOptionalReads4 := clRecordEncounterReads(appt4Key)
+	clSubmitAt(t, ctx, conn, cp, cons, "reclkdoc02", "RecordEncounter", "appointment",
+		`{"appointmentKey":"`+appt4Key+`","summary":"Seen and completed."}`,
+		"2026-07-27T09:30:00Z", encReads4, encOptionalReads4, processor.OutcomeAccepted)
+	if doc4, _ := clReadDoc(t, ctx, conn, appt4Key+".documentation")["data"].(map[string]any); doc4["documentedAt"] != "2026-07-27T09:30:00Z" {
+		t.Fatalf(".documentation after RecordEncounter on a completed visit = %v, want documentedAt 2026-07-27T09:30:00Z", doc4)
 	}
 }

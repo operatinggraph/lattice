@@ -35,6 +35,7 @@ const state = {
   schedule: [],
   followups: [], // every appointment whose documented visit requested a follow-up (clinic-wide worklist)
   rescheduleQueue: [], // clinic-wide worklist of booked, non-terminal appointments a provider's time-off now overlaps (loadFollowups joins /api/staff/appointments against state.providers)
+  arrivedUnclosed: [], // clinic-wide worklist of checked-in appointments past their scheduled end that no outcome has closed (the auto no-show sweep leaves a recorded arrival alone)
   series: [], // clinic-wide recurring visit series worklist (PROTECTED, staff wildcard, D1.5)
   mySeries: [], // the selected patient's own recurring visit series (PROTECTED, patient-self RLS, D1.5)
   mySeriesProjectionHealthy: true, // same signal as apptsProjectionHealthy, for /api/my-visit-series
@@ -3446,8 +3447,18 @@ async function loadFollowups() {
     return;
   }
   const requested = all.filter((a) => a.followUpRequested);
-  for (const f of requested) f._addressed = hasLaterVisit(f, all);
+  for (const f of requested) {
+    f._addressed = hasLaterVisit(f, all);
+    f._addressedBy = f._addressed ? addressingVisit(f, all) : null;
+  }
   state.followups = requested;
+  // The auto no-show sweep never marks a checked-in visit (the desk recorded
+  // the patient's arrival; MarkPastDueNoShow no-ops on checkedIn), so a visit
+  // the provider never closed stays checkedIn past its end with nothing else
+  // pointing at it — this worklist is where the desk sees it and closes it.
+  state.arrivedUnclosed = all
+    .filter((a) => (a.status || "").toLowerCase() === "checkedin" && isPast(a.endsAt || a.startsAt))
+    .sort((a, b) => (a.startsAt !== b.startsAt ? (a.startsAt < b.startsAt ? -1 : 1) : (a.appointmentKey < b.appointmentKey ? -1 : 1)));
 
   // The reschedule-call join needs each appointment's provider's .timeOff
   // ranges (state.providers, /api/providers) — loadProviders runs at boot,
@@ -3463,23 +3474,48 @@ async function loadFollowups() {
 }
 
 // hasLaterVisit reports whether the patient has another booked-or-attended
-// appointment on or after the requested follow-up date — the heuristic that a
-// requested follow-up has since been addressed. A no-show never attended, so
-// it does not count any more than a cancellation does. A visit merely later
-// than the original (but still before followUpDate) does not address it. A
-// follow-up with no target date has no due point a visit can satisfy, so it
-// is never addressed by any later visit — it stays outstanding until a date
-// is set.
+// appointment on or after the requested follow-up date WITH THE SAME PROVIDER
+// — the rule the followUpReminders lens applies (packages/clinic-reminders/
+// followups.go, its addressedAt walk), so what this worklist hides is exactly
+// what the reminder does not fire for. The treating provider asked for the
+// follow-up and is the only reader of its clinical reason; a visit with
+// another provider, whatever its date, is a different visit, not this
+// follow-up being addressed. A follow-up whose visit carries no provider is
+// addressed by any provider's visit. A no-show never attended, so it does not
+// count any more than a cancellation does. A visit merely later than the
+// original (but still before followUpDate) does not address it. A follow-up
+// with no target date has no due point a visit can satisfy, so it is never
+// addressed by any later visit — it stays outstanding until a date is set.
 function hasLaterVisit(f, all) {
   if (!f.followUpDate) return false;
   return all.some(
     (g) =>
       g.appointmentKey !== f.appointmentKey &&
       g.patientKey === f.patientKey &&
+      (!f.providerKey || g.providerKey === f.providerKey) &&
       !["cancelled", "noshow"].includes((g.status || "").toLowerCase()) &&
       g.startsAt > f.startsAt &&
       g.startsAt >= f.followUpDate,
   );
+}
+
+// addressingVisit returns the earliest appointment that addresses the
+// follow-up under hasLaterVisit's rule — the visit the addressed badge names —
+// or null when none does. The same conjuncts, applied to pick the row rather
+// than to answer yes/no.
+function addressingVisit(f, all) {
+  if (!hasLaterVisit(f, all)) return null;
+  return all
+    .filter(
+      (g) =>
+        g.appointmentKey !== f.appointmentKey &&
+        g.patientKey === f.patientKey &&
+        (!f.providerKey || g.providerKey === f.providerKey) &&
+        !["cancelled", "noshow"].includes((g.status || "").toLowerCase()) &&
+        g.startsAt > f.startsAt &&
+        g.startsAt >= f.followUpDate,
+    )
+    .sort((a, b) => (a.startsAt < b.startsAt ? -1 : a.startsAt > b.startsAt ? 1 : 0))[0];
 }
 
 // followupUrgency buckets a follow-up by its target date relative to today (local):
@@ -3544,21 +3580,49 @@ function renderFollowups() {
       grid.append(renderApptCard(a, { cancelable: true, showProvider: false, onDone: loadFollowups }));
     }
   }
-  const reschedulePrefix = queue.length > 0 ? `${queue.length} to reschedule · ` : "";
+  // Arrived-but-never-closed visits sit between the reschedule calls and the
+  // follow-up groups: the patient was seen (or at least checked in) and the
+  // record still says so — the desk completes or no-shows each one from its
+  // card, the same Complete / No-show the card offers any checked-in visit.
+  const arrived = state.arrivedUnclosed;
+  if (arrived.length > 0) {
+    const head = document.createElement("div");
+    head.className = "appts-section-head";
+    head.textContent = `Arrived, never closed · ${arrived.length}`;
+    grid.append(head);
+    const sub = document.createElement("div");
+    sub.className = "appts-section-sub";
+    sub.textContent =
+      "Checked in and past the scheduled end — the auto no-show sweep never marks a visit the desk saw arrive, so these stay open until the provider's outcome is recorded";
+    grid.append(sub);
+    for (const a of arrived) {
+      const card = renderApptCard(a, { cancelable: true, showProvider: false, onDone: loadFollowups });
+      // The card is titled by patient (the desk's view); the provider whose
+      // outcome is missing is named beneath it.
+      const who = document.createElement("div");
+      who.className = "meta";
+      who.textContent = "with " + (a.providerName || shortKey(a.providerKey)) + " · outcome not recorded";
+      card.insertBefore(who, card.querySelector(".card-actions"));
+      grid.append(card);
+    }
+  }
+  const worklistPrefix =
+    (queue.length > 0 ? `${queue.length} to reschedule · ` : "") + (arrived.length > 0 ? `${arrived.length} to close · ` : "");
+  const pendingWork = queue.length > 0 || arrived.length > 0;
 
   if (state.followups.length === 0) {
-    empty.hidden = queue.length > 0;
+    empty.hidden = pendingWork;
     empty.textContent = "No follow-ups requested yet. Document a completed visit and tick “Follow-up needed”.";
-    $("#followups-summary").textContent = queue.length > 0 ? `${queue.length} to reschedule` : "";
+    $("#followups-summary").textContent = worklistPrefix.replace(/ · $/, "");
     return;
   }
 
   const filter = ($("#followups-filter") && $("#followups-filter").value) || "outstanding";
   const rows = state.followups.filter((f) => filter === "all" || !f._addressed);
   if (rows.length === 0) {
-    empty.hidden = queue.length > 0;
-    empty.textContent = "No outstanding follow-ups — every requested follow-up has a later visit booked.";
-    $("#followups-summary").textContent = `${reschedulePrefix}0 of ${state.followups.length}`;
+    empty.hidden = pendingWork;
+    empty.textContent = "No outstanding follow-ups — every requested follow-up has a later visit booked with its provider.";
+    $("#followups-summary").textContent = `${worklistPrefix}0 of ${state.followups.length}`;
     return;
   }
   empty.hidden = true;
@@ -3583,7 +3647,7 @@ function renderFollowups() {
 
   const n = rows.length;
   const suffix = filter === "all" ? "" : ` of ${state.followups.length}`;
-  $("#followups-summary").textContent = `${reschedulePrefix}${n} follow-up${n === 1 ? "" : "s"}${suffix}`;
+  $("#followups-summary").textContent = `${worklistPrefix}${n} follow-up${n === 1 ? "" : "s"}${suffix}`;
 }
 
 function renderFollowupCard(f) {
@@ -3624,7 +3688,10 @@ function renderFollowupCard(f) {
   if (f._addressed) {
     const ad = document.createElement("span");
     ad.className = "badge followup-addressed";
-    ad.textContent = "Later visit booked";
+    const by = f._addressedBy;
+    const byDate = by && by.startsAt ? new Date(by.startsAt) : null;
+    ad.textContent =
+      "Addressed by the " + (byDate && !isNaN(byDate) ? byDate.toLocaleDateString() + " " : "") + "visit" + (by && by.providerName ? " with " + by.providerName : "");
     badges.append(ad);
   }
   // The at-the-date follow-up reminder, once the clinic-reminders followUpReminders
@@ -5791,7 +5858,9 @@ async function submitEncounter(ev) {
   const submit = $("#encounter-submit");
   submit.disabled = true;
   try {
-    const reply = await submitOp("RecordEncounter", "appointment", payload, [a.appointmentKey]);
+    const reply = await submitOp("RecordEncounter", "appointment", payload, [a.appointmentKey, a.appointmentKey + ".schedule"], {
+      optionalReads: [a.appointmentKey + ".status"],
+    });
     const msg = rejectionMessage(reply);
     if (msg) {
       toast("Could not save documentation — " + msg, "err");

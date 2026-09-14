@@ -140,7 +140,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"edgeStaffWorkOrders":        walkNoHealer,
 	"edgeTasks#0":                walkNoHealer,
 	"edgeTasks#1":                walkNoHealer,
-	"followUpReminders":          oneKey,
+	"followUpReminders":          walkMultiPosition,
 	"identityAnchors":            walkMultiPosition,
 	"identityErasureResidue":     walkMultiPosition,
 	"leaseApplicationComplete":   oneKey,

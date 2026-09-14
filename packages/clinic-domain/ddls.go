@@ -564,7 +564,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"(operator / front-of-house / the appointment's own bound provider, workplace-confined exactly as " +
 			"SetAppointmentStatus's staff path) — no patient self-service scope. It never re-opens a terminal " +
 			"appointment to scheduled/confirmed/checkedIn: that would re-claim released cells against whatever has " +
-			"been booked since, and is out of scope. RecordEncounter upserts two sibling aspects along the sensitivity boundary: .encounter — the " +
+			"been booked since, and is out of scope. RecordEncounter is refused VisitNotHeld against a cancelled or noShow appointment (a visit " +
+			"that did not take place cannot be documented) and NotYetStarted ahead of .schedule.startsAt (the same " +
+			"inclusive, soft-clock boundary SetAppointmentStatus's terminal transitions read) — completed / scheduled " +
+			"/ confirmed / checkedIn past their start document normally; this op never writes .status. It upserts two " +
+			"sibling aspects along the sensitivity boundary: .encounter — the " +
 			"raw clinical record {summary, assessment?, plan?}, SENSITIVE, its DEK custodied on the clinicalRecord " +
 			"retention class (never on the patient's identity), readable only through the clinicEncountersRead Secure Lens, which decrypts it at projection for the treating provider — and .documentation " +
 			"— the OPERATIONAL, non-PHI signals {documentedAt (derived from op.submittedAt), followUpRequested, " +
@@ -2961,6 +2965,21 @@ def enforce_future(starts_at, submitted_at):
     if not (submitted < starts_at):
         fail("ScheduleInPast: startsAt " + starts_at + " is not in the future (submitted " + submitted + ")")
 
+def refuse_before_start(appt_key, sched, submitted_at, verb):
+    # The visit-has-started clock shared by every op that needs the visit to
+    # already be underway: a missing/deleted schedule or one with no startsAt
+    # is a state the caller never validated for (InvalidState); otherwise the
+    # boundary is inclusive (submitted AT startsAt has started) and soft
+    # (submitted_at is caller-supplied, normalized to canonical UTC; the
+    # stored startsAt is canonical UTC, so the compare is lexical ==
+    # chronological — the same guard enforce_future reads for the opposite
+    # direction).
+    if sched == None or sched.isDeleted or sched.data.get("startsAt") == None:
+        fail("InvalidState: " + appt_key + ".schedule is missing startsAt; cannot " + verb)
+    submitted = time.rfc3339_utc(submitted_at)
+    if submitted < sched.data.get("startsAt"):
+        fail("NotYetStarted: appointment " + appt_key + " starts at " + sched.data.get("startsAt") + " (submitted " + submitted + "); cannot " + verb + " before the visit starts")
+
 def enforce_started(appt_key, status, sched, submitted_at):
     # A visit is completed or missed only once it has started: both outcomes are
     # facts about the scheduled time having passed (a noShow bills its fee at once
@@ -2969,17 +2988,11 @@ def enforce_started(appt_key, status, sched, submitted_at):
     # on a terminal→terminal correction alike, or a cancel-then-correct would
     # reach the same outcome by the side door. Cancel carries no clock here — it is
     # the legitimate before-the-visit terminal for staff; a patient's own cancel
-    # reads self_visit_clock instead. The boundary is inclusive (submitted
-    # AT startsAt has started). Same soft submittedAt guard as enforce_future
-    # (caller-supplied, normalized to canonical UTC; the stored startsAt is
-    # canonical UTC, so the compare is lexical == chronological).
+    # reads self_visit_clock instead. verb is "mark " + status — the refusal text
+    # SetAppointmentStatus's callers and pins read.
     if status not in ("completed", "noShow"):
         return
-    if sched == None or sched.isDeleted or sched.data.get("startsAt") == None:
-        fail("InvalidState: " + appt_key + ".schedule is missing startsAt; cannot mark " + status)
-    submitted = time.rfc3339_utc(submitted_at)
-    if submitted < sched.data.get("startsAt"):
-        fail("NotYetStarted: appointment " + appt_key + " starts at " + sched.data.get("startsAt") + " (submitted " + submitted + "); cannot mark " + status + " before the visit starts")
+    refuse_before_start(appt_key, sched, submitted_at, "mark " + status)
 
 # The late-cancellation window, expressed as the negative offset from the
 # appointment's own startsAt that opens it — the reminder lead: the reminder
@@ -3869,6 +3882,16 @@ def execute(state, op):
             # script-named primaryKey with no matching mutation.
             return {"mutations": [], "events": [], "response": {}}
 
+        if cur_val == "checkedIn":
+            # Recorded arrival is never swept to no-show: the desk has already
+            # seen this patient, so an un-closed visit is open work for the
+            # desk, not a documentation lapse the patient caused. Also guards
+            # the same race the terminal no-op above guards: a dispatch that
+            # lands after the desk's own late check-in must not clobber it.
+            # The desk closes it via SetAppointmentStatus /
+            # RescheduleAppointment once resolved.
+            return {"mutations": [], "events": [], "response": {}}
+
         provider = appointment_provider(appt_id)
         patient = appointment_patient(appt_id)
         if provider == None or patient == None:
@@ -4065,6 +4088,29 @@ def execute(state, op):
             standing_provider = appointment_provider(appt_id)
             if not actor_bound_to_appointment_provider(op.actor, standing_provider):
                 enforce_workplace_confined(appointment_sites(appt_id, standing_provider), "cannot record encounter on appointment " + appt_key)
+
+        # A visit that never took place cannot be documented: cancelled and
+        # noShow are the two terminal outcomes that say so. completed / scheduled
+        # / confirmed / checkedIn all document normally — the provider
+        # documenting a started visit IS the evidence it happened, and this op
+        # never writes .status, so closing the desk's record stays the desk's
+        # job.
+        # read-posture: (a) declared in contextHint.optionalReads by every
+        # RecordEncounter dispatcher — absent (never set) is the legitimate
+        # still-scheduled case, not a correctness error.
+        cur_status = kv.Read(appt_key + ".status")
+        if cur_status != None and not cur_status.isDeleted:
+            cur_val = cur_status.data.get("value")
+            if cur_val in ("cancelled", "noShow"):
+                fail("VisitNotHeld: appointment " + appt_key + " is " + cur_val + "; a visit that did not take place cannot be documented")
+
+        # A visit cannot be documented before it starts — the same inclusive,
+        # soft-clock boundary enforce_started reads for completed/noShow.
+        # read-posture: (a) declared in contextHint.reads by every
+        # RecordEncounter dispatcher — CreateAppointment always writes
+        # .schedule, so its absence here is a correctness error.
+        sched = kv.Read(appt_key + ".schedule")
+        refuse_before_start(appt_key, sched, op.submittedAt, "document")
 
         # The post-visit record splits across two aspects along the sensitivity
         # boundary: .encounter carries the raw clinical content (SENSITIVE, DEK

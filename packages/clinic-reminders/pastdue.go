@@ -76,7 +76,8 @@ func pastDueAppointmentsLens() pkgmgr.LensSpec {
 // graph data, so the row is a pure function of the subgraph and re-projecting it
 // at any later instant reaches the same verdict.
 //
-// The three-term gate (status is non-terminal AND a recorded lapse at endsAt):
+// The four-term gate (status is non-terminal AND status is not checkedIn AND a
+// recorded lapse at endsAt):
 //
 //   - nonTerminalAppointment (lenses.go) — the appointment has NOT already
 //     reached a terminal outcome. The same fragment gates appointmentReminders,
@@ -86,7 +87,19 @@ func pastDueAppointmentsLens() pkgmgr.LensSpec {
 //     — or even after, racing the @at fire — converges the gate permanently
 //     (TERMINAL_STATUSES are final, clinic-domain ddls.go); MarkPastDueNoShow
 //     itself also no-ops defensively against this exact race (a dispatch that
-//     lands after a legitimate terminal transition beat it here).
+//     lands after a legitimate terminal transition beat it here). This fragment
+//     ALONE still governs freshUntil: the @at timer arms and the lapse still
+//     records at endsAt for a checked-in visit exactly as for any other
+//     non-terminal one, because appointmentReminders closes its own gate on
+//     byTarget.pastDueAppointments and the two lenses' terminal set must stay
+//     one list.
+//   - status <> 'checkedIn' — a recorded arrival is never swept to no-show: the
+//     desk has already seen the patient, so an un-closed visit is open work for
+//     the desk, not a documentation lapse the patient caused. Narrows only the
+//     two dispatch bools, not freshUntil — a checked-in visit past its end
+//     projects violating=false with the lapse still recorded, and a later
+//     checkedIn → scheduled/confirmed move (non-terminal moves freely) re-opens
+//     the gap on the next projection with no clearing write.
 //   - freshnessExpiry.data.byTarget.pastDueAppointments >= endsAt — a timer this
 //     target armed fired at or after the visit's scheduled end, with no terminal
 //     status recorded. compareAny answers false when either operand is nil, so an
@@ -115,9 +128,9 @@ RETURN
   p.key AS patientKey,
   pr.key AS providerKey,
   CASE WHEN %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt) THEN a.schedule.data.endsAt ELSE null END AS freshUntil,
-  (%[1]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_noshow_transition,
-  (%[1]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS violating`,
-	nonTerminalAppointment, PastDueAppointmentsTarget)
+  (%[1]s AND %[3]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_noshow_transition,
+  (%[1]s AND %[3]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS violating`,
+	nonTerminalAppointment, PastDueAppointmentsTarget, `(a.status.data.value <> 'checkedIn')`)
 
 // pastDueAppointmentsTarget returns the §10.8 playbook for the auto-no-show
 // convergence: the single missing_noshow_transition gap → directOp(MarkPastDueNoShow)

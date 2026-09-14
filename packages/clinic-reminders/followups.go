@@ -246,7 +246,7 @@ func followUpRemindersLens() pkgmgr.LensSpec {
 		Output: &pkgmgr.OutputDescriptorSpec{
 			AnchorType:       "appointment",
 			OutputKeyPattern: "followUpReminders.{actorSuffix}",
-			BodyColumns:      []string{"violating", "missing_followup_reminder", "entityKey", "freshUntil", "followUpDate", "followUpReminderSentAt", "remindedFor", "patientKey", "providerKey"},
+			BodyColumns:      []string{"violating", "missing_followup_reminder", "entityKey", "freshUntil", "followUpDate", "followUpReminderSentAt", "remindedFor", "patientKey", "providerKey", "addressedAt"},
 			EmptyBehavior:    "delete",
 			KeyColumn:        "entityId",
 		},
@@ -259,8 +259,9 @@ func followUpRemindersLens() pkgmgr.LensSpec {
 // deadline (no lead offset — the visit is already past and followUpDate is the
 // provider's soft target).
 //
-// The four-term gate (remindedFor <> followUpDate AND followUpRequested = true AND
-// a recorded lapse at followUpDate AND status <> 'cancelled'):
+// The five-term gate (remindedFor <> followUpDate AND followUpRequested = true AND
+// no qualifying addressing visit AND a recorded lapse at followUpDate AND
+// status is neither cancelled nor noShow):
 //
 //   - remindedFor <> followUpDate — NOT yet reminded for the CURRENT follow-up date.
 //     Subsumes never-reminded (no .followUpReminder → remindedFor null → null <>
@@ -270,29 +271,62 @@ func followUpRemindersLens() pkgmgr.LensSpec {
 //   - followUpRequested = true — the documented visit asked for a follow-up. When no
 //     visit is documented, or no follow-up was requested, .documentation.followUpDate
 //     is absent → the followUpDate terms are null → not due.
+//   - addressedAt = null — no later visit with the follow-up's OWN provider (a
+//     follow-up carrying no withProvider link is addressed by any provider — the
+//     visitSeriesDueSpec null-provider arm) already covers it. addressedAt is
+//     the EARLIEST such visit's startsAt, folded over the patient's reverse
+//     forPatient walk (mirrors visitSeriesDueSpec's handledAt exactly): a
+//     sibling appointment g qualifies when it is not this appointment itself,
+//     is neither cancelled nor noShow, starts after the documented visit
+//     itself (a visit that predates the request cannot have answered it — a
+//     followUpDate set at or before the visit's own start is accepted by
+//     RecordEncounter and projected verbatim), starts at or after
+//     followUpDate, and either the follow-up carries no provider or g shares
+//     it. The treating
+//     provider asked for the follow-up and is the only reader of its clinical
+//     reason (.encounter.plan) — a visit with another provider is not the
+//     follow-up being addressed, whatever its date. Cancelling the addressing
+//     visit re-arms the timer (its status flips out of the qualifying set, so
+//     addressedAt reads null again on the next projection — level-triggered,
+//     no clearing write; a past followUpDate then fires at once).
 //   - freshnessExpiry.data.byTarget.followUpReminders >= followUpDate — a timer
 //     this target armed fired at or after the follow-up deadline (lexical RFC3339
 //     compare = chronological on canonical UTC — clinic-domain normalizes the
 //     captured date-only followUpDate to a full RFC3339 instant). compareAny
 //     answers false when either operand is nil, so an appointment no timer has
 //     fired on, and one with no followUpDate at all, both read not-due.
-//   - status <> 'cancelled' — a cancelled appointment is never reminded.
+//   - status is neither cancelled nor noShow — a visit that did not take place
+//     (the two outcomes RecordEncounter refuses VisitNotHeld) is never reminded,
+//     including one documented while completed and corrected to noShow since.
 //
-// The lens reads NO clock: both operands are stored graph data, so the row is a
+// The lens reads NO clock: every operand is stored graph data, so the row is a
 // pure function of the subgraph.
 //
 // freshUntil = followUpDate while this target has recorded no lapse reaching it
-// (a wake-up arming Weaver's @at temporal lane); once the lapse is recorded the
-// gap is open and the gap-dispatch path owns it, so freshUntil is null — exactly
-// ONE @at fire per followUpDate. A followUpDate documented in the past is
-// projected VERBATIM: the overdue @at fires at once and records the lapse, which
-// is the only path that opens the gap. forPatient / withProvider are 0..1 so the OPTIONAL walks do not fan
-// out (a clean flat projection). followUpDate / followUpReminderSentAt / remindedFor
-// / patientKey / providerKey are INFORMATIONAL columns; only entityKey + freshUntil
-// + the two bools are load-bearing for dispatch + the temporal lane.
+// AND no qualifying visit addresses it yet (a wake-up arming Weaver's @at
+// temporal lane); once the lapse is recorded, or a qualifying visit is booked,
+// the gap is open (or permanently closed) and the gap-dispatch path owns it, so
+// freshUntil is null. A followUpDate documented in the past is projected
+// VERBATIM: the overdue @at fires at once and records the lapse, which is the
+// only path that opens the gap. forPatient / withProvider off the anchor are
+// 0..1 so those OPTIONAL walks do not fan out; the reverse forPatient walk to
+// the patient's other appointments, and each one's own withProvider, are
+// folded away by the min() aggregate in the WITH before RETURN — the
+// visitSeriesDueSpec shape. followUpDate / followUpReminderSentAt / remindedFor
+// / patientKey / providerKey / addressedAt are INFORMATIONAL columns; only
+// entityKey + freshUntil + the two bools are load-bearing for dispatch + the
+// temporal lane.
 const followUpRemindersSpec = `MATCH (a:appointment {key: $actorKey})
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
+OPTIONAL MATCH (p)<-[:forPatient]-(g:appointment)
+OPTIONAL MATCH (g)-[:withProvider]->(gpr:provider)
+WITH a, p, pr,
+  min(CASE WHEN (g.key <> a.key) AND (g.status.data.value <> 'cancelled') AND (g.status.data.value <> 'noShow')
+            AND (g.schedule.data.startsAt > a.schedule.data.startsAt)
+            AND (g.schedule.data.startsAt >= a.documentation.data.followUpDate)
+            AND ((pr.key = null) OR (gpr.key = pr.key))
+       THEN g.schedule.data.startsAt ELSE null END) AS addressedAt
 RETURN
   a.key AS actorKey,
   a.key AS entityKey,
@@ -303,9 +337,10 @@ RETURN
   a.status.data.value AS status,
   p.key AS patientKey,
   pr.key AS providerKey,
-  CASE WHEN (a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.status.data.value <> 'cancelled') AND NOT (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) THEN a.documentation.data.followUpDate ELSE null END AS freshUntil,
-  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) AND (a.status.data.value <> 'cancelled')) AS missing_followup_reminder,
-  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) AND (a.status.data.value <> 'cancelled')) AS violating`
+  addressedAt,
+  CASE WHEN (a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow') AND (addressedAt = null) AND NOT (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) THEN a.documentation.data.followUpDate ELSE null END AS freshUntil,
+  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (addressedAt = null) AND (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow')) AS missing_followup_reminder,
+  ((a.followUpReminder.data.remindedFor <> a.documentation.data.followUpDate) AND (a.documentation.data.followUpRequested = true) AND (addressedAt = null) AND (a.freshnessExpiry.data.byTarget.followUpReminders >= a.documentation.data.followUpDate) AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow')) AS violating`
 
 // followUpRemindersTarget returns the §10.8 playbook for the follow-up reminder: the
 // single missing_followup_reminder gap → directOp(RecordFollowUpReminder) over the

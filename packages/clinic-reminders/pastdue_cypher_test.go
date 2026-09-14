@@ -89,9 +89,10 @@ func TestPastDue_Due(t *testing.T) {
 	require.Nil(t, v["freshUntil"], "the lapse is recorded → no armed timer (violating-path dispatches)")
 }
 
-// TestPastDue_CheckedIn — checkedIn is non-terminal too: a patient checked in
-// but never marked completed still converges to past-due once the lapse at
-// endsAt is recorded (the clinic never closed the loop either way).
+// TestPastDue_CheckedIn — a recorded arrival is never swept to no-show, even
+// once the lapse at endsAt is recorded: the desk has already seen the patient,
+// so the visit stays open work for the desk rather than becoming an unexplained
+// lapse.
 func TestPastDue_CheckedIn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -101,8 +102,27 @@ func TestPastDue_CheckedIn(t *testing.T) {
 	f.recordLapse(t, "appt", map[string]string{PastDueAppointmentsTarget: "2026-06-30T09:30:00Z"})
 
 	v := f.projectPastDue(t, "appt")
-	require.Equal(t, true, v["missing_noshow_transition"])
-	require.Equal(t, true, v["violating"])
+	require.Equal(t, false, v["missing_noshow_transition"], "checkedIn is never swept, even with the lapse recorded")
+	require.Equal(t, false, v["violating"])
+	require.Nil(t, v["freshUntil"], "the lapse IS recorded — freshUntil stays null exactly as any other non-terminal past-due row")
+}
+
+// TestPastDue_CheckedInStillArmsTheTimer — freshUntil binds to
+// nonTerminalAppointment alone, not the checkedIn exclusion: a checked-in visit
+// with NO lapse recorded yet still arms the @at at endsAt, because
+// appointmentReminders closes its own gate on byTarget.pastDueAppointments and
+// the two lenses' terminal set must stay one list.
+func TestPastDue_CheckedInStillArmsTheTimer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkApptEnds(t, "appt", "2026-06-30T09:00:00Z", "2026-06-30T09:30:00Z", "checkedIn")
+
+	v := f.projectPastDue(t, "appt")
+	require.Equal(t, false, v["missing_noshow_transition"])
+	require.Equal(t, false, v["violating"])
+	require.Equal(t, "2026-06-30T09:30:00Z", v["freshUntil"], "freshUntil = endsAt arms the @at timer for a checked-in visit exactly as for any other non-terminal one")
 }
 
 // TestPastDue_Completed — a completed visit is never past-due, even with the

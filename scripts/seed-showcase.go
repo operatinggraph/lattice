@@ -1360,13 +1360,19 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 				},
 				OptionalReads: []string{completedApptKey + ".status"},
 			})
-		submitOp(ctx, conn, adminKey, "RecordEncounter", "appointment",
+		submitOpAt(ctx, conn, adminKey, "RecordEncounter", "appointment", completedEnd,
 			map[string]any{
 				"appointmentKey":    completedApptKey,
 				"summary":           "Cleared for return to play; brace recommended for 4 weeks.",
 				"followUpRequested": true,
+				// A requested follow-up needs its target date (MissingFollowUpDate
+				// otherwise): the brace check, four weeks after the visit.
+				"followUpDate": completedStart.AddDate(0, 0, 28).Format("2006-01-02"),
 			},
-			&processor.ContextHint{Reads: []string{completedApptKey}})
+			&processor.ContextHint{
+				Reads:         []string{completedApptKey, completedApptKey + ".schedule"},
+				OptionalReads: []string{completedApptKey + ".status"},
+			})
 	}
 
 	noShowStart := futureDayAt(2, 10)

@@ -405,6 +405,15 @@ func clSubmitAt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 	return clNanoIDFromRequestID(reqID)
 }
 
+// clRecordEncounterReads returns RecordEncounter's Reads/OptionalReads pair
+// (app.js's submitOp("RecordEncounter", ...)): .schedule is REQUIRED
+// (CreateAppointment always writes one — refuse_before_start's clock read);
+// .status is an OPTIONAL read (absence is the legitimate still-scheduled
+// case, not a correctness error — the VisitNotHeld probe).
+func clRecordEncounterReads(apptKey string) (reads, optionalReads []string) {
+	return []string{apptKey, apptKey + ".schedule"}, []string{apptKey + ".status"}
+}
+
 // clRescheduleReads returns RescheduleAppointment's required Reads — the
 // appointment + its .schedule + the withProvider/forPatient endpoint-
 // validation links (app.js submitReschedule, script-read-posture-design.md
@@ -1120,7 +1129,12 @@ func TestClinic_MarkPastDueNoShowSkipsProviderTimeOff(t *testing.T) {
 // followUpRequested, followUpDate). A correction (re-run with
 // followUpRequested=false) overwrites both aspects and drops followUpDate
 // (unconditioned upsert). followUpRequested=true with no followUpDate is
-// rejected (MissingFollowUpDate). A non-appointment target is rejected (WrongClass).
+// rejected (MissingFollowUpDate). A non-appointment target is rejected
+// (WrongClass). The clock/status guards (NotYetStarted, VisitNotHeld) are
+// pinned separately in status_clock_guard_test.go's
+// TestClinic_RecordEncounterClock — every submission here is at or after the
+// visit's own startsAt, a started visit being the ordinary case this test
+// exercises.
 func TestClinic_RecordEncounter(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
@@ -1132,11 +1146,14 @@ func TestClinic_RecordEncounter(t *testing.T) {
 		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-10T09:00:00Z","endsAt":"2026-07-10T09:30:00Z"}`,
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
+	const apptStartsAt = "2026-07-10T09:00:00Z"
+	encReads, encOptionalReads := clRecordEncounterReads(apptKey)
 
-	// Document the visit: raw clinical content + operational follow-up.
-	clSubmit(t, ctx, conn, cp, cons, "enc0001", "RecordEncounter", "appointment",
+	// Document the visit: raw clinical content + operational follow-up. Submitted
+	// AT startsAt — the inclusive boundary.
+	clSubmitAt(t, ctx, conn, cp, cons, "enc0001", "RecordEncounter", "appointment",
 		`{"appointmentKey":"`+apptKey+`","summary":"Annual checkup, vitals normal.","assessment":"Essential hypertension, well-controlled.","plan":"Continue medication; recheck in 6 months.","followUpRequested":true,"followUpDate":"2027-01-15T15:00:00Z"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		apptStartsAt, encReads, encOptionalReads, processor.OutcomeAccepted)
 
 	// The .encounter aspect's class is readable without decrypting its data (only
 	// the data map is ciphertext).
@@ -1162,8 +1179,8 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	}
 	docData, _ := docAsp["data"].(map[string]any)
 	// documentedAt is the canonical-UTC op.submittedAt anchor.
-	if docData["documentedAt"] != clSubmittedAnchor {
-		t.Fatalf("documentation documentedAt = %v, want %s (= op.submittedAt)", docData["documentedAt"], clSubmittedAnchor)
+	if docData["documentedAt"] != apptStartsAt {
+		t.Fatalf("documentation documentedAt = %v, want %s (= op.submittedAt)", docData["documentedAt"], apptStartsAt)
 	}
 	if docData["followUpRequested"] != true {
 		t.Fatalf("documentation followUpRequested = %v, want true", docData["followUpRequested"])
@@ -1174,9 +1191,9 @@ func TestClinic_RecordEncounter(t *testing.T) {
 
 	// A correction (unconditioned upsert): no follow-up this time → followUpDate
 	// dropped, followUpRequested false. Both aspects are replaced whole.
-	clSubmit(t, ctx, conn, cp, cons, "enc0002", "RecordEncounter", "appointment",
+	clSubmitAt(t, ctx, conn, cp, cons, "enc0002", "RecordEncounter", "appointment",
 		`{"appointmentKey":"`+apptKey+`","summary":"Corrected note.","followUpRequested":false,"followUpDate":"2027-01-15T15:00:00Z"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		apptStartsAt, encReads, encOptionalReads, processor.OutcomeAccepted)
 	data = clDecryptEncounter(t, ctx, conn, apptKey)
 	if data["summary"] != "Corrected note." {
 		t.Fatalf("after correction summary = %v", data["summary"])
@@ -1204,9 +1221,9 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	// follow-up reminder can arm an @at timer at it (Weaver's temporal lane needs a
 	// parseable RFC3339 freshUntil). The stored value stays date-prefixed, so the FE's
 	// .slice(0,10) renders the same day.
-	clSubmit(t, ctx, conn, cp, cons, "enc0004", "RecordEncounter", "appointment",
+	clSubmitAt(t, ctx, conn, cp, cons, "enc0004", "RecordEncounter", "appointment",
 		`{"appointmentKey":"`+apptKey+`","summary":"Follow-up by date.","followUpRequested":true,"followUpDate":"2027-03-20"}`,
-		[]string{apptKey}, processor.OutcomeAccepted)
+		apptStartsAt, encReads, encOptionalReads, processor.OutcomeAccepted)
 	docData, _ = clReadDoc(t, ctx, conn, apptKey+".documentation")["data"].(map[string]any)
 	if docData["followUpDate"] != "2027-03-20T09:00:00Z" {
 		t.Fatalf("date-only followUpDate must normalize to 2027-03-20T09:00:00Z; got %v", docData["followUpDate"])
@@ -1220,9 +1237,9 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	// followUpRequested=true with no followUpDate is rejected (MissingFollowUpDate):
 	// a follow-up with no target date can never come due, so followUpReminders (and
 	// the FE's own follow-up worklist) could never act on it.
-	clSubmit(t, ctx, conn, cp, cons, "enc0005", "RecordEncounter", "appointment",
+	clSubmitAt(t, ctx, conn, cp, cons, "enc0005", "RecordEncounter", "appointment",
 		`{"appointmentKey":"`+apptKey+`","summary":"No date given.","followUpRequested":true}`,
-		[]string{apptKey}, processor.OutcomeRejected)
+		apptStartsAt, encReads, encOptionalReads, processor.OutcomeRejected)
 }
 
 // TestClinic_RescheduleAppointment proves the move-an-appointment path: a

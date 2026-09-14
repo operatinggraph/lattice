@@ -421,7 +421,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "RecordEncounter",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Document visit",
-				Description: "Record the clinical note for your completed visit.",
+				Description: "Record the clinical note for a visit that has started. Refused for a cancelled or no-show appointment, or one that hasn't started yet.",
 				Icon:        "clipboard",
 				Tone:        "primary",
 				SubmitLabel: "Save documentation",
@@ -447,7 +447,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "standing",
 				TargetField: "appointmentKey",
 				TargetType:  "appointment",
-				Reads:       []string{"{payload.appointmentKey}"},
+				// .schedule is REQUIRED — CreateAppointment always writes one
+				// (refuse_before_start's clock read). .status is an
+				// OPTIONAL read: absence is the legitimate still-scheduled
+				// case, not a correctness error (the VisitNotHeld probe).
+				Reads:         []string{"{payload.appointmentKey}", "{payload.appointmentKey}.schedule"},
+				OptionalReads: []string{"{payload.appointmentKey}.status"},
 				// The operator-role confinement probe: the workplace-exempt
 				// short-circuit walks the actor's own holdsRole links to test
 				// for the operator role (actor_holds_operator).
