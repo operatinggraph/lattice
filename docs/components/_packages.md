@@ -738,6 +738,13 @@ the op now applies (`ensureApprovedTenancy` now skips an ended term), found at t
   renewals, so a by-hand end stranded the plan's `signRenewal` leg behind a permanent `TenancyEnded` refusal.
   Minted: lease-signing (2026-09-14), caught cold. Check: for every "by construction" exclusion in a consumer
   census, name the refusal in the OP that enforces it; if the op admits the state, the consumer takes the conjunct.
+- **A new value on a status aspect is a census of every OP GUARD that enumerated the old values, not only of the
+  lenses and the FE** — `.decision` gained `lost`; the lens census conjoined every `landlordDecision` gate and the FE
+  followed the boolean, but `SignLease`'s refusal was keyed on the mutable premise (`unit leased ∧ decision ≠
+  approved`), so once the unit relisted a lost application could sign under a still-live grant, and the fire's own
+  test asserted that acceptance. Minted: lease-signing `RecordApplicationLoss` (2026-09-14), caught cold. Check:
+  `grep -n '\.decision\|decision_value\|\.get("value")'` across the package's scripts and decide the new value's
+  arm at every guard; a guard that reads the premise a recorded fact replaces takes the fact as its own conjunct.
 - **A field a self-scoped op stores as informational becomes load-bearing the moment another op derives from it —
   validate at the mint, not the reader.** `.terms.leaseTermMonths` / `requestedRent` / `moveInDate` were free text
   the applicant wrote through `require_number` / `optional_string`; once `DecideLeaseApplication` derived the

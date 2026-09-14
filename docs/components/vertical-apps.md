@@ -117,5 +117,11 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   and missed the inbox — a task scoped to a lost application stayed "Complete" for the grant's 30 days, refused
   every time — and the stepper drew four done steps beneath the lost banner. The census now includes every
   surface keyed by `scopedTo`/`entityKey` to the row (the inbox, the documents list), not only the row's own
-  card. No sound lint shape yet: a mandated goja pin per new terminal boolean covers the banner, the disposition
-  chip, `taskDisposition` and `decisionOffered` together (the `rival_task_ui_test.go` shape).
+  card. Third sighting (LoftSpace recorded `lost`, 2026-09-14, caught cold): the boolean stayed true across the
+  relist, and two surfaces that had hidden the decision on the unit's status alone re-offered it — the landlord
+  search never selected `lost_to_rival` (undefined is falsy) and the by-unit console's `applicationStatus` had no
+  `lost` arm (a lost row ranked "best match"). Mechanized for the search half: `search_columns_test.go` pins that
+  every boolean column of the landlord read lens is selected by `searchLandlordColumns`. The switch half stays a
+  mandated test row per new terminal value (`TestApplicationStatus`) plus the goja pin per new terminal boolean
+  covering the banner, the disposition chip, `taskDisposition` and `decisionOffered` (the `rival_task_ui_test.go`
+  shape).

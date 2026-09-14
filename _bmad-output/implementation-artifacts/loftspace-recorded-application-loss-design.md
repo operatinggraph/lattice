@@ -47,7 +47,8 @@ one). `decidedAt = time.rfc3339_utc(op.submittedAt)` — the instant the platfor
 `missing_lossRecorded = (unitKey <> null) AND (unitStatus = 'leased') AND (landlordDecision = null)` — the exact
 premise the banner already tells the applicant. Folded into `violating`. Target row in `targets.go`, the
 `missing_tenancyEnded` shape: `directOp RecordApplicationLoss`, `Params {leaseAppKey: row.entityKey}`,
-`Reads [row.entityKey]`, `OptionalReads [row.entityKey.decision]` (absent is the whole point of the gap; the declared
+`Reads [row.entityKey]`, `OptionalReads [row.entityKey.decision]`, `Enumerations [{row.entityKey appliesToUnit out}]` (the
+walk the script runs, on the envelope per Contract #2 §2.5 — the `missing_retirement` gap's shape) (absent is the whole point of the gap; the declared
 absence makes the write a CreateOnly assertion so a landlord decision racing the dispatch conflicts and the retry
 re-reads it as decided — a no-op, §2.3 below).
 
@@ -64,8 +65,10 @@ entry's twin), never person-facing:
   appliesToUnit endpoint) and **`UnitNotLeased`** when `.listing` is absent / deleted / `status <> 'leased'` —
   write-path honesty: an operator running it by hand cannot mark an application lost against an available unit
   (the dossier's "by construction" class: the op, not the lens, holds the refusal).
-- Writes `.decision {value: "lost", decidedAt}` via `make_aspect_upsert` (the `DecideLeaseApplication` write;
-  conditioned CreateOnly by the declared absence). Emits `leaseapp.applicationLost{leaseAppKey, unitKey}`.
+- Writes `.decision {value: "lost", decidedAt}` via `make_aspect` — an op `create`, the `SignLease` `.signature`
+  shape — because only a `create` is CreateOnly-conditioned by the declared absence (`commit_path.go` conditions
+  `create` ops on a KnownAbsent key; an `upsert` there is an unconditioned Put that would overwrite a landlord
+  decision racing the dispatch). Emits `leaseapp.applicationLost{leaseAppKey, unitKey}`.
 - DDL: `PermittedCommands` + descriptor prose + example (`ddls.go`, beside `EndTenancy`); the `decision` field
   prose reads `(approved|declined|lost)` — the payload `enum` stays `approved|declined` (a landlord never submits
   `lost`). `scripts/verify-package-lease-signing.go` `ddlCheck` → 9 commands. `Effects`: mirror `EndTenancy`'s
@@ -80,7 +83,9 @@ entry's twin), never person-facing:
 | `missing_decision` (both lenses) · `missing_listingLeased` · `missing_manager` · `renewalComplete` · `tenancyEnd` (`otherLiveTenancyCount`) · `leaseRentSettlement` (semantic-contracts `:193`) | `= null` / `= 'approved'` | untouched — `lost` is neither |
 | `DecideLeaseApplication` | `DecisionFinal` on a different prior value | untouched — refuses `already lost` |
 | `WithdrawLeaseApplication` | refuses only `approved` | untouched — a lost application stays withdrawable (frees the guard; the re-apply path, §2.1) |
-| `SignLease` / `SetApplicantProfile` / renewal ops | read `.decision` for approved | untouched |
+| `SignLease` | refuses `UnitNoLongerAvailable` only while the unit is `leased` and the decision is not `approved` — a lost application on a relisted unit could sign under a still-live grant | refuses `UnitNoLongerAvailable` on a recorded `lost` regardless of the unit's status |
+| `SetApplicantProfile` / renewal ops | read `.decision` for approved | untouched |
+| `cmd/loftspace-app` landlord search (`search.go` `searchLandlordColumns`) · by-unit console `applicationStatus` (`unit_applications.go:91`) | search never selects `lost_to_rival`; the by-unit console reads a lost row as `qualified` / `in_review` and can rank it "best match" | search selects it and the chip names it; `applicationStatus` gains a `lost` arm (`DISPOSITION.lost`, ranked with declined) |
 | `cmd/loftspace-app` `decisionOffered` (`app.js:4152`) | hides on `unitLeased` alone | add `!a.lostToRival` — after a relist the unit is available again and Approve/Decline would re-offer a `DecisionFinal` refusal |
 | `cmd/loftspace-app` banner / stepper / landlord chip + note / inbox disposition (`taskDisposition`) | all keyed on `lostToRival` | untouched — the boolean now stays true |
 | `cmd/wellness-app/residents.go:123` `declinedDecision` | drops `declined` only | drop `lost` too — a lost applicant does not live in the building; keep the allow-nothing-else shape (a set of two) |
@@ -141,3 +146,33 @@ a relisted unit revives no rival.
 - The `((unitStatus <> 'leased') OR (landlordDecision = 'approved'))` term is inlined **eight** times incl. `violating`; a missed site is a rival that re-opens one gap — grep the literal after the edit, expect zero without the new conjunct.
 
 **Non-goals:** §3.
+
+## 5. Build note (2026-09-14) — shipped
+
+**Code:** `71912135` (package 0.38.0 + both apps); the search-column pin lands with the close commit. CI green.
+Reviews: one cold adversarial pass (no BLOCKING; S1–S4 fixed in the round — `SignLease` refuses a recorded `lost`,
+the landlord search selects `lost_to_rival`, `applicationStatus` gains a `lost` arm, the gap declares its
+`appliesToUnit` enumeration; §2.3/§2.4 amended where they stood).
+
+**Live (shared stack):** `reinstall-package` 0.37.0 → 0.38.0 (created 8, updated 19). Weaver's first 23 dispatches
+landed `AuthDenied` one second ahead of the grant's `cap.role-by-operation` row (`_packages.md` §5's known
+first-dispatch shape); `lattice weaver revoke` + `enable leaseApplicationComplete` re-armed them and all 23
+committed. The other 29 rivals had no `weaver-targets` row (non-violating rows are dropped, and the lens's
+reactivation rebuild replays ~3 s/event with lag ≈65k) — `lattice lens reproject` per anchor opened the gap and
+Weaver recorded them: **52 / 52 live rivals carry `.decision = lost`** (Core KV), `read_lease_applications`
+reads 52 `lost_to_rival` / 52 `landlord_decision = lost`; `verify-package-lease-signing` 93 OK; `bin/loftspace-app`
+and `bin/wellness-app` rebuilt and cycled.
+
+**Residuals (stated, not rows):**
+- Rivals of a unit that leased and relisted *before* 0.38.0 are outside the gap (`unitStatus = 'leased'` is its
+  premise) and their pre-fire revival stands; none observed live — every lost rival sat on a still-leased unit.
+- `read_landlord_lease_applications` still reads `landlord_decision` null for the 52 (its rebuild has been in
+  flight since the 07:58 reactivation; the landlord surfaces key on `lost_to_rival`, which is already true). The
+  `leaseApplicationComplete` rebuild throughput (≈3 s/event, `LensProjectionLagging` 65k,
+  `LensSweepStalled` 95 h before this fire) is a Refractor condition for the Lattice lane, reported to Andrew
+  in the fire report.
+
+**Close-pass classification:** design-gap (S1 — an op guard keyed on the premise the recorded fact replaces;
+new `_packages.md` class) · brief-gap (S2/S3 — third sighting of the vertical-apps terminal-state census class;
+search half mechanized by `search_columns_test.go`) · convention (S4 enumeration declaration; N1 the design's
+`upsert` claim) · review-over-reach: none.
