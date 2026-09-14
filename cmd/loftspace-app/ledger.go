@@ -21,6 +21,11 @@ type ledgerEntryProjection struct {
 	AmountCents    *float64 `json:"amountCents"`
 	Memo           string   `json:"memo"`
 	PostedAt       string   `json:"postedAt"`
+	// PeriodStart/PeriodEnd/DueAt: a recurring charge's recorded billing period
+	// and due date (empty on a payment or a one-time charge).
+	PeriodStart string `json:"periodStart"`
+	PeriodEnd   string `json:"periodEnd"`
+	DueAt       string `json:"dueAt"`
 	// ClauseKey/ClauseProse (Fire V4 "why was I charged this?") ride the
 	// authorizedBy hop the ledgerHistory lens optionally walks — empty for a
 	// plain human-submitted charge/payment that carries no clauseRef.
@@ -35,6 +40,9 @@ type ledgerEntryRow struct {
 	AmountCents    int64  `json:"amountCents"`
 	Memo           string `json:"memo,omitempty"`
 	PostedAt       string `json:"postedAt"`
+	PeriodStart    string `json:"periodStart,omitempty"`
+	PeriodEnd      string `json:"periodEnd,omitempty"`
+	DueAt          string `json:"dueAt,omitempty"`
 	ClauseKey      string `json:"clauseKey,omitempty"`
 	ClauseProse    string `json:"clauseProse,omitempty"`
 }
@@ -69,6 +77,9 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 			AmountCents:    amount,
 			Memo:           p.Memo,
 			PostedAt:       p.PostedAt,
+			PeriodStart:    p.PeriodStart,
+			PeriodEnd:      p.PeriodEnd,
+			DueAt:          p.DueAt,
 			ClauseKey:      p.ClauseKey,
 			ClauseProse:    p.ClauseProse,
 		})

@@ -348,6 +348,12 @@ func TestDebitAccount_ClauseRef_WritesAuthorizedByAndCompletesClause(t *testing.
 	if got, _ := entryData["amountCents"].(float64); got != 4500 {
 		t.Fatalf("entry.amountCents = %v, want 4500", got)
 	}
+	// A one-time charge covers no period: none of the three stamps.
+	for _, k := range []string{"periodStart", "periodEnd", "dueAt"} {
+		if v, ok := entryData[k]; ok {
+			t.Fatalf("a one-time clause's entry must not carry %s, got %v", k, v)
+		}
+	}
 }
 
 // TestDebitAccount_ClauseRef_AmountMismatchRejected — the money-provenance
@@ -817,6 +823,19 @@ func TestDebitAccount_RecurringClause_ReArmsChargeValidUntil(t *testing.T) {
 	}
 	if !gotValidUntil.After(debitAt) {
 		t.Fatalf("chargeValidUntil %s must be after the debit instant %s", cvu, debitAt)
+	}
+	// An untermed monthly charge bills the legacy window: the entry records
+	// [postedAt, the re-armed due) as its period and falls due when it posts.
+	entryDoc := readDoc(t, ctx, conn, "vtx.transaction."+txID+".entry")
+	entryData, _ := entryDoc["data"].(map[string]any)
+	if got, _ := entryData["periodStart"].(string); got != "2026-07-02T13:00:00Z" {
+		t.Fatalf("entry.periodStart = %q, want postedAt", got)
+	}
+	if got, _ := entryData["periodEnd"].(string); got != cvu {
+		t.Fatalf("entry.periodEnd = %q, want the re-armed chargeValidUntil %s", got, cvu)
+	}
+	if got, _ := entryData["dueAt"].(string); got != "2026-07-02T13:00:00Z" {
+		t.Fatalf("entry.dueAt = %q, want postedAt", got)
 	}
 }
 

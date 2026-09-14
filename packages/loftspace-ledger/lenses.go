@@ -56,6 +56,10 @@ func Lenses() []pkgmgr.LensSpec {
 // the read model is keyed by vtx.transaction.<id>; transactionKey repeats it in
 // the body for the reader.
 //
+// periodStart / periodEnd / dueAt are the recurring charge's own recorded
+// billing period and due date (DebitAccount stamps them on the .entry from
+// the clause's anniversary grid); null on a payment or a one-time charge.
+//
 // The trailing OPTIONAL MATCH walks authorizedBy to a semantic-contracts clause
 // (Fire V4 "why was I charged this?") — OPTIONAL because a plain human-
 // submitted DebitAccount/CreditAccount carries no clauseRef, and this lens
@@ -75,6 +79,9 @@ RETURN
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
   t.entry.data.postedAt AS postedAt,
+  t.entry.data.periodStart AS periodStart,
+  t.entry.data.periodEnd AS periodEnd,
+  t.entry.data.dueAt AS dueAt,
   c.key AS clauseKey,
   c.prose.data.text AS clauseProse`
 

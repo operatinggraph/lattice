@@ -19,7 +19,12 @@ type oneBillEntryProjection struct {
 	AmountCents    *float64 `json:"amountCents"`
 	Memo           string   `json:"memo"`
 	PostedAt       string   `json:"postedAt"`
-	Source         string   `json:"source"`
+	// PeriodStart/PeriodEnd/DueAt: a recurring charge's recorded billing period
+	// and due date (empty on a payment or a one-time charge).
+	PeriodStart string `json:"periodStart"`
+	PeriodEnd   string `json:"periodEnd"`
+	DueAt       string `json:"dueAt"`
+	Source      string `json:"source"`
 }
 
 // oneBillEntryRow is the statement row the FE renders.
@@ -29,6 +34,9 @@ type oneBillEntryRow struct {
 	AmountCents    int64  `json:"amountCents"`
 	Memo           string `json:"memo,omitempty"`
 	PostedAt       string `json:"postedAt"`
+	PeriodStart    string `json:"periodStart,omitempty"`
+	PeriodEnd      string `json:"periodEnd,omitempty"`
+	DueAt          string `json:"dueAt,omitempty"`
 	Source         string `json:"source"`
 }
 
@@ -60,6 +68,9 @@ func computeOneBillHistory(keys []string, get kvGetter, leaseAppKey string) ([]o
 			AmountCents:    amount,
 			Memo:           p.Memo,
 			PostedAt:       p.PostedAt,
+			PeriodStart:    p.PeriodStart,
+			PeriodEnd:      p.PeriodEnd,
+			DueAt:          p.DueAt,
 			Source:         p.Source,
 		})
 	}

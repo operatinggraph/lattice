@@ -36,3 +36,23 @@ func TestComputeOneBillHistory_NoTransactionsZeroBalance(t *testing.T) {
 		t.Errorf("want no rows / zero balance, got %d rows, balance=%d", len(rows), balance)
 	}
 }
+
+// TestComputeOneBillHistory_PeriodRidesThrough — the rent source's recorded
+// billing period + due date pass through to the statement row; a café entry
+// (which projects none) stays empty.
+func TestComputeOneBillHistory_PeriodRidesThrough(t *testing.T) {
+	entries := map[string]string{
+		"vtx.transaction.1":     `{"transactionKey":"vtx.transaction.1","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":212500,"postedAt":"2026-09-13T23:49:30Z","source":"rent","periodStart":"2026-09-06T00:00:00Z","periodEnd":"2026-10-06T00:00:00Z","dueAt":"2026-09-06T00:00:00Z"}`,
+		"vtx.cafetransaction.1": `{"transactionKey":"vtx.cafetransaction.1","accountKey":"vtx.cafeaccount.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":1200,"postedAt":"2026-09-14T00:00:00Z","source":"cafe"}`,
+	}
+	rows, _ := computeOneBillHistory(keysOf(entries), fakeKV(entries), "vtx.leaseapp.lll")
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(rows))
+	}
+	if rows[0].PeriodStart != "2026-09-06T00:00:00Z" || rows[0].PeriodEnd != "2026-10-06T00:00:00Z" || rows[0].DueAt != "2026-09-06T00:00:00Z" {
+		t.Errorf("rent row period = (%q, %q, due %q)", rows[0].PeriodStart, rows[0].PeriodEnd, rows[0].DueAt)
+	}
+	if rows[1].PeriodStart != "" || rows[1].DueAt != "" {
+		t.Errorf("café row must carry no period, got (%q, %q)", rows[1].PeriodStart, rows[1].DueAt)
+	}
+}

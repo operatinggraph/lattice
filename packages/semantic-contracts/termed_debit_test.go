@@ -256,3 +256,63 @@ func TestDebitAccount_UntermedClause_UndeclaredStatusStillAccepted(t *testing.T)
 		t.Fatalf("untermed due = %q, want postedAt + 720h = 2026-08-01T13:00:00Z", got)
 	}
 }
+
+// termedEntry reads the .entry data of the transaction a debitTermed label
+// minted (the transaction key derives from the request id the label seeds).
+func termedEntry(t *testing.T, ctx context.Context, conn *substrate.Conn, label string) map[string]any {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, "vtx.transaction."+nanoIDFromRequestID(testutil.GenReqID(label))+".entry")
+	data, _ := doc["data"].(map[string]any)
+	return data
+}
+
+// A termed clause's charge records the period it bills and its due date on
+// the entry itself: the period is [the recorded due, the next anniversary),
+// and it falls due at the period's start — never at postedAt.
+func TestDebitAccount_TermedClause_EntryRecordsItsPeriodAndDueDate(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "termeddebit9")
+	leaseKey := seedLease(t, ctx, conn, "BBLEASETERMEDDEBHJK9")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createaccttermdeb09", leaseKey)
+	clauseKey := createTermedClause(t, ctx, conn, cp, cons, "createclausetermdb09", leaseKey, acctKey, "2026-09-06T00:00:00Z", "2027-09-06T00:00:00Z")
+	setClauseDue(t, ctx, conn, clauseKey, "2026-10-06T00:00:00Z")
+
+	debitTermed(t, ctx, conn, cp, cons, "debittermed000000009", acctKey, clauseKey, "2026-10-09T23:49:30Z", processor.OutcomeAccepted)
+	entry := termedEntry(t, ctx, conn, "debittermed000000009")
+	if got, _ := entry["periodStart"].(string); got != "2026-10-06T00:00:00Z" {
+		t.Fatalf("entry.periodStart = %q, want the recorded due 2026-10-06T00:00:00Z", got)
+	}
+	if got, _ := entry["periodEnd"].(string); got != "2026-11-06T00:00:00Z" {
+		t.Fatalf("entry.periodEnd = %q, want the next anniversary 2026-11-06T00:00:00Z", got)
+	}
+	if got, _ := entry["dueAt"].(string); got != "2026-10-06T00:00:00Z" {
+		t.Fatalf("entry.dueAt = %q, want the period's start, not postedAt", got)
+	}
+	if got, _ := entry["postedAt"].(string); got != "2026-10-09T23:49:30Z" {
+		t.Fatalf("entry.postedAt = %q", got)
+	}
+}
+
+// The final period's end is the term's own end, not the anniversary past it:
+// a term that is not a whole number of months bills [its last anniversary,
+// validUntil).
+func TestDebitAccount_TermedClause_FinalPeriodEndsAtValidUntil(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "termeddebit10")
+	leaseKey := seedLease(t, ctx, conn, "BBLEASETERMEDDEBHKTN")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createaccttermdeb10", leaseKey)
+	clauseKey := createTermedClause(t, ctx, conn, cp, cons, "createclausetermdb10", leaseKey, acctKey, "2026-01-01T00:00:00Z", "2026-03-15T00:00:00Z")
+	setClauseDue(t, ctx, conn, clauseKey, "2026-03-01T00:00:00Z")
+
+	status := debitTermed(t, ctx, conn, cp, cons, "debittermed000000010", acctKey, clauseKey, "2026-03-01T00:00:05Z", processor.OutcomeAccepted)
+	if got, _ := status["state"].(string); got != "completed" {
+		t.Fatalf("state = %q, want completed", got)
+	}
+	entry := termedEntry(t, ctx, conn, "debittermed000000010")
+	if got, _ := entry["periodStart"].(string); got != "2026-03-01T00:00:00Z" {
+		t.Fatalf("entry.periodStart = %q", got)
+	}
+	if got, _ := entry["periodEnd"].(string); got != "2026-03-15T00:00:00Z" {
+		t.Fatalf("entry.periodEnd = %q, want validUntil (the term ends there), not the April anniversary", got)
+	}
+}

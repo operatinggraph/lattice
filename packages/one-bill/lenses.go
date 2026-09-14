@@ -65,7 +65,11 @@ func Lenses() []pkgmgr.LensSpec {
 // read time, same as loftspace-ledger's own OPTIONAL MATCH into
 // semantic-contracts' :clause) tagged source:"rent", into the shared one-bill
 // bucket. Every MATCH is REQUIRED: a row projects only for a transaction
-// genuinely posted to a live account held for a live lease.
+// genuinely posted to a live account held for a live lease. Rent is the one
+// source whose charges bill a period: periodStart / periodEnd / dueAt are the
+// recurring charge's own recorded billing period and due date (loftspace-
+// ledger's DebitAccount stamps them on the .entry), null on a payment or a
+// one-time charge; the other three sources project no such columns.
 const rentEntriesSpec = `MATCH (t:transaction)
 MATCH (t)-[:postedTo]->(a:account)
 MATCH (a)-[:heldFor]->(l:leaseapp)
@@ -78,6 +82,9 @@ RETURN
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
   t.entry.data.postedAt AS postedAt,
+  t.entry.data.periodStart AS periodStart,
+  t.entry.data.periodEnd AS periodEnd,
+  t.entry.data.dueAt AS dueAt,
   'rent' AS source`
 
 // cafeEntriesSpec re-projects cafe-ledger's posted transactions tagged

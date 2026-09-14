@@ -1482,6 +1482,22 @@ function fmtUTCDate(s) {
 // <NanoID>", live on 33 statement lines). No ledger op can amend a posted
 // memo (root data {} + an append-only .entry aspect, D5), so this is the
 // durable fix even for the already-posted lines.
+// entryPeriodLabel names the billing period a recurring charge covers and the
+// date it fell due — " · covers Sep 6, 2026 – Oct 6, 2026 · due Sep 6, 2026" —
+// from the row's own recorded periodStart / periodEnd / dueAt (DebitAccount
+// stamps them on the .entry from the clause's anniversary grid; the ledger
+// and one-bill lenses project them). Empty for a payment or a one-time
+// charge, which record no period. The stamps are calendar facts on the UTC
+// grid, so they render by their UTC date (fmtUTCDate), never through a
+// timezone-sensitive parse that would shift a midnight-UTC due date a day
+// west of Greenwich.
+function entryPeriodLabel(e) {
+  if (!e || !e.periodStart || !e.periodEnd) return "";
+  let label = " · covers " + fmtUTCDate(e.periodStart) + " – " + fmtUTCDate(e.periodEnd);
+  if (e.dueAt) label += " · due " + fmtUTCDate(e.dueAt);
+  return label;
+}
+
 function customerMemo(memo) {
   if (!memo) return memo;
   // derived-key: not a key derivation — this alphabet builds a regex to
@@ -3255,7 +3271,8 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
       li.className = "ledger-entry " + t.type;
       const sign = t.type === "debit" ? "+" : "−";
       li.textContent =
-        fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + (t.memo ? " — " + customerMemo(t.memo) : "");
+        fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + entryPeriodLabel(t) +
+        (t.memo ? " — " + customerMemo(t.memo) : "");
       // "Why was I charged this?" (Fire V4) — a semantic-contracts clause
       // authorized this transaction (t.clauseProse from the ledgerHistory
       // lens's optional authorizedBy hop); a plain human-recorded charge
@@ -3392,7 +3409,7 @@ async function refreshStatementBody(body, leaseAppKey) {
         const sign = e.type === "debit" ? "+" : "−";
         const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
         li.textContent =
-          fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) +
+          fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) + entryPeriodLabel(e) +
           (e.memo ? " — " + customerMemo(e.memo) : "");
         list.append(li);
       }

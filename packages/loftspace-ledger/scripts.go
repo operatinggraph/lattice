@@ -575,9 +575,54 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     tx_key = "vtx.transaction." + tx_id
     posted_at = time.rfc3339_utc(op.submittedAt)
 
+    # The period this charge bills, and the clause's next due date. Which
+    # instant is stamped depends on whether the clause carries a term.
+    # UNTERMED: postedAt + the recurring window, the legacy cadence. TERMED:
+    # the due dates walk the calendar-month anniversary grid from validFrom —
+    # this charge bills the period whose start is the recorded due date (the
+    # lens opened the gap because a recorded lapse reached it), so the next
+    # due is the anniversary after it, computed from validFrom each time so
+    # the day-of-month never drifts. A first charge (no recorded due, or one
+    # before validFrom) bills period 0. A lapse whose period would start at
+    # or after validUntil bills nothing: the lens never opens that gap once
+    # the due date lies on the grid, so this is the fail-closed backstop.
+    # The billed period's end is capped at validUntil — the term is
+    # exclusive there, so the final period is [its anniversary, validUntil).
+    period_start = None
+    period_end = None
+    charge_valid_until = None
+    term_exhausted = False
+    if clause_key != None:
+        if clause_valid_from != None:
+            k = period_index(clause_valid_from, clause_due)
+            period_start = time.rfc3339_add_months(clause_valid_from, k)
+            if clause_valid_until != None and period_start >= clause_valid_until:
+                fail("TermExhausted: clause " + clause_key + "'s next period starts at " + period_start + ", at or after its validUntil " + clause_valid_until)
+            charge_valid_until = time.rfc3339_add_months(clause_valid_from, k + 1)
+            period_end = charge_valid_until
+            if clause_valid_until != None and charge_valid_until >= clause_valid_until:
+                term_exhausted = True
+                period_end = clause_valid_until
+        else:
+            charge_valid_until = time.rfc3339_add(posted_at, %q)
+            if clause_period == "monthly":
+                period_start = posted_at
+                period_end = charge_valid_until
+
     entry_data = {"type": entry_type, "amountCents": amount_cents, "postedAt": posted_at}
     if memo != None:
         entry_data["memo"] = memo
+    # A recurring charge records the period it covers and the date it fell
+    # due ON THE ENTRY — the statement states "rent for Sep 6 – Oct 6, due
+    # Sep 6" from the row itself, never by re-deriving the grid from the
+    # clause at read time. The due date is the period's own start: a termed
+    # clause's validFrom is its first period's due date and every later
+    # period falls due on its anniversary; an untermed monthly clause is due
+    # when it posts. A one-time charge covers no period and stamps nothing.
+    if period_start != None:
+        entry_data["periodStart"] = period_start
+        entry_data["periodEnd"] = period_end
+        entry_data["dueAt"] = period_start
 
     # postedTo: the transaction (later-arriving) is the source, the
     # pre-existing account is the target (Contract #1 §1.1). Reads as
@@ -621,28 +666,8 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
         # chargeCount/authorizedBy-link-driven and never reads
         # chargeValidUntil at all.
         #
-        # Which instant is stamped depends on whether the clause carries a
-        # term. UNTERMED: postedAt + the recurring window, the legacy
-        # cadence. TERMED: the due dates walk the calendar-month anniversary
-        # grid from validFrom — this charge bills the period whose start is
-        # the recorded due date (the lens opened the gap because a recorded
-        # lapse reached it), so the next due is the anniversary after it,
-        # computed from validFrom each time so the day-of-month never
-        # drifts. A first charge (no recorded due, or one before validFrom)
-        # bills period 0. A lapse whose period would start at or after
-        # validUntil bills nothing: the lens never opens that gap once the
-        # due date lies on the grid, so this is the fail-closed backstop.
-        term_exhausted = False
-        if clause_valid_from != None:
-            k = period_index(clause_valid_from, clause_due)
-            period_start = time.rfc3339_add_months(clause_valid_from, k)
-            if clause_valid_until != None and period_start >= clause_valid_until:
-                fail("TermExhausted: clause " + clause_key + "'s next period starts at " + period_start + ", at or after its validUntil " + clause_valid_until)
-            charge_valid_until = time.rfc3339_add_months(clause_valid_from, k + 1)
-            if clause_valid_until != None and charge_valid_until >= clause_valid_until:
-                term_exhausted = True
-        else:
-            charge_valid_until = time.rfc3339_add(posted_at, %q)
+        # Which instant is stamped (charge_valid_until, computed above with
+        # the billed period) depends on whether the clause carries a term.
         if clause_period == "monthly" and not term_exhausted:
             # Recurring clause: re-arm chargeValidUntil, never complete. This
             # IS the clauseSatisfaction lens's convergence gate for a monthly

@@ -210,3 +210,40 @@ func TestTasksSummaryFor_CountsExpiredApart(t *testing.T) {
 		})
 	}
 }
+
+// TestEntryPeriodLabel_NamesThePeriodAndDueDate pins the statement's period
+// suffix: a recurring charge reads "covers <start> – <end> · due <due>" by the
+// stamps' UTC calendar dates; a row with no period renders nothing.
+func TestEntryPeriodLabel_NamesThePeriodAndDueDate(t *testing.T) {
+	vm := leaseTermUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("entryPeriodLabel"))
+	if !ok {
+		t.Fatal("entryPeriodLabel is not a function after evaluating its declaration")
+	}
+	run := func(t *testing.T, e map[string]interface{}) string {
+		t.Helper()
+		res, err := fn(goja.Undefined(), vm.ToValue(e))
+		if err != nil {
+			t.Fatalf("entryPeriodLabel threw: %v", err)
+		}
+		return res.String()
+	}
+	for _, tc := range []struct {
+		name string
+		e    map[string]interface{}
+		want string
+	}{
+		{"rent period with due date", map[string]interface{}{"periodStart": "2026-09-06T00:00:00Z", "periodEnd": "2026-10-06T00:00:00Z", "dueAt": "2026-09-06T00:00:00Z"},
+			" · covers Sep 6, 2026 – Oct 6, 2026 · due Sep 6, 2026"},
+		{"period without a due date", map[string]interface{}{"periodStart": "2026-09-06T00:00:00Z", "periodEnd": "2026-10-06T00:00:00Z"},
+			" · covers Sep 6, 2026 – Oct 6, 2026"},
+		{"a payment has no period", map[string]interface{}{"type": "credit", "postedAt": "2026-09-14T00:00:00Z"}, ""},
+		{"a half-stamped row renders nothing", map[string]interface{}{"periodStart": "2026-09-06T00:00:00Z"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := run(t, tc.e); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

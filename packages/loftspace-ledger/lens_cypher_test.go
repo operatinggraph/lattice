@@ -217,3 +217,35 @@ func TestLeaseAccounts_LeaseWithAccount_ProjectsAccountKey(t *testing.T) {
 	require.Equal(t, "vtx.leaseapp."+f.ids["held_lease"], v["leaseAppKey"])
 	require.Equal(t, "vtx.account."+f.ids["held_acct"], v["accountKey"], "the heldFor hop is walked INBOUND from the lease")
 }
+
+// TestLedgerHistory_RecurringCharge_ProjectsItsPeriodAndDueDate — a charge
+// whose .entry records the period it bills and its due date (DebitAccount's
+// termed/monthly stamp) projects all three; a plain charge with none
+// projects null for each, never an error.
+func TestLedgerHistory_RecurringCharge_ProjectsItsPeriodAndDueDate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.mkPostedCharge(t, "rent", 212500, "")
+	f.aspect(t, "rent_tx", "entry", "transaction", map[string]any{
+		"type": "debit", "amountCents": 212500.0, "postedAt": "2026-09-13T23:49:30Z",
+		"periodStart": "2026-09-06T00:00:00Z", "periodEnd": "2026-10-06T00:00:00Z", "dueAt": "2026-09-06T00:00:00Z",
+	})
+	f.mkPostedCharge(t, "plain", 4500, "Lockout fee")
+
+	rows := f.project(t, "ledgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["transactionKey"].(string)] = r.Values
+	}
+	rent := byKey["vtx.transaction."+f.ids["rent_tx"]]
+	require.Equal(t, "2026-09-06T00:00:00Z", rent["periodStart"])
+	require.Equal(t, "2026-10-06T00:00:00Z", rent["periodEnd"])
+	require.Equal(t, "2026-09-06T00:00:00Z", rent["dueAt"])
+	plain := byKey["vtx.transaction."+f.ids["plain_tx"]]
+	require.Nil(t, plain["periodStart"], "a one-time charge records no period")
+	require.Nil(t, plain["periodEnd"])
+	require.Nil(t, plain["dueAt"])
+}

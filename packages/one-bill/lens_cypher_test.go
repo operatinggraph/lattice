@@ -472,3 +472,34 @@ func rowSetJSON(t *testing.T, rows []ruleengine.ProjectionResult) string {
 	require.NoError(t, err)
 	return string(joined)
 }
+
+// TestOneBill_RentEntries_ProjectsPeriodAndDueDate — the rent source carries
+// the recurring charge's recorded billing period + due date through to the
+// shared statement; a rent entry without them projects null for each.
+func TestOneBill_RentEntries_ProjectsPeriodAndDueDate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newObFixture(t)
+	f.mkRentTx(t, "renttx", 212500)
+	f.aspect(t, "renttx", "entry", "transactionEntry", map[string]any{
+		"type": "debit", "amountCents": 212500.0, "postedAt": "2026-09-13T23:49:30Z",
+		"periodStart": "2026-09-06T00:00:00Z", "periodEnd": "2026-10-06T00:00:00Z", "dueAt": "2026-09-06T00:00:00Z",
+	})
+	f.mkRentTx(t, "plaintx", 4500)
+
+	rows := f.project(t, rentEntriesSpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["transactionKey"].(string)] = r.Values
+	}
+	rent := byKey["vtx.transaction."+f.ids["renttx"]]
+	require.Equal(t, "2026-09-06T00:00:00Z", rent["periodStart"])
+	require.Equal(t, "2026-10-06T00:00:00Z", rent["periodEnd"])
+	require.Equal(t, "2026-09-06T00:00:00Z", rent["dueAt"])
+	require.Equal(t, "rent", rent["source"])
+	plain := byKey["vtx.transaction."+f.ids["plaintx"]]
+	require.Nil(t, plain["periodStart"])
+	require.Nil(t, plain["dueAt"])
+}

@@ -98,7 +98,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"(minimal, D5 — the entry detail is a .entry aspect). DebitAccount{accountKey, amountCents, memo?, clauseRef?, " +
 			"period?} records a charge (rent, a late fee, a deposit); CreditAccount{accountKey, amountCents, memo?} " +
 			"records a payment received. Each mints a fresh vtx.transaction.<NanoID> + a .entry aspect {type " +
-			"(debit|credit), amountCents, memo?, postedAt} + the postedTo link (transaction→account, the transaction " +
+			"(debit|credit), amountCents, memo?, postedAt, periodStart?, periodEnd?, dueAt?} + the postedTo link (transaction→account, the transaction " +
 			"is the later-arriving vertex so it is the source — Contract #1 §1.1). The ledger is APPEND-ONLY — no " +
 			"balance is stored or mutated on the account; the ledgerHistory lens derives a balance by summing " +
 			"entries, so concurrent debits/credits never race a read-modify-write. Requires the accountKey be a " +
@@ -124,7 +124,11 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"means period 0) and records the NEXT anniversary, computed from validFrom each time so Jan 31 -> " +
 			"Feb 28 -> Mar 31 never drifts; when that next due reaches validUntil the clause is marked completed " +
 			"(its final period is billed), and a due at or past validUntil is refused (TermExhausted) with no " +
-			"transaction minted.",
+			"transaction minted. A recurring charge records the period it bills on its own .entry — periodStart / " +
+			"periodEnd (the termed clause's anniversary period, its end capped at validUntil; the untermed clause's " +
+			"postedAt + 30 days) and dueAt (the period's start: validFrom is the first period's due date and every " +
+			"later period falls due on its anniversary) — so a statement names the month covered and the due date " +
+			"from the row itself. A one-time charge stamps none of the three.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"accountKey":{"type":"string","description":"vtx.account.<NanoID> the transaction posts to (DebitAccount/CreditAccount; required, validated alive)."},` +

@@ -68,7 +68,10 @@ Installed packages:
   the `clauseSatisfaction` convergence target (one `DebitAccount` per period,
   gated on a recorded lapse reaching the clause's due date and the due date
   lying inside its `.terms.validFrom`/`validUntil` term; the due dates walk the
-  calendar-month grid from `validFrom`) and the `leaseRentSettlement` bootstrap
+  calendar-month grid from `validFrom`, and each recurring charge records the
+  period it bills + its due date on its own `.entry` — `periodStart` /
+  `periodEnd` / `dueAt` — which `ledgerHistory` and `one-bill`'s rent source
+  project so the statement names the month covered) and the `leaseRentSettlement` bootstrap
   (agreed rent → account → a rent clause per tenancy term: the original term
   from `.tenancy.leaseStart`, each signed renewal's from its recorded
   `termStart`/`rentAmount`; a legacy untermed clause is termed from the lease).

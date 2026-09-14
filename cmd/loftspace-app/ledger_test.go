@@ -56,6 +56,26 @@ func TestComputeLedgerHistory_FiltersSumsAndOrders(t *testing.T) {
 	}
 }
 
+// TestComputeLedgerHistory_PeriodRidesThrough — a recurring charge's recorded
+// periodStart/periodEnd/dueAt pass through unchanged; a payment or one-time
+// charge without them stays empty (omitempty).
+func TestComputeLedgerHistory_PeriodRidesThrough(t *testing.T) {
+	entries := map[string]string{
+		"vtx.transaction.1": `{"transactionKey":"vtx.transaction.1","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":212500,"postedAt":"2026-09-13T23:49:30Z","periodStart":"2026-09-06T00:00:00Z","periodEnd":"2026-10-06T00:00:00Z","dueAt":"2026-09-06T00:00:00Z"}`,
+		"vtx.transaction.2": `{"transactionKey":"vtx.transaction.2","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"credit","amountCents":212500,"postedAt":"2026-09-14T00:00:00Z"}`,
+	}
+	rows, _ := computeLedgerHistory(keysOf(entries), fakeKV(entries), "vtx.leaseapp.lll")
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(rows))
+	}
+	if rows[0].PeriodStart != "2026-09-06T00:00:00Z" || rows[0].PeriodEnd != "2026-10-06T00:00:00Z" || rows[0].DueAt != "2026-09-06T00:00:00Z" {
+		t.Errorf("charge row period = (%q, %q, due %q), want the projected stamps", rows[0].PeriodStart, rows[0].PeriodEnd, rows[0].DueAt)
+	}
+	if rows[1].PeriodStart != "" || rows[1].PeriodEnd != "" || rows[1].DueAt != "" {
+		t.Errorf("payment row must carry no period, got (%q, %q, %q)", rows[1].PeriodStart, rows[1].PeriodEnd, rows[1].DueAt)
+	}
+}
+
 // TestComputeLedgerHistory_ClauseProseRidesThrough (Fire V4 "why was I
 // charged this?") — a transaction row carrying clauseKey/clauseProse (the
 // ledgerHistory lens's optional authorizedBy hop) passes both through

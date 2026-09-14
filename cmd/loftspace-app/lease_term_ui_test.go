@@ -8,7 +8,7 @@ import (
 )
 
 // leaseTermUIDecls lifts the shipped fmtUTCDate/applicationBannerFor/
-// relistOffered/decisionOffered declarations (plus fmtUTCDate's
+// relistOffered/decisionOffered/entryPeriodLabel declarations (plus fmtUTCDate's
 // UTC_MONTH_ABBR dependency) out of the embedded app.js — the
 // rotate_offer_test.go / renewal_ready_test.go pattern: the REAL shipped
 // source runs here, not a copy, so these pins are a statement about what
@@ -20,6 +20,7 @@ var leaseTermUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction applicationBannerFor\(row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction decisionOffered\(a, unit\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction relistOffered\(apps\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction entryPeriodLabel\(e\) \{\n.*?\n\}\n`),
 }
 
 func leaseTermUIVM(t *testing.T) *goja.Runtime {
