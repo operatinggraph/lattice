@@ -673,7 +673,18 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   window's soundness bound reads `maxDeadlineArm + markerTTL < TrackerTTL`, and it was gated by a test
   that hardcoded `maxDeadlineArm` — while `StepTimeout` and `CreateTaskTimeout` were exported fields
   carrying only a lower clamp. A deployment raising either past the tracker's life would turn the
-  deadline probe against healthy instances, silently, with the gate still green. Minted: the marker-TTL
-  fire's cold pass. Check: `MaxDeadlineArm` clamps both arms in `withDefaults`
-  (`TestWithDefaults_ClampsTheDeadlineArmBothWays`), and the bootstrap gate computes the invariant from
-  that constant instead of restating its value.
+  deadline probe against healthy instances, silently, with the gate still green — silently no longer,
+  since the probe now refuses a verdict its evidence cannot carry, but the constant is still what buys
+  the verdict. Minted: the marker-TTL fire's cold pass. Check: `MaxDeadlineArm` clamps both arms in
+  `withDefaults` (`TestWithDefaults_ClampsTheDeadlineArmBothWays`), and the bootstrap gate computes the
+  invariant from that constant instead of restating its value.
+- **A probe that reads ABSENCE as a verdict must bound the verdict by the age of the evidence it read:
+  absence past the evidence's own lifetime is not a fact.** The deadline probe read "no op tracker, no
+  outbox record" as *rejected* whatever the age of those absences, so a substrate outage longer than the
+  tracker's 24 h life delivered a late-minted expiry marker into a false terminal on an instance whose
+  human task was still live. The bound is the evidence's own lifetime (`opstatus.TrackerTTL`, owned beside
+  the RPC that projects it) measured from the step's epoch — a stamp nothing inside the step refreshes
+  (`token.<pendingToken>`, never the record, whose own timestamp the verdict's note would move). Past it
+  the verdict is refused, alerted and recorded, never asserted. Minted: the 2026-09-14 evidence-horizon
+  fire. Check: `TestProbeRejectedOrLost_EvidencePastItsOwnLifetimeIsNoVerdict` +
+  `TestProbeRejectedOrLost_HorizonIsTheTrackerLifetime`.
