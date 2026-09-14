@@ -442,6 +442,113 @@ go list -deps ./internal/opstatus | grep 'lattice/internal/' ; grep -rl '"github
 sed -n 2515,2523p $(go env GOMODCACHE)/github.com/nats-io/nats-server/v2@v2.14.0/server/filestore.go
 ```
 
+### 3.7 Fire brief (build note, 2026-09-14) — Steward/Lattice, branch `claude/exciting-clarke-re5z2f`
+
+**1. Scope sentence (verbatim, §3.5).** *"One increment (Steward-built; posture-changing on the orchestration
+plane → the adversarial layer): `opstatus.TrackerTTL` + the `processor` alias; `tokenEpoch` /
+`noteDeadlineProbe` in `state.go`; the shared rejected-or-lost helper in `engine.go` with the note field, its
+two clearing sites and the `InstanceSummary` copy; the four comment/doc rewrites in §3.2's last row; a
+`docs/components/loom.md` dossier entry."* Green bar = §3.5's gates + T1–T8.
+
+**2. Verified touch-list** (every anchor re-read live on `418f200`; §3's own citations are leads and most
+drifted — the live number is what binds).
+
+| Site | Live anchor | What changes |
+|---|---|---|
+| `internal/opstatus/service.go` | `:27` (`Subject` const); package is 2 files, deps `substrate`(+`/keys`) only — the §3.6 leaf census **holds** | new `TrackerTTL = 24 * time.Hour` beside `Subject`, carrying the Contract #4 §4.3 provenance |
+| `internal/processor/tracker.go` | `:19` (`const TrackerTTL = 24 * time.Hour`) | becomes `= opstatus.TrackerTTL`; call sites `step8_commit.go:387`, `step_interfaces.go:139` unchanged |
+| `internal/loom/engine.go` | `:223-246` `Engine` struct · `:269-284` `NewEngine` | a `clock func() time.Time` field + an `e.now()` accessor |
+| | `:64-78` `MaxDeadlineArm`'s comment | the *"past it, the probe reads a committed op's aged-out tracker as 'never committed' and fails a healthy instance"* sentence is rewritten to the guard |
+| | `:1296-1304` `probeFail` | unchanged; the new helper wraps it |
+| | `:1487-1489` (systemOp) · `:1539-1543` (CreateTask) · `:1610-1613` (instanceOp) | the three rejected-or-lost verdicts route through one helper |
+| | `:1451-1455` (`pattern pin missing`) | **stays unguarded** — an invariant break is evidence in itself (§3.2) |
+| `internal/loom/state.go` | `:144-152` `Instance` · `:136` `tokenKey` | `DeadlineProbe *probeNote` field |
+| | `:606-719` `transition` (marshals at `:607`; the else-branch at `:707-713` purges the deadline key) | clears the note when a new token is written or the status leaves running — and is **not** the note's writer |
+| | `:743-761` `redrive` (marshals at `:744`) | clears the note |
+| | `:786-795` `deadlineArmed` · `:767-776` `outboxExists` | the one-KVGet precedent `tokenEpoch` copies |
+| `internal/loom/control.go` | `:16-23` `InstanceSummary` · `:184-191` the field copy in `inspectResolved` · `:333-381` `RedriveInstance` | the summary carries the note; redrive's clear rides `redrive` |
+| `internal/substrate/kv.go` | `:18-24` `KVEntry{Timestamp}` · `:37` `KVGet` · `:164` `KVUpdate(…, expectedRevision)` | read as-is — `KVUpdate` **is** the record-only CAS put §3.2 asks for |
+| `internal/bootstrap/platform_buckets_test.go` | `:72-101` the invariant test + its *"belongs with the structural fix … §11.2 files"* comment | comment rewritten to the shipped guard; the assertions stand |
+| `docs/components/loom.md` | dossier `:603-679`; entry 8 at `:647`, entry 11 at `:672-679` | a new entry; entry 11's *"would turn the deadline probe against healthy instances, silently"* sentence keeps its subject but names the guard |
+
+**Rotted citations, corrected here** (part of the gate, not a footnote): §3.1/§3.2's `engine.go:1310-1471`,
+`:1471`, `:1525`, `:1595`, `state.go:452-530`, `:376-387`, `:610-620`, `:631-645` and `control.go:10-30` have
+all drifted (+15 to +190 lines); the live anchors are in the table. **`docs/components/loom.md:351,363,587`
+names no such sentences** — the live text is dossier entry 11 (`:672-679`); the sibling sentence lives in
+`platform-bucket-marker-ttl-design.md:26`. Both are in the rewrite set.
+
+**Two premises the design implied that the tree does not have** — each resolved here, before the first edit:
+
+- **There is no injected clock on the Engine.** T1 is specified as *"driven by an injected clock on the
+  engine"*; `time.Now()` is called directly (`engine.go:160`, `state.go:692`, `:801`) and no seam exists. The
+  fire **adds** it, mirroring `internal/weaver/engine.go:293-321` verbatim in shape (a `clock` field plus an
+  `e.now()` accessor that tolerates the zero value, so a hand-built Engine keeps the wall clock). This narrows
+  nothing and substitutes nothing; it is the seam the ratified test needs.
+- **`natsfixture` cannot restart a file-backed server** (`natsfixture.go:82-138`; `jsstore.Dir` removes the
+  dir on `t.Cleanup`, with no reuse API). §3.5 anticipates exactly this: the `filestore.go` cites stand as
+  T8's pin and **the fixture gap is an adjacent find** (part 6).
+
+**3. Precedents to mirror.**
+
+- `tokenEpoch` → `deadlineArmed` (`state.go:786`) / `outboxExists` (`:767`): one `KVGet`, `ErrKeyNotFound`
+  turned into a typed answer rather than an error.
+- `noteDeadlineProbe` → `redrive`'s revision-conditioned record write (`state.go:753`), rendered as a
+  single-key `KVUpdate` (`substrate/kv.go:164`). **Not** `transition`: its no-deadline branch (`:707-713`)
+  purges `deadline.<id>`, which on an already-expired key mints a stray marker — the hazard `deleteToken`
+  documents at `:815-820`.
+- The inconclusive verdict's Warn-and-Ack → `probeFail`'s drop (`engine.go:1296-1304`) and `fail`'s Warn
+  carrier (`:1273`); the return is `nil` ⇒ Ack, never a Nak (§3.2, and `probeFail`'s own argument).
+- Clearing the note inside the two persistence sites → the failed-index settle in `transition` (`:631-658`):
+  settle the derived fact inside the batch that flips the status, never as a second write.
+- The clock seam → `internal/weaver/engine.go:293-321`.
+
+**4. Increment order** (one fire; each step's green check runnable).
+
+1. `opstatus.TrackerTTL` + the `processor` alias. → `go build ./... && go test ./internal/opstatus/ ./internal/processor/ ./internal/bootstrap/ -count=1`
+2. `Instance.DeadlineProbe` + `tokenEpoch` + `noteDeadlineProbe` + the two clearing sites. → `go test ./internal/loom/ -count=1`
+3. The shared rejected-or-lost helper across the three verdicts + the clock seam + the `InstanceSummary` copy. → `go test ./internal/loom/ -count=1 -run 'Deadline|Probe|Redrive|Inspect'`
+4. T1–T7 (T8 as the vendor-cite pin), each revert-proven. → `go test ./internal/loom/ -count=1`
+5. Comment/doc rewrites + the dossier entry. → `STRICT=1 go run ./scripts/lint-conventions.go && go run ./scripts/lint-doc-orphan.go`
+6. Full gate: `go build ./... && make vet && golangci-lint run ./... && go test ./... -p 4` (with `POSTGRES_TEST_DSN` up — without it `internal/refractor` is falsely green, `REMOTE.md` §3) `&& make test-lease-convergence`.
+
+**5. In-scope gotchas.** No `packages/` edit ⇒ no manifest/`Version` bump (§3.5). No frozen-contract edit —
+§3.4 builds to Contract #10 §10.6 as written; its one observable consequence is stated there for Andrew's one
+look. `loom-state` removals are TTL'd purges, never DELs. The new field is additive JSON: an older binary
+decodes and drops it, a downgrade clears a note (§3.2, accepted). **Dossier entries copied in verbatim** —
+loom's entry 8 (*"a message on `deadline.>` is a delivery to a handler whose evidence outlives nothing it
+backstops … when a probe's evidence has a shorter life than the wait it guards, its trigger set — and the
+currency of what it read — are the first things to audit"*), entry 11 (*"a constant whose only enforcement is
+a test of three constants is not enforced"* — binds the new `opstatus` constant: its enforcement must be the
+computed invariant, not a restatement), entry 9 (*"a handler that acts on 'empty body' acts on every removal
+shape … name the header, never the shape"*), entry 5 (*"`require`/`assert` inside a `require.Eventually`
+predicate fails a passing test from a non-test goroutine"*), entry 1/6 (*"a `CreateOnly` write against a
+subject that still carries a marker is refused … a guard must never depend on the marker's presence OR
+absence"*), and entry 2 (*"a fixture that hand-seeds `loom-state` cannot reach the states a real transition
+leaves behind"* — T1 seeds through `createInstance` + `transition`, never `putInstance`). The standing
+checklist applies whole, #1 hardest: **the note is new state, so its state table is §3.2's, and every row of
+it is a test** (created / reset at four boundaries / carried across restart / ordered by the CAS).
+
+**6. Adjacent finds.** (a) **`natsfixture` cannot restart a file-backed NATS server**, so no test in the tree
+can exercise a past-due per-message TTL across a recovery — the shape T8 wants. Absorbed into this run's batch
+as its own unit if it is a bounded fixture option; a genuinely new fixture lifecycle is the one designer out.
+(b) §3.2's `docs/components/loom.md:351,363,587` and the `platform-bucket-marker-ttl-design.md:26` sentence
+are stale *instructions* pointing at a "separate, unbuilt row" this fire closes — fixed in increment 5, in the
+same commit (the body-stays-true rule).
+
+**7. Non-goals.** Loupe's `#/flows` rendering of the note (§3.2's consumer table says so). The
+`pattern pin missing` verdict. Raising `TrackerTTL` (§3.3 alt 4, refused — Contract #4 §4.3). An RPC-side
+`asOf`/`beyondHorizon` verdict (§3.3 alt 3, one consumer). Any change to `rearmDeadline`'s unconditioned PUT
+or to the marker-provenance admission gate.
+
+**Scope-diff gate: PASS.** Every touch in part 2 traces to a clause of part 1; the two premise corrections
+add a test seam and a doc-rewrite target and widen no mechanism; the one substitution candidate (writing the
+note through `transition`) is refused on the stray-marker hazard, as §3.2 already required. §3.6's four
+executable censuses re-run live: the three bounds read `1h / 1h / 24h`, the invariant test is present at
+`platform_buckets_test.go:92`, `opstatus` is a leaf that `loom` already imports (`engine.go`) — all as
+stated. The one census whose *form* differs: §3.6's `probeFail(ctx, inst, .*rejected` expects 3 and matches
+**0**, because two of the three verdicts carry their reason through `fmt.Sprintf` on a separate line; the
+three sites are `:1488`, `:1542`, `:1612` as designed — the count holds, the grep does not.
+
 ## 4. Adjudication
 
 Per the 2026-08-20 delegation both verdicts are Winston-adjudicated: no architectural fork (a package partition
