@@ -25,9 +25,11 @@ var augurAllowedActions = map[string]bool{
 // augur-dispatch-pickup §3.2/§3.3). entityID is the row's entity segment — the
 // proposal's bare NanoID handle (§10.2: the augurDispatchPending lens's
 // Output.KeyColumn puts the anchor's bare id there, same as every other
-// weaver-target). row carries the augurDispatchPending lens's columns:
-// proposedAction, proposedParams, proposedSteps, dispatchLeg, candidateKey,
-// targetMetaKey.
+// weaver-target). actorKey is the dispatching engine's own actor key, passed
+// straight through to the inner buildPlan so a materialised leg resolves an
+// {actor} enumeration hub against the same identity every other dispatch does.
+// row carries the augurDispatchPending lens's columns: proposedAction,
+// proposedParams, proposedSteps, dispatchLeg, candidateKey, targetMetaKey.
 //
 // A proposal is dispatched ONE LEG PER EPISODE. proposedSteps is the recorded
 // ordered plan and dispatchLeg how many of its legs have already fired, so this
@@ -47,7 +49,7 @@ var augurAllowedActions = map[string]bool{
 // replayed) defers via NakWithDelay with NO flip — nothing was dispatched, so
 // nothing to record yet; the next redelivery/reclaim retries the same
 // resolution.
-func buildProposedOpPlan(source *targetSource, entityID string, row map[string]any, expectedRevision uint64) (*plan, *planError) {
+func buildProposedOpPlan(source *targetSource, actorKey, entityID string, row map[string]any, expectedRevision uint64) (*plan, *planError) {
 	handle := entityID
 	leg := rowLeg(row, "dispatchLeg")
 	candidateKey, _ := row["candidateKey"].(string)
@@ -106,7 +108,7 @@ func buildProposedOpPlan(source *targetSource, entityID string, row map[string]a
 		// responsible for whatever conditioning is meaningful for its shape;
 		// Weaver cannot know in advance whether an arbitrary proposed op even
 		// reads this field.
-		pl, perr := buildPlan(source, "augurDispatch", candidateID, "missing_dispatch", innerGA, row, expectedRevision)
+		pl, perr := buildPlan(source, actorKey, "augurDispatch", candidateID, "missing_dispatch", innerGA, row, expectedRevision)
 		if perr != nil {
 			if perr.kind == errTransient {
 				// Defer — a live-catalog reference (pattern meta-vertex or

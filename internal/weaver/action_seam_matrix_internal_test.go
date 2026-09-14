@@ -410,7 +410,7 @@ func TestBuildPlanDefaultArm_ReachableOnlyForAnUnhandledAction(t *testing.T) {
 		// The matrix's declaration is authored for a SEAM, which resolves a
 		// planned gap's candidate first; buildPlan is handed the raw action, so
 		// the plan-time form arrives here exactly as an unresolved gap would.
-		_, perr := buildPlan(source, "matrixBuildPlan", "AAmatrixEntityHJKMN", spec.gapColumn, ga, row, 7)
+		_, perr := buildPlan(source, fixtureActorKey, "matrixBuildPlan", "AAmatrixEntityHJKMN", spec.gapColumn, ga, row, 7)
 		defaulted := perr != nil && strings.Contains(perr.msg, "unknown action")
 		if spec.buildPlanHandles && defaulted {
 			t.Errorf("action %q is recorded as handled by buildPlan but fell to its default arm: %s%s",
@@ -423,7 +423,7 @@ func TestBuildPlanDefaultArm_ReachableOnlyForAnUnhandledAction(t *testing.T) {
 		}
 	}
 
-	_, perr := buildPlan(source, "matrixBuildPlan", "AAmatrixEntityHJKMN", "missing_x",
+	_, perr := buildPlan(source, fixtureActorKey, "matrixBuildPlan", "AAmatrixEntityHJKMN", "missing_x",
 		GapAction{Action: "harvestOrgans"}, row, 7)
 	if perr == nil || perr.kind != errConfig || !strings.Contains(perr.msg, "unknown action") {
 		t.Fatalf("an action outside the vocabulary must reach buildPlan's default arm, got %v%s",

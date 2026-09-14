@@ -21,7 +21,7 @@ const (
 // the assertions below are about the param grammar alone.
 func directOpPlan(t *testing.T, params map[string]string, row map[string]any) map[string]any {
 	t.Helper()
-	pl, perr := buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix", Params: params}, row, 7)
 	require.Nil(t, perr, "buildPlan must resolve the params bag")
 	return pl.payload("")
@@ -30,7 +30,7 @@ func directOpPlan(t *testing.T, params map[string]string, row map[string]any) ma
 // directOpParamError resolves a one-param directOp gap and returns the failure.
 func directOpParamError(t *testing.T, value string) *planError {
 	t.Helper()
-	_, perr := buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	_, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix", Params: map[string]string{"limit": value}}, map[string]any{}, 7)
 	return perr
 }
@@ -288,7 +288,7 @@ func TestResolveStringParam_TypedLiteralRefusedOutright(t *testing.T) {
 			Enumerations: []GapEnumeration{{Hub: `json:"` + tpUnitKey + `"`, Relation: "holdsRole", Direction: "out"}}}},
 	}
 	for _, tc := range cases {
-		_, perr := buildPlan(nil, "typedParams", tpEntityID, "missing_a", tc.ga, map[string]any{}, 7)
+		_, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a", tc.ga, map[string]any{}, 7)
 		require.NotNil(t, perr, "%s must refuse the typed-literal token", tc.field)
 		require.Equal(t, errConfig, perr.kind,
 			"%s: the refusal must be a config error, not a per-row data error that latches a Health issue per entity: %v", tc.field, perr.msg)
@@ -298,18 +298,18 @@ func TestResolveStringParam_TypedLiteralRefusedOutright(t *testing.T) {
 
 	// A non-string typed literal is refused by the same one check, before any
 	// decode — so no field can ever coerce a number into a key.
-	_, perr := buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	_, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix", Target: "json:5"}, map[string]any{}, 7)
 	require.NotNil(t, perr)
 	require.Equal(t, errConfig, perr.kind)
 
 	// Positive controls: the two arms a string field DOES have still work.
-	pl, perr := buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix", Target: tpUnitKey}, map[string]any{}, 7)
 	require.Nil(t, perr, "a plain literal key must still resolve")
 	require.Equal(t, tpUnitKey, pl.authTarget)
 
-	pl, perr = buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr = buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix", Target: "row.entityKey"},
 		map[string]any{"entityKey": tpUnitKey}, 7)
 	require.Nil(t, perr, "a row template must still resolve")
@@ -323,7 +323,7 @@ func TestResolveStringParam_TypedLiteralRefusedOutright(t *testing.T) {
 // about gaps that DO declare params.
 func TestResolveParam_OmittedParamsStillDispatch(t *testing.T) {
 	t.Parallel()
-	pl, perr := buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix"}, map[string]any{}, 7)
 	require.Nil(t, perr, "a gap declaring no params must still dispatch")
 	payload := pl.payload("")
@@ -344,7 +344,7 @@ func TestBuildPlan_DirectOp_OptionalReadsDropOnAbsentColumn(t *testing.T) {
 	t.Parallel()
 
 	// Positive control: both entries resolvable, both carried.
-	pl, perr := buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix",
 			OptionalReads: []string{"row.entityKey", "row.priorClaimKey"}},
 		map[string]any{"entityKey": tpUnitKey, "priorClaimKey": tpIdentity}, 7)
@@ -353,7 +353,7 @@ func TestBuildPlan_DirectOp_OptionalReadsDropOnAbsentColumn(t *testing.T) {
 
 	// The null column drops, the surviving entry is still declared, and the
 	// gap dispatches.
-	pl, perr = buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr = buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix",
 			OptionalReads: []string{"row.entityKey", "row.priorClaimKey"}},
 		map[string]any{"entityKey": tpUnitKey, "priorClaimKey": nil}, 7)
@@ -361,7 +361,7 @@ func TestBuildPlan_DirectOp_OptionalReadsDropOnAbsentColumn(t *testing.T) {
 	require.Equal(t, []string{tpUnitKey}, pl.optionalReads(""), "only the resolvable entry is declared")
 
 	// A column missing from the row entirely behaves the same way.
-	pl, perr = buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr = buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix", OptionalReads: []string{"row.priorClaimKey"}},
 		map[string]any{"entityKey": tpUnitKey}, 7)
 	require.Nil(t, perr, "an absent optional-read column must not fail the gap")
@@ -369,13 +369,13 @@ func TestBuildPlan_DirectOp_OptionalReadsDropOnAbsentColumn(t *testing.T) {
 
 	// Contrast, and the boundary of the leniency: a REQUIRED read on the same
 	// absent column still fails the gap. The two lists are not the same rule.
-	_, perr = buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	_, perr = buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix", Reads: []string{"row.priorClaimKey"}},
 		map[string]any{"entityKey": tpUnitKey}, 7)
 	require.NotNil(t, perr, "a required read on an absent column must still fail the gap")
 
 	// Contrast: a config error in the optionalReads list is NOT dropped.
-	_, perr = buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	_, perr = buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		GapAction{Action: actionDirectOp, Operation: "Fix", OptionalReads: []string{`json:"` + tpUnitKey + `"`}},
 		map[string]any{}, 7)
 	require.NotNil(t, perr, "a config error in optionalReads must fail the gap, not silently drop the entry")
@@ -401,14 +401,14 @@ func TestGapCandidate_CarriesOptionalReads(t *testing.T) {
 	require.Equal(t, []string{"row.priorClaimKey"}, candidateGapAction(cand).OptionalReads,
 		"candidateGapAction must carry it into the GapAction buildPlan consumes")
 
-	pl, perr := buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr := buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		candidateGapAction(cand), map[string]any{"priorClaimKey": tpIdentity}, 7)
 	require.Nil(t, perr)
 	require.Equal(t, []string{tpIdentity}, pl.optionalReads(""),
 		"a selected candidate's declared optional read must reach the dispatched plan")
 
 	// Omission vector: a candidate declaring none leaves the plan field nil.
-	pl, perr = buildPlan(nil, "typedParams", tpEntityID, "missing_a",
+	pl, perr = buildPlan(nil, fixtureActorKey, "typedParams", tpEntityID, "missing_a",
 		candidateGapAction(GapCandidate{Action: actionDirectOp, Operation: "Fix"}), map[string]any{}, 7)
 	require.Nil(t, perr)
 	require.Nil(t, pl.optionalReads)

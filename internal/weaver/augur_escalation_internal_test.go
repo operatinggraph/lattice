@@ -78,7 +78,7 @@ func TestAugurEscalation_BuildsDirectOp(t *testing.T) {
 
 	// The synthesized GapAction must plan as a directOp through the normal path
 	// (buildPlan(actionDirectOp) → fireEpisode), with expectedRevision injected.
-	pl, perr := buildPlan(s, targetID, entityID, gapColumn, ga, map[string]any{"entityKey": entityKey}, 42)
+	pl, perr := buildPlan(s, fixtureActorKey, targetID, entityID, gapColumn, ga, map[string]any{"entityKey": entityKey}, 42)
 	if perr != nil {
 		t.Fatalf("buildPlan over the escalation GapAction: %v", perr)
 	}

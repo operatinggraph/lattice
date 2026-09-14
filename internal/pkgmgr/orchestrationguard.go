@@ -72,6 +72,22 @@ const optionalReadsAction = actionDirectOp
 // reservedGapParam and optionalReadsAction above carry.
 const typedLiteralPrefix = "json:"
 
+// actorToken is the playbook token that names the DISPATCHING engine's own
+// actor key — the identity Weaver stamps on the envelope it submits. It is
+// admitted on a gap action's enumerations[].hub alone (Contract #10 §10.8),
+// where the engine substitutes it at plan time; on a param, a reads /
+// optionalReads entry, or any other authored value it is refused, because only
+// a hub — a walk's starting vertex — has a meaning for the submitter's own
+// identity.
+//
+// Re-stated here for the same reason typedLiteralPrefix above is (the
+// installer depends on no engine) and tied back the same way, by
+// TestGapCompanionPrefixes_MatchWeaverVocabulary reading internal/weaver's
+// source. It is also the spelling the op-descriptor dispatch surface admits in
+// its own enumeration-hub vocabulary (opdispatchtemplates.go), so an operation
+// declaring the same walk on both dispatching surfaces writes it identically.
+const actorToken = "{actor}"
+
 // Loom step kinds (Contract #10 §10.5). Re-stated here so the installer
 // validates patterns without importing internal/loom (the installer must not
 // depend on an engine).
@@ -203,11 +219,16 @@ func (def Definition) validateWeaverTargets() error {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q param %q: %w",
 					idx, t.TargetID, col, name, err)
 			}
-			if f, found := typedLiteralInStringField(dispatchStringFields(
+			stringFields := dispatchStringFields(
 				ga.Subject, ga.Pattern, ga.Operation, ga.Assignee, ga.Target,
-				ga.Reads, ga.OptionalReads, ga.Enumerations)); found {
+				ga.Reads, ga.OptionalReads, ga.Enumerations)
+			if f, found := typedLiteralInStringField(stringFields); found {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: %s %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted there (it is meaningful only in a gap's params bag); write the value directly",
 					idx, t.TargetID, col, f.name, f.value, typedLiteralPrefix)
+			}
+			if f, found := actorTokenInStringField(stringFields); found {
+				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: %s %q must be a key, operationType or pattern ref — always a string — so the %s token is not permitted there (it names the submitting engine's own identity, which is meaningful only on an enumeration hub); write the value directly",
+					idx, t.TargetID, col, f.name, f.value, actorToken)
 			}
 			// A goal-authored gap (R1) legitimately declares no top-level
 			// Action — dispatch comes entirely from the Actions catalog via
@@ -375,27 +396,32 @@ func formatJSONFloat(spelling string) string {
 func dispatchStringFields(subject, pattern, operation, assignee, target string,
 	reads, optionalReads []string, ens []EnumerationSpec) []namedValue {
 	out := []namedValue{
-		{"subject", subject},
-		{"pattern", pattern},
-		{"operation", operation},
-		{"assignee", assignee},
-		{"target", target},
+		{name: "subject", value: subject},
+		{name: "pattern", value: pattern},
+		{name: "operation", value: operation},
+		{name: "assignee", value: assignee},
+		{name: "target", value: target},
 	}
 	for i, r := range reads {
-		out = append(out, namedValue{fmt.Sprintf("reads[%d]", i), r})
+		out = append(out, namedValue{name: fmt.Sprintf("reads[%d]", i), value: r})
 	}
 	for i, r := range optionalReads {
-		out = append(out, namedValue{fmt.Sprintf("optionalReads[%d]", i), r})
+		out = append(out, namedValue{name: fmt.Sprintf("optionalReads[%d]", i), value: r})
 	}
 	for i, en := range ens {
-		out = append(out, namedValue{fmt.Sprintf("enumerations[%d].hub", i), en.Hub})
+		out = append(out, namedValue{name: fmt.Sprintf("enumerations[%d].hub", i), value: en.Hub, hub: true})
 	}
 	return out
 }
 
 // namedValue pairs one authored dispatch-binding value with the name the
-// engine's resolver reports it under.
-type namedValue struct{ name, value string }
+// engine's resolver reports it under. hub marks the entries that are an
+// enumeration's hub — the one field of the action contract whose grammar
+// admits the actorToken, and so the one that token's refusal must skip.
+type namedValue struct {
+	name, value string
+	hub         bool
+}
 
 // typedLiteralInStringField returns the first string-typed field carrying the
 // typed-literal token. The engine refuses these at dispatch (resolveStringParam)
@@ -404,10 +430,33 @@ type namedValue struct{ name, value string }
 // the fields it covers are the ones the authored-dispatch scope guard
 // (authored_dispatch_scope.go) compares by RAW string equality, so a token
 // that survived to dispatch would name an operation or pattern in a spelling
-// no gate recognises.
+// no gate recognises. Hubs are covered too: the typed literal has no valid
+// form on any of these fields.
 func typedLiteralInStringField(fields []namedValue) (namedValue, bool) {
 	for _, f := range fields {
 		if strings.HasPrefix(f.value, typedLiteralPrefix) {
+			return f, true
+		}
+	}
+	return namedValue{}, false
+}
+
+// actorTokenInStringField returns the first string-typed field carrying the
+// actorToken OUTSIDE an enumeration hub. The hub is the single field whose
+// grammar admits it, so it is the single field skipped here; every other
+// authored value gets the refusal, on the same dual posture typedLiteralIn
+// StringField carries — the engine refuses it at dispatch (resolveStringParam)
+// and at load (validateGapStringFields), and install refuses it first for the
+// clearer author error.
+//
+// The refusal matters most on the fields nothing downstream would ever
+// complain about: a reads or optionalReads entry spelled {actor} is a
+// syntactically fine key, so it would install, load, dispatch, and declare a
+// read the op never makes — a declaration the read-drift guard adjudicates
+// against, retiring a baseline row for a walk that goes on running undeclared.
+func actorTokenInStringField(fields []namedValue) (namedValue, bool) {
+	for _, f := range fields {
+		if !f.hub && f.value == actorToken {
 			return f, true
 		}
 	}

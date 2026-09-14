@@ -252,7 +252,7 @@ func TestBuildProposedOpPlan_Valid_DirectOp(t *testing.T) {
 	})
 	const handle = "AProposalHandle0001"
 
-	pl, perr := buildProposedOpPlan(s, handle, row, 7)
+	pl, perr := buildProposedOpPlan(s, fixtureActorKey, handle, row, 7)
 	if perr != nil {
 		t.Fatalf("buildProposedOpPlan: %v", perr)
 	}
@@ -293,11 +293,11 @@ func TestBuildProposedOpPlan_RequestIDStableAcrossReclaim(t *testing.T) {
 	})
 	const handle = "AProposalHandle0002"
 
-	pl1, perr := buildProposedOpPlan(s, handle, row, 7)
+	pl1, perr := buildProposedOpPlan(s, fixtureActorKey, handle, row, 7)
 	if perr != nil {
 		t.Fatalf("buildProposedOpPlan (rev 7): %v", perr)
 	}
-	pl2, perr := buildProposedOpPlan(s, handle, row, 999)
+	pl2, perr := buildProposedOpPlan(s, fixtureActorKey, handle, row, 999)
 	if perr != nil {
 		t.Fatalf("buildProposedOpPlan (rev 999): %v", perr)
 	}
@@ -316,7 +316,7 @@ func TestBuildProposedOpPlan_Invalid_ScopeEscape_FlipOnly(t *testing.T) {
 	})
 	const handle = "AProposalHandle0003"
 
-	pl, perr := buildProposedOpPlan(s, handle, row, 7)
+	pl, perr := buildProposedOpPlan(s, fixtureActorKey, handle, row, 7)
 	if perr != nil {
 		t.Fatalf("an invalid proposal must plan a flip, not error: %v", perr)
 	}
@@ -339,7 +339,7 @@ func TestBuildProposedOpPlan_Invalid_NoCandidateKey_FlipOnly(t *testing.T) {
 	t.Parallel()
 	s := newTestSource(t)
 	row := map[string]any{"entityKey": "vtx.augurproposal.AProposalHandle0004"}
-	pl, perr := buildProposedOpPlan(s, "AProposalHandle0004", row, 1)
+	pl, perr := buildProposedOpPlan(s, fixtureActorKey, "AProposalHandle0004", row, 1)
 	if perr != nil {
 		t.Fatalf("a malformed row must plan a flip, not error: %v", perr)
 	}
@@ -359,7 +359,7 @@ func TestBuildProposedOpPlan_Transient_DefersNoFlip(t *testing.T) {
 		"pattern": "notInstalledPattern",
 		"subject": dpCandidate,
 	})
-	pl, perr := buildProposedOpPlan(s, "AProposalHandle0005", row, 1)
+	pl, perr := buildProposedOpPlan(s, fixtureActorKey, "AProposalHandle0005", row, 1)
 	if pl != nil {
 		t.Fatalf("expected no plan for an unresolved pattern reference, got %+v", pl)
 	}
@@ -509,7 +509,7 @@ func TestBuildProposedOpPlan_DispatchesTheRowsLeg(t *testing.T) {
 
 	for leg, wantOp := range map[int]string{0: "SetListingStatus", 1: "RecordLeaseDecision"} {
 		row := planRow(dpCandidate, "vtx.meta.SomeTargetHJKMNPQRS1", leg, steps...)
-		pl, perr := buildProposedOpPlan(s, handle, row, 7)
+		pl, perr := buildProposedOpPlan(s, fixtureActorKey, handle, row, 7)
 		if perr != nil {
 			t.Fatalf("leg %d: buildProposedOpPlan: %v", leg, perr)
 		}
@@ -548,7 +548,7 @@ func TestBuildProposedOpPlan_LegPastTheEnd_FlipOnly(t *testing.T) {
 		directStep("SetListingStatus", dpCandidate),
 		directStep("RecordLeaseDecision", dpCandidate))
 
-	pl, perr := buildProposedOpPlan(s, "AProposalHandle0011", row, 7)
+	pl, perr := buildProposedOpPlan(s, fixtureActorKey, "AProposalHandle0011", row, 7)
 	if perr != nil {
 		t.Fatalf("a leg past the end must plan a flip, not error: %v", perr)
 	}
@@ -577,7 +577,7 @@ func TestBuildProposedOpPlan_LegacyRowUnchanged(t *testing.T) {
 	})
 	const handle = "AProposalHandle0012"
 
-	pl, perr := buildProposedOpPlan(s, handle, row, 7)
+	pl, perr := buildProposedOpPlan(s, fixtureActorKey, handle, row, 7)
 	if perr != nil {
 		t.Fatalf("buildProposedOpPlan: %v", perr)
 	}

@@ -66,6 +66,24 @@ type actuator struct {
 	logger *slog.Logger
 }
 
+// actorKey is the identity this engine submits under — the exact value
+// actuator.submit stamps as opEnvelope.Actor. Plan-time consumers read it back
+// through the Actuator's own field rather than from Config so an {actor}
+// enumeration hub and the envelope that carries it cannot come from two
+// sources and disagree.
+//
+// It is empty only for an Engine assembled field-by-field, as this package's
+// unit tests do; NewEngine always builds an Actuator and Start refuses an empty
+// ActorKey outright. That empty string is precisely the condition buildPlan
+// raises as a config error, so the gap cannot degrade into a silently rootless
+// hub.
+func (e *Engine) actorKey() string {
+	if e.act == nil {
+		return ""
+	}
+	return e.act.actor
+}
+
 func newActuator(conn *substrate.Conn, lane, actor string, logger *slog.Logger) *actuator {
 	if logger == nil {
 		logger = slog.Default()
