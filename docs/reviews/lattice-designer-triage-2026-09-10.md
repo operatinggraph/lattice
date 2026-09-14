@@ -510,7 +510,7 @@ names no such sentences** — the live text is dossier entry 11 (`:672-679`); th
   by this same run** (struck 2026-09-14, body-stays-true). The fixture gap was absorbed as the batch's own
   second unit rather than left as a find: `natsfixture.StartRestartableServer` /
   `RestartableServer.{Stop,Start,StoreDir}` gives the JetStream store to the *test* instead of to any one
-  server (`8f25624`), and **T8 is pinned live** by
+  server (`b094aa2`), and **T8 is pinned live** by
   `TestKVMarkerProvenance_TTLPastDueAtRecoveryStillMintsAMaxAgeMarker` in
   `internal/substrate/kv_marker_provenance_test.go` — the stronger of §3.5's two options, not the
   `filestore.go`-cites fallback. A reader must not take this bullet as licence to skip the pin: it exists.
@@ -556,7 +556,7 @@ checklist applies whole, #1 hardest: **the note is new state, so its state table
 it is a test** (created / reset at four boundaries / carried across restart / ordered by the CAS).
 
 **6. Adjacent finds.** (a) ~~**`natsfixture` cannot restart a file-backed NATS server**~~ — **CLOSED by this
-run**, absorbed as the batch's second unit (`8f25624`), not filed. (b) §3.2's `docs/components/loom.md:351,363,587` and the `platform-bucket-marker-ttl-design.md:26` sentence
+run**, absorbed as the batch's second unit (`b094aa2`), not filed. (b) §3.2's `docs/components/loom.md:351,363,587` and the `platform-bucket-marker-ttl-design.md:26` sentence
 are stale *instructions* pointing at a "separate, unbuilt row" this fire closes — fixed in increment 5, in the
 same commit (the body-stays-true rule).
 
@@ -576,8 +576,8 @@ three sites are `:1488`, `:1542`, `:1612` as designed — the count holds, the g
 
 ### 3.8 Close note — SHIPPED 2026-09-14, and what did not ship
 
-**Shipped on `main`** (Steward/Lattice, branch `claude/exciting-clarke-re5z2f`): `8f25624` the T8 fixture seam
-+ live pin · `711d468` the guard · `ce9843a` the fix round · `c1fc104` the withdrawal below. CI green.
+**Shipped on `main`** (Steward/Lattice, branch `claude/exciting-clarke-re5z2f`): `b094aa2` the T8 fixture seam
++ live pin · `a66dd47` the guard · `c3c4825` the fix round · `27e5c76` the withdrawal below. CI green.
 
 **The guard is the ratified design, whole.** All three rejected-or-lost verdicts date the step before reading
 absence as rejection; the epoch is the `token.<pendingToken>` pointer's substrate stamp; past
@@ -587,7 +587,7 @@ aliasing it.
 
 **Withdrawn: the operator verb.** §3.4's false "the operator verb (`redrive`) is the same one a false fail
 needs" was addressed mid-fire by widening `RedriveInstance` to accept a running instance carrying a note. The
-cumulative close pass broke it twice, both proved, and it was reverted in `c1fc104`:
+cumulative close pass broke it twice, both proved, and it was reverted in `27e5c76`:
 
 1. A running instance's **pattern pin is authoritative** (which is why `advance` and `onDeadline` read it), and
    the widened path re-pinned from the live source — so with the pattern edited since, the redrive resumed a

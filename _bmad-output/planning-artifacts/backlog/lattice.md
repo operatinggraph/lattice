@@ -138,8 +138,8 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
-- 2026-09-14 · `c1fc104` · [Loom/opstatus] the deadline probe refuses to read absence as rejection past its evidence's own lifetime; §10.6 edit prepared, unratified ([triage §3](../../../docs/reviews/lattice-designer-triage-2026-09-10.md))
-- 2026-09-14 · `8f25624` · [natsfixture/substrate] a TTL past due at recovery is minted as a `MaxAge` marker — pinned live, not cited ([triage §3.5](../../../docs/reviews/lattice-designer-triage-2026-09-10.md) T8)
+- 2026-09-14 · `27e5c76` · [Loom/opstatus] the deadline probe refuses to read absence as rejection past its evidence's own lifetime; §10.6 edit prepared, unratified ([triage §3](../../../docs/reviews/lattice-designer-triage-2026-09-10.md))
+- 2026-09-14 · `b094aa2` · [natsfixture/substrate] a TTL past due at recovery is minted as a `MaxAge` marker — pinned live, not cited ([triage §3.5](../../../docs/reviews/lattice-designer-triage-2026-09-10.md) T8)
 - 2026-09-14 · `f4ccd62` · [Weaver/CI] the advance carries its own "cannot act" gates, and `lint-weaver-retire-above-guard` holds every dispatch seam past them ([dossier](../../../docs/components/weaver.md))
 - 2026-09-14 · `5c9912af` · [Refractor/edge-manifest] the own-task op walk gets its own read-grant domain — the base producer binds `op` on one chain and indexes ([triage §2](../../../docs/reviews/lattice-designer-triage-2026-09-10.md))
 - 2026-09-14 · `d1f6eb8` · [Weaver] the `{actor}` hub substitutes the dispatching identity, refused off-hub at all three points ([design](../../implementation-artifacts/descriptor-declared-enumerations-design.md) §9)
