@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/healthkv"
@@ -143,6 +144,12 @@ type heartbeater struct {
 	counter   *runningInstanceCounter
 	logger    *slog.Logger
 
+	// inconclusive is the engine's running total of REFUSED deadline verdicts
+	// (Engine.inconclusiveVerdicts), read once per tick. A nil pointer reports
+	// nothing rather than zero: a heartbeater built without the engine's
+	// counter must not claim the engine has refused none.
+	inconclusive *atomic.Int64
+
 	// ttlMultiplier derives the heartbeat's Health-KV TTL (interval ×
 	// ttlMultiplier, Contract #5 §5.6). Zero disables TTL.
 	ttlMultiplier int
@@ -155,7 +162,7 @@ type heartbeater struct {
 	pausedSince map[string]string
 }
 
-func newHeartbeater(conn *substrate.Conn, healthBucket, stateBucket, instance string, every time.Duration, states *healthkv.ConsumerStateCache, logger *slog.Logger) *heartbeater {
+func newHeartbeater(conn *substrate.Conn, healthBucket, stateBucket, instance string, every time.Duration, states *healthkv.ConsumerStateCache, inconclusive *atomic.Int64, logger *slog.Logger) *heartbeater {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -170,6 +177,7 @@ func newHeartbeater(conn *substrate.Conn, healthBucket, stateBucket, instance st
 		interval:      every,
 		states:        states,
 		counter:       &runningInstanceCounter{conn: conn, bucket: stateBucket, interval: every},
+		inconclusive:  inconclusive,
 		logger:        logger,
 		ttlMultiplier: healthkv.DefaultTTLMultiplier,
 		pausedSince:   make(map[string]string),
@@ -223,6 +231,9 @@ func (h *heartbeater) emit(ctx context.Context, status string) {
 		metrics["runningInstances"] = n
 	} else {
 		h.logger.Warn("loom heartbeat: running-instance scan failed", "err", err)
+	}
+	if h.inconclusive != nil {
+		metrics["inconclusiveDeadlines"] = h.inconclusive.Load()
 	}
 
 	issues := h.pausedIssues(states, now)

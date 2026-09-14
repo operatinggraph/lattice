@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/operatinggraph/lattice/internal/healthkv"
@@ -237,6 +238,19 @@ type Engine struct {
 	// through. It is conn for every production engine; a test replaces it to
 	// observe the requests that one pass makes.
 	failedIndex failedIndexStore
+	// inconclusiveVerdicts counts the deadline verdicts this process has
+	// REFUSED — probeRejectedOrLost's inconclusive arm. The heartbeat reports
+	// it (health.go's emit), which is how a parked instance reaches operational
+	// monitoring rather than only the log.
+	//
+	// A counter of refusals made, not a gauge of instances currently parked:
+	// the gauge's source is the DeadlineProbe field on each record, and reading
+	// it would mean fetching every running instance's body on every heartbeat —
+	// the exact fetch runningInstanceCounter's narrow interface exists to make
+	// impossible on this path. Monotonic and per-process, so it does not fall
+	// back to zero when an operator redrives; nonzero is "this engine has
+	// refused verdicts, go look", and `lattice loom list` is where to look.
+	inconclusiveVerdicts atomic.Int64
 	// clock is the wall clock the deadline probe's evidence-horizon comparison
 	// reads — the "is what I just read still inside its own lifetime?" test in
 	// probeRejectedOrLost. It is injectable because that horizon is a day long
@@ -331,7 +345,7 @@ func (e *Engine) Start(ctx context.Context) (err error) {
 		}
 	}
 
-	hb := newHeartbeater(e.conn, e.cfg.HealthKVBucket, e.cfg.LoomStateBucket, e.cfg.Instance, e.cfg.HeartbeatEvery, e.states, e.logger)
+	hb := newHeartbeater(e.conn, e.cfg.HealthKVBucket, e.cfg.LoomStateBucket, e.cfg.Instance, e.cfg.HeartbeatEvery, e.states, &e.inconclusiveVerdicts, e.logger)
 	go hb.run(ctx)
 
 	e.source.setLoadCallback(func(p *Pattern) { e.reconcileConsumers() })
@@ -1437,6 +1451,7 @@ func (e *Engine) probeRejectedOrLost(ctx context.Context, inst *Instance, reason
 		"readings", "the op may have committed and its tracker aged out, or it was genuinely rejected — "+
 			"no runtime can tell the two apart once the tracker is gone",
 		"operatorAction", "lattice loom redrive")
+	e.inconclusiveVerdicts.Add(1)
 	nerr := e.state.noteDeadlineProbe(ctx, inst, reason, at, expectedRevision)
 	if nerr != nil && substrate.IsRevisionConflict(nerr) {
 		e.logger.Info("loom: instance moved on under the probe; inconclusive note dropped",
