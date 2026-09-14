@@ -3410,3 +3410,38 @@ func TestClinic_CreateAppointment_PendingLeaseFallsBack(t *testing.T) {
 		t.Fatalf("residentVisit link must NOT be written for a pending/undecided lease: %s", residentVisitLnk)
 	}
 }
+
+// TestClinic_CreateAppointment_EndedLeaseFallsBack — a lease that matches the
+// patient and was approved (a .tenancy exists) but whose term has ENDED
+// (EndTenancy recorded endedAt) writes no residentVisit link: a moved-out
+// former tenant is not a resident, however live the leaseapp and its
+// applicationFor link remain. Mirrors wellness-domain's
+// TestCreateBooking_EndedLeaseFallsBackToStandardRate.
+func TestClinic_CreateAppointment_EndedLeaseFallsBack(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "resident-visit-ended")
+
+	identityKey := "vtx.identity.CLrvendedJKMNPQRSTUV"
+	clSeedVertex(t, ctx, conn, identityKey, "identity", false)
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "rvendedpat01", "CreatePatient", "patient",
+		`{"fullName":"Edna Ended","identityKey":"`+identityKey+`"}`,
+		[]string{identityKey}, []string{identityKey + ".patientClaim"}, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerKey := createProvider(t, ctx, conn, cp, cons, "rvendedprv01", "Dr. Owen Reyes", "Pediatrics")
+
+	leaseKey := clSeedLease(t, ctx, conn, "CLrvendedLeaseJKMNPQ", "CLrvendedJKMNPQRSTUV", true)
+	ended, _ := json.Marshal(map[string]any{"class": "tenancy", "isDeleted": false, "data": map[string]any{
+		"leaseStart": "2025-06-01T00:00:00Z", "leaseEnd": "2026-06-01T00:00:00Z", "endedAt": "2026-06-01T00:00:00Z",
+	}})
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, leaseKey+".tenancy", ended); err != nil {
+		t.Fatalf("seed ended tenancy: %v", err)
+	}
+
+	apptID := clCreateAppointmentWithLease(t, ctx, conn, cp, cons, "rvendedappt1", patientKey, providerKey, leaseKey, processor.OutcomeAccepted)
+
+	residentVisitLnk := "lnk.appointment." + apptID + ".residentVisit.leaseapp.CLrvendedLeaseJKMNPQ"
+	if !clMissing(t, ctx, conn, residentVisitLnk) {
+		t.Fatalf("residentVisit link must NOT be written for an ended tenancy: %s", residentVisitLnk)
+	}
+}

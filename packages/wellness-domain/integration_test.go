@@ -1274,6 +1274,42 @@ func TestCreateBooking_PendingLeaseFallsBackToStandardRate(t *testing.T) {
 	}
 }
 
+// TestCreateBooking_EndedLeaseFallsBackToStandardRate proves a lease whose
+// applicationFor link matches the booker and that was approved (a .tenancy
+// exists) but whose term has ENDED (EndTenancy recorded endedAt) does NOT
+// qualify for the resident rate — a moved-out former tenant is no longer a
+// resident, however live the leaseapp and its link remain.
+func TestCreateBooking_EndedLeaseFallsBackToStandardRate(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "bookingended")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcreatestudio000012", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdcreatesessio000013", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+	bookerID := "BBWELLBKERENDHJKMNPQ"
+	bookerKey := seedIdentity(t, ctx, conn, bookerID)
+	leaseID := "BBWELLENDEDLEASEHJKM"
+	leaseKey := seedLease(t, ctx, conn, leaseID, bookerID, true)
+	seedVertex(t, ctx, conn, leaseKey+".tenancy", "tenancy", map[string]any{
+		"leaseStart": "2025-06-01T00:00:00Z", "leaseEnd": "2026-06-01T00:00:00Z", "endedAt": "2026-06-01T00:00:00Z",
+	})
+
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdcreatebookin000014", sessionKey, bookerKey, leaseKey)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted (rate falls back, never rejected)", outcome)
+	}
+
+	statusDoc := readDoc(t, ctx, conn, bookingKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["rate"].(string); got != "standard" {
+		t.Fatalf("status.rate = %q, want standard (an ended tenancy is not a resident)", got)
+	}
+	bookingID := bookingKey[len("vtx.booking."):]
+	residentLnk := "lnk.booking." + bookingID + ".residentRate.leaseapp." + leaseID
+	if keyExists(t, ctx, conn, residentLnk) {
+		t.Fatalf("residentRate link must NOT be written for an ended tenancy: %s", residentLnk)
+	}
+}
+
 func TestCreateBooking_RejectsWhenSessionFull(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "bookingfull")

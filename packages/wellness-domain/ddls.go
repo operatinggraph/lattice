@@ -892,8 +892,9 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"the cancellation — a member must always be able to cancel their own seat regardless of how much " +
 			"waitlist history a popular session has accumulated. Resident-rate: an optional leaseAppKey, when supplied, " +
 			"qualifies for rate=resident only when ALL THREE hold: the leaseapp is alive, its .tenancy aspect " +
-			"is present (CreateOnly-stamped on the leaseapp's FIRST DecideLeaseApplication approve — the only " +
-			"signal an application actually became an active tenancy, not merely pending or declined), and " +
+			"is present and not ended (CreateOnly-stamped on the leaseapp's FIRST DecideLeaseApplication approve — " +
+			"the only signal an application actually became an active tenancy, not merely pending or declined; " +
+			"an endedAt recorded by EndTenancy means the term has run out), and " +
 			"lnk.leaseapp.<id>.applicationFor.identity.<bookerId> is live (known-key kv.Read, the lease-signing " +
 			"renewal-verification idiom) — a match writes the residentRate link (booking→leaseapp, the " +
 			"ratifying audit link a future billing composition lens can walk); failing any one check is NOT a " +
@@ -4512,13 +4513,15 @@ def prepare_booking_common(state, op, p):
         # .tenancy is stamped CreateOnly on a leaseapp's FIRST
         # DecideLeaseApplication approve (lease-signing/scripts.go) — its
         # presence is the only signal that this application actually
-        # became an active tenancy, not merely a pending or declined one.
-        # Without this check a pending or declined applicant (the
-        # applicationFor link stays live in both cases) would wrongly
-        # qualify for the resident rate.
+        # became an active tenancy, not merely a pending or declined one,
+        # and its endedAt (recorded by EndTenancy once the term has run out
+        # with no signed renewal) is the signal that the tenancy is over.
+        # Without both checks a pending or declined applicant (the
+        # applicationFor link stays live in both cases) or a moved-out
+        # former tenant would wrongly qualify for the resident rate.
         # read-posture: (d) declared optionalReads at CreateBooking/JoinWaitlist dispatch.
         tenancy_doc = kv.Read(lease_key + ".tenancy")
-        tenancy_present = tenancy_doc != None and not tenancy_doc.isDeleted
+        tenancy_present = tenancy_doc != None and not tenancy_doc.isDeleted and tenancy_doc.data.get("endedAt") == None
         # read-posture: (d) declared optionalReads at CreateBooking/JoinWaitlist dispatch.
         app_for_lnk = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + booker_id)
         link_live = app_for_lnk != None and not app_for_lnk.isDeleted

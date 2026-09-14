@@ -588,7 +588,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"(ScheduleInPast) — a soft past-time guard (submittedAt is caller-supplied; the host clock is " +
 			"not exposed to Starlark). CreateAppointment also accepts an optional leaseAppKey (mirrors " +
 			"wellness-domain's CreateBooking resident-rate check): when the leaseapp is alive, carries a " +
-			".tenancy aspect, and its applicant identity matches the patient's own identifiedBy identity, " +
+			".tenancy aspect with no endedAt, and its applicant identity matches the patient's own identifiedBy identity, " +
 			"a residentVisit link (appointment→leaseapp) is written — a mismatch or absent lease falls " +
 			"through silently, never a hard failure. CreateAppointment also accepts an optional site (vtx.building.<NanoID>, " +
 			"a location-domain building carrying a clinicSite .site profile): when supplied, the building must be alive + " +
@@ -3336,8 +3336,9 @@ def execute(state, op):
         # wellness-domain's CreateBooking residentRate check, qualifies the
         # appointment for a residentVisit link (appointment→leaseapp) only
         # when ALL THREE hold: the leaseapp is alive, its .tenancy aspect is
-        # present (the same first-approve signal residentRate uses — a
-        # pending/declined application never qualifies), and the leaseapp's
+        # present and not ended (the same signals residentRate uses — a
+        # pending/declined application never qualifies, nor does a term that
+        # has ended), and the leaseapp's
         # applicant identity is THIS patient's own identifiedBy identity. A
         # mismatch or absent lease falls through silently — leaseAppKey is a
         # confinement hint, never a hard requirement, exactly like
@@ -3353,9 +3354,12 @@ def execute(state, op):
             lease_alive = lease_doc != None and not lease_doc.isDeleted
             # read-posture: (d) declared optionalReads by CreateAppointment's
             # dispatcher alongside the leaseapp itself — the first-approve signal
-            # is absent on a pending/declined application, which falls through.
+            # is absent on a pending/declined application, which falls through;
+            # an endedAt (recorded by EndTenancy once the term ran out with no
+            # signed renewal) means the patient has moved out, which falls
+            # through the same way.
             tenancy_doc = kv.Read(lease_key + ".tenancy")
-            tenancy_present = tenancy_doc != None and not tenancy_doc.isDeleted
+            tenancy_present = tenancy_doc != None and not tenancy_doc.isDeleted and tenancy_doc.data.get("endedAt") == None
             # Unlike wellness's CreateBooking (whose booker IS an identity,
             # supplied directly), CreateAppointment's caller supplies a
             # patient vertex, not an identity — the lease's applicant is
