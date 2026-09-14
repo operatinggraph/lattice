@@ -328,7 +328,6 @@ func TestValidateOpDispatchTemplates_EnumerationHubVocabularyIsWhatClientsResolv
 		"{actor}",
 		"{payload.orderKey}",
 		"vtx.identity.AAidentityHJKMNPQRST",
-		"vtx.identity.{payload.identityId}",
 	} {
 		t.Run("admitted "+hub, func(t *testing.T) {
 			t.Parallel()
@@ -363,8 +362,20 @@ func TestValidateOpDispatchTemplates_EnumerationHubVocabularyIsWhatClientsResolv
 		{
 			"a mid-segment hub placeholder is refused",
 			"bkr{actor}",
-			[]string{"does not occupy a whole dot-delimited segment of the hub",
-				"a hub is a whole vertex key, not a fragment assembled into one"},
+			[]string{"is not the whole hub", "resolves to a WHOLE vertex key, not a segment of one"},
+		},
+		{
+			// The stricter half of the same rule, and the one a whole-segment
+			// check admitted: the placeholder fills its own dot-delimited
+			// segment, so the check the two read-template lists use passes it —
+			// yet what it resolves to is itself a whole key, and every shipped
+			// descriptor-driven client substitutes mid-string, so the hub
+			// reaching the envelope is vtx.identity.vtx.identity.<id>. A hub is
+			// the whole value or it is not a placeholder.
+			"a whole-segment hub placeholder that is not the whole hub is refused",
+			"vtx.identity.{payload.identityId}",
+			[]string{"is not the whole hub", "vtx.identity.vtx.identity.<id>",
+				"make the placeholder the entire value, or name a literal key"},
 		},
 		{
 			"a placeholder outside the vocabulary altogether is refused",

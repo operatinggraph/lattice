@@ -25,11 +25,21 @@ var augurAllowedActions = map[string]bool{
 // augur-dispatch-pickup §3.2/§3.3). entityID is the row's entity segment — the
 // proposal's bare NanoID handle (§10.2: the augurDispatchPending lens's
 // Output.KeyColumn puts the anchor's bare id there, same as every other
-// weaver-target). actorKey is the dispatching engine's own actor key, passed
-// straight through to the inner buildPlan so a materialised leg resolves an
-// {actor} enumeration hub against the same identity every other dispatch does.
-// row carries the augurDispatchPending lens's columns: proposedAction,
-// proposedParams, proposedSteps, dispatchLeg, candidateKey, targetMetaKey.
+// weaver-target). row carries the augurDispatchPending lens's columns:
+// proposedAction, proposedParams, proposedSteps, dispatchLeg, candidateKey,
+// targetMetaKey.
+//
+// actorKey is the dispatching engine's own actor key, passed straight through
+// to the inner buildPlan. It resolves NOTHING on this path today, and the
+// threading is deliberate anyway. No materialised leg can currently carry an
+// enumeration: the directOp branch below bypasses buildPlan entirely, and the
+// other branch reaches it only for assignTask/triggerLoom, whose GapAction
+// comes from materializeGapAction — which sets four string fields and no
+// Enumerations — and whose buildPlan arms would ignore the field regardless.
+// What the parameter buys is that the proposed-op path cannot quietly acquire
+// a SECOND source for the submitter's identity: whenever a materialised leg
+// does carry a hub, it resolves against the same actor the Actuator stamps,
+// because there is no other value here to reach for.
 //
 // A proposal is dispatched ONE LEG PER EPISODE. proposedSteps is the recorded
 // ordered plan and dispatchLeg how many of its legs have already fired, so this
