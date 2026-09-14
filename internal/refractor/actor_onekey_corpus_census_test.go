@@ -117,13 +117,23 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"edgeIdentity":                   walkNoHealer,
 	"edgeInstances":                  walkNoHealer,
 	"edgeManifestProviderReadGrants": oneKey,
-	"edgeManifestReadGrants":         walkIncompleteIndex,
+	// Its index is now complete (the own-task walk moved to its own domain,
+	// anchor_hopindex_corpus_census_test.go), so the position count is read
+	// rather than refused — and the answer is the walk: the producer's
+	// `(identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)` chain
+	// carries two UNLABELED positions, which admit any type and therefore the
+	// identity actor type. Another anchor's row really can render this vertex.
+	"edgeManifestReadGrants": walkMultiPosition,
 	// Its index is complete, so the position count is read rather than
 	// refused — and the answer is still the walk: the producer's
 	// `(identity)-[:worksAt]->(work)<-[:containedIn*0..]-(place)` chain carries
 	// two UNLABELED positions, which admit any type and therefore the identity
 	// actor type. Another anchor's row really can render this vertex.
 	"edgeManifestStaffReadGrants": walkMultiPosition,
+	// Single walk, fully labelled: `(identity)<-[:assignedTo]-(task:task)` then
+	// `(task)-[:forOperation]->(op:meta)`. The actor type binds at position 0
+	// only, so the one-key answer holds.
+	"edgeManifestTaskReadGrants": oneKey,
 	"edgeProviderQueue":           walkNoHealer,
 	"edgeProviderSchedule":        walkNoHealer,
 	"edgeServices":                walkNoHealer,

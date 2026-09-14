@@ -21,7 +21,7 @@ orchestration-base's tasks, service-domain's templates/instances, service-locati
 wellness/clinic/café domain state, role-standing grants, maintenance work orders, and the provider-hat
 archetypes — into the reserved `manifest.` key namespace, delivered per-actor over the shared
 `lattice.sync.user.<actor>` SYNC transport (the `nats-subject` Personal Lens adapter, `edge-manifest
-Fire 0`). It also declares **three generated read-grant producer lenses** (one per `ReadGrantDomain`), one
+Fire 0`). It also declares **four generated read-grant producer lenses** (one per `ReadGrantDomain`), one
 **plain `nats-kv` lens** (`opCatalog`, the staff-plane op-descriptor read model — see below), and one
 **server pane** (a Protected/RLS descriptor — a different mechanism, see "Server panes" below). It
 declares no DDLs and no permissions: every row is a read-side re-projection of state another package's DDL
@@ -84,6 +84,13 @@ reachable via the actor's own inbound `identifiedBy` binding to a provider-arche
 | `edgeProviderQueue` | `manifest.ent.<instanceId>` | a bound service provider's own instance queue (`providedBy` → `instanceOf`) — "what runs do I need to complete" |
 | `edgeEntitySessions` (2nd `Walk`) | `manifest.ent.<sessionId>` | a bound instructor's own led sessions (`ledBy`) — "my classes to teach"; this domain's member is `edgeEntitySessions`' second `AnchorWalk`, not a standalone lens (formerly the sibling `edgeInstructorSessions`, folded in per refractor-shared-keyspace-arbitration-design.md §13.7 build order (b) — same anchor kind, byte-identical RETURN, a resident who is ALSO the instructor of a session reachable both ways projects one idempotent row) |
 
+**Task-scoped lens** (`ReadGrantDomain: edgeManifestTask`) — reachable via a task directly `assignedTo` the
+actor, independent of any held role or residence chain:
+
+| Lens | Key | Anchors on |
+|---|---|---|
+| `edgeCatalog` (3rd `Walk`) | `manifest.op.<opMetaId>` | op metas reachable via a task `assignedTo` the actor's own `forOperation` link — the own-task authorization path (a live task's `cap.ephemeral.*` grant, not a `cap.roles.*` permission); this domain's member is `edgeCatalog`'s third `AnchorWalk`, not a standalone lens; an op reachable this way and also via the base or staff paths projects one merged row |
+
 **Generated read-grant producers** — one `actorAggregate` lens per `ReadGrantDomain`, compiled by `pkgmgr`
 from the `Walk` declarations above rather than hand-written (`lenses.go`'s `ReadGrantDomains()`); without
 them Refractor's D1 `readableAnchors` gate silently drops every row the corresponding lenses project:
@@ -93,6 +100,7 @@ them Refractor's D1 `readableAnchors` gate silently drops every row the correspo
 | `edgeManifestReadGrants` | `cap-read.edgeManifest.<actor>` (nats-kv, `capability-kv`) | every resident/base-lens anchor the actor's residence chain reaches |
 | `edgeManifestStaffReadGrants` | `cap-read.edgeManifestStaff.<actor>` | every staff-lens anchor a role the actor holds reaches |
 | `edgeManifestProviderReadGrants` | `cap-read.edgeManifestProvider.<actor>` | every provider-hat-lens anchor the actor's own provider/instructor/serviceprovider binding reaches |
+| `edgeManifestTaskReadGrants` | `cap-read.edgeManifestTask.<actor>` | every op meta a live task `assignedTo` the actor reaches via that task's own `forOperation` link |
 
 **The staff-plane op catalog** (`opCatalog`, staff-descriptor-rendering-design.md §2.1) is this package's
 one PLAIN lens — an ordinary `nats-kv` read model rather than a Personal Lens, and the only member of the
@@ -126,11 +134,11 @@ missing row could not say. Because the lens references the `permission`/`role` l
 event reaches it through the unseeded whole-corpus rescan rather than an anchored seed; that is
 install-frequency work, not steady-state.
 
-Three domains rather than one: §6.14 unions every cap-read slice into the actor's effective readable set, so
-a reachability path not every actor has (staff role-standing grants, provider-hat bindings) lives in its own
-slice — the §6.14 blast-radius unit, so a path most actors never take neither grows nor invalidates the
-base slice every actor holds. An identity with no such binding simply gets an empty slice, deleted by the
-generated producer's `EmptyBehavior` + realness filter.
+Four domains rather than one: §6.14 unions every cap-read slice into the actor's effective readable set, so
+a reachability path not every actor has (staff role-standing grants, provider-hat bindings, a live task's
+own-task grant) lives in its own slice — the §6.14 blast-radius unit, so a path most actors never take
+neither grows nor invalidates the base slice every actor holds. An identity with no such binding simply gets
+an empty slice, deleted by the generated producer's `EmptyBehavior` + realness filter.
 
 Vocabulary additions riding the op rows: `ceremonyMintedSecretHashField` / `ceremonyRevealTitle` /
 `ceremonyRevealHelp` (all nullable) declare a MINT-AND-REVEAL ceremony — the named field carries the

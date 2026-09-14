@@ -136,23 +136,23 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	// and AnchorSideSeeds (Dist's only consumer) drops no seed. The graph the
 	// derivation walks is the graph it walked before the re-open existed.
 	"edgeManifestStaffReadGrants": hopIndexed,
-	// The base producer is still held, and on a DIFFERENT variable than its
-	// residence chain: two of its walks bind `op` to a meta over different
-	// chains — `(tpl)-[:permitsOperation]->(op:meta)` in one stage and
-	// `(task)-[:forOperation]->(op:meta)` in a later one, after the boundary
-	// stranded it. That is the colliding-walk-variable shape staging exists to
-	// keep apart (pkgmgr's TestExpandReadGrantWalks_CollidingWalkVariablesAreStagedApart),
-	// so the two occurrences are NOT one binding and merging them would assert a
-	// hop no row walks. Its residence chain re-opens are admitted; this one name
-	// is what declines the lens.
-	"edgeManifestReadGrants":   hopWithDropped,
-	"edgeProviderQueue":        hopIndexed,
-	"edgeProviderSchedule":     hopIndexed,
-	"edgeServices":             hopIndexed, // Personal — see edgeEntityMenuItems.
-	"edgeStaffPanes":           hopIndexed,
-	"edgeStaffWorkOrders":      hopIndexed, // Personal — see edgeEntityMenuItems.
-	"edgeTasks#0":              hopIndexed,
-	"edgeTasks#1":              hopIndexed,
+	// The base producer no longer binds `op` on two chains: the own-task walk
+	// that used to strand it moved to its own `edgeManifestTask` domain
+	// (below), so the only `op` binding left is
+	// `(tpl)-[:permitsOperation]->(op:meta)`. Its residence chain re-opens are
+	// admitted the same way the staff producer's are (see above), so the index
+	// is complete.
+	"edgeManifestReadGrants": hopIndexed,
+	// Single walk, no staging boundary at all:
+	// `(identity)<-[:assignedTo]-(task:task)`, `(task)-[:forOperation]->(op:meta)`.
+	"edgeManifestTaskReadGrants": hopIndexed,
+	"edgeProviderQueue":          hopIndexed,
+	"edgeProviderSchedule":       hopIndexed,
+	"edgeServices":               hopIndexed, // Personal — see edgeEntityMenuItems.
+	"edgeStaffPanes":             hopIndexed,
+	"edgeStaffWorkOrders":        hopIndexed, // Personal — see edgeEntityMenuItems.
+	"edgeTasks#0":                hopIndexed,
+	"edgeTasks#1":                hopIndexed,
 	"followUpReminders":        hopIndexed,
 	"applicantOnboarding":      hopIndexed,
 	"identityAnchors":          hopIndexed,

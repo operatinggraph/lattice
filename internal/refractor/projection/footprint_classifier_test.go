@@ -98,7 +98,7 @@ func TestHasMultiBindingConjunctUnit_PinnedCensus(t *testing.T) {
 // ExpandReadGrantWalks, packages/edge-manifest's ReadGrantDomains) — the
 // staged-WITH shape this file's WITH-resolution logic exists for. Every
 // grant entry in every one of these producers is a single-binding MapLiteral
-// (one anchor per walk), so all three must classify false, exactly like the
+// (one anchor per walk), so all four must classify false, exactly like the
 // hand-authored producers above.
 func TestHasMultiBindingConjunctUnit_GeneratedActorAggregateProducers(t *testing.T) {
 	expanded, err := edgemanifest.Package.ExpandReadGrantWalks()
@@ -108,6 +108,7 @@ func TestHasMultiBindingConjunctUnit_GeneratedActorAggregateProducers(t *testing
 		"edgeManifestReadGrants",
 		"edgeManifestStaffReadGrants",
 		"edgeManifestProviderReadGrants",
+		"edgeManifestTaskReadGrants",
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := specByName(t, expanded.Lenses, name)

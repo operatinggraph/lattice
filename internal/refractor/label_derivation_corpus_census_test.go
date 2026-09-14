@@ -175,6 +175,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"edgeEntityTabs":                 {narrow, "identity leaseapp tab unit", modeBroad},
 	"edgeInstances":                  {narrow, "identity service", modeBroad},
 	"edgeManifestProviderReadGrants": {narrow, "appointment identity instructor provider service serviceprovider session", modeLabel},
+	"edgeManifestTaskReadGrants":     {narrow, "identity meta task", modeRelation},
 	"edgeProviderQueue":              {narrow, "identity service serviceprovider", modeBroad},
 	"edgeProviderSchedule":           {narrow, "appointment identity provider", modeBroad},
 	"edgeStaffPanes":                 {narrow, "identity meta role", modeBroad},

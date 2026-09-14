@@ -45,16 +45,17 @@ const OpCatalogBucket = "op-catalog"
 // So each of those sixteen declares its actor→anchor reachability ONCE, as a
 // `Walk`, and pkgmgr compiles BOTH artifacts from it: the lens's own OPTIONAL
 // MATCH prefix, and the read-grant producer that grants the anchors. `Spec`
-// therefore carries the presentation TAIL only. The three producers
-// (edgeManifestReadGrants / …Staff… / …Provider…) are generated, one per
-// declared ReadGrantDomain — they are not written here, and must not be.
+// therefore carries the presentation TAIL only. The four producers
+// (edgeManifestReadGrants / …Staff… / …Provider… / …Task…) are generated, one
+// per declared ReadGrantDomain — they are not written here, and must not be.
 //
-// Three domains rather than one: §6.14 unions every cap-read slice into the
+// Four domains rather than one: §6.14 unions every cap-read slice into the
 // actor's effective readable set, so a reachability path not every actor has
-// (staff role-standing grants, provider-hat bindings) lives in its own slice
-// and its branches never join the base producer's cross-branch fan-out. An
-// identity with no such binding simply gets an empty slice, deleted by the
-// generated producer's EmptyBehavior + realness filter.
+// (staff role-standing grants, provider-hat bindings, a live task's own-task
+// grant) lives in its own slice and its branches never join the base
+// producer's cross-branch fan-out. An identity with no such binding simply
+// gets an empty slice, deleted by the generated producer's EmptyBehavior +
+// realness filter.
 //
 // Every Personal-Lens cypher below is Personal:true (Refractor's cross-vertex
 // fan-out re-executes the cypher once per reachable identity, binding
@@ -149,7 +150,7 @@ func Lenses() []pkgmgr.LensSpec {
 					},
 				},
 				{
-					GrantDomain: domainBase,
+					GrantDomain: domainTask,
 					AnchorType:  "meta",
 					AnchorVar:   "op",
 					Chain: []string{
@@ -429,7 +430,7 @@ func Lenses() []pkgmgr.LensSpec {
 	}
 }
 
-// ReadGrantDomains declares the three cap-read slices this package owns. pkgmgr
+// ReadGrantDomains declares the four cap-read slices this package owns. pkgmgr
 // generates one actorAggregate producer lens per entry, in this order, appended
 // after the declared lenses — which is the order manifest.yaml lists them in.
 func ReadGrantDomains() []pkgmgr.ReadGrantDomainSpec {
@@ -437,6 +438,7 @@ func ReadGrantDomains() []pkgmgr.ReadGrantDomainSpec {
 		{Name: domainStaff},
 		{Name: domainBase},
 		{Name: domainProvider},
+		{Name: domainTask},
 	}
 }
 
@@ -446,6 +448,7 @@ const (
 	domainBase     = "edgeManifest"
 	domainStaff    = "edgeManifestStaff"
 	domainProvider = "edgeManifestProvider"
+	domainTask     = "edgeManifestTask"
 
 	// manifestSubjectPrefix + manifestStream are the shared Personal Lens
 	// transport every edge-manifest lens rides — the same SYNC stream +
@@ -602,7 +605,7 @@ RETURN
 // (`domainBase` — an op offered through a service the actor's residence
 // reaches), the held-role path (`domainStaff` — an op a permission grants
 // through a role the actor holds, staff-worlds F2's "browse all my ops"),
-// and the own-task path (`domainBase` — an op a live task assigned to the
+// and the own-task path (`domainTask` — an op a live task assigned to the
 // actor grants, mirroring edgeTasks's own self-assigned Walk one hop further
 // via the task's own `forOperation` link, orchestration-base/ddls.go). The
 // third exists because a task-scoped submission (e.g. lease-signing's

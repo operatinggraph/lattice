@@ -139,9 +139,10 @@ func narrowingCases(t *testing.T) []narrowingCase {
 			// (identity)<-[:identifiedBy]-(provider)<-[:withProvider]-(appointment)
 			// and (identity)<-[:identifiedBy]-(serviceprovider)<-[:providedBy]-(service)<-[:instanceOf]-(service)
 			// — so the derivation is exhaustive and the set is the seven types
-			// those patterns name. Its two siblings reach containment through
-			// UNLABELED nodes and stay broad; they are pinned in
-			// TestNonExhaustiveAuthPlaneLenses_StayBroad.
+			// those patterns name. Its base and staff siblings reach containment
+			// through UNLABELED nodes and stay broad; they are pinned in
+			// TestNonExhaustiveAuthPlaneLenses_StayBroad. Its task sibling
+			// narrows too, below.
 			lensID:     "CensusEdgeProVider99",
 			lensName:   "edgeManifestProviderReadGrants",
 			cypher:     authPlaneActorAggregates(t)["edgeManifestProviderReadGrants"].cypher,
@@ -150,6 +151,18 @@ func narrowingCases(t *testing.T) []narrowingCase {
 				"identity": {}, "instructor": {}, "session": {}, "provider": {},
 				"appointment": {}, "serviceprovider": {}, "service": {},
 			},
+		},
+		{
+			// edge-manifest's TASK read-grant producer, generated from
+			// edgeCatalog's own-task Walk. Its one walk —
+			// (identity)<-[:assignedTo]-(task:task), (task)-[:forOperation]->(op:meta)
+			// — carries a label at every node, so the derivation is exhaustive
+			// and the set is the three types the pattern names.
+			lensID:     "CensusEdgeTaskGrant9",
+			lensName:   "edgeManifestTaskReadGrants",
+			cypher:     authPlaneActorAggregates(t)["edgeManifestTaskReadGrants"].cypher,
+			anchorType: "identity",
+			wantLabels: map[string]struct{}{"identity": {}, "task": {}, "meta": {}},
 		},
 	}
 }

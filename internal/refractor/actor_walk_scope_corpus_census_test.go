@@ -138,19 +138,26 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"edgeIdentity":                   "identity:applicationFor,holdsRole,identifiedBy,residesIn,worksAt|instructor:identifiedBy|leaseapp:applicationFor|patient:identifiedBy|provider:identifiedBy|role:holdsRole|serviceprovider:identifiedBy|any:containedIn,residesIn,worksAt",
 	"edgeInstances":                  "identity:providedTo|service:instanceOf,providedTo",
 	"edgeManifestProviderReadGrants": "appointment:withProvider|identity:identifiedBy|instructor:identifiedBy,ledBy|provider:identifiedBy,withProvider|service:instanceOf,providedBy|serviceprovider:identifiedBy,providedBy|session:ledBy",
-	"edgeManifestReadGrants":         scopeNil,
-	// THE ONE ROW HERE THAT WENT `nil` → SCOPE, which this file's header names
-	// as the direction needing the argument written down. It is derived from
-	// the same pattern graph the anchor index reports Complete for
-	// (anchor_hopindex_corpus_census_test.go states why the staged re-opens are
-	// admitted), and §5.1's claim transfers to it because the graph the scope
-	// reads is the graph the UNSTAGED five walks produce — the staged re-opens
-	// add duplicate hop records and nothing else, which
-	// TestEdgeManifestStaffReadGrants_IndexesToItsUnstagedGraph asserts hop set
-	// by hop set and seed by seed. So every path an actor's row depends on is a
-	// path of pattern hops here, and a walk following only these relations
-	// still reaches every one of them.
+	// THE ROW THAT WENT `nil` → SCOPE, which this file's header names as the
+	// direction needing the argument written down. It is derived from the same
+	// pattern graph the anchor index now reports Complete for
+	// (anchor_hopindex_corpus_census_test.go — the own-task walk that used to
+	// strand `op` moved to its own domain below), and §5.1's claim transfers to
+	// it because the graph the scope reads is the graph the nine remaining base
+	// walks produce.
 	//
+	// Read the digest against those nine walks: `residesIn`+`containedIn*0..`
+	// off the actor into the residence chain, then `availableAt` to a service
+	// template and `permitsOperation` to an op meta, `locatedAt` to a studio or
+	// menu item or provider; `assignedTo` to a task, `providedTo` to a service
+	// instance, `bookedBy` to a booking, `applicationFor` to a lease and
+	// `openFor` to a tab. The `any:` entry carries `availableAt`,
+	// `containedIn`, `locatedAt`, `practicesAt`, `residesIn` and `servedAt`
+	// because the residence chain's two intermediate positions
+	// (`home`/`container`) are UNLABELLED, and an unlabelled position is
+	// followable from every type — the same positions that keep this lens off
+	// the one-key answer (actor_onekey_corpus_census_test.go).
+	"edgeManifestReadGrants": "booking:bookedBy|identity:applicationFor,assignedTo,bookedBy,providedTo,residesIn|leaseapp:applicationFor,openFor|menuitem:servedAt|meta:permitsOperation|provider:practicesAt|service:availableAt,permitsOperation,providedTo|session:atStudio|studio:atStudio,locatedAt|tab:openFor|task:assignedTo|any:availableAt,containedIn,locatedAt,practicesAt,residesIn,servedAt",
 	// Read the digest against the producer's five walks: `holdsRole` off the
 	// actor into `role`, then `grantedBy`+`forOperation` to an op meta,
 	// `queuedFor` to a queued task and `offeredTo` to a pane meta; and
@@ -162,6 +169,9 @@ var corpusActorWalkScopeDigests = map[string]string{
 	// positions that keep this lens off the one-key answer
 	// (actor_onekey_corpus_census_test.go).
 	"edgeManifestStaffReadGrants":       "identity:holdsRole,worksAt|meta:forOperation,offeredTo|permission:forOperation,grantedBy|role:grantedBy,holdsRole,offeredTo,queuedFor|studio:locatedAt|task:queuedFor|workorder:locatedAt|any:containedIn,locatedAt,worksAt",
+	// Single walk, fully labelled, no unlabelled position at all:
+	// `(identity)<-[:assignedTo]-(task:task)`, `(task)-[:forOperation]->(op:meta)`.
+	"edgeManifestTaskReadGrants": "identity:assignedTo|meta:forOperation|task:assignedTo,forOperation",
 	"edgeProviderQueue":                 "identity:identifiedBy|service:instanceOf,providedBy|serviceprovider:identifiedBy,providedBy",
 	"edgeProviderSchedule":              "appointment:withProvider|identity:identifiedBy|provider:identifiedBy,withProvider",
 	"edgeServices":                      "identity:residesIn|service:availableAt,providedBy|any:availableAt,containedIn,providedBy,residesIn",
@@ -205,7 +215,6 @@ var corpusActorWalkScopeDigests = map[string]string{
 // conjunct added to the derivation without a constant lands here as a string
 // nobody reviewed.
 var corpusActorWalkScopeRefusals = map[string]string{
-	"edgeManifestReadGrants": "a branch's pattern graph is incomplete",
 	// Its `(o:object)-[r]->(owner)` is a wildcard hop at an unlabeled position:
 	// any relation, at any type, so nothing is left to scope. The affected-anchor
 	// derivation reads that same index and DOES act on it — the two arms disagree

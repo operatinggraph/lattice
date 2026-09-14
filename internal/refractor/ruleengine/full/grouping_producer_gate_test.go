@@ -37,7 +37,7 @@ func generatedReadGrantProducers(t testing.TB) map[string]string {
 		out[l.CanonicalName] = l.Spec
 	}
 	require.Equal(t,
-		[]string{"edgeManifestProviderReadGrants", "edgeManifestReadGrants", "edgeManifestStaffReadGrants"},
+		[]string{"edgeManifestProviderReadGrants", "edgeManifestReadGrants", "edgeManifestStaffReadGrants", "edgeManifestTaskReadGrants"},
 		sortedNames(namesOf(out)),
 		"one producer per declared read-grant domain")
 	return out
