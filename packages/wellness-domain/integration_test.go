@@ -1584,6 +1584,65 @@ func TestTombstoneSession_ReleasesStudioSlotCells(t *testing.T) {
 	}
 }
 
+// TestTombstoneSession_RefusesOnceTheClassHasStarted pins TombstoneSession's
+// own SessionStarted guard: a class that has already begun is a record, not a
+// booking, the same reason TombstoneSessionSeries skips history occurrences
+// (this file, above TombstoneSessionSeries). Both sides of the boundary are
+// checked — starting exactly at submittedAt counts as started, the same
+// at-the-boundary reading as CancelBooking's own SessionStarted guard.
+func TestTombstoneSession_RefusesOnceTheClassHasStarted(t *testing.T) {
+	cases := []struct {
+		name        string
+		suffix      string
+		submittedAt string
+	}{
+		{name: "ten minutes after the class began", suffix: "A", submittedAt: "2026-07-08T09:10:00Z"},
+		{name: "exactly at the class's startsAt", suffix: "B", submittedAt: "2026-07-08T09:00:00Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn := setupDomainEnv(t)
+			cp, cons := newDomainPipeline(t, ctx, conn, "sessionstarted"+tc.suffix)
+
+			studioKey := createStudio(t, ctx, conn, cp, cons, "wdssrefusestud"+tc.suffix, "Flow Room")
+			sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdssrefusesess"+tc.suffix, studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 20)
+			if outcome != processor.OutcomeAccepted {
+				t.Fatalf("CreateSession outcome = %v, want Accepted", outcome)
+			}
+
+			env := &processor.OperationEnvelope{
+				RequestID:     testutil.GenReqID("wdssrefusetmb" + tc.suffix),
+				Lane:          processor.LaneDefault,
+				OperationType: "TombstoneSession",
+				Actor:         domainActorKey,
+				SubmittedAt:   tc.submittedAt,
+				Class:         "session",
+				Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
+				ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+					sessionKey, sessionKey + ".schedule",
+					atStudioLnkKey(t, sessionKey, studioKey),
+				}},
+			}
+			got, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+			if got != processor.OutcomeRejected {
+				t.Fatalf("TombstoneSession on a started class outcome = %v, want Rejected", got)
+			}
+			if reply.Error == nil || !strings.Contains(reply.Error.Message, "SessionStarted") {
+				t.Fatalf("rejection should be SessionStarted, got %+v", reply.Error)
+			}
+
+			if !keyExists(t, ctx, conn, sessionKey) {
+				t.Fatalf("a started class must survive the refused TombstoneSession")
+			}
+			for _, cellKey := range wdSlotClaimKeys(t, studioKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z") {
+				if !keyExists(t, ctx, conn, cellKey) {
+					t.Fatalf("studioSlotClaim %s must still be held after the refused TombstoneSession", cellKey)
+				}
+			}
+		})
+	}
+}
+
 // reassignSessionEnv builds a ReassignSession envelope with the read posture
 // its dispatcher declares (ddls.go): the session + its schedule are required
 // reads (mirroring TombstoneSession, which always declares .schedule even

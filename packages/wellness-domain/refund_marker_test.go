@@ -636,12 +636,16 @@ func TestReleaseOrphanedBooking_ReleasesNoShowAndRefundsBothChargeShapes(t *test
 	_, noShowTxID, _ := substrate.ParseVertexKey(noShowTxKey)
 
 	tombstoneReqID := testutil.GenReqID("wdorphannstombst0001")
+	// Submitted before the 09:00 start: TombstoneSession refuses SessionStarted
+	// once a class has begun, and this test's own subject is
+	// ReleaseOrphanedBooking's refund behavior on a dead session, not that
+	// guard.
 	tombstoneEnv := &processor.OperationEnvelope{
 		RequestID:     tombstoneReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "TombstoneSession",
 		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-08T09:35:00Z",
+		SubmittedAt:   "2026-07-08T08:59:00Z",
 		Class:         "session",
 		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
 		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
@@ -776,12 +780,16 @@ func TestReleaseOrphanedBooking_NoDoubleRefundWhenNoShowFeeAlreadyReversed(t *te
 	priorRefundKey := seedReversingRefundMarker(t, ctx, conn, "BBWELLURPHNARPRRHJKM", acctKey, bookingKey, noShowTxKey, "No-show fee refund", 2500.0)
 
 	tombstoneReqID := testutil.GenReqID("wdorphnartombst0001")
+	// Submitted before the 09:00 start: TombstoneSession refuses SessionStarted
+	// once a class has begun, and this test's own subject is
+	// ReleaseOrphanedBooking's idempotent-refund behavior on a dead session,
+	// not that guard.
 	tombstoneEnv := &processor.OperationEnvelope{
 		RequestID:     tombstoneReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "TombstoneSession",
 		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-08T09:35:00Z",
+		SubmittedAt:   "2026-07-08T08:59:00Z",
 		Class:         "session",
 		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
 		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
@@ -878,12 +886,16 @@ func TestReleaseOrphanedBooking_ResolvesSessionAndBookerFromLinks(t *testing.T) 
 	noShowTxKey := seedPostedNoShowFeeCharge(t, ctx, conn, bookingKey, acctKey, "BBWELLURPHLKTXN1HJKM", 2500.0)
 	_, noShowTxID, _ := substrate.ParseVertexKey(noShowTxKey)
 
+	// Submitted before the 09:00 start: TombstoneSession refuses SessionStarted
+	// once a class has begun, and this test's own subject is
+	// ReleaseOrphanedBooking's anchor-less-booking refund behavior on a dead
+	// session, not that guard.
 	tombstoneEnv := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("wdorphanlktombst0001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "TombstoneSession",
 		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-08T09:35:00Z",
+		SubmittedAt:   "2026-07-08T08:59:00Z",
 		Class:         "session",
 		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
 		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{

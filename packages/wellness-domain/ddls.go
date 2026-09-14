@@ -211,7 +211,10 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"noShowFeeCents uses, just unconditional on attendance rather than gated on a noShow. TombstoneSession " +
 			"requires the session's actual studio (verified via the atStudio link) to release the held slot cells " +
 			"in the same atomic batch, then soft-deletes the session (no cascade onto its bookings — they simply " +
-			"drop from the wellnessBookings roster's session join). TombstoneSession's standing guard: the " +
+			"drop from the wellnessBookings roster's session join). It refuses SessionStarted once the class has " +
+			"begun (submittedAt compared against .schedule.startsAt, same at-the-boundary reading as CancelBooking: " +
+			"starting exactly at submittedAt counts as started) — a started class is a record, not a booking, and " +
+			"TombstoneSessionSeries's own occurrence walk skips history for the same reason. TombstoneSession's standing guard: the " +
 			"operator passes unconditionally; a bound instructor may additionally cancel only a class THEY " +
 			"lead — the caller supplies the instructor param and the script requires BOTH " +
 			"lnk.session.<id>.ledBy.instructor.<iid> AND lnk.instructor.<iid>.identifiedBy.identity.<actor> to be " +
@@ -2965,6 +2968,24 @@ def execute(state, op):
         # read-posture: (a) declared reads at TombstoneSession dispatch —
         # required for cell release.
         sched = kv.Read(sess_key + ".schedule")
+
+        # A session that has already started is a record, not a booking --
+        # TombstoneSessionSeries skips exactly these occurrences for the same
+        # reason (its occurrence walk, this file): tombstoning a class that ran hands every
+        # one of its bookings to ReleaseOrphanedBooking, which drains the seat
+        # and refunds a class price for a class that actually happened. Same
+        # inequality (and same at-the-boundary reading) as CancelBooking's own
+        # SessionStarted guard: starting exactly at submittedAt counts as
+        # started.
+        if sched == None or sched.isDeleted:
+            fail("InvalidState: " + sess_key + ".schedule is missing; cannot cancel")
+        starts_at = sched.data.get("startsAt")
+        if starts_at == None:
+            fail("InvalidState: " + sess_key + ".schedule.startsAt is missing; cannot cancel")
+        submitted = time.rfc3339_utc(op.submittedAt)
+        if submitted >= starts_at:
+            fail("SessionStarted: session " + sess_key + " started at " + str(starts_at) + ", cannot cancel a class once it has begun (submitted " + submitted + ")")
+
         mutations = [make_tombstone(sess_key)]
         mutations.extend(release_cells_mutations(studio, sched))
         # The session's CURRENT instructor (regardless of which standing path

@@ -337,7 +337,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "TombstoneSession",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Cancel class",
-				Description: "Cancel this class.",
+				Description: "Cancel this class. Refused once the class has started (SessionStarted).",
 				Icon:        "cancel",
 				Tone:        "destructive",
 				SubmitLabel: "Cancel class",
@@ -370,12 +370,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"studio":     "{entity.studioKey}",
 				},
 				// The session vertex is REQUIRED, not optional: the script's
-				// vertex_alive/class_of guards fail closed on its absence, and
-				// its .schedule aspect is required for the same reason — the
-				// script reads it to rebuild the studio/instructor cells it
-				// releases (UnknownSession / cell-release correctness errors,
-				// not meaningful rejections), the same shape CancelBooking's
-				// Reads declare above.
+				// vertex_alive/class_of guards fail closed on its absence
+				// (UnknownSession, a correctness error). Its .schedule aspect
+				// is required too — the script reads it both to rebuild the
+				// studio/instructor cells it releases AND to test the
+				// SessionStarted guard, so a missing .schedule/.startsAt is
+				// itself a correctness error (InvalidState) while the guard's
+				// own verdict is the meaningful rejection, the same shape
+				// CancelBooking's Reads declare above.
 				Reads: []string{
 					"{payload.sessionKey}",
 					"{payload.sessionKey}.schedule",

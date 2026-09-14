@@ -1067,11 +1067,18 @@ func reapVerifyLitter(ctx context.Context, conn *substrate.Conn, adminKey string
 
 	sessionKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.session.")
 	must(err, "list vtx.session. keys")
+	// TombstoneSession refuses SessionStarted once a class has begun
+	// (wellness-domain ddls.go) — a class that ran is a record, litter or
+	// not — so a started litter session is kept, and so is its studio: the
+	// op deliberately doesn't cascade, and tombstoning the studio out from
+	// under a kept session would strand it with missingStudio=true.
+	now := time.Now().UTC().Format(time.RFC3339)
+	keptStudios := map[string]bool{}
 	for _, key := range sessionKeys {
 		if strings.Count(key, ".") != 2 || !alive(ctx, conn, key) {
 			continue
 		}
-		name, ok := readAspectName(ctx, conn, key+".schedule")
+		name, startsAt, ok := readSchedule(ctx, conn, key+".schedule")
 		if !ok {
 			continue
 		}
@@ -1083,14 +1090,23 @@ func reapVerifyLitter(ctx context.Context, conn *substrate.Conn, adminKey string
 		if !isVerifyLitterName(name) && !atLitterStudio {
 			continue
 		}
+		if startsAt != "" && startsAt <= now {
+			keptStudios[studioKey] = true
+			fmt.Printf("==> kept verify-litter session that already ran: %s (%s, started %s)\n", key, name, startsAt)
+			continue
+		}
 		submitOp(ctx, conn, adminKey, "TombstoneSession", "session",
 			map[string]any{"sessionKey": key, "studio": studioKey},
-			&processor.ContextHint{Reads: []string{key, studioKey}})
+			&processor.ContextHint{Reads: []string{key, key + ".schedule", studioKey}})
 		fmt.Printf("==> reaped verify-litter session: %s (%s)\n", key, name)
 	}
 
 	studioKeysSorted := make([]string, 0, len(litterStudios))
 	for key := range litterStudios {
+		if keptStudios[key] {
+			fmt.Printf("==> kept verify-litter studio with a class that already ran: %s (%s)\n", key, litterStudios[key])
+			continue
+		}
 		studioKeysSorted = append(studioKeysSorted, key)
 	}
 	sort.Strings(studioKeysSorted)
@@ -1118,23 +1134,31 @@ func findSessionStudio(ctx context.Context, conn *substrate.Conn, sessionKey str
 }
 
 // readAspectName reads a {isDeleted, data:{name}} aspect and returns its name
-// when the aspect is alive — shared by reapVerifyLitter for both the studio
-// .profile and session .schedule aspect shapes, which both carry a name field.
+// when the aspect is alive — reapVerifyLitter's read of the studio .profile.
 func readAspectName(ctx context.Context, conn *substrate.Conn, aspectKey string) (string, bool) {
+	name, _, ok := readSchedule(ctx, conn, aspectKey)
+	return name, ok
+}
+
+// readSchedule reads a session .schedule aspect ({isDeleted, data:{name,
+// startsAt}}) and returns its name + startsAt when the aspect is alive; on an
+// aspect shape with no startsAt (a studio .profile) the second value is "".
+func readSchedule(ctx context.Context, conn *substrate.Conn, aspectKey string) (string, string, bool) {
 	entry, err := conn.KVGet(ctx, bootstrap.CoreKVBucket, aspectKey)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	var aspect struct {
 		IsDeleted bool `json:"isDeleted"`
 		Data      struct {
-			Name string `json:"name"`
+			Name     string `json:"name"`
+			StartsAt string `json:"startsAt"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(entry.Value, &aspect); err != nil || aspect.IsDeleted {
-		return "", false
+		return "", "", false
 	}
-	return aspect.Data.Name, true
+	return aspect.Data.Name, aspect.Data.StartsAt, true
 }
 
 // findManagingLandlord returns the identity key of any live landlord already

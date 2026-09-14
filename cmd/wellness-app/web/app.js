@@ -930,7 +930,15 @@ async function renderSchedule() {
         );
         ensureLedgerAccount(bookerKey, true);
         toast(action === "waitlist" ? "Added to the waitlist." : "Booked.", true);
-        setTimeout(renderSchedule, 700);
+        // Holds the booked state on the card immediately — the same labels
+        // scheduleCard paints from the projection — while the
+        // wellnessBookings lens mints the new row; renderSchedule below would
+        // otherwise repaint from the pre-booking row it still has, and the
+        // member would see "Book" again a moment after clicking it.
+        btn.textContent = action === "waitlist" ? "Waitlisted" : "Booked";
+        btn.disabled = true;
+        await awaitProjectedBooking("", se.sessionKey, bookerKey);
+        await renderSchedule();
       } catch (e) {
         toast(e.message, false);
         btn.disabled = false;
@@ -1451,6 +1459,24 @@ async function loadRoster() {
   await loadRosterBilling();
 }
 
+// rosterArrears maps a covered member's identityKey to their
+// /api/frontdesk-arrears row (loadBillingArrears's own endpoint, staff-only,
+// server-sorted worst-first) — read again here so the booking pickers and the
+// roster cards can flag a debtor before the desk books them, not just the
+// billing panel underneath. Best-effort, the same posture as
+// loadBillingArrears's own catch: a failed fetch leaves the map empty and the
+// badge simply does not show — the ledger stays the authority on what is
+// actually owed, this is a courtesy.
+let rosterArrears = new Map();
+async function loadRosterArrears() {
+  try {
+    const data = await appGet("/api/frontdesk-arrears");
+    rosterArrears = new Map((data.arrears || []).map((row) => [row.identityKey, row]));
+  } catch (_) {
+    rosterArrears = new Map();
+  }
+}
+
 // rosterGeneration counts roster renders. Each render captures it and any
 // async continuation checks it before painting, so a slow render whose class
 // the staffer has already moved on from drops its result instead of overwriting
@@ -1474,7 +1500,14 @@ async function renderRoster() {
   }
   let bookings;
   try {
-    const r = await appGet("/api/bookings?sessionKey=" + encodeURIComponent(sessionKey));
+    // Fetched concurrently: rosterArrears (staff only) is a courtesy read the
+    // pickers/cards below consult, never a correctness dependency of the
+    // roster itself, so its own fetch never throws (loadRosterArrears' catch)
+    // and cannot fail this Promise.all.
+    const [r] = await Promise.all([
+      appGet("/api/bookings?sessionKey=" + encodeURIComponent(sessionKey)),
+      isStaff() ? loadRosterArrears() : Promise.resolve(),
+    ]);
     bookings = r.bookings || [];
   } catch (e) {
     // The staffer may have moved on to another class while this fetch was
@@ -1598,8 +1631,10 @@ async function renderBookMember(se, bookings, generation) {
       // they booked rather than a tenancy, whom CreateBooking books at the
       // standard rate.
       opt.value = m.bookerKey + "|" + m.leaseAppKey;
+      const arrearsText = arrearsBadgeText(rosterArrears.get(m.bookerKey));
       opt.textContent = nameForIdentity(idOf(m.bookerKey)) +
-        (m.leaseAppKey ? " — lease " + shortKey(m.leaseAppKey) : " — guest");
+        (m.leaseAppKey ? " — lease " + shortKey(m.leaseAppKey) : " — guest") +
+        (arrearsText ? " — " + arrearsText : "");
       select.appendChild(opt);
     }
   }
@@ -1634,14 +1669,29 @@ async function bookGuest() {
   const sessionKey = document.getElementById("roster-session").value;
   const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
   if (!guestKey || !se) return;
+  // Courtesy only — same posture as bookSelectedMember's own confirm above.
+  const arrears = rosterArrears.get(guestKey);
+  const overdueDays = arrears ? Number(arrears.daysOverdue) || 0 : 0;
+  if (
+    arrears && arrears.isOverdue &&
+    !window.confirm(nameForIdentity(idOf(guestKey)) + " owes " + money(arrears.balanceCents) + ", " + overdueDays +
+      (overdueDays === 1 ? " day" : " days") + " overdue. Book them anyway?")
+  ) {
+    return;
+  }
+  const label = btn.textContent;
   btn.disabled = true;
   try {
     await bookMemberIn(se, guestKey, "");
     resetGuestPicker();
     toast("Booked.", true);
-    setTimeout(renderRoster, 700);
+    btn.textContent = "Booked — updating roster…";
+    await awaitProjectedBooking("?sessionKey=" + encodeURIComponent(se.sessionKey), se.sessionKey, guestKey);
+    await renderRoster();
+    btn.textContent = label;
   } catch (e) {
     toast(e.message, false);
+    btn.textContent = label;
   } finally {
     btn.disabled = false;
   }
@@ -1711,6 +1761,9 @@ async function searchGuests(q) {
       // on this class — rather than a match that silently never appears.
       opt.disabled = true;
       opt.textContent = g.name + " — already on this class";
+    } else {
+      const arrearsText = arrearsBadgeText(rosterArrears.get(g.identityKey));
+      if (arrearsText) opt.textContent = g.name + " — " + arrearsText;
     }
     select.appendChild(opt);
   }
@@ -1863,14 +1916,35 @@ async function bookSelectedMember() {
   const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
   if (!value || !se) return;
   const [bookerKey, leaseAppKey] = value.split("|");
+  // Courtesy only — CreateBooking enforces nothing about arrears, whoever
+  // submits. Asked before the button is disabled so declining leaves the
+  // form exactly as it was, the same posture as the late-cancel confirm.
+  const arrears = rosterArrears.get(bookerKey);
+  const overdueDays = arrears ? Number(arrears.daysOverdue) || 0 : 0;
+  if (
+    arrears && arrears.isOverdue &&
+    !window.confirm(nameForIdentity(idOf(bookerKey)) + " owes " + money(arrears.balanceCents) + ", " + overdueDays +
+      (overdueDays === 1 ? " day" : " days") + " overdue. Book them anyway?")
+  ) {
+    return;
+  }
+  const label = btn.textContent;
   btn.disabled = true;
   try {
     await bookMemberIn(se, bookerKey, leaseAppKey);
     toast("Booked.", true);
-    setTimeout(renderRoster, 700);
+    // Holds the booked state while the wellnessBookings lens mints the new
+    // row — renderRoster below reads that same lens, so an immediate
+    // re-render would still show the seat as open. awaitProjectedBooking's
+    // own bound is what ends the wait either way.
+    btn.textContent = "Booked — updating roster…";
+    await awaitProjectedBooking("?sessionKey=" + encodeURIComponent(se.sessionKey), se.sessionKey, bookerKey);
+    await renderRoster();
+    btn.textContent = label;
   } catch (e) {
     toast(e.message, false);
     btn.disabled = false;
+    btn.textContent = label;
   }
 }
 
@@ -2014,6 +2088,38 @@ async function awaitProjectedStatus(sessionKey, bookingKey, want) {
   }
 }
 
+// BOOKING_PROJECTION_POLL_MS bounds how long a booking click waits for the
+// wellnessBookings lens to mint the row it just committed before the caller
+// re-renders from whatever the lens says. Same reasoning as
+// ATTENDANCE_PROJECTION_POLL_MS above (the write lands in Core KV, the read
+// side is the lens, and a lens reprojects a beat later) but longer and
+// coarser: attendance re-projects a STATUS FLIP on a row the lens already
+// holds, while a booking is a brand-new row the lens has to mint from
+// scratch — measured on this stack at ~24s, so this sums to ~31s, headroom
+// past the measured lag rather than attendance's sub-2s bound.
+const BOOKING_PROJECTION_POLL_MS = [500, 1000, 1500, 2000, 3000, 4000, 5000, 6000, 8000];
+
+// awaitProjectedBooking polls query (an /api/bookings path + query string) on
+// BOOKING_PROJECTION_POLL_MS's schedule until a row for sessionKey/bookerKey
+// lands as booked or waitlisted, returning true. Returns false when the
+// schedule is exhausted or a poll throws — the caller's own re-render
+// surfaces a read failure on its own, mirroring awaitProjectedStatus's catch.
+async function awaitProjectedBooking(query, sessionKey, bookerKey) {
+  for (const wait of BOOKING_PROJECTION_POLL_MS) {
+    await new Promise((r) => setTimeout(r, wait));
+    try {
+      const r = await appGet("/api/bookings" + query);
+      const row = (r.bookings || []).find(
+        (b) => b.sessionKey === sessionKey && b.bookerKey === bookerKey && (b.status === "booked" || b.status === "waitlisted"),
+      );
+      if (row) return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  return false;
+}
+
 // markAttendance submits SetBookingAttendance for a booking, either on a
 // class `mine` leads (the two ownership-probe optionalReads bind that path)
 // or, when `mine` is falsy, as front-of-house staff (the script's workplace
@@ -2081,28 +2187,40 @@ function renderCancelClass(sessionKey) {
   // only the operator can clear that run, and only per class for the desk.
   const offerSeries = !!se.seriesKey && !se.missingStudio && isStaff() && upcoming > 1;
 
+  // TombstoneSession refuses SessionStarted once startsAt <= submittedAt
+  // (packages/wellness-domain/ddls.go) — the same at-the-boundary reading
+  // renderRoster's own `started` derivation already applies. The affordance
+  // mirrors that refusal: a class that ran is a record, not a booking, so it
+  // no longer offers the per-class control. The series control is unaffected
+  // — it cancels the run's still-upcoming siblings, which this one class
+  // having started does not change.
+  const started = !!(se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
+  if (started && !offerSeries) return;
+
   const wrap = document.createElement("div");
   wrap.className = "card-actions";
-  wrap.innerHTML = '<button id="cancel-class" class="danger">Call off this class</button>';
+  wrap.innerHTML = started ? "" : '<button id="cancel-class" class="danger">Call off this class</button>';
   if (offerSeries) {
     wrap.innerHTML +=
       '<button id="cancel-series" class="danger">' + esc("Call off the remaining " + upcoming + " classes in this series") + "</button>";
   }
   document.getElementById("roster-body").appendChild(wrap);
-  document.getElementById("cancel-class").addEventListener("click", async () => {
-    const btn = document.getElementById("cancel-class");
-    btn.disabled = true;
-    try {
-      await cancelClass(se, isLeader ? mine : null);
-      toast("Class called off.", true);
-      staffSessionsCache = null;
-      document.getElementById("roster-session").dataset.loaded = "";
-      setTimeout(loadRoster, 700);
-    } catch (e) {
-      toast(e.message, false);
-      btn.disabled = false;
-    }
-  });
+  if (!started) {
+    document.getElementById("cancel-class").addEventListener("click", async () => {
+      const btn = document.getElementById("cancel-class");
+      btn.disabled = true;
+      try {
+        await cancelClass(se, isLeader ? mine : null);
+        toast("Class called off.", true);
+        staffSessionsCache = null;
+        document.getElementById("roster-session").dataset.loaded = "";
+        setTimeout(loadRoster, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  }
   if (!offerSeries) return;
   document.getElementById("cancel-series").addEventListener("click", async () => {
     const btn = document.getElementById("cancel-series");
@@ -2669,11 +2787,17 @@ function rosterCard(b, markable, cancellable) {
   const waitlistBadge = waitlisted && b.waitlistSlot != null
     ? '<span class="badge open">Waitlisted — #' + Math.trunc(b.waitlistSlot) + "</span>"
     : "";
+  // rosterArrears is populated for staff renders only (renderRoster) — an
+  // instructor-only viewer simply sees no badge, the same fail-closed shape
+  // as the billing panel this data comes from.
+  const arrearsText = arrearsBadgeText(rosterArrears.get(b.bookerKey));
+  const arrearsBadge = arrearsText ? '<span class="badge arrears">' + esc(arrearsText) + "</span>" : "";
   return (
     '<div class="card">' +
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
     waitlistBadge +
     (mark ? '<span class="badge ' + esc(mark.badge) + '">' + esc(mark.label) + "</span>" : "") +
+    arrearsBadge +
     reminderBadge(b) +
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     // A forfeited booking gets neither action: SetBookingAttendance refuses
@@ -2782,6 +2906,20 @@ function arrearsLine(row) {
     return '<span class="arrears-overdue">OVERDUE — ' + days + (days === 1 ? " day" : " days") + "</span>";
   }
   return "Due " + due;
+}
+
+// arrearsBadgeText renders the same frontdesk-arrears row as the short "owes
+// $60.00 · 3 days overdue" the booking pickers and roster cards append beside
+// a debtor's name — "" for no balance owed, the common case, so a caller can
+// append the result unconditionally.
+function arrearsBadgeText(row) {
+  if (!row || !(Number(row.balanceCents) > 0)) return "";
+  let text = "owes " + money(row.balanceCents);
+  if (row.isOverdue) {
+    const days = Number(row.daysOverdue) || 0;
+    text += " · " + days + (days === 1 ? " day" : " days") + " overdue";
+  }
+  return text;
 }
 
 // loadBillingArrears populates the front desk's arrears list — every covered
