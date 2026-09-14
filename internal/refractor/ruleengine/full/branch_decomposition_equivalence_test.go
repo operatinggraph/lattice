@@ -1290,6 +1290,25 @@ func TestBranchDecomposition_GeneratedProducersProjectIdenticalRows(t *testing.T
 		t.Run("multi-actor/"+name, func(t *testing.T) {
 			rows := executeBothBranchWays(t, unanchoredProducer(t, specs[name]), "", adjKV, coreKV)
 			require.Lenf(t, rows, corpora, "%s must project one row per seeded actor", name)
+
+			// Every differential above is an equality, and two empty
+			// projections are equal. This pass folds all six actors at once,
+			// so a producer that grants nothing HERE grants nothing over any
+			// of them — the corpus does not reach its domain and every
+			// comparison above agreed about nothing.
+			granted := 0
+			for _, r := range rows {
+				anchors, _ := r.Values["readableAnchors"].([]any)
+				for _, a := range anchors {
+					m, _ := a.(map[string]any)
+					if id, _ := m["anchorId"].(string); id != "" {
+						granted++
+					}
+				}
+			}
+			require.Positivef(t, granted,
+				"%s granted nothing across all %d seeded actors — the corpus does not reach "+
+					"its domain, so the differentials above compare empty projections", name, corpora)
 		})
 	}
 }
