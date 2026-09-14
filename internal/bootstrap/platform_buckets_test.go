@@ -75,20 +75,22 @@ func TestPlatformBuckets_MarkerTTLAtOrAboveTheServerFloor(t *testing.T) {
 //
 // Loom's deadline probe decides rejected-or-lost from the ABSENCE of the op
 // tracker, which the Processor writes at op submit with processor.TrackerTTL.
-// A marker consumed after the tracker has aged out reads a healthy instance as
-// failed. The arm is bounded by loom.MaxDeadlineArm — the ceiling withDefaults
-// clamps both StepTimeout and CreateTaskTimeout down to — so the widest
-// delivery any deployment can reach is that ceiling plus this window, and the
-// two constants are asserted against each other here rather than each being
-// believed on its own.
+// The arm is bounded by loom.MaxDeadlineArm — the ceiling withDefaults clamps
+// both StepTimeout and CreateTaskTimeout down to — so the widest delivery any
+// deployment can reach is that ceiling plus this window, and the two constants
+// are asserted against each other here rather than each being believed on its
+// own.
 //
-// The margin demanded is an order of magnitude, not a hair, because the
-// failure this guards is silent: a window raised until it crosses the tracker
-// turns the deadline probe's evidence-absence test from "the op was rejected"
-// into "the op is simply old". Raising either constant past what this allows is
-// a decision about that probe, and belongs with the structural fix
-// loom-state-tombstone-sweep-design.md §11.2 files (a durable armed/disarmed
-// fact on the instance record the probe can read) — not with a bigger constant.
+// What the invariant buys is the verdict itself. Past the horizon the probe
+// refuses to read absence as rejection — it compares the age of the step
+// against this same TrackerTTL and returns an INCONCLUSIVE verdict (alert, a
+// note on the instance record, the instance left running) rather than failing
+// an instance whose tracker has merely aged out (internal/loom's
+// deadlineRejectedOrLost). So a window raised until it crosses the tracker does
+// not fail healthy instances; it costs every rejected-or-lost step its
+// terminal, leaving an alerted instance parked on a step nobody can adjudicate.
+// The margin demanded is an order of magnitude, not a hair, because that
+// degradation is quiet: the probe keeps running and keeps acking.
 func TestLoomStateMarkerTTL_FitsInsideTheTrackerLifetime(t *testing.T) {
 	widestDelivery := loom.MaxDeadlineArm + bootstrap.LoomStateMarkerTTL
 	require.Less(t, widestDelivery, processor.TrackerTTL,

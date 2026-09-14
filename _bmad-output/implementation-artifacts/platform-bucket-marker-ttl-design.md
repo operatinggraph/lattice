@@ -22,9 +22,11 @@ lost. This fire moves the value into the bucket registry as a per-bucket duratio
 *declared* rather than inherited.
 
 **Why one hour and not a day.** The window is bounded above by the evidence the deadline probe reads:
-`processor.TrackerTTL` = 24 h. The probe judges *rejected-or-lost* from the absence of that tracker,
-so a marker delivered after the tracker has aged out fails a healthy instance
-(`loom-state-tombstone-sweep-design.md` §11.2 — a separate, unbuilt row). One hour keeps the widest
+`opstatus.TrackerTTL` = 24 h. The probe judges *rejected-or-lost* from the absence of that tracker, and
+past that horizon it refuses to: a marker delivered once the tracker has aged out gets an
+**inconclusive** verdict — alert, a note on the instance record, instance left running — so the cost of
+crossing the bound is the verdict, not a failed healthy instance
+(`lattice-designer-triage-2026-09-10.md` §3). One hour keeps the widest
 delivery this value permits at ≈ 1.02 h after the op (a 60 s deadline arm plus the window), a **24×
 margin** inside the 24 h evidence lifetime, while buying 3600× over today for the named need: a
 restart, a deploy, a reconnect. §3.2 states the invariant and §4 pins it with a test.

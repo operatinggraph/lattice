@@ -149,6 +149,25 @@ type Instance struct {
 	PendingToken string `json:"pendingToken"`
 	Status       string `json:"status"`
 	RetryCount   int    `json:"retryCount"`
+	// DeadlineProbe carries the step-deadline probe's last INCONCLUSIVE verdict
+	// on the step this instance is parked on: the probe found neither an op
+	// tracker nor an outbox record, but the step's own evidence had already aged
+	// past opstatus.TrackerTTL, so absence proves nothing and the instance stays
+	// running on its token. Nil is the ordinary state. Additive: a record
+	// written by a binary that does not know the field decodes with it nil,
+	// which reads as "no inconclusive verdict stands" — the same answer a
+	// cleared note gives.
+	DeadlineProbe *probeNote `json:"deadlineProbe,omitempty"`
+}
+
+// probeNote is one inconclusive step-deadline verdict, stored on the instance
+// record. At is when the probe reached it and Reason is the operator-facing
+// account of what could not be told apart — the same text the Warn alert
+// carries, kept on the record so an operator inspecting the instance later
+// (InstanceSummary) sees why it is parked rather than failed.
+type probeNote struct {
+	At     string `json:"at"`
+	Reason string `json:"reason"`
 }
 
 // tokenPointer is the thin reverse index value stored under token.<pendingToken>
@@ -553,6 +572,13 @@ const (
 //   - outbox != nil writes the op-to-submit record (the relay publishes it).
 //   - deadlineTTL > 0 arms (PUT, fresh TTL) deadline.<instanceId> (re-arm on
 //     each step); deadlineTTL <= 0 deletes it (terminal).
+//   - a new token, or a status leaving running, also settles the instance's
+//     inconclusive deadline-probe note (Instance.DeadlineProbe) to nil in the
+//     SAME body that carries the state change. The note describes one step's
+//     evidence, so it cannot outlive that step: a new token IS a new step, and a
+//     terminal is a verdict that supersedes it. Settled in the batch rather than
+//     written after it for the reason the failed index is (below) — a second
+//     write could land, or not, independently of the state it claims to describe.
 //   - inst.Status != running (terminal) also removes the instance's pattern pin
 //     (instance.<id>.pattern) in the same batch and settles the failed index
 //     (instance.<id>.failed) for the arm taken — written on failed, removed on
@@ -604,6 +630,11 @@ const (
 // trips ago, and an advance landing in that window must refuse the write rather
 // than flip an instance that has already moved to its next step.
 func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, oldToken string, tokenMode tokenWriteMode, outbox *outboxRecord, deadlineTTL time.Duration, expectedRevision uint64) error {
+	// The note describes the step being left, so it is settled in this body
+	// rather than in a write of its own (doc comment above).
+	if newToken != "" || inst.Status != StatusRunning {
+		inst.DeadlineProbe = nil
+	}
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
@@ -741,6 +772,11 @@ func (s *stateStore) transition(ctx context.Context, inst *Instance, newToken, o
 // the guard must not depend on it, so the pin is written as an ordinary put,
 // guarded by the same batch's CAS.
 func (s *stateStore) redrive(ctx context.Context, inst *Instance, pattern *Pattern, expectedRevision uint64) error {
+	// A redrive resumes the step from the operator's decision, so any
+	// inconclusive deadline-probe note left on the record is spent: the operator
+	// has answered what the probe could not. Settled in this batch, for the same
+	// reason the failed index's removal rides it.
+	inst.DeadlineProbe = nil
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
@@ -775,6 +811,39 @@ func (s *stateStore) outboxExists(ctx context.Context, token string) (bool, erro
 	return true, nil
 }
 
+// errTokenPointerMissing reports that token.<token> is absent for an instance
+// whose record still names that token as pending. The pointer is written in the
+// step's own transition batch and removed only by the batch that leaves the
+// step, so for a running instance its absence is an invariant break — never a
+// "the step is old" answer. Callers match on this sentinel to turn the break
+// into an operator-visible failed terminal (§10.6: never a silent wedge), the
+// same posture errPatternPinMissing gets.
+var errTokenPointerMissing = errors.New("token pointer missing for a running instance (written in the step's own transition batch)")
+
+// tokenEpoch returns the epoch of the step a token stands for: the timestamp of
+// the token.<token> reverse pointer, which the step's own transition batch
+// wrote. An absent pointer returns errTokenPointerMissing (wrapped), told apart
+// from a stale epoch so the caller can act on the invariant break rather than
+// read it as age.
+//
+// It is the step's epoch by construction, and the only key in the family that
+// is: the pointer is written create-only by every advancing transition and
+// re-put by a redrive, and nothing else touches it — not a re-arm (which writes
+// only deadline.<instanceId>), not the probe's own note (which writes only the
+// instance record). So its age is the age of the step, which is what the
+// deadline probe compares against the op-status horizon before it reads absent
+// evidence as a verdict (opstatus.TrackerTTL).
+func (s *stateStore) tokenEpoch(ctx context.Context, token string) (time.Time, error) {
+	entry, err := s.conn.KVGet(ctx, s.bucket, tokenKey(token))
+	if err != nil {
+		if errors.Is(err, substrate.ErrKeyNotFound) {
+			return time.Time{}, fmt.Errorf("loom: token %q: %w", token, errTokenPointerMissing)
+		}
+		return time.Time{}, fmt.Errorf("loom: read token epoch %q: %w", token, err)
+	}
+	return entry.Timestamp, nil
+}
+
 // deadlineArmed reports whether deadline.<instanceId> currently holds a value —
 // the probe's currency test (§10.6). A MaxAge marker's emission empties the
 // subject, so a value present when the probe runs was put there afterwards: an
@@ -804,6 +873,34 @@ func (s *stateStore) rearmDeadline(ctx context.Context, instanceID string, ttl t
 	}
 	if _, err := s.conn.KVPutWithTTL(ctx, s.bucket, deadlineKey(instanceID), body, ttl); err != nil {
 		return fmt.Errorf("loom: rearm deadline %q: %w", instanceID, err)
+	}
+	return nil
+}
+
+// noteDeadlineProbe records an inconclusive step-deadline verdict on the
+// instance record and nothing else: a single-key compare-and-set on
+// instance.<instanceId> at the revision the probe read it, leaving cursor,
+// token, status and every other key in the family exactly as they were.
+//
+// It is deliberately NOT a transition. A transition with no deadline to arm
+// purges deadline.<instanceId>, and the key the probe was woken by has already
+// expired — so that purge would land on an empty subject and mint a fresh
+// marker there, waking the probe again on a step that was never due (the hazard
+// deleteToken documents). The note is a fact about the record, so the record is
+// the only key it touches.
+//
+// The CAS is the ordering, and a refusal is an answer rather than an error: the
+// caller reads a revision conflict as "the instance moved on under the probe"
+// and drops the note, exactly as probeFail drops a refused terminal. inst is
+// mutated to carry the note, so a caller holding it sees what was written.
+func (s *stateStore) noteDeadlineProbe(ctx context.Context, inst *Instance, reason string, at time.Time, expectedRevision uint64) error {
+	inst.DeadlineProbe = &probeNote{At: substrate.FormatTimestamp(at), Reason: reason}
+	body, err := json.Marshal(inst)
+	if err != nil {
+		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
+	}
+	if _, err := s.conn.KVUpdate(ctx, s.bucket, instanceKey(inst.InstanceID), body, expectedRevision); err != nil {
+		return fmt.Errorf("loom: note deadline probe %q: %w", inst.InstanceID, err)
 	}
 	return nil
 }

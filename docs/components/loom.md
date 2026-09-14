@@ -185,7 +185,9 @@ StartLoomPattern{patternRef, subjectKey}  →  outbox  →  events.loom.patternS
   ⌛ deadline.<instanceId> TTL expiry — the server's Nats-Marker-Reason: MaxAge marker, the only
        wake-up: a removal of the key is not an expiry, and a key present at probe time means a
        later step re-armed → read-before-act probe
-       → GET vtx.op.<token>: committed → advance+alert; not yet relayed → re-arm; else → fail
+       → GET vtx.op.<token>: committed → advance+alert; not yet relayed → re-arm;
+         else → fail — unless the step is older than the tracker's own life, where
+         absence proves nothing: inconclusive → alert + note on the record, stay parked
   pattern exhausted → CompletePattern{instanceId} (via outbox) → events.loom.patternCompleted
 ```
 
@@ -201,8 +203,9 @@ creation-deadline** (`CreateTaskTimeout`) whose **expiry IS the disarm**: the pr
 vertex already minted and **nothing re-arms** (Contract #10 §10.6), after which the human wait is
 **unbounded** — the durable cursor + live `token.<taskKey>`
 pointer survive any restart, so when the user finally acts the completion correlates and the cursor
-advances. A rejected/lost `CreateTask` is failed by the creation-deadline probe (never a silent wedge);
-a mis-declared `completionDomains` is caught by a load-time warn.
+advances. A rejected/lost `CreateTask` is failed by the creation-deadline probe (never a silent wedge —
+and never on evidence older than the tracker it reads, where the verdict is inconclusive instead); a
+mis-declared `completionDomains` is caught by a load-time warn.
 
 ### External steps (`externalTask`)
 
@@ -237,7 +240,8 @@ to a userTask (dispatch to an async completer, then park; the completer is a hum
   on the `instanceOp` submission**, probed via the `instanceOp`'s own `vtx.op.<opRequestId>` tracker. Its
   **expiry IS the disarm**: the probe finds the `instanceOp` committed, **nothing re-arms**, and the wait
   for the bridge's `replyOp` is **unbounded** — it **never advances the cursor** (only `orchestration.externalTaskCompleted` does). A
-  rejected/lost `instanceOp` → `FailPattern` (FR29, never a silent wedge). A dead bridge surfaces on the
+  rejected/lost `instanceOp` → `FailPattern` (FR29, never a silent wedge; an inconclusive verdict past the
+  evidence horizon alerts and stays parked instead). A dead bridge surfaces on the
   **bridge's own** Health, not a per-instance Loom timeout — symmetric to the unbounded human wait.
 
 The `externalTask` step kind, its two-op dispatch, the third `payload.externalRef` correlation key, and
@@ -285,7 +289,7 @@ code**. Pattern definitions, guards, step→operation bindings, and the `task` t
 | State | Where | Why |
 |-------|-------|-----|
 | **Tasks** (+ assignment links, completion) | **Core KV** | Business-meaningful, cross-component, audited |
-| **Instance cursor + pinned pattern + token index** (pattern ref, pinned definition, step pointer, run status, reverse pointer) | **`loom-state`** | Single-component orchestration bookkeeping (P1 boundary); the instance has **no Core-KV vertex** — its sole durable home is the cursor; the pinned definition (`instance.<id>.pattern`) is what the cursor indexes into |
+| **Instance cursor + pinned pattern + token index** (pattern ref, pinned definition, step pointer, run status, reverse pointer, any standing `deadlineProbe` note) | **`loom-state`** | Single-component orchestration bookkeeping (P1 boundary); the instance has **no Core-KV vertex** — its sole durable home is the cursor; the pinned definition (`instance.<id>.pattern`) is what the cursor indexes into |
 
 The instance is **operational-only**: there is no Core-KV instance vertex — `loom-state` is its sole
 durable home (P1). Each step transition is a **single `substrate.AtomicBatch`** that, all-or-nothing,
@@ -312,7 +316,10 @@ story latitude):
    read), and a completion landing in that window has already advanced the instance to a step the
    probe knows nothing about. Its `fail` therefore carries the revision the record was read at, and
    a refused condition is the answer, not an error: the verdict is dropped and the marker acked —
-   the same drop an advance takes on a stale completion.
+   the same drop an advance takes on a stale completion. The inconclusive verdict's `deadlineProbe`
+   note is written the same way — a single-key compare-and-set on the record at that revision, never a
+   transition, whose disarm branch would purge an already-expired `deadline.<instanceId>` and mint a
+   stray marker on it.
 
 **Provisioning + index posture.** `loom-state` must be provisioned with **`AllowAtomicPublish: true`**
 on its backing stream, the same flag `core-kv` gets (`internal/bootstrap/primordial.go`) — without it,
@@ -464,7 +471,7 @@ is later wanted — while any single instance stays answerable by id whatever it
 | Long-waiting instance > 24h | Extended-dedupe at engine (idempotency horizon, arch §85) |
 | Crash mid-step | Write-ahead atomic batch (pointer + cursor + outbox record before any side effect); the relay re-publishes the `outbox.<token>` op on resume, collapsing on the Contract #4 tracker → re-drive safely; pointer presence is the idempotency guard |
 | Relay publish (or outbox-delete) fails | The outbox record persists; the relay returns **`NakWithDelay`** → JetStream redelivers no sooner than the 5s floor (`substrate.DefaultRedeliveryDelay`) → re-publish (idempotent). Bounded cadence, unbounded count: at-least-once preserved, no `MaxDeliver`, and the relay never hot-loops against a failing ops stream **or** a failing `loom-state` KV. Submission cannot be lost between batch and broker |
-| Rejected / failed / unseen step | Off-stream terminal (a rejected op writes no tracker/event) — learned via the `deadline.<instanceId>` TTL expiry + a read-before-act probe (`GET vtx.op.<token>`: committed → advance+alert; not yet relayed → re-arm; else → `status=failed`). Never the submit reply; never wedges |
+| Rejected / failed / unseen step | Off-stream terminal (a rejected op writes no tracker/event) — learned via the `deadline.<instanceId>` TTL expiry + a read-before-act probe (`GET vtx.op.<token>`: committed → advance+alert; not yet relayed → re-arm; else → `status=failed`, or an alerted `deadlineProbe` note with the instance left running when the step's own evidence is older than `opstatus.TrackerTTL`). Never the submit reply; never wedges |
 
 ---
 
@@ -672,8 +679,21 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 - **A constant whose only enforcement is a test of three constants is not enforced.** The deadline
   window's soundness bound reads `maxDeadlineArm + markerTTL < TrackerTTL`, and it was gated by a test
   that hardcoded `maxDeadlineArm` — while `StepTimeout` and `CreateTaskTimeout` were exported fields
-  carrying only a lower clamp. A deployment raising either past the tracker's life would turn the
-  deadline probe against healthy instances, silently, with the gate still green. Minted: the marker-TTL
-  fire's cold pass. Check: `MaxDeadlineArm` clamps both arms in `withDefaults`
+  carrying only a lower clamp. A deployment raising either past the tracker's life would have turned the
+  deadline probe against healthy instances, silently, with the gate still green; the probe now refuses to
+  read absence as rejection past that horizon, so the same raise costs every rejected-or-lost step its
+  terminal verdict instead — quieter still, and the reason the bound is asserted rather than trusted.
+  Minted: the marker-TTL fire's cold pass. Check: `MaxDeadlineArm` clamps both arms in `withDefaults`
   (`TestWithDefaults_ClampsTheDeadlineArmBothWays`), and the bootstrap gate computes the invariant from
   that constant instead of restating its value.
+- **A read that treats a key's ABSENCE as a verdict is sound only inside that key's own TTL — date the
+  evidence, not just the wait.** The deadline probe read "no `vtx.op.<requestId>` tracker, no outbox
+  record" as *rejected or lost* while the wait it backstops is unbounded and the tracker lives
+  `opstatus.TrackerTTL`, so a marker minted late (a recovery pass drains every past-due per-message TTL in
+  one sweep, on one clock) failed instances whose op had committed. The fix compares the step's epoch — the
+  `token.<pendingToken>` pointer's substrate timestamp, the one key in the family the step's own batch
+  writes and nothing later touches — against that horizon, and any standing fact it writes on the record
+  is settled inside every batch that leaves the step it describes, never as a second write. Minted: the
+  2026-09-14 evidence-horizon fire. Check:
+  `TestOnDeadline_AbsenceIsEvidenceOnlyInsideTheEvidencesLifetime` (both verdicts, one instance, one
+  marker) and `TestDeadlineProbeNote_IsSettledByEveryPathThatLeavesTheStep`.

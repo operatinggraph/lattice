@@ -26,6 +26,19 @@ import (
 // Subject is the NATS Services subject the op-status RPC responds on.
 const Subject = "lattice.op.status"
 
+// TrackerTTL is the lifetime of a Contract #4 idempotency tracker, and so the
+// horizon of every answer this surface gives: 24h is the architecture-locked
+// default (Contract #4 §4.3), the expiry clock is fixed at commit and cannot be
+// extended, and Found:false is the contracted answer once it has elapsed.
+//
+// It lives here, beside Subject, because it belongs to the surface rather than
+// to either side of it: the Processor writes trackers with it and every caller
+// that reads absence as a verdict needs the same number to know how long that
+// verdict is worth. A caller whose own wait can outlast it must compare the age
+// of its evidence against this before reading absence as "never committed" —
+// internal/loom's step-deadline probe does exactly that.
+const TrackerTTL = 24 * time.Hour
+
 // serviceName is the NATS Services registration name (exposed via
 // $SRV.PING/$SRV.INFO/$SRV.STATS alongside the endpoint).
 const serviceName = "op-status"
