@@ -67,10 +67,29 @@ var ErrInstanceNotFound = errors.New("not found")
 // command that did nothing.
 var errConsumerNotManaged = errors.New("consumer not managed")
 
-// errInstanceNotFailed reports that a Redrive target is not in the failed
-// state — the only state Redrive accepts (running is already progressing;
-// complete has nothing to resume).
-var errInstanceNotFailed = errors.New("instance is not in a failed state")
+// errInstanceNotFailed reports that a Redrive target is in none of the states
+// Redrive accepts (isResumable): it is complete, or it is running and making
+// its own progress.
+var errInstanceNotFailed = errors.New("instance is not in a failed or deadline-inconclusive state")
+
+// isResumable reports whether an operator redrive has anything to resume.
+//
+// Two states qualify, and they are the two an instance cannot leave on its own.
+// A FAILED instance is the ordinary one: terminal, and only an operator restarts
+// it. A RUNNING instance carrying a DeadlineProbe note is the other: its step
+// deadline fired, the probe found evidence too old to decide on and refused to
+// call it (probeRejectedOrLost), so the record stands running on a pending token
+// that nothing will ever resolve — the deadline is not re-armed, so no later
+// probe revisits it, and a rejected op emits no completion. It is parked, not
+// progressing, and the alert the refusal raises names this verb as the way out.
+//
+// A running instance with no note is refused, unchanged: that one is genuinely
+// in flight, and re-submitting its step would duplicate an op that is still on
+// its way to a verdict of its own.
+func isResumable(inst *Instance) bool {
+	return inst.Status == StatusFailed ||
+		(inst.Status == StatusRunning && inst.DeadlineProbe != nil)
+}
 
 // errPatternNotLoaded reports that a Redrive target's pattern is not (or no
 // longer) registered in the live source — nothing to re-pin against.

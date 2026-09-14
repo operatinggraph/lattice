@@ -1305,11 +1305,23 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 // The window it closes is the probe's own: it reads the record, asks the
 // lattice.op.status RPC and the outbox, and only then writes — and a completion
 // landing anywhere in there advances the instance to a step this probe knows
-// nothing about. The record's three writers are createInstance (create-only),
-// transition and redrive, and none of them bumps the revision while leaving the
-// pending step in place, so a bump under a running read is always another
-// actor's advance, completion or fail. Dropping is then exactly right, and it
-// is the same drop advance takes on a stale completion.
+// nothing about. Three of the record's four writers — createInstance
+// (create-only), transition and redrive — cannot bump the revision while leaving
+// the pending step in place, so a bump from any of them is another actor's
+// advance, completion or fail, and dropping is the same drop advance takes on a
+// stale completion.
+//
+// The fourth writer, noteDeadlineProbe, DOES leave the pending step in place: a
+// second replica's probe, straddling the evidence horizon by milliseconds, can
+// record an inconclusive verdict at R and leave this probe's fail at R refused.
+// The drop is still the answer, and now for a stronger reason than "someone else
+// moved it on". The two replicas disagree only because the step's age fell within
+// microseconds of the horizon, where neither verdict is better founded than the
+// other; the record they land on carries the same reason string this fail would
+// have written, the instance stays running rather than terminal, and it is
+// redrivable in that state (control.go's isResumable). Dropping therefore takes
+// the more conservative of two equally-supported verdicts and costs the operator
+// nothing — the same alert, the same verb.
 //
 // The drop is a nil return (⇒ Ack), never a Nak: a MaxAge marker lives one
 // second, so a Nak asks for a redelivery that will not exist, and a re-probe
@@ -1324,6 +1336,40 @@ func (e *Engine) probeFail(ctx context.Context, inst *Instance, oldToken, reason
 	return err
 }
 
+// maxPlausibleStepAge is the oldest a parked step can genuinely be. Past it,
+// the difference between this host's clock and the substrate's stamp is a
+// statement about a clock rather than about a step.
+//
+// A year, expressed as a multiple of the horizon so a deployment that moves the
+// horizon moves this with it. The floor it has to clear is the longest wait Loom
+// legitimately parks on: a userTask's human wait is bounded only by the task's
+// own lifetime, up to 30 days (tombstone_sweep.go's skip rationale), so a bound
+// anywhere near that would turn the very long-wait instances this guard protects
+// into the false terminals it exists to prevent. A year is more than an order of
+// magnitude clear of it.
+//
+// That deliberately does NOT catch a modest skew — a host an hour or a day out
+// still reads a plausible age — and cannot: no bound can separate a day of skew
+// from a day of waiting. What it catches is a clock that is wrong the way broken
+// clocks are wrong: a VM resumed from a snapshot, a dead RTC, a container whose
+// time source never synced, all of which land years off.
+const maxPlausibleStepAge = 365 * opstatus.TrackerTTL
+
+// isClockFault reports whether a computed step age is one no clock agreeing with
+// the substrate could produce: negative (the token pointer is stamped in this
+// host's future) or past maxPlausibleStepAge.
+//
+// It exists because the evidence-horizon comparison is the one place Loom
+// subtracts a server-stamped instant from its own wall clock, and a host far
+// enough ahead would read EVERY rejected-or-lost verdict as past the horizon —
+// converting the whole off-stream backstop into parked instances fleet-wide, a
+// far worse outcome than the DR-scale false terminal the guard removes. A guard
+// that cannot trust its own clock must not be the thing that decides, so a fault
+// falls back to the verdict the engine would reach with no guard at all.
+func isClockFault(age time.Duration) bool {
+	return age < 0 || age > maxPlausibleStepAge
+}
+
 // probeRejectedOrLost is the single verdict every deadline probe reaches when
 // it has found no tracker and no outbox record: the op was rejected or lost —
 // UNLESS the absences it just read are older than the evidence that would have
@@ -1336,16 +1382,22 @@ func (e *Engine) probeFail(ctx context.Context, inst *Instance, oldToken, reason
 // in the step's transition batch and refreshed by nothing but a redrive, so its
 // timestamp is when this step began waiting (tokenEpoch carries the argument).
 //
-// The three arms:
+// The arms:
 //
 //   - No token pointer at all — an invariant break for a running instance, so
 //     it fails the instance like a missing pattern pin does; a break is
 //     evidence in itself.
+//   - An age no clock could produce (isClockFault) — the guard disqualifies
+//     ITSELF, logs at Error, and takes the unguarded verdict. A skewed host
+//     must not convert the backstop into parks fleet-wide.
 //   - Epoch at or past the horizon — INCONCLUSIVE. The probe refuses the
 //     verdict: it warns naming both readings the evidence can no longer tell
 //     apart, records the refusal on the record, and Acks. The instance stays
 //     running on its token, so a human task still open can still complete, and
-//     an operator has the alert and the redrive verb. This is the §10.6
+//     the note is what makes the instance redrivable while running
+//     (control.go's isResumable) — the alert names that verb, and without the
+//     note the record would be parked with no operator exit at all, since no
+//     later probe revisits a deadline that is not re-armed. This is the §10.6
 //     "distinguishes BY EVIDENCE" clause honoured past the evidence's life,
 //     and it is alerted, never a silent wedge.
 //   - Epoch inside the horizon — the ordinary terminal, at the revision the
@@ -1364,13 +1416,24 @@ func (e *Engine) probeRejectedOrLost(ctx context.Context, inst *Instance, reason
 	}
 	at := e.now()
 	age := at.Sub(epoch)
+	if isClockFault(age) {
+		e.logger.Error("loom: step age is not an age any real step can have; the evidence-horizon guard is skipped and the deadline decided without it",
+			"instanceId", inst.InstanceID, "cursor", inst.Cursor, "pendingToken", token,
+			"stepEpoch", epoch, "engineClock", at, "stepAge", age,
+			"evidenceHorizon", opstatus.TrackerTTL, "implausibleBeyond", maxPlausibleStepAge,
+			"cause", "this host's clock disagrees with the substrate's by more than any real step age; "+
+				"check NTP on the Loom host",
+			"consequence", "the evidence-horizon guard is bypassed for this verdict")
+		return e.probeFail(ctx, inst, token, reason, expectedRevision)
+	}
 	if age < opstatus.TrackerTTL {
 		return e.probeFail(ctx, inst, token, reason, expectedRevision)
 	}
 
-	e.logger.Warn("loom: deadline verdict inconclusive; the op's tracker outlived nothing and the instance is left running",
+	e.logger.Warn("loom: deadline verdict inconclusive; the evidence aged out before the marker arrived, so the instance is left running for an operator",
 		"instanceId", inst.InstanceID, "cursor", inst.Cursor, "pendingToken", token,
-		"stepAge", age, "evidenceHorizon", opstatus.TrackerTTL, "wouldHaveFailedWith", reason,
+		"stepEpoch", epoch, "stepAge", age, "evidenceHorizon", opstatus.TrackerTTL,
+		"wouldHaveFailedWith", reason,
 		"readings", "the op may have committed and its tracker aged out, or it was genuinely rejected — "+
 			"no runtime can tell the two apart once the tracker is gone",
 		"operatorAction", "lattice loom redrive")
