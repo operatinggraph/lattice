@@ -1266,8 +1266,8 @@ func (e *Engine) bumpDispatchCount(ctx context.Context, targetID, entityID, col,
 // per-(target, gapColumn, actionRef) confidence window (§10.3 `__effect`,
 // weaver-planner-mandate design §3.2) at the exact same seam bumpDispatchCount
 // uses — the CAS-create-won lane-1 path and the sweep's reclaim, never a
-// redelivery re-fire. A failure is logged, never propagated: the window is
-// Fire 5's future ranking input, not a dispatch gate.
+// redelivery re-fire. A failure is logged, never propagated: the window is the
+// planner's candidate-ranking input, not a dispatch gate.
 func (e *Engine) bumpEffectDispatch(ctx context.Context, targetID, gapColumn, actionRef string) {
 	if err := e.marks.recordEffectDispatch(ctx, targetID, gapColumn, actionRef); err != nil {
 		e.logger.Warn("weaver: effect dispatch record failed",

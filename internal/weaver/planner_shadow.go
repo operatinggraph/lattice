@@ -155,9 +155,7 @@ func lessCandidateRank(a, b candidateRank) bool {
 	}
 	// A candidate with no dispatch history yet is neither favored nor
 	// penalized against one with data on this term — it ties and falls
-	// through to cost/lexicographic (a documented Fire-4 simplification;
-	// Fire 5's brief may refine how a no-data candidate ranks against a
-	// scored one).
+	// through to cost, then lexicographic order.
 	if a.hasRate && b.hasRate && a.closeRate != b.closeRate {
 		return a.closeRate > b.closeRate
 	}

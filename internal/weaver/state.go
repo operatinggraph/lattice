@@ -788,9 +788,10 @@ func (m *markStore) countInFlight(ctx context.Context) (int, error) {
 const effectKeyMarker = ".__effect."
 
 // effectWindowSize (K) sizes the sliding window of per-(target, gapColumn,
-// actionRef) dispatch/close outcomes the planner's future close-rate ranking
-// (Fire 5) reads. Config-tunable like MarkLease; a constant default here —
-// Fire 5's brief may promote it to a config knob, the mechanism is fixed.
+// actionRef) dispatch/close outcomes that the planner's close-rate ranking
+// reads (planner_shadow.go's rankCandidates) and that the zero-observed-closes
+// health probe measures against (health.go). A constant here, not a config
+// knob; the mechanism does not depend on the value.
 const effectWindowSize = 20
 
 // effectStats is the JSON body of an `__effect` confidence-window key: a FIFO
