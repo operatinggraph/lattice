@@ -47,6 +47,10 @@ lens + `directOp` playbook), made to roll.
 
 ## 3. Why rolling-`@at`, not a per-series `@every`
 
+> **Amended 2026-09-13 (§9):** the lens no longer arms an `@at` at all — an occurrence is credited by a
+> qualifying *visit* (a level-triggered read of the appointment corpus), never by the deadline passing. The
+> argument below against a per-series `@every` still holds; the rolling-`@at` it argued *for* is gone.
+
 `@every` (`substrate.ScheduleEvery`) publishes ONE durable, singleton schedule message that re-fires
 into one fired-subject forever (§10.4 "Recurring schedules"). It is the right tool for Weaver's single
 global sweep (`schedule.weaver.sweep`, the only recurring consumer today). It is the **wrong** tool for
@@ -92,6 +96,10 @@ All in **clinic-reminders** (the convergence-owning package; `clinic-domain` sta
 `followups.go` exactly — it is the closest precedent.
 
 ### Inc 1 — series state + the convergence lens + the advance op (package, no FE)
+
+> **Amended 2026-09-13 (§9):** `freshUntil` / the `@at` and the fixed-grid roll from `dueFor` below are
+> superseded — the gap opens on a qualifying visit (`handledAt`, `startsAt >= nextDueAt`) and the advance
+> re-anchors `nextDueAt = handledAt + intervalDays`. §9 is the text of record for both.
 
 - **Aspect (clinic-domain, on the patient — or a new lightweight `vtx.visitseries.<id>`; pick patient
   to avoid a new vertex type unless a patient can hold >1 concurrent series → then a series vertex).**
@@ -258,3 +266,120 @@ plus the full facet `node --test *.test.mjs` (156 vectors, extended for the thir
 `ResumeVisitSeries` on an ended series — it stays a harmless idempotent no-op; the FE now simply never offers
 it, which is the named fix. No Postgres migration script — the read model is Refractor-projected and
 re-derives its full row shape on the next CDC event, per the Protected-lens convention.
+
+## 9. Fire brief — an occurrence is credited by a visit, never by the clock (build note, 2026-09-13)
+
+**Scope sentence** (verbatim, verticals.md): *"A recurring visit is credited on the clock, never on a booking —
+`AdvanceVisitSeries` rolls at `nextDueAt` whether or not a visit was booked; the design says Book handles the
+occurrence but nothing records it, so 'Due now' empties at Weaver latency. Live: Riley's series at occurrence 2,
+no visit at the 08-15 grid point."* Green bar: *"an occurrence stays a worklist row until a visit on/after its due
+date exists."*
+
+**Decisions (Winston, §0 — recorded here, amending §3/§4 body text where they conflict, dated).**
+
+1. **The gap is level-triggered on a recorded fact, not a clock lapse.** `missing_series_advance` opens iff the
+   series is active AND a *qualifying visit* exists: an `appointment` `forPatient` the series' patient, whose
+   `.status.data.value` is neither `cancelled` nor `noShow` (null-safe `<>`, the `.paused` idiom), whose
+   `.schedule.data.startsAt >= .progress.nextDueAt`, and — when the series has a `withProvider` — with that same
+   provider (a provider-less series accepts any provider). The row projects `handledAt = min(...startsAt)` over
+   that set (nulls dropped by the fold, `aggregate.go`); the gap is `handledAt <> null`. **`freshUntil` and the
+   `freshnessExpiry.byTarget.visitSeriesDue` conjunct are deleted** — §4's "freshUntil re-arms the next `@at`"
+   and §3's rolling-`@at` framing described the clock-credit; a deadline passing now changes nothing on the
+   platform (the desk's "Due now" bucket is the FE's own `nextDueAt < today`, `seriesUrgency`). Per the
+   `_packages.md` dossier: a `freshUntil` with no marker reader is deleted, not kept.
+2. **The advance re-anchors the cadence on the crediting visit.** `AdvanceVisitSeries` gains a required
+   `handledAt` (the qualifying visit's `startsAt`, supplied by the playbook from `row.handledAt`) and writes
+   `.progress = {lastOccurrenceAt: handledAt, nextDueAt: handledAt + intervalDays, occurrenceCount+1}` — "every
+   N days from the last visit", not §4's fixed grid from `dueFor` (whose rationale was dispatch-latency drift,
+   moot once the base is a recorded visit instant). `dueFor` stays as the audit fact (`occurredFor` in the
+   event) and the op refuses `InvalidArgument` when `handledAt < dueFor`. Consumption falls out of the
+   arithmetic: after the advance `nextDueAt > handledAt`, so the same visit never re-qualifies; a second visit
+   booked at/after the new `nextDueAt` credits N+1 on the next evaluation (two visits booked ahead credit two
+   occurrences — "a visit on/after its due date exists", per row).
+3. **A series overdue with no visit is a worklist row, not a violating row.** Weaver converges gaps the
+   platform can close; "book the patient" is the desk's, so `violating` is false there. The FE's
+   `seriesUrgency` already buckets it "Due now" off `nextDueAt` and now the row *stays* (nothing advances it).
+4. **FE:** `bookSeriesOccurrence` carries the floor — booking a day before `nextDueAt` would not credit the
+   occurrence, so the Book calendar blocks those days with a reason and the lead line says "on or after <date>";
+   the floor clears on submit / patient change / leaving Book. Pure predicate goja-pinned.
+
+**Verified touch-list** (live 2026-09-13):
+- `packages/clinic-reminders/visitseries.go` — `visitSeriesDueSpec` :1114–1129 (add
+  `OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)` + `OPTIONAL MATCH (a)-[:withProvider]->(apr:provider)`,
+  `WITH … min(CASE WHEN … THEN a.schedule.data.startsAt ELSE null END) AS handledAt`, gap = active AND
+  handledAt <> null; drop `freshUntil`); `visitSeriesDueLens()` :1046–1063 (`BodyColumns`: −`freshUntil`
+  +`handledAt`); `AdvanceVisitSeries` branch :890–915 (+`handledAt`); its descriptor/param docs :99–103,
+  :138, :151–152, :185–189; `.progress` DDL doc :261–290; the package-doc header :7–47 (rolling-`@at` framing);
+  `visitSeriesDueTarget()` :1279–1300 (+`"handledAt": "row.handledAt"`, description).
+- `packages/clinic-reminders/manifest.yaml` :2 + `package.go` :79 — `0.10.10 → 0.11.0` (semantic change).
+- `packages/clinic-reminders/visitseries_cypher_test.go` — the freshness-lapse vectors (:79–260, :360–440)
+  become visit vectors (below); `integration_test.go` :697–736 `TestAdvanceVisitSeries_RollsForward` (+`handledAt`).
+- `cmd/clinic-app/web/app.js` — `bookSeriesOccurrence` :4000–4011, `dayBlockedReason` :2547–2561,
+  `renderSlotCalendar` :2565, `#book-lead` (index.html :42), `submitBook` reset :3037, `setPatient`; new goja pin
+  in `cmd/clinic-app/` mirroring `lifecycle_transitions_test.go`.
+- `docs/components/_packages.md` dossier (close pass) · this doc §3/§4 body (dated strike, decision 1–2).
+
+**Precedents to mirror.** Reverse walk from a walked neighbour: `packages/clinic-domain/lenses.go:938`
+(`(p)<-[:forPatient]-(a:appointment)`); a gap gated on a neighbour-side existence with an aggregate pulled out of
+the group: `packages/clinic-ledger/lenses.go:100–140` (`noShowSettlementSpec`, `max(tx.key)`, `count(DISTINCT)`);
+`CASE WHEN … ELSE null END` inside an aggregate: `packages/lease-signing/lenses.go:859`; null-safe status test:
+`s.paused.data.value <> true` (visitseries.go:1126); RFC3339 string ordering: visitseries.go:1128 (both sides
+`time.rfc3339_utc`-normalized — `visitseries.go:764`, `clinic-domain/ddls.go:3213`). Re-derivation of the series
+anchor on an appointment event is the actor-aware pipeline's pattern-directed derivation
+(`internal/refractor/pipeline/anchor_derivation.go`, fallback `walkscope.go` BFS) — the same transport
+`noShowSettlement` relies on for `settles` links; the business-plane sweep is the standing healer. FE calendar
+block reason: `dayBlockedReason` :2547 (returns a string reason, `""` = open). Goja pin: `lifecycle_transitions_test.go`.
+
+**Increment order + green checks.**
+- **Inc 1 (package, `sonnet` builder):** lens + op + playbook + docs + version bump. Lens vectors
+  (`visitseries_cypher_test.go`): no visit → not violating, `handledAt` null; visit `>= nextDueAt` same provider →
+  violating, `handledAt` = its `startsAt`; visit before `nextDueAt` → not; `cancelled` / `noShow` → not; other
+  provider when the series has one → not; provider-less series + any provider → yes; two qualifying → earliest;
+  paused / past-`activeUntil` with a qualifying visit → not; `ReferencesNoClockParameter` kept. Op vectors
+  (`integration_test.go`): advance writes `lastOccurrenceAt = handledAt`, `nextDueAt = handledAt + interval`;
+  same-`handledAt` replay idempotent; `handledAt < dueFor` refused. Green: `go test ./packages/clinic-reminders/
+  -count=1`, `go test ./internal/refractor/ -run 'Corpus|Census' -count=1` (re-pin by lens name — the lens gains
+  a reverse hop + an aggregate), `DIFF_BASE=main go run ./scripts/lint-package-version.go`, `go run
+  ./scripts/lint-lens-anchors.go`, `STRICT=1 go run ./scripts/lint-conventions.go`.
+- **Inc 2 (FE, `sonnet` builder):** the booking floor. Green: `go test ./cmd/clinic-app/ -count=1` (new pin),
+  `node --check cmd/clinic-app/web/app.js`, `go run ./scripts/lint-app-op-descriptors.go`, `lint-markup-escaping`.
+- **Live (Winston):** `make refresh-clinic` (or `reinstall-package PKG=clinic-reminders`) on the running stack;
+  read `weaver-targets` `visitSeriesDue.<riley>`: not violating, `handledAt` null, `nextDueAt` in the past; book a
+  visit for Riley with Dr Osei at/after `nextDueAt` through `:7799/api/op`; watch the row flip violating →
+  advanced (`occurrenceCount` +1, `nextDueAt` = visit + 30d); `pkill -x clinic-app` → rebuild → relaunch (Makefile
+  recipe) → the series worklist shows the row Upcoming. Cumulative cold review (opus) over the whole diff at close.
+
+**In-scope gotchas** (dossier + checklist, walked before the first edit):
+- `_packages.md` retired entry, still binding: *a lens MATCH edit is a corpus edit* — `internal/refractor/*_corpus_census_test.go`
+  fail by lens name on any `Spec` edit; run them and re-pin deliberately.
+- *A playbook `Params` entry bound to an OPTIONAL-hop column is a dispatch refusal on every row where the hop
+  misses* — `handledAt` rides an OPTIONAL walk but is non-null by construction whenever the gap is open (the gap
+  IS `handledAt <> null`); one lens pin seeds the anchor with the walk missing and asserts the gap shut.
+- *Every conjunct of `missing_<g>` must count the population the op's own test reads* — the op reads only the row;
+  its one guard (`handledAt >= dueFor`) is implied by the lens's `startsAt >= nextDueAt`; pin both.
+- *For every `freshUntil` a lens projects, name the reader of the marker — none ⇒ delete the column* (decision 1).
+- *A link key's type segment is what an outbound walk rebuilds the far endpoint from* — fixtures build
+  `lnk.appointment.<id>.forPatient.patient.<id>` through the `edge` helper from the real vertex types.
+- *A recorded value is read as the FACT it records* — `lastOccurrenceAt` now means "the crediting visit's start";
+  say so in the DDL doc; nothing else reads it (grep).
+- `packages/` content edit ⇒ manifest + `Version` bump; `lint-package-version` with `DIFF_BASE`.
+- vertical-apps dossier: *an op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`*;
+  *a value reaches markup unescaped* — the floor reason is `textContent`/`title` only; *a "the person can also do it
+  from X" claim is a claim about X's render gate* — the floor is set by the one entry point (`bookSeriesOccurrence`).
+- Standing checklist: #3 (revert-prove: delete the `handledAt` conjunct and the "no visit" vector must fail; delete
+  the re-anchor and the op vector must fail), #5 (one writer of `.progress` — the op; unchanged), #6 (the
+  `noShowSettlement` precedent's `max(tx.key)` comment says `collect()+index` is unsupported — the same reason this
+  brief uses `min(CASE …)` rather than an ordered pick).
+
+**Adjacent finds.** (a) `visitseries.go` header + `package.go`'s "@every" note describe the clock model —
+rewritten in Inc 1 (same fire). (b) A crediting visit cancelled *after* the advance stays credited — the
+occurrence was recorded off a booking that never happened. Non-goal here (the recorded fact is the booking; the
+desk re-books, and the replacement credits the next occurrence only if it lands on/after the new `nextDueAt`);
+named so the PO sees the boundary, not filed — no missing pattern (an un-credit is an ordinary op; nobody has
+asked). (c) No adjacent defects found by the scout.
+
+**Non-goals.** No change to `visitSeriesRead` / the Postgres read model (its columns are unchanged; the FE's
+"Due now" derivation stays FE-side). No `fulfils` link from appointment to series — the recorded `lastOccurrenceAt`
++ the `>= nextDueAt` arithmetic is the consumption record; a link would add a second writer of relationship state
+for no reader. No skip-to-latest / catch-up semantics. No change to `PauseVisitSeries` / `EndVisitSeries` /
+`StartVisitSeries`. No new op.
