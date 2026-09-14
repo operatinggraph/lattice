@@ -89,10 +89,12 @@ func (e *Engine) legacyTombstoneFamilies() []legacyTombstoneFamily {
 // while the wait it backstops does not: a userTask parked on its human is
 // bounded only by the task's own lifetime, up to 30 days. So a running
 // instance whose deadline was disarmed more than a day ago has no tracker and
-// no outbox record left, and the probe reads that absence as "the op was
-// rejected" and FAILS the instance. Converting that instance's legacy marker
-// would re-fire exactly that probe and kill a live human wait, so the marker
-// is left as it is — a permanent subject is the cheaper outcome by far.
+// no outbox record left, so the probe reaches absences it cannot read: inside
+// the tracker's life it calls them a rejection and FAILS the instance, past it
+// it refuses the verdict and alerts on a live human wait. Converting that
+// instance's legacy marker buys one of those two and never a correct answer,
+// so the marker is left as it is — a permanent subject is the cheaper outcome
+// by far.
 //
 // A record that cannot be read is a skip too, never a conversion: an instance
 // the pass cannot classify is one whose marker it has no verdict on. A read
