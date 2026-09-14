@@ -86,9 +86,12 @@ type protectedApplicationRow struct {
 	InflightPayment   bool `json:"inflight_payment"`
 	DeclinedBgcheck   bool `json:"declined_bgcheck"`
 	DeclinedPayment   bool `json:"declined_payment"`
-	// LostToRival: the unit has leased and this application carries no decision —
-	// the landlord decided a sibling. The card's banner reads it ahead of the
-	// closed-gap stepper, and the inbox treats its expired tasks as read-only.
+	// LostToRival: this application lost its unit to another applicant — the
+	// recorded .decision = lost (RecordApplicationLoss), which holds after the
+	// unit relists, OR the live premise in the moments before it is recorded
+	// (the unit reads leased and this application carries no decision). The
+	// card's banner reads it ahead of the closed-gap stepper, and the inbox
+	// treats its expired tasks as read-only.
 	LostToRival bool `json:"lostToRival"`
 }
 

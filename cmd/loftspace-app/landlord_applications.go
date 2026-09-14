@@ -103,9 +103,12 @@ type protectedLandlordRow struct {
 	HasGuarantor             *bool    `json:"hasGuarantor"`
 	GuarantorIncomeToRentMet *bool    `json:"guarantorIncomeToRentMet"`
 	Qualified                bool     `json:"qualified"`
-	// LostToRival: the unit has leased and this application carries no decision
-	// — the landlord decided a sibling, so the row reads "unit leased to another
-	// applicant" rather than "awaiting your decision".
+	// LostToRival: this application lost its unit to another applicant — the
+	// recorded .decision = lost (RecordApplicationLoss), which holds after the
+	// unit relists, OR the live premise in the moments before it is recorded
+	// (the unit reads leased and this application carries no decision). The
+	// row reads "unit went to another applicant" rather than "awaiting your
+	// decision", and decisionOffered hides Approve/Decline on it.
 	LostToRival bool `json:"lostToRival"`
 }
 

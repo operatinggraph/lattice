@@ -739,11 +739,12 @@ func TestLeaseApplicationComplete_WinnerBgcheckGap_ReopensAfterOwnUnitLeases(t *
 // TestLeaseApplicationComplete_RivalGapsClose_WhenUnitLeasesToSomeoneElse: a
 // second, unrelated application on the SAME unit — with none of its own four
 // applicant gates recorded and no landlord decision on THIS application —
-// stops being violating (and so stops being dispatched RecordIdentityPII /
-// SignLease / the bgcheck+payment patterns) the instant the unit leases to a
-// different applicant. Board fix 2026-08-23: the four applicant gaps + missing_decision
-// previously carried no unitStatus term, so a rival kept re-asking for PII/a
-// signature on a unit they could no longer get.
+// stops being dispatched RecordIdentityPII / SignLease / the bgcheck+payment
+// patterns the instant the unit leases to a different applicant: the four
+// applicant gaps and missing_decision close on the unit's status. The one gap
+// that OPENS is missing_lossRecorded, so the row stays violating for exactly
+// the work of recording the loss (RecordApplicationLoss, targets.go), and
+// converges once .decision = lost is on the application.
 func TestLeaseApplicationComplete_RivalGapsClose_WhenUnitLeasesToSomeoneElse(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -769,7 +770,96 @@ func TestLeaseApplicationComplete_RivalGapsClose_WhenUnitLeasesToSomeoneElse(t *
 	require.Equal(t, false, v["missing_signature"], "unit already leased to someone else → no point asking for a signature")
 	require.Equal(t, false, v["missing_decision"], "no decision left to make once the unit is gone")
 	require.Equal(t, false, v["missing_listingLeased"], "a rival never landlord-approved → this gap was never open")
-	require.Equal(t, false, v["violating"], "a losing rival converges the instant the unit leases to someone else")
+	require.Equal(t, true, v["missing_lossRecorded"], "unit leased, no decision on this application → the loss is not yet recorded")
+	require.Equal(t, true, v["violating"], "the row stays violating until the loss is recorded — the one dispatch left")
+
+	// The loss is recorded: the row converges with nothing left to do.
+	f.aspect(t, "rival", "decision", "decision", map[string]any{"value": "lost", "decidedAt": "2026-06-18T00:00:00Z"})
+	rows = f.project(t, "rival")
+	require.Len(t, rows, 1)
+	v = rows[0].Values
+	require.Equal(t, "lost", v["landlordDecision"])
+	require.Equal(t, false, v["missing_lossRecorded"], "a recorded loss closes the gap")
+	require.Equal(t, false, v["missing_decision"], "lost is a recorded decision, not an awaited one")
+	require.Equal(t, false, v["violating"], "a losing rival converges once its loss is recorded")
+}
+
+// TestLeaseApplicationComplete_RecordedLoss_HoldsAcrossTheRelist is the reason
+// the loss is a recorded fact: the winner's tenancy ends, missing_relist flips
+// the unit back to 'available', and the live (unitStatus <> 'leased') term
+// reads open again — but the (landlordDecision <> 'lost') conjunct on every
+// applicant gap keeps the rival closed. Without it every rival on a relisted
+// unit would be re-dispatched RecordIdentityPII / SignLease against a unit it
+// lost months ago. The control is the undecided application on the same
+// available unit, whose gaps are genuinely open.
+func TestLeaseApplicationComplete_RecordedLoss_HoldsAcrossTheRelist(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	for _, name := range []string{"lostRival", "fresh"} {
+		f.vtx(t, name, "leaseapp")
+		f.vtx(t, name+"Id", "identity")
+		f.edge(t, "applicationFor", name, name+"Id")
+		f.edge(t, "appliesToUnit", name, "unit1")
+	}
+	f.aspect(t, "lostRival", "decision", "decision", map[string]any{"value": "lost", "decidedAt": "2026-06-18T00:00:00Z"})
+
+	rows := f.project(t, "lostRival")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "available", v["unitStatus"], "the unit has relisted")
+	for _, col := range []string{"missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_decision", "missing_listingLeased", "missing_lossRecorded"} {
+		require.Equal(t, false, v[col], "%s stays closed on a recorded loss whatever the unit's status", col)
+	}
+	require.Equal(t, false, v["violating"], "a lost application is never revived by a relist")
+
+	rows = f.project(t, "fresh")
+	require.Len(t, rows, 1)
+	v = rows[0].Values
+	require.Equal(t, true, v["missing_onboarding"], "the control: an undecided application on the relisted unit is live")
+	require.Equal(t, false, v["missing_lossRecorded"], "an available unit records no loss")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestLeaseApplicationComplete_LossRecordedGap_OnlyOnLeasedAndUndecided pins
+// the gap's premise corner by corner: it opens on a leased unit with no
+// decision and on nothing else — a recorded lost / approved / declined
+// decision closes it on a leased unit, and an available unit never opens it.
+func TestLeaseApplicationComplete_LossRecordedGap_OnlyOnLeasedAndUndecided(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, tc := range []struct {
+		name     string
+		status   string
+		decision string
+		want     bool
+	}{
+		{"leased, undecided", "leased", "", true},
+		{"leased, lost", "leased", "lost", false},
+		{"leased, approved (the winner)", "leased", "approved", false},
+		{"leased, declined", "leased", "declined", false},
+		{"available, undecided", "available", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLensFixture(t)
+			f.vtx(t, "app", "leaseapp")
+			f.vtx(t, "bob", "identity")
+			f.edge(t, "applicationFor", "app", "bob")
+			f.vtx(t, "unit1", "unit")
+			f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": tc.status})
+			f.edge(t, "appliesToUnit", "app", "unit1")
+			if tc.decision != "" {
+				f.aspect(t, "app", "decision", "decision", map[string]any{"value": tc.decision, "decidedAt": "2026-06-18T00:00:00Z"})
+			}
+			rows := f.project(t, "app")
+			require.Len(t, rows, 1)
+			require.Equal(t, tc.want, rows[0].Values["missing_lossRecorded"])
+		})
+	}
 }
 
 // TestLeaseApplicationComplete_ListingLeasedGap_NotApprovedGatesEachGap: a not-yet-
@@ -1749,6 +1839,36 @@ func TestApplicantOnboarding_NoLiveApplicationDoesNotAsk(t *testing.T) {
 	v := rows[0].Values
 	require.Equal(t, false, v["missing_onboarding"], "no application still needs onboarding → stop asking")
 	require.Equal(t, false, v["violating"])
+}
+
+// TestApplicantOnboarding_RecordedLossDoesNotAsk_EvenAfterTheRelist: the
+// per-application half of the gate carries the same (decision <> 'lost')
+// conjunct leaseApplicationComplete's applicant gaps do, so an applicant whose
+// only application lost its unit is not asked for their SSN once that unit
+// relists as available — the relist is a new opportunity, not this
+// application's revival.
+func TestApplicantOnboarding_RecordedLossDoesNotAsk_EvenAfterTheRelist(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	const now = "2026-06-18T00:00:00Z"
+	f.vtx(t, "alice", "identity")
+	f.vtx(t, "app1", "leaseapp")
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	f.edge(t, "applicationFor", "app1", "alice")
+	f.edge(t, "appliesToUnit", "app1", "unit1")
+
+	rows := f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0].Values["missing_onboarding"], "the control: an undecided application on an available unit asks")
+
+	f.aspect(t, "app1", "decision", "decision", map[string]any{"value": "lost", "decidedAt": now})
+	rows = f.projectApplicantOnboarding(t, "alice", now)
+	require.Len(t, rows, 1)
+	require.Equal(t, false, rows[0].Values["missing_onboarding"], "a lost application does not ask, whatever its unit's status")
+	require.Equal(t, false, rows[0].Values["violating"])
 }
 
 // TestApplicantOnboarding_OneLiveApplicationAmongDeadOnesStillAsks is the

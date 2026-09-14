@@ -115,12 +115,15 @@ type memberProjection struct {
 	CoveringLocations []string `json:"coveringLocations"`
 }
 
-// declinedDecision is the one landlordDecision value that removes somebody from
-// the directory. Compared as an allow-nothing-else test rather than a
-// "keep only approved" one on purpose: the column is three-state, and an
-// application still awaiting a landlord belongs to somebody living in the
-// building whom the front desk books in. Only a REFUSAL is disqualifying.
-const declinedDecision = "declined"
+// disqualifyingDecisions are the landlordDecision values that remove somebody
+// from the directory: a landlord's refusal, and a loss of the unit to another
+// applicant (RecordApplicationLoss records it as the same aspect's `lost`).
+// Compared as an allow-nothing-else test rather than a "keep only approved"
+// one on purpose: the column is multi-state, and an application still awaiting
+// a landlord belongs to somebody living in the building whom the front desk
+// books in. Only a refusal or a recorded loss is disqualifying — neither of
+// those people lives in the building.
+var disqualifyingDecisions = map[string]bool{"declined": true, "lost": true}
 
 // bookerProjection is one row of the wellness-domain `wellnessBookers` lens —
 // a live booking, the person who made it, and the locations covering the class
@@ -174,12 +177,13 @@ func computeCoveredMembers(keys []string, get kvGetter, hats subjectHats) []memb
 		if json.Unmarshal(raw, &p) != nil || p.BookerKey == "" || p.LeaseAppKey == "" {
 			continue
 		}
-		// A refused applicant keeps a live lease and a live applicationFor link
-		// (DecideLeaseApplication tombstones neither), so dropping them is this
+		// A refused or lost applicant keeps a live lease and a live
+		// applicationFor link (neither DecideLeaseApplication nor
+		// RecordApplicationLoss tombstones them), so dropping them is this
 		// reader's job. The operator exemption below is from CONFINEMENT, not
 		// from this: root sees every building, not people it was never true to
 		// call members.
-		if strings.EqualFold(strings.TrimSpace(p.LandlordDecision), declinedDecision) {
+		if disqualifyingDecisions[strings.ToLower(strings.TrimSpace(p.LandlordDecision))] {
 			continue
 		}
 		if !hatsReachCoverage(hats, p.CoveringLocations) {

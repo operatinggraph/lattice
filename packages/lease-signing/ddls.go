@@ -102,7 +102,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "leaseapp",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy"},
+		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy", "RecordApplicationLoss"},
 		Description: "Lease-application DDL. Vertex shape: vtx.leaseapp.<NanoID>, class=leaseapp, root data = {} " +
 			"(minimal, D5 — the application status/gaps are LENS-computed, not stored). The application's applicant " +
 			"is a LINK (applicationFor → identity: the later-arriving leaseapp is the source, the pre-existing " +
@@ -126,7 +126,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"an APPROVED application is an executed lease (its account, balance and rent clause hang off it, the unit is leased) " +
 			"and is refused (AlreadyApproved), a declined one stays withdrawable. " +
 			"DecideLeaseApplication{leaseAppKey, decision, reason?, unit?} records the landlord's leasing decision as a .decision aspect " +
-			"{value (approved|declined), decidedAt (canonical-UTC RFC3339), reason? (optional decline rationale)}. A recorded decision is " +
+			"{value (approved|declined), decidedAt (canonical-UTC RFC3339), reason? (optional decline rationale)} — the aspect's value is " +
+			"approved|declined|lost, the third recorded by RecordApplicationLoss (below), never submitted by a landlord. A recorded decision is " +
 			"TERMINAL: re-submitting the same decision is idempotent, but changing it to a different value is rejected (DecisionFinal) so a " +
 			"decision cannot silently flip / oscillate; an approve is rejected (NotReadyToApprove) unless the application has been signed. It is the human gate the " +
 			"listing-flip waits behind: the convergence lens reads .decision.value so an approval opens missing_listingLeased " +
@@ -214,7 +215,23 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"Emits leaseapp.tenancyEnded{leaseAppKey, leaseEnd}. Once endedAt is set, SignRenewal refuses TenancyEnded, " +
 			"leaseApplicationComplete's applicant gaps and listing flip close (an ended tenancy is terminal, the decline's " +
 			"shape — a relisted unit is never re-leased to the ended tenant), leaseExpiry opens no cycle, and tenancyEnd's " +
-			"own missing_relist relists the unit unless another approved tenancy now holds it.",
+			"own missing_relist relists the unit unless another approved tenancy now holds it. " +
+			"RecordApplicationLoss{leaseAppKey} is operator-granted (never person-facing) and records that an application lost its " +
+			"unit to another applicant — the directOp leaseApplicationComplete's missing_lossRecorded gap dispatches once an " +
+			"undecided application's unit reads leased, and runnable by hand via the CLI under the primordial admin (as EndTenancy; " +
+			"Loupe's console identity holds consoleOperator, not operator). It reads the application (a REQUIRED declared read) " +
+			"and its .decision (declared optionalReads — absent is the gap's own premise); ANY recorded decision (lost, approved " +
+			"or declined) is an idempotent no-op with zero mutations and no event. It resolves the unit from the application's " +
+			"OWN appliesToUnit link (never a payload field; NoUnit when there is no live endpoint) and reads that unit's .listing " +
+			"as a follow-up, refusing UnitNotLeased when the listing is absent, deleted, or its status is not leased (write-path " +
+			"honesty — an operator cannot mark an application lost against an available unit). Otherwise it writes .decision " +
+			"{value: lost, decidedAt (canonical-UTC RFC3339, the instant the loss was recorded)} — no reason, no " +
+			".decidedProfileSnapshot (nobody decided this application) — conditioned CreateOnly by the declared absence, so a " +
+			"landlord decision racing the dispatch conflicts and the re-dispatch reads it as decided. Emits " +
+			"leaseapp.applicationLost{leaseAppKey, unitKey}. A lost application is terminal and never revived: " +
+			"DecideLeaseApplication refuses DecisionFinal on it, the four applicant gaps and lost_to_rival read the recorded " +
+			"value across the unit's later relist, and WithdrawLeaseApplication still accepts it (freeing the per-(applicant, " +
+			"unit) guard so the applicant may re-apply to the relisted unit afresh).",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
@@ -223,9 +240,9 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months — a whole number ≥ 1 (CreateLeaseApplication; required when moveInDate is supplied; a zero, negative or fractional count is refused InvalidTerms, as is one read back at the first approve)."},` +
 			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent, > 0 when supplied (CreateLeaseApplication; optional, only with moveInDate; zero or negative is refused InvalidTerms). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
 			`"leaseAppId":{"type":"string","description":"Optional bare NanoID for the application vertex (CreateLeaseApplication); absent → minted. The write-ahead seam, mirroring service-domain's instanceId."},` +
-			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), backfill (BackfillLeaseTerms), re-point at a different unit (ReassignLeaseUnit), or whose lease term to record as ended (EndTenancy); required, validated alive."},` +
+			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), backfill (BackfillLeaseTerms), re-point at a different unit (ReassignLeaseUnit), whose lease term to record as ended (EndTenancy), or whose loss of its unit to another applicant to record (RecordApplicationLoss); required, validated alive."},` +
 			`"newUnitKey":{"type":"string","description":"vtx.unit.<NanoID> of the unit to re-point the application's appliesToUnit link at (ReassignLeaseUnit; required, validated alive). The operator repair for an application whose unit was tombstoned."},` +
-			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition."},` +
+			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition. The recorded .decision aspect's value is approved|declined|lost — lost is written by RecordApplicationLoss when the unit went to another applicant, never submitted here."},` +
 			`"reason":{"type":"string","description":"Optional free-text rationale for a DecideLeaseApplication decline (applicant feedback + a fair-housing record). Stored on the .decision aspect and projected as the declineReason lens column; ignored on an approve."},` +
 			`"annualIncome":{"type":"number","description":"The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE — stored in the .profile aspect (underwritingRecord retention class), NEVER projected; only the derived incomeToRentMet boolean reaches the read model."},` +
 			`"employmentStatus":{"type":"string","enum":["employed","self-employed","unemployed","student","retired"],"description":"The applicant's employment status (SetApplicantProfile; required). SENSITIVE — stored in .profile. employed / self-employed derive the projected employmentVerified=true."},` +
@@ -248,7 +265,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"leaseTermMonths":       "Requested lease term in months — a whole number ≥ 1 (a zero, negative or fractional count is refused InvalidTerms at CreateLeaseApplication, and again at the first approve if a stored value fails the test). Required when moveInDate is supplied; written to the .terms aspect and signed on at the first approve (leaseEnd = moveInDate + this many calendar months).",
 			"requestedRent":         "Optional monthly rent the applicant offers, > 0 when supplied (zero or negative is refused InvalidTerms). Written to the .terms aspect when supplied (only meaningful alongside moveInDate); the first approve records it as .tenancy.rentAmount, falling back to the unit's listed rent where it is absent or non-positive.",
 			"leaseAppId":            "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
-			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent; ReassignLeaseUnit validates it is alive and re-points its appliesToUnit link at newUnitKey; EndTenancy validates it is alive and rewrites its .tenancy aspect with endedAt = leaseEnd (the .tenancy is a required declared read too). The caller lists it in ContextHint.Reads.",
+			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent; ReassignLeaseUnit validates it is alive and re-points its appliesToUnit link at newUnitKey; EndTenancy validates it is alive and rewrites its .tenancy aspect with endedAt = leaseEnd (the .tenancy is a required declared read too); RecordApplicationLoss validates it is alive and writes .decision {value: lost, decidedAt} once its unit has leased to another applicant (the .decision is a declared optionalReads). The caller lists it in ContextHint.Reads.",
 			"newUnitKey":            "Full vtx.unit.<NanoID> key of the unit ReassignLeaseUnit re-points the application at (required, validated alive). The operator names the unit directly — the application's OWN appliesToUnit / applicationFor links, never payload fields, are what the op reads to find the CURRENT unit and the applicant.",
 			"annualIncome":          "The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE: stored in the .profile aspect, custodied on the package's underwritingRecord retention class (RetentionClasses) rather than the applicant's identity, and NEVER projected. The op derives incomeToRentMet (gross monthly income ≥ 3× the unit's listing rent) from it into the non-sensitive .applicationSignals aspect, and only that boolean reaches the read model.",
 			"employmentStatus":      "The applicant's employment status (SetApplicantProfile; required): employed | self-employed | unemployed | student | retired. SENSITIVE — stored in .profile. employed / self-employed derive the projected employmentVerified=true (an active income source); the rest are captured honestly and read as unverified.",
@@ -261,7 +278,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"guarantorAnnualIncome": "The guarantor's gross annual income (SetApplicantProfile; optional, captured only when hasGuarantor, > 0). SENSITIVE — stored in .profile, NEVER projected. The op derives guarantorIncomeToRentMet (guarantor gross monthly ≥ 3× the unit's listing rent — the standard reason a guarantor backs a thin-income application) from it into .applicationSignals, and only that boolean reaches the read model.",
 			"coApplicantName":       "The co-applicant's name (SetApplicantProfile; optional, captured only when hasCoApplicant). SENSITIVE: a third party's identifier, stored in the .underwritingParties aspect (underwritingRecord retention class), never projected.",
 			"coApplicantContact":    "The co-applicant's contact — email or phone (SetApplicantProfile; optional, captured only when hasCoApplicant). SENSITIVE: a third party's identifier, stored in .underwritingParties, never projected.",
-			"decision":              "The landlord's leasing decision (DecideLeaseApplication; required): approved or declined. Written to the .decision aspect {value, decidedAt}. A recorded decision is TERMINAL — the same value re-submits idempotently, a different value is rejected (DecisionFinal); approve is rejected (NotReadyToApprove) unless the application is signed. The convergence lens reads it: approved opens missing_listingLeased (the unit leases); declined folds into the lens's declined disposition (a terminal rejection).",
+			"decision":              "The landlord's leasing decision (DecideLeaseApplication; required): approved or declined. Written to the .decision aspect {value, decidedAt}, whose recorded value is approved|declined|lost — lost is recorded by RecordApplicationLoss when the unit went to another applicant, never submitted by a landlord. A recorded decision is TERMINAL — the same value re-submits idempotently, a different value is rejected (DecisionFinal, a lost application included); approve is rejected (NotReadyToApprove) unless the application is signed. The convergence lens reads it: approved opens missing_listingLeased (the unit leases); declined folds into the lens's declined disposition (a terminal rejection); lost closes the applicant gaps and projects lost_to_rival.",
 			"reason":                "Optional free-text rationale the landlord supplies with a DecideLeaseApplication decline — applicant feedback plus a fair-housing record. Stored on the .decision aspect ({value, decidedAt, reason?}) only when supplied and projected as the declineReason lens column the applicant FE renders on the declined banner. A same-value re-submission (idempotent) can attach / update it; ignored on an approve.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -400,6 +417,21 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"actor via the tenancyEnd target, or by hand). Rejects a non-existent application (UnknownLeaseApplication) " +
 					"or one with no .tenancy / no leaseEnd (NoTenancy) — including a submission that failed to declare the " +
 					".tenancy read, which is refused rather than read on demand.",
+			},
+			{
+				Name:    "RecordApplicationLoss — record that an application lost its unit to another applicant",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
+				ExpectedOutcome: "Reads the application (declared in ContextHint.Reads — required) and its .decision (declared in " +
+					"ContextHint.OptionalReads). If .decision already carries a value — lost, approved or declined — no-ops with " +
+					"zero mutations and no event (idempotent under at-least-once dispatch; a landlord decision racing the dispatch " +
+					"is nothing to record; no primaryKey). Resolves the unit from the application's own appliesToUnit link and " +
+					"reads its .listing; rejects NoUnit when the link has no live endpoint and UnitNotLeased when the listing is " +
+					"absent, deleted, or its status is not leased. Otherwise writes .decision {value: lost, decidedAt: " +
+					"<op.submittedAt, canonical UTC>} (create-only under the declared absence; no reason, no " +
+					".decidedProfileSnapshot). Emits leaseapp.applicationLost{leaseAppKey, unitKey}. Returns primaryKey. " +
+					"Operator-only (Weaver's service actor via leaseApplicationComplete's missing_lossRecorded gap, or by hand via the CLI " +
+					"under the primordial admin, as EndTenancy). " +
+					"Rejects a non-existent application (UnknownLeaseApplication).",
 			},
 		},
 		Effects: map[string][]json.RawMessage{

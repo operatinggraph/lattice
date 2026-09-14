@@ -581,3 +581,37 @@ func TestLandlordLeaseApplicationsRead_LostToRival(t *testing.T) {
 	require.Equal(t, false, byApp[f.ids["winner"]]["lost_to_rival"], "the approved application is the winner")
 	require.Equal(t, false, byApp[f.ids["pending"]]["lost_to_rival"], "an undecided application on an available unit is awaiting the landlord")
 }
+
+// TestLandlordLeaseApplicationsRead_RecordedLoss_HoldsAcrossTheRelist — the
+// landlord's row reads the RECORDED .decision = lost ahead of the live
+// unit-status term: once the winner's tenancy ends and the unit relists, the
+// rival's row still says "unit leased to another applicant" rather than
+// re-offering the landlord a decision DecisionFinal would refuse. The undecided
+// application on the same relisted unit is the control.
+func TestLandlordLeaseApplicationsRead_RecordedLoss_HoldsAcrossTheRelist(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	// The winner's tenancy has ended and the unit relisted.
+	f.seedManagedApplication(t, "winner", "alice", "unit1", "larry")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 4200, "rentCurrency": "USD", "status": "available"})
+	for _, pair := range [][2]string{{"lostRival", "bob"}, {"fresh", "carol"}} {
+		f.vtx(t, pair[0], "leaseapp")
+		f.vtx(t, pair[1], "identity")
+		f.edge(t, "applicationFor", pair[0], pair[1])
+		f.edge(t, "appliesToUnit", pair[0], "unit1")
+	}
+	f.aspect(t, "lostRival", "decision", "decision", map[string]any{"value": "lost", "decidedAt": "2026-06-18T00:00:00Z"})
+
+	rows := f.projectLandlordRead(t)
+	byApp := map[string]map[string]any{}
+	for _, r := range rows {
+		byApp[r.Values["app_id"].(string)] = r.Values
+	}
+	require.Len(t, byApp, 3)
+	require.Equal(t, "available", byApp[f.ids["lostRival"]]["unit_status"], "the unit has relisted")
+	require.Equal(t, true, byApp[f.ids["lostRival"]]["lost_to_rival"], "a recorded loss holds across the relist")
+	require.Equal(t, "lost", byApp[f.ids["lostRival"]]["landlord_decision"])
+	require.Equal(t, false, byApp[f.ids["fresh"]]["lost_to_rival"], "the control: an undecided application on the relisted unit is awaiting the landlord")
+}

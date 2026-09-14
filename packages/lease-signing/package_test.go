@@ -225,10 +225,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 11; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 26; got != want {
+	if got, want := len(Package.Permissions), 27; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 16; got != want {
+	if got, want := len(Package.OpMetas), 17; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -323,6 +323,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"SignRenewal", "any"},
 		{"CancelRenewal", "any"}, {"CancelRenewal", "self"},
 		{"EndTenancy", "any"},
+		{"RecordApplicationLoss", "any"},
 	}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {

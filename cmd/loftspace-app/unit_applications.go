@@ -13,9 +13,12 @@ import (
 // surface renders it: the application key, the applicant identity + its human
 // name, and a coarse disposition derived from the convergence row. status is
 // "leased" (landlord-approved AND the unit leased — the terminal done state),
-// "approved" (the landlord approved, lease in flight), "qualified" (every applicant
-// gap closed but the landlord has not decided), "declined" (a standing business
-// rejection OR a landlord decline), or "in_review" (still converging). signed
+// "ended" (the recorded tenancy's term ended), "approved" (the landlord approved,
+// lease in flight), "qualified" (every applicant gap closed but the landlord has
+// not decided), "declined" (a standing business rejection OR a landlord decline),
+// "lost" (the unit went to another applicant — RecordApplicationLoss's recorded
+// .decision = lost, terminal whatever the unit's status reads later), or
+// "in_review" (still converging). signed
 // reflects whether the applicant has executed the lease (the .signature aspect).
 // qualified mirrors the RLS-enforced protectedLandlordRow's own `qualified`
 // column bit for bit (lenses.go's applicantApproved: every one of the four
@@ -80,10 +83,13 @@ type unitApplicationsRow struct {
 
 // applicationStatus reduces a convergence row to the landlord's coarse
 // disposition. declined wins (a standing verification rejection OR a landlord
-// decline — the safest signal to surface). ended is next — EndTenancy has
-// recorded the term's end, a terminal fact that must not read as a live
-// "leased"/"approved" tenancy (the by-unit console's own ledger panel gates on
-// this too). Then the landlord-decision states: landlord-approved + unit
+// decline — the safest signal to surface). lost is next — RecordApplicationLoss
+// has recorded .decision = lost, a terminal fact read off the recorded value
+// (never the unit's status, which reads available again once the winner's
+// tenancy ends and the unit relists). Then ended — EndTenancy has recorded the
+// term's end, a terminal fact that must not read as a live "leased"/"approved"
+// tenancy (the by-unit console's own ledger panel gates on this too). Then
+// the landlord-decision states: landlord-approved + unit
 // leased is the terminal "leased"; landlord-approved with the lease still in
 // flight is "approved"; a qualified-but-undecided application
 // (applicantApproved, no decision) is "qualified" — the state the landlord acts on
@@ -92,6 +98,8 @@ func applicationStatus(a applicationRow) string {
 	switch {
 	case a.Declined:
 		return "declined"
+	case a.LandlordDecision == "lost":
+		return "lost"
 	case a.TenancyEndedAt != "":
 		return "ended"
 	case a.LandlordApproved && a.UnitStatus == "leased":

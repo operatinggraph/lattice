@@ -56,6 +56,21 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     is a human running AssignUnitOwner. Closes the moment any `manages` link
 //     lands (the unit is an appliesToUnit neighbor, so the link reprojects this
 //     anchor).
+//   - missing_lossRecorded → directOp RecordApplicationLoss{leaseAppKey:
+//     row.entityKey} — this package's own operator-granted op (the
+//     missing_tenancyEnded → EndTenancy shape, tenancy_end_targets.go). Opens
+//     when the application's unit reads leased and this application carries no
+//     decision — the landlord decided a sibling, never this one — and closes
+//     when the op records .decision = {value: lost, decidedAt} on the
+//     application, the fact every liveness consumer then reads (the four
+//     applicant gaps, lost_to_rival) so the winner's later tenancy end and
+//     relist revive no rival. The gap's only param is the anchor's own key: the
+//     op resolves the unit from the application's appliesToUnit link and
+//     re-verifies the premise from state (UnitNotLeased otherwise), never from
+//     the row. .decision is an OptionalRead — absent is the whole point of the
+//     gap — and the declared absence conditions the write CreateOnly, so a
+//     landlord decision racing the dispatch conflicts and the re-dispatch reads
+//     it as decided (an idempotent no-op).
 //   - missing_leaseDoc → triggerLoom(leaseDocument) over the application itself
 //     (row.entityKey — the pattern's subjectType is leaseapp). Opens on signing
 //     (signature present, no completed docGen outcome, none in flight, none
@@ -122,7 +137,19 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			"missing_payment":       {Action: "triggerLoom", Pattern: "collectPayment", Subject: "row.applicant", Adapter: "stripe"},
 			"missing_signature":     {Action: "assignTask", Operation: "SignLease", Assignee: "row.applicant", Target: "row.entityKey"},
 			"missing_listingLeased": {Action: "directOp", Operation: "SetListingStatus", Params: map[string]string{"unit": "row.unitKey", "status": "leased"}, Reads: []string{"row.unitKey", "row.unitKey.listing"}},
-			"missing_leaseDoc":      {Action: "triggerLoom", Pattern: "leaseDocument", Subject: "row.entityKey"},
+			"missing_lossRecorded": {
+				Action:        "directOp",
+				Operation:     "RecordApplicationLoss",
+				Params:        map[string]string{"leaseAppKey": "row.entityKey"},
+				Reads:         []string{"row.entityKey"},
+				OptionalReads: []string{"row.entityKey.decision"},
+				// The unit resolution (scripts.go leaseapp_unit): one outbound
+				// appliesToUnit walk off the application, degree 1 by construction.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "row.entityKey", Relation: "appliesToUnit", Direction: "out"},
+				},
+			},
+			"missing_leaseDoc": {Action: "triggerLoom", Pattern: "leaseDocument", Subject: "row.entityKey"},
 			"missing_leaseDocAttach": {Action: "directOp", Operation: "AttachObject", Params: map[string]string{
 				"digest": "row.docDigest", "size": "row.docSize", "contentType": "row.docContentType",
 				"storeName": "row.docStoreName", "filename": "row.docFilename",

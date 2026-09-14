@@ -116,6 +116,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "SignRenewal", Scope: "any"},
 			{OperationType: "CancelRenewal", Scope: "any"},
 			{OperationType: "EndTenancy", Scope: "any"},
+			{OperationType: "RecordApplicationLoss", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -2201,6 +2202,55 @@ func TestSignLease_RejectsUnitLeasedToRival(t *testing.T) {
 
 	if keyExists(t, ctx, conn, appKey+".signature") {
 		t.Fatalf("a rival applicant must NOT be able to sign a unit already leased to someone else")
+	}
+}
+
+// TestSignLease_RefusesLostApplication: a recorded loss outlives the unit's
+// status. RecordApplicationLoss wrote .decision = lost while the unit was
+// leased to someone else; the winner's tenancy then ended and the unit relisted
+// as available, so the live unit-status check alone would let a SignLease
+// grant dispatched before the loss (a 30-day task) sign an application that
+// lost. The op refuses UnitNoLongerAvailable on the recorded value itself.
+func TestSignLease_RefusesLostApplication(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "sign-lost")
+
+	applicantKey := seedApplicant(t, ctx, conn, "BBsignrecgpHJKMNPQRS")
+	appKey := createApplication(t, ctx, conn, cp, cons, applicantKey)
+	unitKey := unitKeyFor(applicantKey)
+	setUnitLeasedStatus(t, ctx, conn, unitKey)
+	ralEnv := ralEnvelope("signLostRecord", lsActorKey, appKey, "2026-09-14T13:00:00Z")
+	testutil.PublishOp(t, conn, ralEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	// The unit relists: seedUnit's own listing shape, no status = available.
+	setListingAspect(t, ctx, conn, unitKey, "2026-08-01T00:00:00Z", 12, 2400)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("signlost0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SignLease",
+		Actor:         lsActorKey,
+		SubmittedAt:   "2026-09-20T16:00:00Z",
+		Class:         "leaseapp",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + appKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{appKey},
+			OptionalReads: []string{appKey + ".decision"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: appKey, Relation: "appliesToUnit", Direction: "out"},
+			},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want Rejected — a lost application never signs, relist or not", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "UnitNoLongerAvailable") || !strings.Contains(reply.Error.Message, "lost") {
+		t.Fatalf("want a UnitNoLongerAvailable refusal naming the loss, got %+v", reply.Error)
+	}
+	if keyExists(t, ctx, conn, appKey+".signature") {
+		t.Fatalf("a lost application must NOT be able to sign after its unit relists")
 	}
 }
 

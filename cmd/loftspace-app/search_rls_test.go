@@ -96,6 +96,10 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 	// search hit the same way renderRLSApplicantRow does off the normal by-unit read.
 	exec(`UPDATE read_landlord_lease_applications SET tenancy_ended_at = $1 WHERE app_id = 'app-L'`,
 		"2026-09-15T00:00:00Z")
+	// app-N lost its unit to another applicant — the same round-trip proof for
+	// lost_to_rival, which decisionOffered and the search row's chip read off a
+	// search hit (a lost row on a relisted unit must not re-offer a decision).
+	exec(`UPDATE read_landlord_lease_applications SET lost_to_rival = true WHERE app_id = 'app-N'`)
 
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subLarry)
@@ -141,6 +145,19 @@ func TestUnifiedSearch_RLS_Enforcement(t *testing.T) {
 		}
 		if len(res.People) != 1 || res.People[0].Name != "Alice Applicant" {
 			t.Fatalf("expected Larry to find Alice via applicant_name, got %+v", res.People)
+		}
+	})
+
+	t.Run("staff (wildcard) reads Bob's lost application as lost off the search hit", func(t *testing.T) {
+		code, res := search(t, cookieFor(subStaff), "Bob")
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		if len(res.People) != 1 || len(res.People[0].Applications) != 1 || res.People[0].Applications[0].EntityKey != "vtx.leaseapp.app-N" {
+			t.Fatalf("expected Bob's app-N application as the sole hit, got %+v", res.People)
+		}
+		if !res.People[0].Applications[0].LostToRival {
+			t.Errorf("app-N lostToRival must round-trip true through searchLandlordColumns (decisionOffered and the search chip read it)")
 		}
 	})
 

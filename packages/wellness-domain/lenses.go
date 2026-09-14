@@ -254,17 +254,18 @@ RETURN
 // absent row and an empty set have to deny alike: an unwired unit is covered by
 // nobody, the same answer require_workplace gives an empty location list.
 //
-// `landlordDecision` is projected so the boundary can drop the REJECTED.
-// `DecideLeaseApplication` tombstones neither the leaseapp nor its
-// applicationFor link on a decline (lease-signing/scripts.go), so a refused
-// applicant keeps a live link to the building that refused them — publishing
-// them to that building's front desk as a member is the one disclosure this
-// directory must not make. It is projected rather than filtered in the cypher
-// because the column is THREE-state — approved, declined, and the null of an
-// undecided application — and only the first two are decidable against a
-// literal; the reader drops `declined` and keeps the rest, which is the
+// `landlordDecision` is projected so the boundary can drop the REJECTED and
+// the LOST. Neither `DecideLeaseApplication` (on a decline) nor
+// `RecordApplicationLoss` tombstones the leaseapp or its applicationFor link
+// (lease-signing/scripts.go), so a refused applicant — or one whose unit went
+// to somebody else — keeps a live link to the building; publishing them to
+// that building's front desk as a member is the one disclosure this directory
+// must not make. It is projected rather than filtered in the cypher because
+// the column is multi-state — approved, declined, lost, and the null of an
+// undecided application — and the null is not decidable against a literal;
+// the reader drops `declined` and `lost` and keeps the rest, which is the
 // café front-desk directory's own posture (cafeLeaseWorkplaces filters no
-// decision at all) minus the refusal.
+// decision at all) minus the refusal and the loss.
 //
 // Deliberately NOT filtered on `.tenancy`, though that is the stricter signal
 // and the one CreateBooking reads for the resident RATE. A rate is a claim

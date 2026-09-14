@@ -3883,6 +3883,7 @@ const DISPOSITION = {
   approved: { label: "Approved — leasing", cls: "approved" },
   qualified: { label: "Qualified — awaiting decision", cls: "qualified" },
   declined: { label: "Declined", cls: "declined" },
+  lost: { label: "Lost — unit went to another applicant", cls: "declined" },
   in_review: { label: "In review", cls: "review" },
   ended: { label: "Lease ended", cls: "leased" },
 };
@@ -3891,8 +3892,10 @@ const DISPOSITION = {
 // best-first so the landlord can compare at a glance rather than reading an arbitrary
 // NanoID order. Pure FE over the already-projected disposition + qualification signals
 // (no new lens/data). Tier by status (the resolved winner up top, declined to the
-// bottom), then by a qualification score, then leaseAppKey for a stable order.
-const STATUS_RANK = { leased: 0, approved: 1, qualified: 2, in_review: 3, declined: 4, ended: 5 };
+// bottom — a lost application sits with the declined, above them only because
+// nobody turned it down), then by a qualification score, then leaseAppKey for
+// a stable order.
+const STATUS_RANK = { leased: 0, approved: 1, qualified: 2, in_review: 3, lost: 4, declined: 5, ended: 6 };
 
 function qualScore(a) {
   let s = 0;
@@ -4143,15 +4146,17 @@ function renderRLSUnitCard(u) {
 // decisionOffered reports whether the landlord decide surface should render
 // Approve/Decline for a row: qualified, the unit not already leased to a
 // different applicant, and the application itself not already decided —
-// approved, declined, OR its recorded tenancy already ended. A decided row
-// never re-offers the decision: DecisionFinal refuses a different value once
-// .decision is set, and re-offering Approve on an ended-and-relisted tenant
-// (the unit is available again, so unitLeased alone no longer hides it) would
-// only ever earn a silent same-value no-op. Pure and DOM-free so it is
-// goja-testable.
+// approved, declined, lost to a rival, OR its recorded tenancy already ended.
+// A decided row never re-offers the decision: DecisionFinal refuses a
+// different value once .decision is set. Two of these rows sit on a unit that
+// reads available again, so unitLeased alone would not hide them: the
+// ended-and-relisted tenant, where Approve would only ever earn a silent
+// same-value no-op, and the losing rival whose loss is recorded on the
+// application (lostToRival holds across the relist), where Approve would earn
+// a DecisionFinal refusal. Pure and DOM-free so it is goja-testable.
 function decisionOffered(a, unit) {
   const unitLeased = (unit && unit.unitStatus) === "leased";
-  return !!(a && a.qualified && !unitLeased && !a.tenancyEndedAt && !a.landlordApproved && !a.landlordDeclined);
+  return !!(a && a.qualified && !unitLeased && !a.tenancyEndedAt && !a.lostToRival && !a.landlordApproved && !a.landlordDeclined);
 }
 
 // renderRLSApplicantRow renders one RLS-scoped application: the applicant's
@@ -4179,7 +4184,7 @@ function renderRLSApplicantRow(a, unit) {
   if (a.tenancyEndedAt) info.append(dispChip("Lease ended " + fmtUTCDate(a.tenancyEndedAt), "leased"));
   else if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
   else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
-  else if (a.lostToRival) info.append(dispChip("Unit leased to another applicant", "declined"));
+  else if (a.lostToRival) info.append(dispChip("Unit went to another applicant", "declined"));
   else info.append(dispChip("Awaiting your decision", "review"));
   if (a.signedAt) {
     const signed = document.createElement("span");
@@ -4244,7 +4249,7 @@ function renderRLSApplicantRow(a, unit) {
   } else if (a.lostToRival) {
     const note = document.createElement("div");
     note.className = "applicant-note";
-    note.textContent = "Unit leased to another applicant — no decision is left to make here.";
+    note.textContent = "Unit went to another applicant — no decision is left to make here.";
     row.append(note);
   }
 
@@ -4402,6 +4407,7 @@ function renderSearchApplicationRow(a) {
   if (a.tenancyEndedAt) info.append(dispChip("Lease ended " + fmtUTCDate(a.tenancyEndedAt), "leased"));
   else if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
   else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
+  else if (a.lostToRival) info.append(dispChip("Unit went to another applicant", "declined"));
   else info.append(dispChip("Awaiting decision", "review"));
   if (a.signedAt) {
     const signed = document.createElement("span");

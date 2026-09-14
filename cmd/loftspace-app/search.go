@@ -92,7 +92,8 @@ const searchLandlordColumns = `entity_key, applicant, applicant_name, applicant_
        terms_lease_term_months, terms_requested_rent, tenancy_ended_at,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
-       guarantor_income_to_rent_met, COALESCE(qualified, false)`
+       guarantor_income_to_rent_met, COALESCE(qualified, false),
+       COALESCE(lost_to_rival, false)`
 
 // selectLandlordRowsForApplicantsSQL and selectLandlordRowsForUnitsSQL reuse
 // read_landlord_lease_applications' full column set (selectLandlordApplicationsSQL's
@@ -126,7 +127,7 @@ func scanLandlordRow(rows interface {
 		&row.TermsRequestedRent, &row.TenancyEndedAt,
 		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 		&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
-		&row.GuarantorIncomeToRentMet, &row.Qualified,
+		&row.GuarantorIncomeToRentMet, &row.Qualified, &row.LostToRival,
 	)
 	if err != nil {
 		return protectedLandlordRow{}, err

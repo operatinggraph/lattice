@@ -717,6 +717,12 @@ def execute(state, op):
             decision_value = decision.data.get("value")
         if unit_status == "leased" and decision_value != "approved":
             fail("UnitNoLongerAvailable: unit " + unit_key + " is already leased to another applicant; application " + app_key + " was not the one approved")
+        # A recorded loss outlives the unit's status: once the winner's
+        # tenancy ends and the unit relists, the live check above reads it
+        # available again, but this application lost it -- a grant dispatched
+        # before the loss was recorded stays unsignable.
+        if decision_value == "lost":
+            fail("UnitNoLongerAvailable: application " + app_key + " lost its unit to another applicant")
 
         # Snapshot the tenant's name onto the lease at the moment it becomes an
         # executed contract: a signed lease is a legal document that names its
@@ -1565,6 +1571,66 @@ def execute(state, op):
         mutations = [make_aspect_update_occ(app_key, "tenancy", "tenancy", ended, tenancy.revision)]
         events = [{"class": "leaseapp.tenancyEnded",
                    "data": {"leaseAppKey": app_key, "leaseEnd": lease_end}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": app_key}}
+
+    if ot == "RecordApplicationLoss":
+        # Weaver's service-actor directOp (the EndTenancy precedent), dispatched
+        # by leaseApplicationComplete's missing_lossRecorded gap once the unit
+        # an undecided application applies to has leased to someone else — and
+        # runnable by an operator by hand via the CLI (the primordial admin, as
+        # EndTenancy). It records the loss as a THIRD
+        # terminal value of the landlord's own .decision aspect, {value: lost,
+        # decidedAt}, so every consumer that reads a recorded decision as
+        # terminal (DecisionFinal, the applicant gaps' 'lost' conjunct,
+        # lost_to_rival) reads this one the same way, and the winner's later
+        # tenancy end + relist revives no rival. No reason and no
+        # .decidedProfileSnapshot: nobody decided this application. The unit
+        # comes from the application's OWN link, never a payload field, and
+        # the premise is re-verified from state rather than trusted off the
+        # dispatching row: an operator cannot mark an application lost against
+        # a unit that is not leased.
+        app_key = required_string(p, "leaseAppKey")
+        parts_of(app_key, "leaseAppKey", "leaseapp")
+        if not vertex_alive(state, app_key):
+            fail("UnknownLeaseApplication: " + app_key)
+
+        # Any recorded decision is an idempotent no-op — no mutation, no event,
+        # no primaryKey (the EndTenancy / SetListingStatus no-op shape): 'lost'
+        # is the at-least-once re-dispatch, 'approved' / 'declined' mean the
+        # landlord decided it and there is nothing to record. A refusal here
+        # would burn Weaver's retry budget on a race the lens already closed.
+        # read-posture: (d) declared optionalReads at RecordApplicationLoss
+        # dispatch — absent is the gap's own premise, and the declared absence
+        # conditions the write below CreateOnly.
+        prior = kv.Read(app_key + ".decision")
+        if prior != None and not prior.isDeleted and prior.data.get("value") != None:
+            return {"mutations": [], "events": [], "response": {}}
+
+        unit_key = leaseapp_unit(app_key)
+        if unit_key == None:
+            fail("NoUnit: application " + app_key + " names no live unit; there is no unit to have lost")
+        # read-posture: (e) per-candidate follow-up read off the appliesToUnit
+        # enumeration leaseapp_unit() just walked -- mirrors SignLease's own
+        # resolution of the unit + its .listing.
+        listing = kv.Read(unit_key + ".listing")
+        unit_status = None
+        if listing != None and not listing.isDeleted:
+            unit_status = listing.data.get("status")
+        if unit_status != "leased":
+            fail("UnitNotLeased: application " + app_key + " applies to unit " + unit_key + " whose listing is " + str(unit_status) + "; only a leased unit records a loss")
+
+        # decidedAt is the instant the platform recorded the loss — the same
+        # stamp DecideLeaseApplication writes, normalized to canonical UTC. The
+        # write is a CREATE (the SignLease .signature shape), so the step-4
+        # declared absence conditions it: a landlord decision that lands
+        # between this op's hydration and its commit conflicts instead of being
+        # overwritten with a loss, and the re-hydrated retry reads it as
+        # decided — the no-op above. An upsert would silently win that race.
+        lost = {"value": "lost", "decidedAt": time.rfc3339_utc(op.submittedAt)}
+        mutations = [make_aspect(app_key, "decision", "decision", lost)]
+        events = [{"class": "leaseapp.applicationLost",
+                   "data": {"leaseAppKey": app_key, "unitKey": unit_key}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": app_key}}
 

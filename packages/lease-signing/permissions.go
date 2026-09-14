@@ -31,6 +31,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	CancelRenewal (self)            → consumer
 //	ReassignLeaseUnit               → operator
 //	EndTenancy                      → operator
+//	RecordApplicationLoss           → operator
 //
 // The orchestrator-submitted ops are operator-driven (the same operator-grant
 // idiom service-domain / orchestration-base use):
@@ -220,6 +221,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "EndTenancy",
 			Scope:         "any",
 			Note:          "Grants the operator (Weaver's service actor) the right to submit EndTenancy — the directOp the tenancyEnd target dispatches once a signed, approved tenancy's leaseEnd has lapsed with no open renewal (the OpenRenewal / SetListingStatus cross-package directOp precedent); an operator may also run it by hand. Never a person-facing action: the term ends on its own recorded date, and the op refuses NotYetEnded ahead of it.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "RecordApplicationLoss",
+			Scope:         "any",
+			Note:          "Grants the operator (Weaver's service actor) the right to submit RecordApplicationLoss — the directOp leaseApplicationComplete's missing_lossRecorded gap dispatches once an undecided application's unit has leased to another applicant (the EndTenancy precedent); an operator may also run it by hand via the CLI under the primordial admin. Never a person-facing action: the loss is recorded on the application as .decision = lost, the op refuses UnitNotLeased against a unit that is not leased, and any recorded decision makes it a no-op.",
 			GrantsTo:      []string{"operator"},
 		},
 	}
@@ -554,6 +561,51 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Reads: []string{
 					"{payload.leaseAppKey}",
 					"{payload.leaseAppKey}.tenancy",
+				},
+			},
+		},
+		{
+			// RecordApplicationLoss is dispatched by Weaver off
+			// leaseApplicationComplete's missing_lossRecorded gap and carries a
+			// standing operator grant alone — the EndTenancy posture: no
+			// scope=self path, so "standing" and no authContext target to bind.
+			// The descriptor exists so a by-hand operator submission (the CLI
+			// under the primordial admin, as EndTenancy — Loupe's console
+			// identity holds consoleOperator, not operator) and any
+			// descriptor-driven dispatcher declare the same reads the
+			// target's playbook routes (targets.go): the application as a
+			// REQUIRED read, and its .decision as an OPTIONAL one — absent is
+			// the gap's own premise, and the declared absence is what conditions
+			// the write CreateOnly. The unit is never a payload field: the script
+			// walks the application's own appliesToUnit link and reads that
+			// unit's .listing as a follow-up, so a descriptor-driven client
+			// declares the enumeration rather than a hub it cannot form ahead
+			// of dispatch.
+			OperationType: "RecordApplicationLoss",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Record an application's loss",
+				ShortLabel:  "Record loss",
+				Description: "Record that an undecided application lost its unit to another applicant. Refused unless the unit is leased; a no-op once any decision is recorded.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Record loss",
+				Group:       "Operator repairs",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","x-entityRef":"leaseapp","description":"vtx.leaseapp.<NanoID> of the application whose unit went to another applicant."}},` +
+				`"required":["leaseAppKey"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The application that lost its unit. Its own appliesToUnit link names the unit; that unit must be leased, and the application must carry no decision yet.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:         "leaseapp",
+				AuthContext:   "standing",
+				TargetField:   "leaseAppKey",
+				TargetType:    "leaseapp",
+				Reads:         []string{"{payload.leaseAppKey}"},
+				OptionalReads: []string{"{payload.leaseAppKey}.decision"},
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
 				},
 			},
 		},

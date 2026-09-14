@@ -1424,10 +1424,29 @@ func TestHandleMembers_DeclinedApplicantIsNotOffered(t *testing.T) {
 	}
 }
 
+// The same discriminating pair for the loss drop: an applicant whose unit went
+// to somebody else (RecordApplicationLoss's `lost`) keeps a live lease and a
+// live applicationFor link exactly as a refused one does, and lives in the
+// building no more than they do.
+func TestHandleMembers_LostApplicantIsNotOffered(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	seedMemberDecided(t, s.conn, leaseHere, memberA, "lost")
+	seedMemberDecided(t, s.conn, leaseElsewhere, memberB, "approved")
+
+	rec := sessionGET(s, s.handleMembers, "/api/members", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	members := decodeMembers(t, rec)
+	if len(members) != 1 || members[0].BookerKey != "vtx.identity."+memberB {
+		t.Fatalf("got %+v, want only the approved member — a lost application is not a membership", members)
+	}
+}
+
 // An application still awaiting a landlord belongs to somebody living in the
-// building, and is exactly who the front desk books in. Only a REFUSAL
-// disqualifies; the resident RATE is CreateBooking's separate, stricter
-// question, answered from the lease's own .tenancy.
+// building, and is exactly who the front desk books in. Only a REFUSAL or a
+// recorded LOSS disqualifies; the resident RATE is CreateBooking's separate,
+// stricter question, answered from the lease's own .tenancy.
 func TestHandleMembers_UndecidedApplicationStaysInTheDirectory(t *testing.T) {
 	s, cookieFor := devSessionServer(t)
 	seedMemberDecided(t, s.conn, leaseHere, memberA, "")

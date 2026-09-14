@@ -592,3 +592,43 @@ func TestLeaseApplicationsRead_LostToRival_NamesTheLosingRival(t *testing.T) {
 	require.Equal(t, false, byApp[f.ids["pending"]]["lost_to_rival"], "an undecided application on an available unit is in review")
 	require.Equal(t, true, byApp[f.ids["declinedRival"]]["declined"])
 }
+
+// TestLeaseApplicationsRead_RecordedLoss_HoldsAcrossTheRelist — lost_to_rival
+// reads the RECORDED .decision = lost ahead of the live unit-status term: a
+// rival whose loss RecordApplicationLoss recorded stays lost once the winner's
+// tenancy ends and the unit relists as available, with every applicant gap and
+// missing_decision closed, so the card keeps its "went to another applicant"
+// banner instead of reverting to "In review". The undecided application on
+// the same available unit is the control.
+func TestLeaseApplicationsRead_RecordedLoss_HoldsAcrossTheRelist(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	for _, name := range []string{"lostRival", "fresh"} {
+		f.vtx(t, name, "leaseapp")
+		f.vtx(t, name+"Id", "identity")
+		f.edge(t, "applicationFor", name, name+"Id")
+		f.edge(t, "appliesToUnit", name, "unit1")
+	}
+	f.aspect(t, "lostRival", "decision", "decision", map[string]any{"value": "lost", "decidedAt": "2026-06-18T00:00:00Z"})
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 2)
+	byApp := map[string]map[string]any{}
+	for _, r := range rows {
+		byApp[r.Values["app_id"].(string)] = r.Values
+	}
+	lost := byApp[f.ids["lostRival"]]
+	require.Equal(t, "available", lost["unit_status"], "the unit has relisted")
+	require.Equal(t, true, lost["lost_to_rival"], "a recorded loss holds across the relist")
+	for _, col := range []string{"missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_decision"} {
+		require.Equal(t, false, lost[col], "%s stays closed on a recorded loss", col)
+	}
+	require.Equal(t, false, lost["declined"], "lost is not a decline")
+	fresh := byApp[f.ids["fresh"]]
+	require.Equal(t, false, fresh["lost_to_rival"], "the control: an undecided application on the relisted unit is in review")
+	require.Equal(t, true, fresh["missing_onboarding"])
+}

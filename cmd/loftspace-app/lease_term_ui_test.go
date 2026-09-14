@@ -143,11 +143,11 @@ func TestRelistOffered_TruthTable(t *testing.T) {
 
 // TestDecisionOffered pins the landlord decide surface's gate: Approve/Decline
 // render only for a qualified, undecided application on a not-yet-leased unit.
-// The revert-proof case is the ended-and-relisted tenant: once EndTenancy has
-// recorded the term's end and the unit relists (unitLeased goes false again),
-// the OLD gate (`a.qualified && !unitLeased`) alone would re-offer the
-// decision on a row DecisionFinal already closed — Approve would only ever be
-// a silent same-value no-op.
+// The two revert-proof cases sit on a unit that reads available again, where
+// `a.qualified && !unitLeased` alone would re-offer a decision DecisionFinal
+// already closed: the ended-and-relisted tenant (Approve would only ever be a
+// silent same-value no-op) and the losing rival whose recorded loss holds
+// across the relist (Approve would earn a DecisionFinal refusal).
 func TestDecisionOffered(t *testing.T) {
 	vm := leaseTermUIVM(t)
 	fn, ok := goja.AssertFunction(vm.Get("decisionOffered"))
@@ -182,6 +182,7 @@ func TestDecisionOffered(t *testing.T) {
 		{"already approved", map[string]interface{}{"qualified": true, "landlordApproved": true}, available, false},
 		{"already declined", map[string]interface{}{"qualified": true, "landlordDeclined": true}, available, false},
 		{"ended tenancy, unit relisted (available again) — the revert-proof case", map[string]interface{}{"qualified": true, "landlordApproved": true, "tenancyEndedAt": "2026-09-15T00:00:00Z"}, available, false},
+		{"lost to a rival, unit relisted (available again) — the recorded loss holds", map[string]interface{}{"qualified": true, "lostToRival": true}, available, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := run(t, tc.a, tc.unit); got != tc.want {

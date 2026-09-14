@@ -271,6 +271,8 @@ func TestGroupByUnit_CarriesTenancyEndedAt(t *testing.T) {
 // distinction renderApplicantRow's payment-ledger gate and DISPOSITION's
 // label both depend on. declined still wins over ended (though the two never
 // co-occur: an application that was never approved never carries a tenancy).
+// A recorded loss (.decision = lost) reads "lost" whatever the unit's status
+// — including after the unit relists as available.
 func TestApplicationStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -278,6 +280,8 @@ func TestApplicationStatus(t *testing.T) {
 		want string
 	}{
 		{"declined wins over everything", applicationRow{Declined: true, TenancyEndedAt: "2026-09-15T00:00:00Z"}, "declined"},
+		{"lost, unit still leased to the winner", applicationRow{LandlordDecision: "lost", UnitStatus: "leased"}, "lost"},
+		{"lost, unit relisted (available again) — the recorded loss holds", applicationRow{LandlordDecision: "lost", UnitStatus: "available", ApplicantApproved: true}, "lost"},
 		{"ended wins over leased", applicationRow{LandlordApproved: true, UnitStatus: "leased", TenancyEndedAt: "2026-09-15T00:00:00Z"}, "ended"},
 		{"ended even if unit not yet relisted", applicationRow{LandlordApproved: true, UnitStatus: "available", TenancyEndedAt: "2026-09-15T00:00:00Z"}, "ended"},
 		{"approved + leased, no end", applicationRow{LandlordApproved: true, UnitStatus: "leased"}, "leased"},

@@ -87,6 +87,13 @@
 //     approved tenancy now holds it. See
 //     _bmad-output/implementation-artifacts/loftspace-lease-term-and-tenancy-end-design.md.
 //
+//   - RecordApplicationLoss (leaseapp DDL, operator-granted), dispatched by
+//     leaseApplicationComplete's missing_lossRecorded gap: a losing rival's
+//     loss recorded on the application as .decision = lost, the third
+//     terminal value of the landlord's decision aspect, read by every
+//     liveness consumer so a relisted unit revives no rival. See
+//     _bmad-output/implementation-artifacts/loftspace-recorded-application-loss-design.md.
+//
 // The external-call outcome lives in the .outcome aspect (D5); the leaseapp /
 // service vertex roots stay minimal. Depends identity-domain + service-domain +
 // orchestration-base. Install via the InstallPackage kernel op.
@@ -97,7 +104,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.37.0",
+	Version: "0.38.0",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -138,8 +145,11 @@ var Package = pkgmgr.Definition{
 		"ends frees its unit: the tenancyEnd frozen-table target arms a timer on each signed, approved tenancy's leaseEnd, " +
 		"dispatches EndTenancy (operator-granted) to record .tenancy.endedAt once the recorded lapse reaches it with no " +
 		"open renewal, and relists the ended tenancy's unit via SetListingStatus unless another approved tenancy now holds " +
-		"it; an ended tenancy is terminal in leaseApplicationComplete and leaseExpiry, and SignRenewal refuses it. Depends " +
-		"identity-domain + service-domain + orchestration-base.",
+		"it; an ended tenancy is terminal in leaseApplicationComplete and leaseExpiry, and SignRenewal refuses it. A " +
+		"losing rival's loss is a recorded fact, not a live derivation: leaseApplicationComplete's missing_lossRecorded gap " +
+		"dispatches RecordApplicationLoss (operator-granted) to write .decision = lost on an undecided application whose " +
+		"unit leased to someone else, and every liveness consumer reads the recorded value, so the winner's later tenancy " +
+		"end and relist revive no rival. Depends identity-domain + service-domain + orchestration-base.",
 	Depends:          []string{"identity-domain", "service-domain", "orchestration-base"},
 	DDLs:             DDLs(),
 	Lenses:           Lenses(),
