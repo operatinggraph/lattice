@@ -306,8 +306,7 @@ func TestLoomRedrive_HappyPath_Table(t *testing.T) {
 
 func TestLoomRedrive_NotFailed_JSON(t *testing.T) {
 	eng := newFakeEngine()
-	eng.errOn["redrive:inst1"] = errors.New(
-		`loom: instance is not in a failed or inconclusively-parked state: "inst1" (status=running, deadlineProbe=false)`)
+	eng.errOn["redrive:inst1"] = errors.New(`loom: instance is not in a failed state: "inst1" (status=running)`)
 	url := startLoomControlTest(t, eng)
 
 	natsURL := url
@@ -317,7 +316,7 @@ func TestLoomRedrive_NotFailed_JSON(t *testing.T) {
 
 	out, err := runCmd(t, cmd, []string{"redrive", "inst1"})
 	require.Error(t, err)
-	assert.Contains(t, out, "not in a failed or inconclusively-parked state")
+	assert.Contains(t, out, "not in a failed state")
 	assert.Contains(t, out, `"ok":false`)
 }
 

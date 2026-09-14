@@ -1351,10 +1351,11 @@ func (e *Engine) probeFail(ctx context.Context, inst *Instance, oldToken, reason
 //     the note on the instance, and leave the instance running on its token
 //     (Contract #10 §10.6 — the engine distinguishes BY EVIDENCE, and alerts
 //     rather than wedging silently when it cannot). The step is not re-armed, so
-//     no further deadline fires for this instance and the note is the standing
-//     record of it; RedriveInstance accepts a running instance carrying one,
-//     which is the operator's verb for the reading in which no completer will
-//     ever come.
+//     no further deadline fires for this instance: a flow whose completer can
+//     still act completes on its own, and a flow whose op was genuinely rejected
+//     holds on its token with this note as the only record of it. There is no
+//     operator verb for that second reading yet — RedriveInstance takes a failed
+//     instance only — and the note is what an operator reads instead.
 //   - no token pointer at all → an invariant break, not age: the pointer rides
 //     the step's own batch. It fails the instance with that reason, the posture
 //     a missing pattern pin gets.
@@ -1369,8 +1370,12 @@ func (e *Engine) deadlineRejectedOrLost(ctx context.Context, inst *Instance, old
 		}
 		return err
 	}
-	if age := e.now().Sub(epoch); age >= opstatus.TrackerTTL {
-		return e.noteInconclusiveDeadline(ctx, inst, reason, epoch, age, expectedRevision)
+	// One clock read decides the verdict AND stamps it: an age measured at one
+	// instant and a note stamped at another would describe two different
+	// moments, and the note is the only durable record of the comparison.
+	at := e.now()
+	if age := at.Sub(epoch); age >= opstatus.TrackerTTL {
+		return e.noteInconclusiveDeadline(ctx, inst, reason, epoch, age, at, expectedRevision)
 	}
 	return e.probeFail(ctx, inst, oldToken, reason, expectedRevision)
 }
@@ -1389,16 +1394,16 @@ func (e *Engine) deadlineRejectedOrLost(ctx context.Context, inst *Instance, old
 // completion or a fail, which have left the step the note describes. The return
 // is nil either way ⇒ Ack, never a Nak: the marker that woke this probe lives
 // one second, and a redelivery would reach the same verdict.
-func (e *Engine) noteInconclusiveDeadline(ctx context.Context, inst *Instance, reason string, epoch time.Time, age time.Duration, expectedRevision uint64) error {
+func (e *Engine) noteInconclusiveDeadline(ctx context.Context, inst *Instance, reason string, epoch time.Time, age time.Duration, at time.Time, expectedRevision uint64) error {
 	note := fmt.Sprintf("INCONCLUSIVE past the %v op-status horizon — %q cannot be judged: the step's "+
 		"evidence (step epoch %s, age %v) is older than the op tracker the probe reads, so an absent "+
 		"tracker cannot tell an op that committed and aged out from one that was rejected. NO FURTHER "+
 		"DEADLINE WILL FIRE for this instance: nothing re-arms, and it stays running on this token. "+
-		"If the op committed, its completer (the human, or the bridge) can still complete it; if it was "+
-		"rejected, nothing ever will, and `lattice loom redrive` re-submits the step — which past this "+
-		"horizon can run a committed op a second time, the operator's call to make.",
+		"A flow whose completer can still act (the human, or the bridge) completes on its own. A flow "+
+		"whose op was genuinely rejected has no engine verdict and no operator verb yet: it holds here, "+
+		"and this note is the record of it.",
 		opstatus.TrackerTTL, reason, substrate.FormatTimestamp(epoch), age.Truncate(time.Second))
-	if err := e.state.noteDeadlineProbe(ctx, inst, note, e.now(), expectedRevision); err != nil {
+	if err := e.state.noteDeadlineProbe(ctx, inst, note, at, expectedRevision); err != nil {
 		if substrate.IsRevisionConflict(err) {
 			e.logger.Info("loom: instance moved on under the probe; inconclusive deadline note dropped",
 				"instanceId", inst.InstanceID, "expectedRevision", expectedRevision)

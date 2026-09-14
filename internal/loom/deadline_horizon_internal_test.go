@@ -250,13 +250,12 @@ func TestOnDeadline_AMissingTokenPointerIsAnInvariantBreakNotAgeing(t *testing.T
 // out of running — a verdict that supersedes an inconclusive one. redrive
 // resumes on the operator's decision, which answers what the probe could not.
 //
-// The redrive row runs twice. Through RedriveInstance, which is the reachable
-// path: an instance parked on an inconclusive verdict is redrivable, and the
-// resume must not carry the verdict it just answered. And at the store, on a
-// FAILED record carrying a note — a state no production path produces (every
-// terminal runs through transition, which clears it) and which only a record
-// written by an older binary could present, which is why the clear is settled in
-// redrive's batch rather than assumed away.
+// The redrive row is belt and braces by construction and is exercised at the
+// store: no production path leaves a note on a FAILED record (every terminal
+// runs through transition, which clears it) and RedriveInstance accepts only a
+// failed instance — so the state the clear guards is reachable only from a
+// record written by an older binary, which is exactly why the clear is settled
+// in redrive's batch rather than assumed away.
 func TestDeadlineProbeNote_IsSettledByEveryPathThatLeavesTheStep(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -296,31 +295,15 @@ func TestDeadlineProbeNote_IsSettledByEveryPathThatLeavesTheStep(t *testing.T) {
 		require.Nil(t, after.DeadlineProbe, "a terminal instance carries no pending-step note")
 	})
 
-	t.Run("RedriveInstance clears it: the operator answered what the probe could not", func(t *testing.T) {
+	t.Run("redrive clears it: the operator answered what the probe could not", func(t *testing.T) {
 		const instanceID = "instNoteRedrive1"
-		_, pat, _ := seedOnStepZero(ctx, t, e, instanceID)
-		registerPattern(e, pat)
-		noted, _ := noteOnRecord(ctx, t, s, instanceID)
-		require.NotNil(t, noted.DeadlineProbe)
-
-		require.NoError(t, e.RedriveInstance(ctx, instanceID),
-			"a running instance carrying an inconclusive verdict is redrivable")
-		after, err := s.getInstance(ctx, instanceID)
-		require.NoError(t, err)
-		require.Equal(t, StatusRunning, after.Status)
-		require.Equal(t, 0, after.Cursor, "the redrive resumes AT the parked cursor")
-		require.Nil(t, after.DeadlineProbe, "a redriven instance carries no stale inconclusive verdict")
-	})
-
-	t.Run("the store's redrive clears it on a failed record too", func(t *testing.T) {
-		const instanceID = "instNoteRedrive2"
 		inst, pat, token0 := seedOnStepZero(ctx, t, e, instanceID)
 		require.NoError(t, e.fail(ctx, inst, token0, "step 0 deadline exceeded; op rejected or lost", 0))
 		noted, revision := noteOnRecord(ctx, t, s, instanceID)
 		require.NotNil(t, noted.DeadlineProbe, "seed: a failed record carrying a note, as an older binary could leave")
 
 		noted.Status = StatusRunning
-		require.NoError(t, s.redrive(ctx, noted, &pat, "", revision))
+		require.NoError(t, s.redrive(ctx, noted, &pat, revision))
 		after, err := s.getInstance(ctx, instanceID)
 		require.NoError(t, err)
 		require.Equal(t, StatusRunning, after.Status)
@@ -427,6 +410,8 @@ func TestNoteDeadlineProbe_TheSecondReplicasCASIsRefused(t *testing.T) {
 	require.Equal(t, revisionAfterB, revisionNow, "the refused note must have written nothing")
 	require.Equal(t, "replica B's verdict", survived.DeadlineProbe.Reason)
 	require.Equal(t, StatusRunning, survived.Status)
+	require.Nil(t, replicaA.DeadlineProbe,
+		"a refused CAS leaves the in-memory record as it was: nothing was written, so nothing may claim it was")
 	requireLogged(t, logs, "INFO", "loom: instance moved on under the probe; inconclusive deadline note dropped")
 }
 
@@ -658,9 +643,10 @@ func TestDeadlineRejectedOrLost_ReadsTheStepsEpochAndNotTheRecords(t *testing.T)
 // step's pointer is re-put, so its epoch is the redrive's instant and not the
 // original submission's.
 //
-// Without that reset a redrive of a day-old step would be re-noted by the very
-// next marker — the operator's action would change nothing — and a redrive is
-// the only verb that reaches a parked instance at all.
+// Without that reset, an operator redriving an instance whose failed step is a
+// day old would buy nothing — the resumed step's own deadline marker would read
+// the old epoch, and the very next probe would judge a step submitted seconds
+// ago on evidence from yesterday.
 func TestTokenEpoch_RestartsWhenARedriveResumesTheStep(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -695,19 +681,17 @@ func TestTokenEpoch_RestartsWhenARedriveResumesTheStep(t *testing.T) {
 		"the redrive's re-put restarts the step's epoch (before=%s after=%s)", before, after)
 }
 
-// TestRedriveInstance_AcceptsAnInstanceParkedOnAnInconclusiveVerdict pins the
-// operator verb the inconclusive verdict needs.
+// TestOnDeadline_TheAgeAndTheNotesStampComeFromOneClockRead pins that a verdict
+// reads the clock once.
 //
-// A parked instance's deadline expired and nothing re-arms, so on the reading
-// where the step's op was genuinely rejected no completion will ever come: it is
-// stalled exactly as a failed instance is, and a redrive is what resumes it. The
-// verdict's note is the gate — this case seeds it through the probe itself, not
-// by hand, so the state redrive accepts is the state the engine produces.
-//
-// What the resume must leave behind: a running instance on a freshly re-put
-// token with a live arm and its op back in the outbox, and no note — the
-// operator has answered what the probe could not.
-func TestRedriveInstance_AcceptsAnInstanceParkedOnAnInconclusiveVerdict(t *testing.T) {
+// The note is the durable record of a comparison: its reason states the age the
+// probe measured and its At states when the probe reached that verdict. Two
+// reads would let those describe two different instants — a note stamped after
+// the age it reports, by however long the write took — and nothing downstream
+// could tell which instant the comparison actually used. The clock here steps
+// forward on every read, so a second read is visible both in the count and in
+// the stamp.
+func TestOnDeadline_TheAgeAndTheNotesStampComeFromOneClockRead(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -716,191 +700,31 @@ func TestRedriveInstance_AcceptsAnInstanceParkedOnAnInconclusiveVerdict(t *testi
 	defer cancel()
 
 	s := newLoomStateStoreForTransition(ctx, t)
-	e, _, at := horizonEngine(s)
+	e, _, _ := horizonEngine(s)
 	startNotCommittedResponder(t, s.conn)
 
-	const instanceID = "instRedriveParked1"
-	pat := twoStepSystemPattern()
-	token := seedStepZeroOfPattern(ctx, t, e, pat, instanceID)
-	registerPattern(e, pat)
-
+	const instanceID = "instOneClockRead1"
+	token := seedParkedUserTask(ctx, t, s, instanceID, time.Hour)
+	removeDeadlineArm(ctx, t, s, instanceID)
 	epoch, err := s.tokenEpoch(ctx, token)
 	require.NoError(t, err)
-	*at = epoch.Add(opstatus.TrackerTTL + time.Hour)
+
+	// A stepping clock: read N returns verdictAt + N-1 steps, so any extra read
+	// lands on a different instant than the first.
+	verdictAt := epoch.Add(opstatus.TrackerTTL + time.Hour)
+	reads := 0
+	e.clock = func() time.Time {
+		reads++
+		return verdictAt.Add(time.Duration(reads-1) * time.Minute)
+	}
+
 	subjPrefix, marker := deadlineMarkerFor(s, instanceID)
 	require.Equal(t, substrate.Ack, e.handleDeadline(ctx, subjPrefix, marker))
-	requireNoteStands(ctx, t, s, instanceID, token)
 
-	require.NoError(t, e.RedriveInstance(ctx, instanceID))
-
-	resumed, err := s.getInstance(ctx, instanceID)
-	require.NoError(t, err)
-	require.Equal(t, StatusRunning, resumed.Status)
-	require.Equal(t, 0, resumed.Cursor, "the resume is AT the parked cursor, never a restart")
-	require.Equal(t, token, resumed.PendingToken, "the resumed step re-derives its own token")
-	require.Nil(t, resumed.DeadlineProbe, "the resume settles the verdict it answered")
-
-	resumedEpoch, err := s.tokenEpoch(ctx, token)
-	require.NoError(t, err)
-	require.True(t, resumedEpoch.After(epoch), "the resumed step's epoch restarts, so the probe reads it as fresh")
-	_, err = s.conn.KVGet(ctx, s.bucket, outboxKey(deriveRequestID(instanceID, 0)))
-	require.NoError(t, err, "the resumed step's op is back in the outbox for the relay")
-	armed, err := s.deadlineArmed(ctx, instanceID)
-	require.NoError(t, err)
-	require.True(t, armed, "the resumed step arms its own deadline again")
-}
-
-// TestRedriveInstance_RefusesARunningInstanceWithNoInconclusiveVerdict keeps the
-// gate's original purpose: a running instance with no standing verdict is
-// progressing and still backstopped by a live deadline, so a redrive would
-// re-submit a step whose op may be seconds from committing. The refusal is the
-// same typed error a complete instance gets, and it names what the record
-// actually holds.
-func TestRedriveInstance_RefusesARunningInstanceWithNoInconclusiveVerdict(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := horizonContext()
-	defer cancel()
-
-	s := newLoomStateStoreForTransition(ctx, t)
-	e, _, _ := horizonEngine(s)
-
-	const instanceID = "instRedriveRunning1"
-	_, pat, token0 := seedOnStepZero(ctx, t, e, instanceID)
-	registerPattern(e, pat)
-
-	err := e.RedriveInstance(ctx, instanceID)
-	require.ErrorIs(t, err, errInstanceNotFailed,
-		"a plain running instance is progressing: the note is the whole gate")
-	require.Contains(t, err.Error(), "status=running")
-	require.Contains(t, err.Error(), "deadlineProbe=false")
-
-	untouched, err := s.getInstance(ctx, instanceID)
-	require.NoError(t, err)
-	require.Equal(t, token0, untouched.PendingToken, "a refused redrive writes nothing")
-	require.Equal(t, 0, untouched.Cursor)
-}
-
-// TestRedriveInstance_ACompletionUnderTheRedriveWins pins the race guard on the
-// arm that has a live token to race with.
-//
-// Both halves are the same fact from two sides. At the store: the redrive's
-// batch is conditioned on the revision the call read, so a completion that
-// lands first bumps the revision and the redrive is rejected WHOLE — the
-// instance keeps the progress it just made rather than being re-submitted over
-// it. And at the control surface: that same completion cleared the note in its
-// advance, so the operator's next attempt is refused by the gate itself, which
-// is the honest answer — there is nothing stalled to redrive any more.
-func TestRedriveInstance_ACompletionUnderTheRedriveWins(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := horizonContext()
-	defer cancel()
-
-	s := newLoomStateStoreForTransition(ctx, t)
-	e, _, _ := horizonEngine(s)
-
-	const instanceID = "instRedriveRace1"
-	_, pat, token0 := seedOnStepZero(ctx, t, e, instanceID)
-	registerPattern(e, pat)
-	noted, revision := noteOnRecord(ctx, t, s, instanceID)
-	require.NotNil(t, noted.DeadlineProbe)
-
-	// The completion lands under the redrive: a real advance off the parked
-	// step, which bumps the record's revision.
-	require.NoError(t, e.advance(ctx, instanceID, token0))
-	advanced, revisionAfter, err := s.getInstanceAtRevision(ctx, instanceID)
-	require.NoError(t, err)
-	require.Equal(t, 1, advanced.Cursor, "precondition: the completion advanced the instance")
-	require.NotEqual(t, revision, revisionAfter)
-
-	// The redrive's own batch, at the revision it read: refused whole.
-	noted.Status = StatusRunning
-	require.Error(t, s.redrive(ctx, noted, &pat, token0, revision),
-		"a completion landing first must refuse the redrive, not be overwritten by it")
-	survived, revisionNow, err := s.getInstanceAtRevision(ctx, instanceID)
-	require.NoError(t, err)
-	require.Equal(t, revisionAfter, revisionNow, "the refused batch must have written nothing")
-	require.Equal(t, 1, survived.Cursor)
-	require.Nil(t, survived.DeadlineProbe, "the advance settled the note on its way past the step")
-
-	// And the gate refuses the retry: the advance cleared what made it
-	// redrivable.
-	require.ErrorIs(t, e.RedriveInstance(ctx, instanceID), errInstanceNotFailed,
-		"an instance that has since advanced is not stalled")
-}
-
-// TestRedriveInstance_AbandonsTheParkedStepsPointerInItsOwnBatch pins the one
-// op that makes redriving a RUNNING instance safe, and the reason it is
-// conditional.
-//
-// A parked instance's token pointer is live — unlike a failed one's, which its
-// terminal removed — so a completion for that step can arrive at any moment,
-// including between the redrive's CAS batch and the resumed step's submission.
-// Resolving it there would advance the cursor under a re-submission of the same
-// step, leaving the record on a step whose successor has already run. The batch
-// therefore gives the pointer up: handleCompletion's resolveToken then finds no
-// live token for such a completion and drops it, which is the honest
-// consequence of an operator declaring the step unanswerable.
-//
-// The second case is why the op is conditional rather than unconditional. A
-// failed instance has no pointer to abandon, and purging a subject that holds
-// nothing MINTS a marker on it — the growth hazard deleteToken documents — so
-// that path passes no token and its batch stays three writes wide.
-func TestRedriveInstance_AbandonsTheParkedStepsPointerInItsOwnBatch(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("requires NATS")
-	}
-	ctx, cancel := horizonContext()
-	defer cancel()
-
-	s := newLoomStateStoreForTransition(ctx, t)
-	e, _, _ := horizonEngine(s)
-
-	t.Run("a parked step's pointer is given up, so a late completion resolves nothing", func(t *testing.T) {
-		const instanceID = "instAbandonParked1"
-		_, pat, token0 := seedOnStepZero(ctx, t, e, instanceID)
-		noted, revision := noteOnRecord(ctx, t, s, instanceID)
-		require.NotNil(t, noted.DeadlineProbe)
-		_, ok, err := s.resolveToken(ctx, token0)
-		require.NoError(t, err)
-		require.True(t, ok, "precondition: a parked step's pointer is live")
-
-		// The CAS half of RedriveInstance, run alone so the intermediate state
-		// it leaves is observable.
-		before := streamWrites(ctx, t, s.conn)
-		noted.Status = StatusRunning
-		noted.PendingToken = ""
-		require.NoError(t, s.redrive(ctx, noted, &pat, token0, revision))
-		require.Equal(t, uint64(4), streamWrites(ctx, t, s.conn)-before,
-			"record, pin, failed index and the abandoned pointer — one batch, four writes")
-
-		_, ok, err = s.resolveToken(ctx, token0)
-		require.NoError(t, err)
-		require.False(t, ok,
-			"the pointer a late completion would correlate on must be gone before the step is re-submitted")
-		inWindow, err := s.getInstance(ctx, instanceID)
-		require.NoError(t, err)
-		require.Equal(t, StatusRunning, inWindow.Status)
-		require.Empty(t, inWindow.PendingToken, "the window is running-with-no-pending-token")
-	})
-
-	t.Run("a failed step has no pointer to abandon, and none is minted", func(t *testing.T) {
-		const instanceID = "instAbandonFailed1"
-		inst, pat, token0 := seedOnStepZero(ctx, t, e, instanceID)
-		require.NoError(t, e.fail(ctx, inst, token0, "step 0 deadline exceeded; op rejected or lost", 0))
-		failed, revision, err := s.getInstanceAtRevision(ctx, instanceID)
-		require.NoError(t, err)
-
-		before := streamWrites(ctx, t, s.conn)
-		failed.Status = StatusRunning
-		require.NoError(t, s.redrive(ctx, failed, &pat, failed.PendingToken, revision))
-		require.Equal(t, uint64(3), streamWrites(ctx, t, s.conn)-before,
-			"record, pin and failed index only: an absent pointer is not purged, so no marker is minted on it")
-	})
+	note := requireNoteStands(ctx, t, s, instanceID, token)
+	require.Equal(t, 1, reads, "one verdict reads the clock once")
+	require.Equal(t, substrate.FormatTimestamp(verdictAt), note.At,
+		"the note is stamped at the instant the comparison was made")
+	require.Contains(t, note.Reason, "age 25h0m0s",
+		"and the age it reports is measured from that same instant")
 }
