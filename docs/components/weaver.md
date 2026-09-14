@@ -1471,9 +1471,13 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   (`TestEmit_TruncatesListingButNotStatus`, cited here as a check it never performed). And anchor every
   mutation to its own function: a bare `s.bump(&s.orphansDeleted)` is a SUBSTRING of its 3-tab siblings
   and one identical `KVGet` line appears in three legs, so a first-occurrence patch silently mutates the
-  wrong one and greens (minted 2026-08-25, three times in one item). Check: revert each claimed line
-  alone, move each claimed ordering past the boundary it claims to precede, and name the test that fails;
-  if nothing reds, make the line load-bearing or delete the claim.
+  wrong one and greens (minted 2026-08-25, three times in one item). **The same trap one level down, at
+  an ARGUMENT** (minted 2026-09-14, the second sighting of the cited-but-never-performed shape): a vector
+  proving the advance's gates are a no-op was cited for the zero count the seam passes, but its row
+  declared no `maxretries_<g>`, so `gapSuppressionTerms` answered `needsCount=false` and never consulted
+  the count — mutating the argument to 999 left the vector green. Check: revert each claimed line alone,
+  move each claimed ordering past the boundary it claims to precede, MUTATE each argument a vector is
+  cited for, and name the test that fails; if nothing reds, make the line load-bearing or delete the claim.
 - **A leg's arms are a lattice, not a list: every RETIRE belongs above every "cannot act" GUARD** — a
   guard answers *may this leg act* (an unreplayed registry, an operator freeze, another leg already owns
   the gap); a retire answers *does this fact still hold* (a closed gap's budget, an issue about a value
@@ -1486,10 +1490,18 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   in the sweep's count leg, while the sweep's mark leg had the release above its gate but the ADVANCE
   that follows it above the gate too. Both halves are the same mis-labelling — a release is a retire and
   belongs above the guard, an advance is an act and belongs below it — and the split only became
-  observable when a package declared the column that makes a goal target suppress at all. Check: label
-  every arm guard / act / retire, then assert each retire is still reachable with every guard's
-  condition true — destruction is an act and stays below the gates, reading is not, and a seam that both
-  records a boundary and dispatches from it is TWO arms that the gate must separate, never one.
+  observable when a package declared the column that makes a goal target suppress at all. Minted a
+  fifth time 2026-09-14: the mark leg's two release+advance arms sat above the leg's own `violating`
+  gate, so a released goal or proposal leg dispatched on a row lane 1 would not have touched. The
+  DISPATCH half is mechanized now — `scripts/lint-weaver-retire-above-guard.go` (CI, STRICT) holds
+  `fireEpisode` to a declared dispatch-seam allowlist, asserts `advanceReleasedLeg` carries both its
+  `violating` and `gapSuppressedWithCount` gates ABOVE its first act by token offset, and asserts every
+  call to it sits inside a release `if`. The entry stays for the half no gate reads: the ordering of
+  ISSUE retires against the registry, freeze and entityKey guards, where the first three mintings live.
+  Check for that half: label every arm guard / act / retire, then assert each retire is still reachable
+  with every guard's condition true — destruction is an act and stays below the gates, reading is not,
+  and a seam that both records a boundary and dispatches from it is TWO arms that the gate must
+  separate, never one.
 - **A fact ends by more routes than the one you are editing — enumerate the LEGS, not just the verb** —
   and the leg you are not looking at is usually the only one that runs for a quiet row. Two levels of the
   same class. *Teardown routes:* the issue families are prefix-keyed below the target, so a route that

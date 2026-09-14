@@ -61,7 +61,6 @@ Open items only (shipped ones are in the Done log). Grouped by component tag.
 | **[edge-manifest] `edgeCatalog` carries the whole descriptor vocabulary per row** | Every catalog row repeats the descriptor vocabulary (~2 KB × 26–97 rows per actor), so one actor's content pass is 50–200 KB of near-identical text; a vocabulary reference per row, or a per-actor vocabulary row, would cut it by an order of magnitude. Measured at the personal-lens delta T7. | ★ | S | 📋 ready · [why](../../implementation-artifacts/personal-lens-delta-publication-design.md) §13 |
 
 
-| **[Weaver] Mechanize the retire-above-guard ordering — no dispatch reachable from an ungated arm** | The mark leg's release+advance sits above the `violating` gate, so a goal leg completing on a non-violating row dispatches where lane 1 would not. A gate asserting every `advanceReleasedLeg`/`fireEpisode` is reachable only past its arm's guards closes the dossier's retire/guard class. | ★★ | S–M | 🏗️ owner: claude/exciting-clarke-qa1p2c · [dossier](../../../docs/components/weaver.md) · next: gate the advance, then the lint |
 | **[Weaver] A markless goal gap with attempts booked and no `escalatedAt` gets no leg release** | The sweep's markless route is gated on `escalatedAt`, arm (n) on `Count == 0`, and lane 1's `dispatchGap` releases only with a mark — so that shape loses its `__effect` close credit. Self-healing for the chain (the next delivery re-synthesizes and `bookDispatch` restarts the tally); the credit is what is lost. | ★ | S | 📋 ready · found by the goal-leg close pass |
 
 ### Survey log (round-robin rotation)
@@ -139,6 +138,7 @@ effort without an Andrew greenlight. A row that acquires a real driver comes bac
 
 ## Done log — lattice (newest first)
 
+- 2026-09-14 · `f4ccd62` · [Weaver/CI] the advance carries its own "cannot act" gates, and `lint-weaver-retire-above-guard` holds every dispatch seam past them ([dossier](../../../docs/components/weaver.md))
 - 2026-09-14 · `5c9912af` · [Refractor/edge-manifest] the own-task op walk gets its own read-grant domain — the base producer binds `op` on one chain and indexes ([triage §2](../../../docs/reviews/lattice-designer-triage-2026-09-10.md))
 - 2026-09-14 · `d1f6eb8` · [Weaver] the `{actor}` hub substitutes the dispatching identity, refused off-hub at all three points ([design](../../implementation-artifacts/descriptor-declared-enumerations-design.md) §9)
 - 2026-09-13 · `06dea92` · [Processor/cafe-domain] batched-read primitive refuted; a Charge resolves its tab's unit once — `leaseapp_unit` memo ([design](../../implementation-artifacts/kv-links-listing-leg-collapse-design.md))
