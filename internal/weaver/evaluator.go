@@ -2183,12 +2183,18 @@ func (e *Engine) releaseAdvancedProposalLeg(ctx context.Context, targetID, entit
 // nothing left to remediate — the goal the chain serves is met, or the lens has
 // stopped saying otherwise.
 //
-// The gap must not be SUPPRESSED. inflight_<g> says a call is outstanding, and a
-// fresh episode fired at the vendor while the previous call stands is the one
-// thing that column exists to prevent. The count is asked as ZERO because every
-// release deletes the dispatch-count document: the budget term would be
-// measuring a chain that no longer exists, and what remains to decide the
-// advance is the inflight term the row alone carries.
+// The gap must not be SUPPRESSED. The gate governs only what may be STARTED
+// (releaseSuppressedLeg's doc, Contract #10 §10.3) — which is the licence the
+// release above it stands on, and the reason only the advance is conditional.
+// inflight_<g> says a call is outstanding, and a fresh episode fired at the
+// vendor while the previous call stands is the one thing that column exists to
+// prevent. It is LOAD-BEARING at the sweep's mark leg above all: the mark-lease
+// expiry → reclaim is the re-dispatch path a long-pending external call is
+// actually exposed to, so a release arm reaching this act is the very route the
+// gate has to hold. The count is asked as ZERO because every release deletes the
+// dispatch-count document: the budget term would be measuring a chain that no
+// longer exists, and what remains to decide the advance is the inflight term the
+// row alone carries.
 //
 // Nothing is stranded by withholding on either gate. A release removes the mark
 // and the count, so neither sweep leg enumerates the gap any more — but both

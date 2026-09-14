@@ -162,11 +162,17 @@ func TestReclaim_ProposalLegAdvanceHonoursTheCannotActGates(t *testing.T) {
 // reach it from BELOW their own violating and suppression gates must be
 // unchanged by the re-ask.
 //
-// Each subtest is chosen so a gate asked the wrong way would withhold:
+// Each subtest is chosen so a gate asked the wrong way would withhold, and both
+// rows declare a maxretries_<g> so that the BUDGET TERM IS LIVE at the re-ask —
+// a row with no cap answers the gate without consulting the count at any value
+// (gapSuppressionTerms' needsCount), and a vector run over one would pin nothing
+// about the zero this seam passes:
 //
 //   - the count leg's escalation-release arm reaches the advance having already
-//     cleared the suppression gate over the REAL count, and the re-ask says the
-//     same thing at zero;
+//     cleared the suppression gate over the REAL count, which this route
+//     requires to sit below the cap. The re-ask at zero clears the same term the
+//     same way; asked at or above the cap it withholds, which is what makes the
+//     argument observable here at all;
 //   - escalateExhaustedGap reaches it from the exhausted verdict itself, where
 //     the real count has by definition REACHED the cap. Asked with that count
 //     the budget term would read the advance as suppressed and the chain would
@@ -183,7 +189,7 @@ func TestAdvanceReleasedLeg_GatesAreANoOpAtTheSeamsThatAlreadyPassedThem(t *test
 		budget int
 		count  dispatchCount
 	}{
-		{"countLegEscalationRelease", 0, dispatchCount{Count: 2, Leg: "legA",
+		{"countLegEscalationRelease", 3, dispatchCount{Count: 1, Leg: "legA",
 			EscalatedAt: substrate.FormatTimestamp(time.Now().Add(-2 * time.Hour))}},
 		{"exhaustedGapEscalation", 2, dispatchCount{Count: 2, Leg: "legA"}},
 	} {
