@@ -72,6 +72,10 @@ type applicationRow struct {
 	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
 	TermsRequestedRent *float64 `json:"termsRequestedRent"`
 	SignedAt           string   `json:"signedAt"`
+	// TenancyEndedAt is set once EndTenancy has recorded the term's end — the
+	// landlord by-unit view's Relist gate (unitTenancyEnded, app.js) reads it
+	// alongside LandlordApproved. Empty until the .tenancy exists and has ended.
+	TenancyEndedAt string `json:"tenancyEndedAt"`
 	// Applicant qualification profile — the DERIVED signals the landlord decides
 	// on (SetApplicantProfile; the raw financials are never projected). All
 	// pointers so an application with no .profile yet stays absent rather than

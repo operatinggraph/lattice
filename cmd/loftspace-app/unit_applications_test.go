@@ -231,6 +231,33 @@ func TestGroupByUnit_CarriesQualificationProfile(t *testing.T) {
 	}
 }
 
+// TestGroupByUnit_CarriesTenancyEndedAt proves TenancyEndedAt flows from the
+// convergence row to the landlord applicantSummary — the field
+// unitTenancyEnded (app.js) reads to gate the landlord unit card's manual
+// Relist button. An application that never recorded a tenancy leaves it empty.
+func TestGroupByUnit_CarriesTenancyEndedAt(t *testing.T) {
+	apps := []applicationRow{
+		{EntityKey: "vtx.leaseapp.a1", Applicant: "vtx.identity.alice", LandlordApproved: true,
+			UnitKey: "vtx.unit.u1", UnitStatus: "leased", TenancyEndedAt: "2026-09-15T00:00:00Z"},
+		{EntityKey: "vtx.leaseapp.a2", Applicant: "vtx.identity.bob", MissingSignature: true,
+			UnitKey: "vtx.unit.u1", UnitStatus: "leased"},
+	}
+	units := groupByUnit(apps, nil, nil)
+	if len(units) != 1 {
+		t.Fatalf("want 1 unit, got %d", len(units))
+	}
+	byKey := map[string]applicantSummary{}
+	for _, a := range units[0].Applications {
+		byKey[a.LeaseAppKey] = a
+	}
+	if got := byKey["vtx.leaseapp.a1"].TenancyEndedAt; got != "2026-09-15T00:00:00Z" {
+		t.Errorf("a1 tenancyEndedAt = %q, want 2026-09-15T00:00:00Z", got)
+	}
+	if got := byKey["vtx.leaseapp.a2"].TenancyEndedAt; got != "" {
+		t.Errorf("a2 (never recorded) tenancyEndedAt = %q, want empty", got)
+	}
+}
+
 // TestDecodeListingProjections_SkipsBadRows decodes the availableListings bucket
 // into flat projections, skipping unreadable keys and tombstoned (no-unitKey) rows.
 func TestDecodeListingProjections_SkipsBadRows(t *testing.T) {

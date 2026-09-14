@@ -26,14 +26,18 @@ import (
 // Nullable columns mirror the protected-lens convention (protectedLandlordRow):
 // a pointer stays nil rather than projecting a zero value for "not set yet".
 type renewalRow struct {
-	EntityKey           string   `json:"entityKey"`
-	LeaseApp            string   `json:"leaseApp"`
-	Tenant              string   `json:"tenant"`
-	TenantName          *string  `json:"tenantName"`
-	Landlord            string   `json:"landlord"`
-	Status              string   `json:"status"`
-	CycleEnd            *string  `json:"cycleEnd"`
-	UnitAddress         *string  `json:"unitAddress"`
+	EntityKey   string  `json:"entityKey"`
+	LeaseApp    string  `json:"leaseApp"`
+	Tenant      string  `json:"tenant"`
+	TenantName  *string `json:"tenantName"`
+	Landlord    string  `json:"landlord"`
+	Status      string  `json:"status"`
+	CycleEnd    *string `json:"cycleEnd"`
+	UnitAddress *string `json:"unitAddress"`
+	// LeaseEnd is the renewed leaseapp's CURRENT .tenancy.leaseEnd — the new term's
+	// end once a renewal has signed, distinct from CycleEnd (the cycle being
+	// renewed, i.e. the OLD end).
+	LeaseEnd            *string  `json:"leaseEnd"`
 	RentAmount          *float64 `json:"rentAmount"`
 	TermMonths          *float64 `json:"termMonths"`
 	TermsSetAt          *string  `json:"termsSetAt"`
@@ -51,7 +55,7 @@ type renewalRow struct {
 // open cycle needing action surfaces before a completed/cancelled one.
 const selectRenewalsSQL = `
 SELECT entity_key, lease_app, tenant, tenant_name, landlord, status, cycle_end,
-       unit_address, rent_amount, term_months, terms_set_at,
+       unit_address, lease_end, rent_amount, term_months, terms_set_at,
        has_guarantor, guarantor_verified_at, guarantor_method,
        signed_at, cancel_reason
 FROM read_renewals
@@ -86,7 +90,7 @@ func queryRenewals(ctx context.Context, pool pgxBeginner, actorID string) ([]ren
 		var row renewalRow
 		if err := rows.Scan(
 			&row.EntityKey, &row.LeaseApp, &row.Tenant, &row.TenantName, &row.Landlord, &row.Status, &row.CycleEnd,
-			&row.UnitAddress, &row.RentAmount, &row.TermMonths, &row.TermsSetAt,
+			&row.UnitAddress, &row.LeaseEnd, &row.RentAmount, &row.TermMonths, &row.TermsSetAt,
 			&row.HasGuarantor, &row.GuarantorVerifiedAt, &row.GuarantorMethod,
 			&row.SignedAt, &row.CancelReason,
 		); err != nil {

@@ -132,6 +132,14 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 	      SET applicant_name=$1, applicant_email=$2, applicant_phone=$3, qualified=true
 	      WHERE app_id='app-L'`, "Alice Applicant", "alice@example.com", "+15550001111")
 
+	// app-L also carries a recorded, ENDED tenancy — the Postgres round-trip proof
+	// for the five tenancy columns on the landlord model (app-CO stays null,
+	// exercising the "never recorded" absence case in the same test).
+	exec(`UPDATE read_landlord_lease_applications
+	      SET tenancy_lease_start=$1, tenancy_lease_end=$2, tenancy_term_start=$3, tenancy_rent_amount=$4, tenancy_ended_at=$5
+	      WHERE app_id='app-L'`,
+		"2025-09-15T00:00:00Z", "2026-09-15T00:00:00Z", "2025-09-15T00:00:00Z", 2400.0, "2026-09-15T00:00:00Z")
+
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subLarry)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -301,6 +309,22 @@ func TestLandlordReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 		if nullContact.Qualified {
 			t.Errorf("app-CO's qualified column default (NULL -> COALESCE false) must round-trip false, got true")
+		}
+		if withContact.TenancyLeaseStart == nil || *withContact.TenancyLeaseStart != "2025-09-15T00:00:00Z" {
+			t.Errorf("app-L tenancyLeaseStart = %v, want 2025-09-15T00:00:00Z", withContact.TenancyLeaseStart)
+		}
+		if withContact.TenancyTermStart == nil || *withContact.TenancyTermStart != "2025-09-15T00:00:00Z" {
+			t.Errorf("app-L tenancyTermStart = %v, want 2025-09-15T00:00:00Z", withContact.TenancyTermStart)
+		}
+		if withContact.TenancyRentAmount == nil || *withContact.TenancyRentAmount != 2400 {
+			t.Errorf("app-L tenancyRentAmount = %v, want 2400", withContact.TenancyRentAmount)
+		}
+		if withContact.TenancyEndedAt == nil || *withContact.TenancyEndedAt != "2026-09-15T00:00:00Z" {
+			t.Errorf("app-L tenancyEndedAt = %v, want 2026-09-15T00:00:00Z (the ended-lease round-trip)", withContact.TenancyEndedAt)
+		}
+		if nullContact.TenancyLeaseStart != nil || nullContact.TenancyEndedAt != nil {
+			t.Errorf("app-CO never recorded a tenancy — columns must stay null, got %v/%v",
+				nullContact.TenancyLeaseStart, nullContact.TenancyEndedAt)
 		}
 	})
 

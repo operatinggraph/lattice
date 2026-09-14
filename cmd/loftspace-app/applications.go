@@ -47,6 +47,15 @@ type protectedApplicationRow struct {
 	TermsMoveInDate    *string  `json:"termsMoveInDate"`
 	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
 	TermsRequestedRent *float64 `json:"termsRequestedRent"`
+	// The recorded tenancy — null until the landlord's first approve derives it
+	// (DecideLeaseApplication) from the applicant's own .terms (falling back to
+	// the unit's .listing). TenancyTermStart is set once a renewal signs a new
+	// term; TenancyEndedAt is set once EndTenancy records the term's end.
+	TenancyLeaseStart *string  `json:"tenancyLeaseStart"`
+	TenancyLeaseEnd   *string  `json:"tenancyLeaseEnd"`
+	TenancyTermStart  *string  `json:"tenancyTermStart"`
+	TenancyRentAmount *float64 `json:"tenancyRentAmount"`
+	TenancyEndedAt    *string  `json:"tenancyEndedAt"`
 	// The anchored executed-lease artifact's pointers (null until the platform's
 	// docGen + attach convergence lands the signedLease attachment). The
 	// lease-document GET streams the bytes by DocStoreName.
@@ -87,7 +96,9 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
        unit_available_from, signed_at, landlord_decision,
        decline_reason, terms_move_in_date, terms_lease_term_months,
-       terms_requested_rent, doc_store_name, doc_filename, doc_content_type,
+       terms_requested_rent, tenancy_lease_start, tenancy_lease_end,
+       tenancy_term_start, tenancy_rent_amount, tenancy_ended_at,
+       doc_store_name, doc_filename, doc_content_type,
        profile_submitted, income_to_rent_met, employment_verified, reference_count,
        has_co_applicant, has_guarantor, guarantor_income_to_rent_met,
        missing_onboarding, missing_bgcheck, missing_payment, missing_signature,
@@ -133,6 +144,8 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 			&row.UnitStatus, &row.UnitBedrooms, &row.UnitBathrooms, &row.UnitAvailableFrom,
 			&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 			&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
+			&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
+			&row.TenancyRentAmount, &row.TenancyEndedAt,
 			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified, &row.ReferenceCount,
 			&row.HasCoApplicant, &row.HasGuarantor, &row.GuarantorIncomeToRentMet,
@@ -164,6 +177,8 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_rent, unit_currency, unit_status, unit_bedrooms, unit_bathrooms,
        unit_available_from, signed_at, landlord_decision, decline_reason,
        terms_move_in_date, terms_lease_term_months, terms_requested_rent,
+       tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
+       tenancy_rent_amount, tenancy_ended_at,
        doc_store_name, doc_filename, doc_content_type,
        profile_submitted, income_to_rent_met, employment_verified, reference_count,
        has_co_applicant, has_guarantor, guarantor_income_to_rent_met,
@@ -195,6 +210,8 @@ func queryApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entit
 		&row.UnitStatus, &row.UnitBedrooms, &row.UnitBathrooms, &row.UnitAvailableFrom,
 		&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 		&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
+		&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
+		&row.TenancyRentAmount, &row.TenancyEndedAt,
 		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified, &row.ReferenceCount,
 		&row.HasCoApplicant, &row.HasGuarantor, &row.GuarantorIncomeToRentMet,

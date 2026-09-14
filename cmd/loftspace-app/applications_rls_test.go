@@ -154,10 +154,12 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	// B's application (anchor B, unsigned); self-grants. Both rows carry
 	// unit_bedrooms/unit_bathrooms/unit_available_from so the round-trip
 	// assertions below guard against the SELECT/Scan silently dropping them.
-	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, landlord_decision, signed_at, unit_bedrooms, unit_bathrooms, unit_available_from, authz_anchors, projection_seq,
+	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, landlord_decision, signed_at, unit_bedrooms, unit_bathrooms, unit_available_from,
+	      tenancy_lease_start, tenancy_lease_end, tenancy_term_start, tenancy_rent_amount, tenancy_ended_at, authz_anchors, projection_seq,
 	      profile_submitted, missing_onboarding, missing_bgcheck, missing_payment, missing_signature, missing_decision,
 	      inflight_bgcheck, inflight_payment, declined_bgcheck, declined_payment, declined)
-	      VALUES ('app-A', 'vtx.leaseapp.app-A', 'vtx.identity.`+subAlice+`', 'approved', '2026-07-15T00:00:00Z', 2, 1, '2026-08-01', $1, 1,
+	      VALUES ('app-A', 'vtx.leaseapp.app-A', 'vtx.identity.`+subAlice+`', 'approved', '2026-07-15T00:00:00Z', 2, 1, '2026-08-01',
+	      '2026-09-15T00:00:00Z', '2027-09-15T00:00:00Z', null, 2400, null, $1, 1,
 	      false, false, false, false, false, false, false, false, false, false, false)`, []string{subAlice})
 	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, unit_bedrooms, unit_bathrooms, unit_available_from, authz_anchors, projection_seq,
 	      profile_submitted, missing_onboarding, missing_bgcheck, missing_payment, missing_signature, missing_decision,
@@ -306,6 +308,19 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 		if rows[0].UnitAvailableFrom == nil || *rows[0].UnitAvailableFrom != "2026-08-01" {
 			t.Errorf("app-A unitAvailableFrom = %v, want 2026-08-01", rows[0].UnitAvailableFrom)
+		}
+		if rows[0].TenancyLeaseStart == nil || *rows[0].TenancyLeaseStart != "2026-09-15T00:00:00Z" {
+			t.Errorf("app-A tenancyLeaseStart = %v, want 2026-09-15T00:00:00Z", rows[0].TenancyLeaseStart)
+		}
+		if rows[0].TenancyLeaseEnd == nil || *rows[0].TenancyLeaseEnd != "2027-09-15T00:00:00Z" {
+			t.Errorf("app-A tenancyLeaseEnd = %v, want 2027-09-15T00:00:00Z", rows[0].TenancyLeaseEnd)
+		}
+		if rows[0].TenancyRentAmount == nil || *rows[0].TenancyRentAmount != 2400 {
+			t.Errorf("app-A tenancyRentAmount = %v, want 2400", rows[0].TenancyRentAmount)
+		}
+		if rows[0].TenancyTermStart != nil || rows[0].TenancyEndedAt != nil {
+			t.Errorf("app-A tenancyTermStart/tenancyEndedAt must stay null (no renewal, not ended), got %v/%v",
+				rows[0].TenancyTermStart, rows[0].TenancyEndedAt)
 		}
 	})
 

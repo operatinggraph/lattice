@@ -1450,6 +1450,31 @@ function fmtDate(s) {
   return isNaN(d) ? s : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+// UTC_MONTH_ABBR renders fmtUTCDate's month name without touching the local
+// timezone at all — Intl/Date formatting of a UTC instant is timezone-sensitive
+// by construction, which is exactly what fmtUTCDate exists to avoid.
+const UTC_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// fmtUTCDate renders a `.tenancy` stamp (a midnight-UTC RFC3339 instant, e.g.
+// leaseStart/leaseEnd/termStart/endedAt, and a renewal's leaseEnd) by its UTC
+// CALENDAR DATE — the YYYY-MM-DD slice, e.g. "Sep 15, 2026". It NEVER goes
+// through `new Date(s).toLocaleDateString()`: that reads the instant in the
+// viewer's local timezone, so a midnight-UTC stamp renders as the day before
+// everywhere west of Greenwich. EndTenancy's own NotYetEnded refusal names the
+// same YYYY-MM-DD slice, so every surface that shows a tenancy date must read
+// it the same way this does — string slicing, never a timezone-sensitive Date
+// parse. Falls back to the raw slice for a value this doesn't recognize
+// (never a locale Date parse) so a malformed stamp is visible, not silently
+// wrong.
+function fmtUTCDate(s) {
+  if (!s || typeof s !== "string" || s.length < 10) return s || "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (!m) return s.slice(0, 10);
+  const monthName = UTC_MONTH_ABBR[Number(m[2]) - 1];
+  if (!monthName) return s.slice(0, 10);
+  return `${monthName} ${Number(m[3])}, ${m[1]}`;
+}
+
 // customerMemo strips a raw entity key from a ledger memo before it reaches
 // a customer surface — a memo is free text an operator typed (staff form
 // below, or a hand-run remediation), so nothing stops one from embedding a
@@ -1772,6 +1797,48 @@ function shortKey(key) {
   return i >= 0 ? key.slice(i + 1) : key || "—";
 }
 
+// applicationBannerFor decides the application card's decision banner —
+// pulled out of renderApplicationCard as a pure function of row so it is
+// testable without a DOM. tenancyEndedAt is a TERMINAL fact (EndTenancy has
+// recorded the term's end) and wins over every other branch, including a
+// standing decline: it is evaluated FIRST. Declined is next — a standing
+// rejection (a failed verification OR an explicit landlord decline, both fold
+// into row.declined) is a terminal disposition, not a step still to complete.
+// Finishing the four applicant steps no longer means the application is
+// done — the landlord still has to decide. So "complete" requires BOTH the
+// landlord approval AND the unit actually leased (the genuine done state — an
+// early approval on a not-yet-qualified application does not read
+// "complete"). Between the approval and the listing flip the lease is being
+// finalized (row.landlordApproved, unit not yet leased) — a short window the
+// directOp closes. A qualified-but-undecided application (row.missing_decision)
+// reads "awaiting landlord review."
+function applicationBannerFor(row) {
+  if (row.tenancyEndedAt) {
+    return { cls: "decision ok", text: "Lease ended " + fmtUTCDate(row.tenancyEndedAt) };
+  }
+  if (row.declined) {
+    // A landlord decline may carry a reason (declineReason); a verification decline
+    // (failed bgcheck/payment) never does. Surface the reason so a decline gives the
+    // applicant feedback rather than a bare rejection.
+    return {
+      cls: "decision declined",
+      text: row.landlordDeclined && row.declineReason
+        ? "Application declined: " + row.declineReason
+        : "Application declined.",
+    };
+  }
+  if (row.landlordApproved && row.unitStatus === "leased") {
+    return { cls: "decision ok", text: "Application complete — all steps done." };
+  }
+  if (row.landlordApproved) {
+    return { cls: "decision ok", text: "Approved — finalizing lease." };
+  }
+  if (row.missing_decision) {
+    return { cls: "decision pending", text: "Qualified — awaiting landlord review." };
+  }
+  return { cls: "decision pending", text: "In review — complete the open steps below." };
+}
+
 // renderApplicationCard renders one application from the protected, RLS-scoped
 // read model (GET /api/applications, D1.3 Fire 3): the unit header, the
 // decision banner, the four-gate stepper, lease terms, qualification profile,
@@ -1798,39 +1865,13 @@ function renderApplicationCard(row, highlight) {
     head.append(rent);
   }
 
-  // Decision banner. Declined takes precedence: a standing rejection (a failed
-  // verification OR an explicit landlord decline — both fold into row.declined) is a
-  // terminal disposition, not a step still to complete. Finishing the four applicant
-  // steps no longer means the application is done — the landlord still has to decide.
-  // So "complete" requires BOTH the landlord approval AND the unit actually leased
-  // (the genuine done state — an early approval on a not-yet-qualified application
-  // does not read "complete"). Between the approval and the listing flip the lease
-  // is being finalized (row.landlordApproved, unit not yet leased) — a short window
-  // the directOp closes. A qualified-but-undecided application (row.missing_decision)
-  // reads "awaiting landlord review."
+  // Decision banner — the terminal-vs-pending disposition (see
+  // applicationBannerFor for the precedence: an ended lease wins over
+  // everything, including a standing decline).
   const banner = document.createElement("div");
-  if (row.declined) {
-    banner.className = "decision declined";
-    // A landlord decline may carry a reason (declineReason); a verification decline
-    // (failed bgcheck/payment) never does. Surface the reason so a decline gives the
-    // applicant feedback rather than a bare rejection.
-    banner.textContent =
-      row.landlordDeclined && row.declineReason
-        ? "Application declined: " + row.declineReason
-        : "Application declined.";
-  } else if (row.landlordApproved && row.unitStatus === "leased") {
-    banner.className = "decision ok";
-    banner.textContent = "Application complete — all steps done.";
-  } else if (row.landlordApproved) {
-    banner.className = "decision ok";
-    banner.textContent = "Approved — finalizing lease.";
-  } else if (row.missing_decision) {
-    banner.className = "decision pending";
-    banner.textContent = "Qualified — awaiting landlord review.";
-  } else {
-    banner.className = "decision pending";
-    banner.textContent = "In review — complete the open steps below.";
-  }
+  const bannerInfo = applicationBannerFor(row);
+  banner.className = bannerInfo.cls;
+  banner.textContent = bannerInfo.text;
 
   // Stepper (journey order)
   const steps = document.createElement("ol");
@@ -1909,13 +1950,50 @@ function renderApplicationCard(row, highlight) {
   return card;
 }
 
-// renderLeaseTermsPanel builds the "Lease terms" review panel — the terms the
-// applicant is agreeing to, so signing is no longer blind. It reads the unit's
-// listing economics + address and the application's own requested .terms, both
-// projected onto the convergence row. A term row renders only when its value is
-// present; if nothing beyond the address is known the panel is omitted entirely
-// (returns null) so it never shows an empty shell. When the applicant requested a
-// different rent than the listing asks, both are shown ("you offered …").
+// pendingLeaseTerms derives the terms an approval would commit to — the SAME
+// chain DecideLeaseApplication walks when no .tenancy is recorded yet
+// (packages/lease-signing scripts.go): the applicant's own .terms first,
+// falling back field-by-field to the unit's .listing. Returns null fields
+// where neither source carries a value, so callers render/omit gracefully —
+// the caller never computes an end date from these (the op alone does that).
+function pendingLeaseTerms(row) {
+  const moveIn = row.termsMoveInDate || row.unitAvailableFrom || null;
+  const months = typeof row.termsLeaseTermMonths === "number"
+    ? row.termsLeaseTermMonths
+    : (typeof row.unitLeaseTermMonths === "number" ? row.unitLeaseTermMonths : null);
+  const offeredRent = typeof row.termsRequestedRent === "number" ? row.termsRequestedRent : null;
+  const listingRent = typeof row.unitRent === "number" ? row.unitRent : null;
+  return { moveIn, months, offeredRent, listingRent };
+}
+
+// fmtRentLine renders a pendingLeaseTerms rent pair as the offered rent when
+// there is one, else the listing's — with a "(listing asks $X)" courtesy when
+// the two differ, so an applicant sees at a glance that their ask was above or
+// below what the unit lists for. currency is the unit's ISO code (rent itself
+// carries no separate currency).
+function fmtRentLine(offeredRent, listingRent, currency) {
+  const primary = offeredRent !== null ? offeredRent : listingRent;
+  if (primary === null) return null;
+  const cur = currency && currency !== "USD" ? ` ${currency}` : "";
+  let rent = currency && currency !== "USD"
+    ? `${primary.toLocaleString()}${cur} / month`
+    : `$${primary.toLocaleString()} / month`;
+  if (offeredRent !== null && listingRent !== null && offeredRent !== listingRent) {
+    rent += ` (listing asks $${listingRent.toLocaleString()})`;
+  }
+  return rent;
+}
+
+// renderLeaseTermsPanel builds the "Lease terms" panel. Once DecideLeaseApplication
+// has recorded a .tenancy it states the RECORDED lease (the fact, not the ask):
+// start/end, the current term's start after a renewal, and the rent actually
+// billed. Before that it states what SIGNING would commit to — the same
+// moveIn/months/rent chain the op itself walks (pendingLeaseTerms) — so the
+// applicant reviews the real terms rather than the listing's defaults. A term
+// row renders only when its value is present; if nothing beyond the address is
+// known the panel is omitted entirely (returns null) so it never shows an empty
+// shell. Every `.tenancy` stamp renders by its UTC calendar date (fmtUTCDate);
+// the pre-approval ask keeps fmtDate.
 function renderLeaseTermsPanel(row) {
   const rows = [];
   const addTerm = (label, value) => {
@@ -1930,25 +2008,27 @@ function renderLeaseTermsPanel(row) {
   const baths = typeof row.unitBathrooms === "number" ? `${row.unitBathrooms} ba` : "";
   addTerm("Size", [beds, baths].filter(Boolean).join(" · "));
 
-  if (typeof row.unitRent === "number") {
-    const cur = row.unitCurrency && row.unitCurrency !== "USD" ? ` ${row.unitCurrency}` : "";
-    const base = row.unitCurrency && row.unitCurrency !== "USD"
-      ? `${row.unitRent.toLocaleString()}${cur} / month`
-      : `$${row.unitRent.toLocaleString()} / month`;
-    let rent = base;
-    if (typeof row.termsRequestedRent === "number" && row.termsRequestedRent !== row.unitRent) {
-      rent += ` (you offered $${row.termsRequestedRent.toLocaleString()})`;
+  let head;
+  if (row.tenancyLeaseStart) {
+    // Recorded — states the fact the lease was signed on, not the ask.
+    addTerm("Lease", `${fmtUTCDate(row.tenancyLeaseStart)} → ${row.tenancyLeaseEnd ? fmtUTCDate(row.tenancyLeaseEnd) : "—"}`);
+    if (row.tenancyTermStart) addTerm("Current term", "from " + fmtUTCDate(row.tenancyTermStart));
+    if (typeof row.tenancyRentAmount === "number") addTerm("Rent", `$${row.tenancyRentAmount.toLocaleString()} / month`);
+    head = row.tenancyEndedAt ? "Lease ended " + fmtUTCDate(row.tenancyEndedAt) : "Lease terms";
+  } else {
+    // Pre-approval — states what the signature commits to.
+    const terms = pendingLeaseTerms(row);
+    const rentLine = fmtRentLine(terms.offeredRent, terms.listingRent, row.unitCurrency);
+    if (rentLine) addTerm("Rent", rentLine);
+    if (terms.moveIn !== null && terms.months !== null) {
+      addTerm("Lease", `from ${fmtDate(terms.moveIn)}, ${terms.months} months`);
+    } else if (terms.moveIn !== null) {
+      addTerm(row.termsMoveInDate ? "Requested move-in" : "Available from", fmtDate(terms.moveIn));
+    } else if (terms.months !== null) {
+      addTerm("Lease term", `${terms.months} months`);
     }
-    addTerm("Rent", rent);
+    head = row.missing_signature ? "Lease terms — review before signing" : "Lease terms";
   }
-
-  const term = typeof row.termsLeaseTermMonths === "number"
-    ? row.termsLeaseTermMonths
-    : (typeof row.unitLeaseTermMonths === "number" ? row.unitLeaseTermMonths : null);
-  if (term !== null) addTerm("Lease term", `${term} months`);
-
-  const moveIn = row.termsMoveInDate || row.unitAvailableFrom;
-  if (moveIn) addTerm(row.termsMoveInDate ? "Requested move-in" : "Available from", fmtDate(moveIn));
 
   if (rows.length === 0) return null;
 
@@ -1956,10 +2036,14 @@ function renderLeaseTermsPanel(row) {
   panel.className = "lease-terms";
   const h = document.createElement("div");
   h.className = "lease-terms-head";
-  h.textContent = row.missing_signature
-    ? "Lease terms — review before signing"
-    : "Lease terms";
+  h.textContent = head;
   panel.append(h);
+  if (!row.tenancyLeaseStart && row.missing_signature) {
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = "Approval signs a lease on these terms.";
+    panel.append(note);
+  }
   const dl = document.createElement("dl");
   for (const [label, value] of rows) {
     const dt = document.createElement("dt");
@@ -2871,7 +2955,16 @@ function renderRenewalCard(row, landlord) {
   sub.className = "addr-sub";
   const bits = [];
   if (landlord) bits.push(row.tenantName || shortKey(row.tenant));
-  if (row.cycleEnd) bits.push("term ends " + fmtDate(row.cycleEnd));
+  // A completed cycle states what happened, in the OLD/NEW-end shape a renewal
+  // actually has: the term that was renewed (cycleEnd), and — once the signed
+  // renewal has moved leaseEnd — the new term's own end. An open/cancelled cycle
+  // still just names the current term's end.
+  if (row.status === "complete" && row.cycleEnd) {
+    bits.push("renewed the term ending " + fmtUTCDate(row.cycleEnd));
+    if (row.leaseEnd) bits.push("new term ends " + fmtUTCDate(row.leaseEnd));
+  } else if (row.cycleEnd) {
+    bits.push("term ends " + fmtDate(row.cycleEnd));
+  }
   if (row.termsSetAt) bits.push((row.rentAmount != null ? "$" + row.rentAmount + "/mo" : "terms set") + (row.termMonths != null ? " · " + row.termMonths + " mo" : ""));
   if (row.hasGuarantor === true) bits.push(row.guarantorVerifiedAt ? "guarantor verified " + fmtDate(row.guarantorVerifiedAt) : "guarantor pending");
   if (row.signedAt) bits.push("signed " + fmtDate(row.signedAt));
@@ -3971,7 +4064,8 @@ function renderRLSApplicantRow(a, unit) {
   name.className = "applicant-name";
   name.textContent = a.applicantName || shortKey(a.applicant);
   info.append(name);
-  if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
+  if (a.tenancyEndedAt) info.append(dispChip("Lease ended " + fmtUTCDate(a.tenancyEndedAt), "leased"));
+  else if (a.landlordApproved) info.append(dispChip("Approved — leasing", "approved"));
   else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
   else info.append(dispChip("Awaiting your decision", "review"));
   if (a.signedAt) {
@@ -3991,10 +4085,34 @@ function renderRLSApplicantRow(a, unit) {
     row.append(contact);
   }
 
+  // The recorded lease, once approval has derived one — the fact, mirroring
+  // renderLeaseTermsPanel's post-approval line, so the landlord's own view
+  // states the same terms the tenant sees.
+  if (a.landlordApproved && a.tenancyLeaseStart && !a.tenancyEndedAt) {
+    const lease = document.createElement("div");
+    lease.className = "applicant-note";
+    const end = a.tenancyLeaseEnd ? fmtUTCDate(a.tenancyLeaseEnd) : "—";
+    const rent = typeof a.tenancyRentAmount === "number" ? ` · $${a.tenancyRentAmount.toLocaleString()}/mo` : "";
+    lease.textContent = `Lease ${fmtUTCDate(a.tenancyLeaseStart)} → ${end}${rent}`;
+    row.append(lease);
+  }
+
   row.append(renderQualification(a));
 
   const unitLeased = (unit && unit.unitStatus) === "leased";
   if (a.qualified && !unitLeased) {
+    // States the terms an approval would sign — the same chain
+    // DecideLeaseApplication itself walks (pendingLeaseTerms), so the decision
+    // is never blind to what it commits to.
+    const terms = pendingLeaseTerms(a);
+    if (terms.moveIn !== null && terms.months !== null) {
+      const primaryRent = terms.offeredRent !== null ? terms.offeredRent : terms.listingRent;
+      const rentPart = primaryRent !== null ? ` at $${primaryRent.toLocaleString()}/month` : "";
+      const ask = document.createElement("p");
+      ask.className = "hint";
+      ask.textContent = `Approving signs a lease from ${fmtDate(terms.moveIn)}, ${terms.months} months${rentPart}.`;
+      row.append(ask);
+    }
     const actions = document.createElement("div");
     actions.className = "applicant-actions";
     const approve = document.createElement("button");
@@ -4213,6 +4331,21 @@ function renderUnits() {
   $("#units-summary").textContent = `${n} unit${n === 1 ? "" : "s"}`;
 }
 
+// unitTenancyEnded reports whether NO application in a unit's application
+// group is holding a live tenancy — an approved application whose recorded
+// .tenancy has not (yet) ended. A unit with no applications, or whose approved
+// applications have all ended, or that has no approved application at all,
+// reports true; a single approved-and-not-ended application reports false,
+// even alongside others that have ended. Pure and DOM-free so it is
+// goja-testable: the gate on the landlord unit card's manual Relist button for
+// a `leased` unit (§2.2's double-approval edge case, or a unit whose automatic
+// relist has not landed yet) — a leased unit still holding a live tenancy must
+// never offer it (missing_listingLeased would flip it straight back).
+function unitTenancyEnded(apps) {
+  const list = apps || [];
+  return !list.some((a) => a && a.landlordApproved && !a.tenancyEndedAt);
+}
+
 function renderUnitCard(u) {
   const card = document.createElement("div");
   card.className = "card unit-card";
@@ -4268,6 +4401,19 @@ function renderUnitCard(u) {
     offBtn.addEventListener("click", () => setListingStatus(u, "withdrawn"));
     meta.append(offBtn);
   } else if (status === "withdrawn") {
+    const relistBtn = document.createElement("button");
+    relistBtn.className = "ghost";
+    relistBtn.textContent = "Relist";
+    relistBtn.title = "Put this unit back on the market";
+    relistBtn.addEventListener("click", () => setListingStatus(u, "available"));
+    meta.append(relistBtn);
+  } else if (status === "leased" && unitTenancyEnded(u.applications)) {
+    // The manual fallback for §2.2's double-approval edge case, or for a unit
+    // whose automatic relist has not landed yet — every approved application
+    // here has ended (or none ever carried a tenancy), so this cannot undo a
+    // still-live lease. A leased unit that DOES hold a live tenancy renders no
+    // status button at all: a manual relist there would be flipped straight
+    // back by missing_listingLeased.
     const relistBtn = document.createElement("button");
     relistBtn.className = "ghost";
     relistBtn.textContent = "Relist";

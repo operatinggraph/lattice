@@ -126,6 +126,32 @@ func TestComputeApplications_LandlordDecisionColumnsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestComputeApplications_TenancyEndedAtRoundTrip pins the tenancyEndedAt
+// decode: it must survive the handler's decode→re-serialize round-trip (the
+// landlord by-unit Relist gate reads it off the SAME applicationRow, via
+// groupByUnit — see TestGroupByUnit_CarriesTenancyEndedAt), and stay empty on
+// a row that never recorded a tenancy rather than a misleading zero value.
+func TestComputeApplications_TenancyEndedAtRoundTrip(t *testing.T) {
+	entries := map[string]string{
+		"leaseApplicationComplete.ended": `{"entityKey":"vtx.leaseapp.ended","applicant":"vtx.identity.alice","landlordApproved":true,"tenancyEndedAt":"2026-09-15T00:00:00Z"}`,
+		"leaseApplicationComplete.live":  `{"entityKey":"vtx.leaseapp.live","applicant":"vtx.identity.alice","landlordApproved":true}`,
+	}
+	got := computeApplications(keysOf(entries), fakeKV(entries), "vtx.identity.alice")
+	if len(got) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(got))
+	}
+	byKey := map[string]applicationRow{}
+	for _, r := range got {
+		byKey[r.EntityKey] = r
+	}
+	if got := byKey["vtx.leaseapp.ended"].TenancyEndedAt; got != "2026-09-15T00:00:00Z" {
+		t.Errorf("ended row tenancyEndedAt = %q, want 2026-09-15T00:00:00Z", got)
+	}
+	if got := byKey["vtx.leaseapp.live"].TenancyEndedAt; got != "" {
+		t.Errorf("live row (no tenancy end recorded) tenancyEndedAt = %q, want empty", got)
+	}
+}
+
 func TestComputeApplications_SkipsUndecodable(t *testing.T) {
 	entries := map[string]string{
 		"leaseApplicationComplete.app1": `not json`,

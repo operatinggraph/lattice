@@ -37,6 +37,10 @@ type applicantSummary struct {
 	LandlordApproved bool   `json:"landlordApproved"`
 	LandlordDeclined bool   `json:"landlordDeclined"`
 	DeclineReason    string `json:"declineReason"`
+	// TenancyEndedAt is set once EndTenancy has recorded the term's end — the
+	// landlord unit card's Relist gate (unitTenancyEnded, app.js) reads it
+	// alongside LandlordApproved to tell an ended tenancy apart from a live one.
+	TenancyEndedAt string `json:"tenancyEndedAt"`
 	// The applicant's qualification profile — the DERIVED signals the landlord
 	// reads to decide (never the raw financials). Pointers stay null until the
 	// applicant submits a profile, so the FE renders "no profile yet" rather than
@@ -162,6 +166,7 @@ func groupByUnit(apps []applicationRow, identities []identityView, listings []li
 			LandlordApproved:         a.LandlordApproved,
 			LandlordDeclined:         a.LandlordDeclined,
 			DeclineReason:            a.DeclineReason,
+			TenancyEndedAt:           a.TenancyEndedAt,
 			ProfileSubmitted:         a.ProfileSubmitted,
 			IncomeToRentMet:          a.IncomeToRentMet,
 			EmploymentVerified:       a.EmploymentVerified,

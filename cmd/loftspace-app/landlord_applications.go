@@ -76,6 +76,13 @@ type protectedLandlordRow struct {
 	TermsMoveInDate    *string  `json:"termsMoveInDate"`
 	TermsLeaseTerm     *float64 `json:"termsLeaseTermMonths"`
 	TermsRequestedRent *float64 `json:"termsRequestedRent"`
+	// The recorded tenancy — null until the first approve derives it. Mirrors
+	// protectedApplicationRow field for field (applications.go).
+	TenancyLeaseStart *string  `json:"tenancyLeaseStart"`
+	TenancyLeaseEnd   *string  `json:"tenancyLeaseEnd"`
+	TenancyTermStart  *string  `json:"tenancyTermStart"`
+	TenancyRentAmount *float64 `json:"tenancyRentAmount"`
+	TenancyEndedAt    *string  `json:"tenancyEndedAt"`
 	// The anchored executed-lease artifact's pointers — the SAME columns the
 	// applicant model carries (cmd/loftspace-app's GET /api/lease-document falls
 	// back to this landlord-scoped row when the applicant-scoped read finds
@@ -116,6 +123,8 @@ SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        unit_region, unit_rent, unit_currency, unit_status, signed_at,
        landlord_decision, decline_reason, terms_move_in_date,
        terms_lease_term_months, terms_requested_rent,
+       tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
+       tenancy_rent_amount, tenancy_ended_at,
        doc_store_name, doc_filename, doc_content_type,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
@@ -158,6 +167,8 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 			&row.UnitCurrency, &row.UnitStatus, &row.SignedAt, &row.LandlordDecision,
 			&row.DeclineReason, &row.TermsMoveInDate, &row.TermsLeaseTerm,
 			&row.TermsRequestedRent,
+			&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
+			&row.TenancyRentAmount, &row.TenancyEndedAt,
 			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 			&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
@@ -203,6 +214,8 @@ SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        unit_region, unit_rent, unit_currency, unit_status, signed_at,
        landlord_decision, decline_reason, terms_move_in_date,
        terms_lease_term_months, terms_requested_rent,
+       tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
+       tenancy_rent_amount, tenancy_ended_at,
        doc_store_name, doc_filename, doc_content_type,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
@@ -236,6 +249,8 @@ func queryLandlordApplicationByKey(ctx context.Context, pool pgxBeginner, actorI
 		&row.UnitCurrency, &row.UnitStatus, &row.SignedAt, &row.LandlordDecision,
 		&row.DeclineReason, &row.TermsMoveInDate, &row.TermsLeaseTerm,
 		&row.TermsRequestedRent,
+		&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
+		&row.TenancyRentAmount, &row.TenancyEndedAt,
 		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 		&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
