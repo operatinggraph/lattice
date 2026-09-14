@@ -117,9 +117,8 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"edgeIdentity":                   walkNoHealer,
 	"edgeInstances":                  walkNoHealer,
 	"edgeManifestProviderReadGrants": oneKey,
-	// Its index is now complete (the own-task walk moved to its own domain,
-	// anchor_hopindex_corpus_census_test.go), so the position count is read
-	// rather than refused — and the answer is the walk: the producer's
+	// Its index is complete, so the position count is read rather than
+	// refused — and the answer is the walk: the producer's
 	// `(identity)-[:residesIn]->(home)-[:containedIn*0..]->(container)` chain
 	// carries two UNLABELED positions, which admit any type and therefore the
 	// identity actor type. Another anchor's row really can render this vertex.

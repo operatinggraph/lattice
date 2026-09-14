@@ -8,10 +8,10 @@
 // `role` off `chainHeldRoles`, `work`/`place` off the worksAt+containedIn
 // spine — which is exactly the shape judgeMatch admits, so it carries a
 // complete anchor hop index and reaches the derivation's `act` path. Its
-// sibling base-domain producer edgeManifestReadGrants binds `op` over two
-// genuinely different chains across a staging boundary and stays refused
-// (anchor_hopindex_corpus_census_test.go pins both verdicts); this test
-// targets the producer the derivation actually acts on.
+// sibling base-domain producer edgeManifestReadGrants carries a complete index
+// too (anchor_hopindex_corpus_census_test.go pins every producer's verdict);
+// this test targets the staff producer because its re-opened chains are the
+// shape judgeMatch's admission rule was written for.
 //
 // Activated through the real generated-producer install path (mirroring
 // edge_manifest_fire2_producer_flip_e2e_test.go), the test pins three

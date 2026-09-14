@@ -41,13 +41,31 @@ import (
 )
 
 // emComposedLenses returns the package's composed lens specs — the fifteen
-// data lenses with their compiled reachability prefixes plus the three
-// generated read-grant producers, in install order.
+// data lenses with their compiled reachability prefixes plus the generated
+// read-grant producers, one per declared ReadGrantDomain, in install order.
 func emComposedLenses(t *testing.T) []pkgmgr.LensSpec {
 	t.Helper()
 	expanded, err := Package.ExpandReadGrantWalks()
 	require.NoError(t, err, "the package's read-grant walks must compile")
 	return expanded.Lenses
+}
+
+// emGeneratedProducerNames returns every generated read-grant producer, read
+// from the compiled lens set rather than listed by hand. The shape assertions
+// below hold for a producer BECAUSE it is generated, not because someone
+// remembered to name it: a hand-written list silently exempts the next
+// declared domain from the realness filter that makes its empty-delete fire.
+func emGeneratedProducerNames(t *testing.T) []string {
+	t.Helper()
+	names := []string{}
+	for _, l := range emComposedLenses(t) {
+		if strings.HasSuffix(l.CanonicalName, "ReadGrants") {
+			names = append(names, l.CanonicalName)
+		}
+	}
+	require.Len(t, names, len(Package.ReadGrantDomains),
+		"one generated producer per declared ReadGrantDomain")
+	return names
 }
 
 // emComposedSpec returns one composed lens's cypher by canonical name — for a
@@ -328,11 +346,7 @@ func emAnchorEntries(t *testing.T, rows []ruleengine.ProjectionResult) []string 
 // `anchorId`, so EmptyBehavior "delete" actually fires. No security change — a
 // null anchorId never matched anything in IsReadable's union.
 func TestMigration_GeneratedProducersDeclareTheRealnessFilter(t *testing.T) {
-	for _, name := range []string{
-		"edgeManifestReadGrants",
-		"edgeManifestStaffReadGrants",
-		"edgeManifestProviderReadGrants",
-	} {
+	for _, name := range emGeneratedProducerNames(t) {
 		l := emComposedLens(t, name)
 		require.NotNil(t, l.Output, "%s: generated producer has no Output descriptor", name)
 		require.Equal(t, "anchorId", l.Output.RealnessFilter,
@@ -355,11 +369,7 @@ func TestMigration_BindinglessIdentityGrantsNothing(t *testing.T) {
 	}
 	f := newEmFixture(t)
 	f.vtx(t, "loner", "identity")
-	for _, name := range []string{
-		"edgeManifestReadGrants",
-		"edgeManifestStaffReadGrants",
-		"edgeManifestProviderReadGrants",
-	} {
+	for _, name := range emGeneratedProducerNames(t) {
 		require.Empty(t, emAnchorEntries(t, f.project(t, emComposedSpec(t, name), f.key("loner"))),
 			"%s: a binding-less identity must be granted no anchor", name)
 	}
@@ -604,7 +614,7 @@ func TestMigration_GeneratedProducersEmitNoDuplicateAnchors(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
-	for _, c := range []struct {
+	cases := []struct {
 		producer string
 		world    func(*testing.T) *emFixture
 		actor    string
@@ -612,7 +622,18 @@ func TestMigration_GeneratedProducersEmitNoDuplicateAnchors(t *testing.T) {
 		{"edgeManifestReadGrants", emResidentWorld, "resident"},
 		{"edgeManifestStaffReadGrants", emStaffWorldFull, "tech"},
 		{"edgeManifestProviderReadGrants", emProviderWorld, "providerId"},
-	} {
+		{"edgeManifestTaskReadGrants", emTaskWorld, "taskActor"},
+	}
+	covered := []string{}
+	for _, c := range cases {
+		covered = append(covered, c.producer)
+	}
+	require.ElementsMatch(t, emGeneratedProducerNames(t), covered,
+		"every generated producer needs a world that exercises it — the payload ceiling "+
+			"is per `cap-read.<domain>.<actor>` document, so an unexercised domain is an "+
+			"unmeasured one")
+
+	for _, c := range cases {
 		t.Run(c.producer, func(t *testing.T) {
 			f := c.world(t)
 			rows := f.project(t, emComposedSpec(t, c.producer), f.key(c.actor))

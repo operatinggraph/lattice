@@ -78,10 +78,7 @@ const OpCatalogBucket = "op-catalog"
 // label instead of a bare NanoID; the location TYPE segment is still not
 // synthesized into the row (the engine has no vertex-type-from-key function
 // outside nanoIdFromKey, and no string concatenation to build one), so the
-// renderer derives type from the key client-side. Still deferred: the
-// open-task-forOperation catalog path — a task's own bound op already rides
-// inline on its edgeTasks row, so that gap is "browse all my ops," never
-// "complete my task."
+// renderer derives type from the key client-side.
 //
 // One lens in the slice is NOT a Personal Lens: `opCatalog`, the plain
 // (`nats-kv`) descriptor read model a staff application renders op forms from

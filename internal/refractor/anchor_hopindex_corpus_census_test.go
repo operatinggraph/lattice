@@ -67,9 +67,12 @@ const (
 // corpusAnchorIndexVerdicts pins the conjunct for every anchored cypher the
 // installed corpus ships.
 //
-// Exactly one row here is refused by a WITH conjunct — edgeManifestReadGrants,
-// below, on a genuine cross-walk variable collision. Every other row's staging
-// WITH carries the anchor cleanly: it exists to collapse an arm's fan-out back
+// No row here is refused by a WITH conjunct: every one of them carries a lens
+// whose staging WITH holds the anchor cleanly, so `hopWithDropped` and
+// `hopWithUnmodelled` have no corpus witness and survive only as inputs to
+// TestCorpusAnchorHopIndex_EveryReasonIsAKnownConjunct. A lens that acquires
+// one is a real finding, not a pin to move. Each row's staging WITH exists to
+// collapse an arm's fan-out back
 // to one row per anchor before the next arm fans out
 // (packages/privacy-base/lenses.go states the measurement), so it carries the
 // anchor and lets the spent arm go, and no later clause names the arm again —
@@ -136,12 +139,13 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	// and AnchorSideSeeds (Dist's only consumer) drops no seed. The graph the
 	// derivation walks is the graph it walked before the re-open existed.
 	"edgeManifestStaffReadGrants": hopIndexed,
-	// The base producer no longer binds `op` on two chains: the own-task walk
-	// that used to strand it moved to its own `edgeManifestTask` domain
-	// (below), so the only `op` binding left is
-	// `(tpl)-[:permitsOperation]->(op:meta)`. Its residence chain re-opens are
-	// admitted the same way the staff producer's are (see above), so the index
-	// is complete.
+	// The base producer's nine walks bind `op` on exactly one chain,
+	// `(tpl)-[:permitsOperation]->(op:meta)` — the own-task chain to the same
+	// label is granted by `edgeManifestTask` (below), a separate domain, so no
+	// WITH strands the name. Its residence chain is re-opened at five stages
+	// and `tpl` re-bound across a boundary, admitted the same way the staff
+	// producer's re-opens are and asserted the same way: hop set by hop set and
+	// seed by seed, by TestEdgeManifestReadGrants_IndexesToItsUnstagedGraph.
 	"edgeManifestReadGrants": hopIndexed,
 	// Single walk, no staging boundary at all:
 	// `(identity)<-[:assignedTo]-(task:task)`, `(task)-[:forOperation]->(op:meta)`.

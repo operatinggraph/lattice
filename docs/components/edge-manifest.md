@@ -37,8 +37,9 @@ booking, a tab, a studio, a menu item, a work order, an appointment, a pane meta
 (`internal/refractor/projection/personal.go` → `capabilityread.IsReadable`) drops such a row unless the
 actor's unioned `cap-read.<domain>.<actor>` slices list the anchor's bare NanoID — silently, fail-closed, by
 design (Contract #6 §6.14 Path B). Each such lens declares its actor→anchor reachability ONCE, as one or
-more `AnchorWalk`s (`lenses.go`'s `Walks` field — `edgeEntitySessions` and `edgeCatalog` each carry two, one
-per reachability path to the same anchor kind, compiled to independent branches and merged by output key,
+more `AnchorWalk`s (`lenses.go`'s `Walks` field — `edgeEntitySessions` and `edgeTasks` each carry two and
+`edgeCatalog` three, one per reachability path to the same anchor kind, compiled to independent branches and
+merged by output key,
 refractor-shared-keyspace-arbitration-design.md §13), and `pkgmgr` compiles both the lens's own cypher and
 the read-grant producer that grants the anchors, from that declaration.
 
@@ -56,7 +57,7 @@ already have on the nats-kv side).
 |---|---|---|
 | `edgeIdentity` | `manifest.me` | the actor's own identity (self-anchored) — display name, claimed status, roles, residence/workplace anchors, the `{me.<type>}` self-anchor set (leaseapp/workplace/provider/instructor/serviceprovider) |
 | `edgeServices` | `manifest.svc.<tplId>` | service templates reachable via the actor's residence → `containedIn*` → `availableAt` chain |
-| `edgeCatalog` | `manifest.op.<opMetaId>` | op metas reachable via a reachable service template's `permitsOperation` link; carries `viaServices`, the list of service keys that permit it — **or** via a held role's `grantedBy` permission → `forOperation` (the role-standing-grant catalog path, a second `Walk` in the `edgeManifestStaff` domain; see below) |
+| `edgeCatalog` | `manifest.op.<opMetaId>` | op metas reachable via a reachable service template's `permitsOperation` link; carries `viaServices`, the list of service keys that permit it — **or** via a held role's `grantedBy` permission → `forOperation` (the role-standing-grant catalog path, a second `Walk` in the `edgeManifestStaff` domain; see below) — **or** via a task `assignedTo` the actor, over the task's own `forOperation` (the own-task catalog path, a third `Walk` in the `edgeManifestTask` domain; see below) |
 | `edgeTasks` | `manifest.task.<taskId>` | open tasks directly `assignedTo` the actor |
 | `edgeInstances` | `manifest.inst.<instId>` | service instances `providedTo` the actor ("my orders") |
 | `edgeEntitySessions` | `manifest.ent.<sessionId>` | wellness class sessions reachable via residence → the studio's `locatedAt` place (`entityType: "session"`, a `dispatch.targetType: "session"` browse target) — **or** via the actor's own bound instructor's `ledBy`-inverse sessions (the provider-hat "my classes to teach" path, a second `Walk` in the `edgeManifestProvider` domain; see below) |
@@ -211,8 +212,10 @@ narrowings, each a reasonable v1 cut rather than a correctness gap in what IS bu
 - **`edgeIdentity`'s `anchors`/`roles` arrays** carry no human-readable location TYPE segment (there is no
   vertex-type-from-key function beyond `nanoIdFromKey`, and no string concatenation to synthesize one from
   the key's type segment) — the renderer derives type from the key client-side.
-- **Still deferred:** the open-task-`forOperation` catalog path — a task's own bound op already rides inline
-  on its `edgeTasks` row, so that gap is "browse all my ops," never "complete my task."
+- **The open-task-`forOperation` catalog path** is `edgeCatalog`'s third `Walk`, in its own
+  `edgeManifestTask` read-grant domain (see the task-scoped table above). A task's own bound op also rides
+  inline on its `edgeTasks` row; the catalog path is what makes it browsable as an op rather than reachable
+  only through the task.
 
 A degenerate `collect(DISTINCT {…})` entry (e.g. `{key:null,name:null}` when an identity holds no role)
 is expected, not a bug — the renderer obligation is the same one `my-tasks.*` rows already carry (design

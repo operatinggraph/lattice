@@ -409,8 +409,8 @@ func TestManifestAnchorCoverage_ProviderWorld(t *testing.T) {
 // (`ReadGrantDomain: edgeManifestTask`), authorized independently of any held
 // role or residence chain (lenses.go's edgeCatalogTail doc comment). The op
 // meta here is reachable NO OTHER WAY: no service template permitsOperation's
-// it and no role's permission forOperation's it, so the base producer — which
-// no longer declares this Walk — must grant nothing for it.
+// it and no role's permission forOperation's it, so the base producer, which
+// declares neither of those chains to it, must grant nothing for it.
 //
 //	taskActor ←assignedTo— openTask(task, status=open) —forOperation→ taskOp(meta)
 func emTaskWorld(t *testing.T) *emFixture {
@@ -427,10 +427,11 @@ func emTaskWorld(t *testing.T) *emFixture {
 // TestManifestAnchorCoverage_TaskWorld is the coverage half of the split filed
 // in docs/reviews/lattice-designer-triage-2026-09-10.md §2: edgeCatalog's
 // own-task branch (Walk 2) is covered by edgeManifestTaskReadGrants, and the
-// second assertion is the split's whole point — the base producer, which held
-// this Walk before the split, must grant the anchor NOTHING, because the two
-// producers now partition genuinely distinct authorization bases rather than
-// binding one name (`op`) over two unrelated chains.
+// second assertion is the partition's whole point — the base producer must
+// grant the anchor NOTHING, because the two producers carry genuinely distinct
+// authorization bases rather than binding one name (`op`) over two unrelated
+// chains. The base slice is asserted non-empty first: a negative over an empty
+// projection proves nothing.
 func TestManifestAnchorCoverage_TaskWorld(t *testing.T) {
 	f := emTaskWorld(t)
 	actor := f.key("taskActor")
@@ -442,7 +443,10 @@ func TestManifestAnchorCoverage_TaskWorld(t *testing.T) {
 		[]string{emComposedSpec(t, "edgeManifestTaskReadGrants")})
 
 	baseGranted := f.grantedAnchorIDs(t, actor, []string{emComposedSpec(t, "edgeManifestReadGrants")})
+	require.NotEmpty(t, baseGranted,
+		"the base producer grants nothing at all in this world, so the negative below would hold "+
+			"whether or not the two domains partition")
 	require.Falsef(t, baseGranted[f.ids["taskOp"]],
-		"the own-task op must NOT be granted by the base producer — it moved to its own %q domain so the "+
-			"base producer stops binding op over two unrelated chains", domainTask)
+		"the own-task op must NOT be granted by the base producer — %q carries it, so the base "+
+			"producer binds op over one chain only", domainTask)
 }

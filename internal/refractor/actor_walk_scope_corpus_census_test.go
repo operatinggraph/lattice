@@ -140,16 +140,18 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"edgeManifestProviderReadGrants": "appointment:withProvider|identity:identifiedBy|instructor:identifiedBy,ledBy|provider:identifiedBy,withProvider|service:instanceOf,providedBy|serviceprovider:identifiedBy,providedBy|session:ledBy",
 	// THE ROW THAT WENT `nil` → SCOPE, which this file's header names as the
 	// direction needing the argument written down. It is derived from the same
-	// pattern graph the anchor index now reports Complete for
-	// (anchor_hopindex_corpus_census_test.go — the own-task walk that used to
-	// strand `op` moved to its own domain below), and §5.1's claim transfers to
-	// it because the graph the scope reads is the graph the nine remaining base
-	// walks produce.
+	// pattern graph the anchor index reports Complete for
+	// (anchor_hopindex_corpus_census_test.go), and §5.1's claim transfers to it
+	// because the graph the scope reads is the graph the nine base walks
+	// produce — the staged re-opens add duplicate hop records and nothing else,
+	// which TestEdgeManifestReadGrants_IndexesToItsUnstagedGraph asserts hop set
+	// by hop set and seed by seed.
 	//
 	// Read the digest against those nine walks: `residesIn`+`containedIn*0..`
 	// off the actor into the residence chain, then `availableAt` to a service
-	// template and `permitsOperation` to an op meta, `locatedAt` to a studio or
-	// menu item or provider; `assignedTo` to a task, `providedTo` to a service
+	// template and `permitsOperation` to an op meta, `atStudio`/`locatedAt` to a
+	// studio, `servedAt` to a menu item and `practicesAt` to a provider;
+	// `assignedTo` to a task, `providedTo` to a service
 	// instance, `bookedBy` to a booking, `applicationFor` to a lease and
 	// `openFor` to a tab. The `any:` entry carries `availableAt`,
 	// `containedIn`, `locatedAt`, `practicesAt`, `residesIn` and `servedAt`
