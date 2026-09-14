@@ -157,16 +157,27 @@ func TestKVMarkerProvenance_ExpiryIsTheOnlyMaxAgeMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, c.KVPurgeWithTTL(ctx, bucket, purgedKey, time.Second, 0))
 
-	// 4. An arm superseded by a re-arm before its own TTL runs out. The arm's
-	// TTL is the slack the re-arm has to land inside — a loaded host can stall
-	// one round trip past a 1 s TTL, and then the marker the arm mints is a
-	// legitimate expiry rather than the eviction this step pins — while the
-	// observation window at the end of the test (past the purge's own 4 s
-	// quiet period) still outlasts it by a wide margin.
-	_, err = c.KVPutWithTTL(ctx, bucket, evictedKey, []byte(`{"setAt":"t0"}`), 3*time.Second)
+	// 4. An arm superseded by a re-arm before its own TTL runs out.
+	//
+	// This step's proposition is intrinsically timed: proving a superseded TTL
+	// cannot fire late means landing the re-arm inside the first arm's TTL AND
+	// still watching when that TTL would have come due. Both were previously
+	// hoped for — the re-arm implicitly, the observation via a fixed 4 s window
+	// that might or might not have reached the instant — and a loaded runner
+	// stalled a round trip past the arm's TTL, at which point the marker the arm
+	// mints is a legitimate expiry rather than the eviction this pins. Both are
+	// now asserted: the arm is timed from before its own put, the re-arm's
+	// landing inside the TTL is a checked precondition, and the closing window is
+	// computed to outlast the TTL instant rather than assumed to.
+	const evictedArmTTL = 10 * time.Second
+	evictedArmedAt := time.Now()
+	_, err = c.KVPutWithTTL(ctx, bucket, evictedKey, []byte(`{"setAt":"t0"}`), evictedArmTTL)
 	require.NoError(t, err)
 	_, err = c.KVPutWithTTL(ctx, bucket, evictedKey, []byte(`{"setAt":"t1"}`), 30*time.Second)
 	require.NoError(t, err)
+	require.Less(t, time.Since(evictedArmedAt), evictedArmTTL,
+		"the re-arm has to land inside the arm's own TTL or the arm expires for real and this step "+
+			"pins nothing — a stall this long is host contention, not the marker mechanism")
 
 	armedSubj := kvBucketSubject(bucket, armedKey)
 	deletedSubj := kvBucketSubject(bucket, deletedKey)
@@ -205,7 +216,15 @@ func TestKVMarkerProvenance_ExpiryIsTheOnlyMaxAgeMarker(t *testing.T) {
 	// could fire after the cursor advanced.
 	awaitMarker(t, mc, evictedSubj, 2, "the re-arm's value must be delivered")
 	require.Len(t, mc.forSubject(evictedSubj), 2, "the re-arm's value follows the arm's")
-	requireNoFurtherMarker(t, mc, evictedSubj, 2, 4*time.Second,
+	// The window has to still be open when the superseded TTL would have come
+	// due, or a quiet subject proves only that the instant had not arrived. Hold
+	// it open to two seconds past that instant, and never shorten it below the
+	// original fixed period.
+	evictedWindow := time.Until(evictedArmedAt.Add(evictedArmTTL + 2*time.Second))
+	if evictedWindow < 4*time.Second {
+		evictedWindow = 4 * time.Second
+	}
+	requireNoFurtherMarker(t, mc, evictedSubj, 2, evictedWindow,
 		"an arm evicted by a re-arm must never emit its own expiry marker")
 
 	for _, m := range mc.forSubject(evictedSubj) {
