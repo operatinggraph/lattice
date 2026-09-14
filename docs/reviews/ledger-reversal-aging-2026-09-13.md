@@ -116,3 +116,18 @@ tombstoned but whose marker reverses it. Live: Alex Kim's due date moves from Se
    name (absorbed, inc 2); the row's clinic/loftspace claim (recorded above, nothing to build).
 7. **Non-goals:** no `reason` on café entries; no targeted waiver op; no clinic/loftspace edit; no change to
    balance arithmetic or the episode/notification rules; no new bucket.
+
+### Build note (2026-09-13)
+
+Shipped at `5e6e08a0` (merge `c09d9368`); wellness-ledger 0.2.22, cafe-ledger 0.5.2, wellness-domain 0.27.3
+refreshed live; `bin/wellness-app` + `bin/cafe-app` cycled. Live: Alex Kim's due date reads
+`2026-09-28T03:53:33Z` (the Sep 13 charge + 15), the refund row carries `reversesKey`, the reversed charge
+names "Evening Flow with Sam". Deviations from the brief: café's `computeLedgerBalances` threads `ReversesKey`
+too (the desk grid's own `deriveStatement` call would otherwise never see a reversal); the two link-discovered
+walks are admitted in `internal/testutil/read_drift_baseline.txt`; the branch-decomposition corpus pin for
+`wellnessLedgerHistory` moves g3/o3 → g4/o5 (product path, no aggregator). Cold review (opus) found one
+BLOCKING — the per-credit `kv.Links` needed `None, 1` (a limit-less call is charged 256 against the live-read
+budget) — and one adjacent defect fixed in the same fire: `ReleaseOrphanedBooking`'s no-show branch lacked
+`SetBookingAttendance`'s `already_refunded` probe (a fee reversed by an attended re-mark was reversed again on
+call-off). Both classes appended to the `_packages.md` dossier. The four mint sites are CancelBooking,
+SetBookingAttendance, ReleaseOrphanedBooking ×2 (the grounding above said "CancelBooking ×2").

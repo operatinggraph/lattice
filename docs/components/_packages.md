@@ -626,6 +626,20 @@ sibling groups, label set, grouping key, walk scope, hop index) fail by lens nam
   Charge vector surfaced three read-drift rows every sibling op already carried. Check: every op that calls
   `require_workplace` / `enforce_workplace` has one vector as a non-operator staff actor; an op with the guard and no
   `read <Op> lnk.identity.<id>.worksAt.*` baseline row is the tell.
+- **A `kv.Links` call with no page limit is charged at the 256-unit default against the script live-read budget,
+  however many links the hub actually carries** — `starlark_kv.go` charges the clamped LIMIT, not `len(links)`, so a
+  single-link probe (`postedTo`, `reverses`, `heldFor`) inside a per-candidate loop costs 257 a candidate and turns a
+  long-history account into a permanently *rejected* evaluation (a script error Weaver re-dispatches every window),
+  never the paged `history_too_long` degrade written for it. Minted: cafe-ledger `arrears_entries` (2026-09-13, caught
+  cold as BLOCKING). Check: every `kv.Links` whose relation is single-valued passes `None, 1`; price a per-candidate
+  walk as `candidates × (1 + limit)` against `DefaultLiveReadBudget` at the sweep's page cap.
+- **A link that TWO ops walk needs the idempotency probe on both — "dispatched at most once per booking" is a claim
+  about one op, not about the link.** `SetBookingAttendance` guarded its no-show refund with a `reverses in` probe
+  because it is re-markable; `ReleaseOrphanedBooking` walked the same `settles` link with none, so a fee reversed by an
+  attended re-mark, re-marked noShow, and then released on call-off was refunded twice. Minted: wellness-domain
+  (2026-09-13, caught cold). Check: for every link a refund/settlement mint walks, list every op that can reach that
+  walk and the states each leaves the anchor in; a probe that exists on one of them exists on all, or the exclusion is
+  stated per pair (CancelBooking is exempt only because it tombstones the anchor).
 - **A guard's OCC rests on whoever writes its read declaration.** `contextHint` is submitter-supplied and never
   enforced, so a cap that reads a maintained aspect declared only in a descriptor's `optionalReads` is hydrated —
   and its bare update revision-conditioned — only for callers who repeat the declaration; a caller that omits it
