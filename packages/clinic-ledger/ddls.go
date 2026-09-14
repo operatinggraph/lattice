@@ -255,13 +255,13 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"front-of-house scope=any grant may waive.",
 			},
 			{
-				Name:    "ClinicCreditAccount — Weaver-dispatched no-show reversal (reversesRef)",
-				Payload: map[string]any{"accountKey": "vtx.clinicaccount.<NanoID>", "amountCents": 2500, "memo": "No-show fee reversal (corrected)", "reason": "waiver", "reversesRef": "vtx.clinictransaction.<NanoID>"},
+				Name:    "ClinicCreditAccount — Weaver-dispatched fee reversal (reversesRef)",
+				Payload: map[string]any{"accountKey": "vtx.clinicaccount.<NanoID>", "amountCents": 2500, "memo": "Fee reversal (corrected)", "reason": "waiver", "reversesRef": "vtx.clinictransaction.<NanoID>"},
 				ExpectedOutcome: "Same as the waiver case, plus validates reversesRef is alive (UnknownTransaction otherwise) and writes " +
 					"lnk.clinictransaction.<id>.reverses.clinictransaction.<id> (credit→the reversed debit). This is the shape " +
 					"clinicNoShowSettlement's missing_reversal gap dispatches once CorrectAppointmentStatus moves a charged " +
-					"no-show appointment to a different terminal status — a human-submitted ClinicCreditAccount simply omits " +
-					"reversesRef and gets the plain waiver shape above.",
+					"appointment (a no-show, or a patient's late cancel) to a status carrying no fee — a human-submitted " +
+					"ClinicCreditAccount simply omits reversesRef and gets the plain waiver shape above.",
 			},
 		},
 	}

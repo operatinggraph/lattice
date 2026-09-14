@@ -536,19 +536,30 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, checkedIn, completed, " +
 			"cancelled, noShow}, with an optional audit note (a cancel / no-show reason, stored on .status distinct " +
 			"from the .schedule visit reason). completed / noShow are accepted only once the visit has started " +
-			"(op.submittedAt at or after .schedule.startsAt; NotYetStarted before) — cancelled carries no clock. " +
+			"(op.submittedAt at or after .schedule.startsAt; NotYetStarted before) — a staff cancel carries no clock. " +
 			"Transitioning to noShow also stores a noShowFeeCents amount on .status " +
 			"(caller-supplied positive number, or a 2500 default when omitted) — the billing consequence a no-show " +
-			"otherwise lacked; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge. " +
-			"The terminal statuses {cancelled, completed, noShow} are FINAL: " +
-			"re-setting the same terminal value is idempotent, but changing a terminal status to a different one is " +
+			"otherwise lacked; clinic-ledger's clinicNoShowSettlement lens bills the fee's presence on the current " +
+			"status, whichever op wrote it, with a DebitAccount charge. A patient's OWN cancel (the consumer scope=self " +
+			"grant, status=cancelled only) reads a three-state clock against .schedule.startsAt: at or after startsAt " +
+			"it is refused VisitStarted (the front desk records the outcome); inside the 24-hour late-cancel window " +
+			"(startsAt − 24h, the reminder lead) it lands with lateCancel: true and the 2500 no-show fee on .status; " +
+			"earlier it is free. A patient's own RescheduleAppointment reads the same clock: VisitStarted once started, " +
+			"LateReschedule inside the window (cancel, or call the desk — a free late move would sidestep the fee). " +
+			"Staff paths are unaffected. The terminal statuses {cancelled, completed, noShow} are FINAL: " +
+			"re-setting the same terminal value is idempotent (a cancelled re-set carries lateCancel + noShowFeeCents " +
+			"forward), but changing a terminal status to a different one is " +
 			"rejected (TerminalStatus) so a finished / cancelled visit cannot silently revert; non-terminal statuses " +
-			"move freely. CorrectAppointmentStatus{appointmentKey, status, note} is the explicit repair for a WRONG " +
+			"move freely. CorrectAppointmentStatus{appointmentKey, status, note, noShowFeeCents?} is the explicit repair for a WRONG " +
 			"terminal call — the move SetAppointmentStatus refuses (an auto no-show on a patient who was actually " +
 			"seen). It transitions ONLY between the terminal values (NotTerminal if the appointment never reached one; " +
 			"InvalidArgument for a non-terminal target; NotYetStarted for a completed / noShow target ahead of the " +
 			"visit's startsAt), touches no slot-claim cells (the first terminal transition " +
-			"already released them, so it takes no provider/patient), and REQUIRES an audit note. It records the " +
+			"already released them, so it takes no provider/patient), and REQUIRES an audit note. A correction onto " +
+			"noShow carries noShowFeeCents exactly as SetAppointmentStatus does (caller-supplied positive number or the " +
+			"2500 default), so the ledger charges it; a correction onto completed / cancelled writes no fee, and " +
+			"clinic-ledger's missing_reversal gap reverses a charge already posted for the prior noShow or late " +
+			"cancel — the waiver. It records the " +
 			"overwritten value as .status.correctedFrom and emits clinic.appointmentStatusCorrected. Staff-only " +
 			"(operator / front-of-house / the appointment's own bound provider, workplace-confined exactly as " +
 			"SetAppointmentStatus's staff path) — no patient self-service scope. It never re-opens a terminal " +
@@ -642,7 +653,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / CorrectAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite / TombstoneAppointment; required, validated alive)."},` +
 			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required). Transitioning TO a terminal value (completed/cancelled/noShow) for the first time also requires provider + patient (to release the held slot-claim cells; omitted on a non-terminal transition or an idempotent same-value re-set). CorrectAppointmentStatus also requires it, restricted to the three terminal values."},` +
 			`"note":{"type":"string","description":"Audit note for the transition, e.g. a cancel / no-show reason (SetAppointmentStatus; optional). REQUIRED on CorrectAppointmentStatus — a correction rewrites a record already treated as final. Stored on .status, distinct from the .schedule visit reason; an omitted note carries none."},` +
-			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetAppointmentStatus; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge against the patient's ledger account."},` +
+			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetAppointmentStatus / CorrectAppointmentStatus; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge against the patient's ledger account. A patient's own cancel inside the 24-hour late-cancel window stores the 2500 default itself (with lateCancel: true) — never caller-supplied on that path."},` +
 			`"summary":{"type":"string","maxLength":4000,"description":"Visit summary / clinical note (RecordEncounter; required). RAW clinical content, stored SENSITIVE on .encounter — DEK custodied on the clinicalRecord retention class; reaches a reader only through the clinicEncountersRead Secure Lens, decrypted at projection for the treating provider."},` +
 			`"assessment":{"type":"string","maxLength":4000,"description":"Clinical assessment / diagnosis (RecordEncounter; optional). RAW PHI, stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only."},` +
 			`"plan":{"type":"string","maxLength":4000,"description":"Treatment plan / orders (RecordEncounter; optional). RAW PHI, stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only. The clinical reason for any follow-up belongs here, not in the operational followUp fields."},` +
@@ -663,7 +674,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / CorrectAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite validate it alive + class=appointment; TombstoneAppointment validates it alive).",
 			"status":            "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required). The first transition to a terminal value also requires provider + patient. CorrectAppointmentStatus requires it too, restricted to the three terminal values.",
 			"note":              "Audit note recorded with a status transition (e.g. a cancel / no-show reason). Optional on SetAppointmentStatus, REQUIRED on CorrectAppointmentStatus. Stored on the .status aspect, distinct from the .schedule visit reason; omitted → no note.",
-			"noShowFeeCents":    "Optional no-show fee in integer cents (SetAppointmentStatus, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by clinic-ledger's clinicNoShowSettlement lens to post a DebitAccount charge.",
+			"noShowFeeCents":    "Optional no-show fee in integer cents (SetAppointmentStatus / CorrectAppointmentStatus, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by clinic-ledger's clinicNoShowSettlement lens to post a DebitAccount charge. A patient's own late cancel (inside startsAt − 24h) stores the 2500 default with lateCancel: true.",
 			"summary":           "Required visit summary / clinical note (RecordEncounter). RAW clinical content stored SENSITIVE on .encounter — DEK custodied on the clinicalRecord retention class; reaches a reader only through the clinicEncountersRead Secure Lens, decrypted at projection for the treating provider.",
 			"assessment":        "Optional clinical assessment / diagnosis (RecordEncounter). RAW PHI stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only.",
 			"plan":              "Optional treatment plan / orders (RecordEncounter). RAW PHI stored SENSITIVE on .encounter — decrypted at projection into clinicEncountersRead for the treating provider only. The clinical reason for a follow-up lives here, not in the operational followUp fields.",
@@ -737,8 +748,10 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"transition is SetAppointmentStatus's job) and the target status to be one of the three terminal " +
 					"values (InvalidArgument otherwise — this op never re-opens an appointment). Requires a note. " +
 					"Upserts .status {value: completed, note, correctedFrom: noShow} — no slot-claim cell moves, " +
-					"since the first terminal transition already released them. Emits " +
-					"clinic.appointmentStatusCorrected. Returns primaryKey.",
+					"since the first terminal transition already released them — and no noShowFeeCents, so " +
+					"clinic-ledger's missing_reversal gap credits back the fee the wrong no-show charged. (A " +
+					"correction onto noShow instead carries noShowFeeCents: caller-supplied or the 2500 default, " +
+					"charged the same way.) Emits clinic.appointmentStatusCorrected. Returns primaryKey.",
 			},
 			{
 				Name:    "MarkPastDueNoShow — Weaver-dispatched auto no-show (pastDueAppointments target)",
@@ -750,7 +763,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"Otherwise resolves provider/patient LIVE off the appointment's own " +
 					"withProvider/forPatient links, upserts the .status aspect {value: noShow, note: \"Auto no-show: " +
 					"appointment ended without a status update\"} (deliberately no noShowFeeCents — only a " +
-					"staff-observed SetAppointmentStatus(noShow) bills), and releases the held slot-claim " +
+					"staff-observed SetAppointmentStatus(noShow), a noShow correction, or the patient's own late " +
+					"cancel bills), and releases the held slot-claim " +
 					"cells — the same effect as a staff-submitted SetAppointmentStatus(noShow) minus the fee and the " +
 					"caller-supplied provider/patient params a human dispatcher would send. Emits clinic.appointmentStatusSet{auto: true}. " +
 					"Submitted under Weaver's service-actor authority only (clinic-reminders' pastDueAppointments target); " +
@@ -929,23 +943,29 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"},
 		Description: "Appointment status aspect (clinic). Stored as vtx.appointment.<NanoID>.status (class " +
 			"appointmentStatus) = {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?, " +
-			"noShowFeeCents?, correctedFrom?}. Non-sensitive. Written by CreateAppointment (initial scheduled), SetAppointmentStatus " +
+			"noShowFeeCents?, lateCancel?, correctedFrom?}. Non-sensitive. Written by CreateAppointment (initial scheduled), SetAppointmentStatus " +
 			"(transitions, with an optional audit note — a cancel / no-show reason, distinct from the .schedule visit " +
-			"reason — and, only when transitioning to noShow, a noShowFeeCents amount: caller-supplied or a 2500 " +
-			"default), CorrectAppointmentStatus (a terminal→terminal repair of a wrong final call, which requires the " +
-			"note and additionally records correctedFrom — the terminal value it overwrote), and MarkPastDueNoShow " +
+			"reason — and a noShowFeeCents amount when transitioning to noShow (caller-supplied or a 2500 default) or " +
+			"when a patient cancels their own visit inside the 24-hour late-cancel window (lateCancel: true, the 2500 " +
+			"default; a same-value cancelled re-set carries both forward)), CorrectAppointmentStatus (a terminal→terminal " +
+			"repair of a wrong final call, which requires the note, additionally records correctedFrom — the terminal " +
+			"value it overwrote — and carries noShowFeeCents onto a noShow exactly as the first transition does, none " +
+			"onto completed / cancelled), and MarkPastDueNoShow " +
 			"(the same noShow transition, Weaver-dispatched once a non-terminal " +
-			"appointment's endsAt passes unattended, always the 2500 default fee) — whose appointment vertexType DDL " +
-			"owns both scripts; this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
+			"appointment's endsAt passes unattended, deliberately fee-less) — whose appointment vertexType DDL " +
+			"owns both scripts; this aspect-type DDL is the step-6 write gate. The fee's PRESENCE on the current " +
+			"value is what clinic-ledger's clinicNoShowSettlement bills, whichever writer set it, and its absence on a " +
+			"charged appointment is what it reverses. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"value":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"]},"note":{"type":"string"},"noShowFeeCents":{"type":"number"},` +
-			`"correctedFrom":{"type":"string","enum":["cancelled","completed","noShow"]}}}`,
+			`"lateCancel":{"type":"boolean"},"correctedFrom":{"type":"string","enum":["cancelled","completed","noShow"]}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":          "Appointment status: scheduled | confirmed | checkedIn | completed | cancelled | noShow.",
 			"note":           "Audit note recorded with a status transition (e.g. a cancel / no-show reason). Optional on SetAppointmentStatus, required on CorrectAppointmentStatus.",
-			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow (caller-supplied positive number, or a 2500 default when omitted).",
+			"noShowFeeCents": "Optional no-show fee in integer cents, present when value is noShow (staff-set or a correction: caller-supplied positive number, or a 2500 default when omitted) or cancelled by the patient inside the 24-hour late-cancel window (lateCancel: true, the 2500 default). Its presence on the current value is what clinic-ledger bills; its absence on a charged appointment (a correction to completed / cancelled) is what it reverses.",
+			"lateCancel":     "true when the patient cancelled their own visit inside the 24-hour late-cancel window (submitted at or after startsAt − 24h) — the cancel carries the no-show fee. Absent otherwise; a same-value cancelled re-set carries it forward.",
 			"correctedFrom":  "The terminal status this correction overwrote, present only on a CorrectAppointmentStatus write — the only trace of the wrong call once the upsert lands.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -2947,8 +2967,9 @@ def enforce_started(appt_key, status, sched, submitted_at):
     # via clinic-ledger's noShowSettlement), so a future visit is refused
     # NotYetStarted — on the first terminal transition (SetAppointmentStatus) and
     # on a terminal→terminal correction alike, or a cancel-then-correct would
-    # reach the same outcome by the side door. Cancel carries no clock — it is the
-    # legitimate before-the-visit terminal. The boundary is inclusive (submitted
+    # reach the same outcome by the side door. Cancel carries no clock here — it is
+    # the legitimate before-the-visit terminal for staff; a patient's own cancel
+    # reads self_visit_clock instead. The boundary is inclusive (submitted
     # AT startsAt has started). Same soft submittedAt guard as enforce_future
     # (caller-supplied, normalized to canonical UTC; the stored startsAt is
     # canonical UTC, so the compare is lexical == chronological).
@@ -2959,6 +2980,54 @@ def enforce_started(appt_key, status, sched, submitted_at):
     submitted = time.rfc3339_utc(submitted_at)
     if submitted < sched.data.get("startsAt"):
         fail("NotYetStarted: appointment " + appt_key + " starts at " + sched.data.get("startsAt") + " (submitted " + submitted + "); cannot mark " + status + " before the visit starts")
+
+# The late-cancellation window, expressed as the negative offset from the
+# appointment's own startsAt that opens it — the reminder lead: the reminder
+# that says "your visit is tomorrow" (remindAt = startsAt − 24h, the
+# clinic-reminders lane) is the last free-cancel moment. Inside the window a
+# patient's own cancel still lands but owes the no-show fee, and a patient's
+# own reschedule is refused (self_visit_clock); staff paths carry no window.
+LATE_CANCEL_WINDOW_OFFSET = "-24h"
+
+# The no-show fee written when no caller-supplied noShowFeeCents is given —
+# the staff-observed noShow, the noShow correction, and the patient's own late
+# cancel all default to it.
+DEFAULT_NO_SHOW_FEE_CENTS = 2500
+
+def self_visit_clock(appt_key, sched, submitted_at):
+    # The three-state clock a self-scoped (patient) cancel / reschedule reads
+    # against the visit's own startsAt: "started" (submitted at or after
+    # startsAt — the front desk records the outcome, noShow with its fee or
+    # completed), "late" (inside the LATE_CANCEL_WINDOW_OFFSET window — a
+    # cancel owes the no-show fee, a reschedule is refused), or "open"
+    # (before the window — as free as the staff path). Same soft submittedAt
+    # guard as enforce_started (caller-supplied, normalized to canonical UTC;
+    # the stored startsAt is canonical UTC and rfc3339_add re-emits canonical
+    # whole-second UTC, so both compares are lexical == chronological). Both
+    # boundaries are inclusive on the stricter side: submitted AT startsAt has
+    # started, submitted AT the window's opening instant is late.
+    if sched == None or sched.isDeleted or sched.data.get("startsAt") == None:
+        fail("InvalidState: " + appt_key + ".schedule is missing startsAt; cannot read the visit clock")
+    starts_at = sched.data.get("startsAt")
+    submitted = time.rfc3339_utc(submitted_at)
+    if submitted >= starts_at:
+        return "started"
+    if submitted >= time.rfc3339_add(starts_at, LATE_CANCEL_WINDOW_OFFSET):
+        return "late"
+    return "open"
+
+def no_show_fee_cents(p):
+    # The fee a noShow status carries: caller-supplied noShowFeeCents (must be
+    # positive) or DEFAULT_NO_SHOW_FEE_CENTS when omitted. Shared by
+    # SetAppointmentStatus and CorrectAppointmentStatus so every writer of a
+    # noShow validates and defaults identically; stored on .status for
+    # clinic-ledger's clinicNoShowSettlement lens to post the charge.
+    fee_cents = optional_number(p, "noShowFeeCents")
+    if fee_cents == None:
+        return DEFAULT_NO_SHOW_FEE_CENTS
+    if fee_cents <= 0:
+        fail("InvalidArgument: noShowFeeCents: must be a positive number")
+    return fee_cents
 
 def optional_bool(p, name):
     # Default False (absent / null / non-bool → False).
@@ -3459,15 +3528,37 @@ def execute(state, op):
             if cur_val in TERMINAL_STATUSES:
                 fail("TerminalStatus: appointment " + appt_key + " is " + str(cur_val) + " (terminal); cannot reschedule — cancelled/completed/noShow are final")
 
-        # Release-old / claim-new, in the SAME atomic batch: read the appointment's
-        # CURRENT .schedule to know which cells it holds today, discretize both the
-        # old and new intervals, and diff. Cells held by BOTH sets need no mutation —
-        # they stay claimed straight through the move (no read/re-claim gap).
+        # The appointment's CURRENT .schedule, read once for the two things below
+        # that need it: the patient-self clock, and the release-old / claim-new
+        # cell diff.
         # read-posture: (a) declared in contextHint.reads by RescheduleAppointment's
         # dispatcher (cmd/clinic-app/web/app.js submitReschedule)
         old_sched = kv.Read(appt_key + ".schedule")
         if old_sched == None or old_sched.isDeleted:
             fail("InvalidState: " + appt_key + ".schedule is missing; cannot reschedule")
+
+        # Patient-self clock (self_visit_clock): once the visit has started the
+        # front desk records its outcome, so the move is refused VisitStarted;
+        # inside the late-cancel window the move is refused LateReschedule — a
+        # free late move would be the side door around the late-cancel fee,
+        # which lives on .status (a reschedule never writes it), so the patient
+        # may cancel (and owe the fee) or call the desk. Staff move freely.
+        # Ordered behind the ownership binding + endpoint checks above, so the
+        # clock only ever answers about an appointment the caller owns.
+        # authcontext-target: (selector) its presence selects the patient-self
+        # clock — a stricter branch, never an exemption; ownership of the
+        # appointment was proven by the identifiedBy binding above.
+        if op.authContextTarget != "":
+            clock = self_visit_clock(appt_key, old_sched, op.submittedAt)
+            if clock == "started":
+                fail("VisitStarted: appointment " + appt_key + " started at " + old_sched.data.get("startsAt") + " (submitted " + time.rfc3339_utc(op.submittedAt) + "); cannot reschedule once the visit has started — the front desk records the outcome")
+            if clock == "late":
+                fail("LateReschedule: appointment " + appt_key + " starts at " + old_sched.data.get("startsAt") + " (submitted " + time.rfc3339_utc(op.submittedAt) + "); within the 24-hour window a visit may be cancelled (the no-show fee applies) but not moved — call the front desk")
+
+        # Release-old / claim-new, in the SAME atomic batch: the current .schedule
+        # says which cells the appointment holds today; discretize both the old
+        # and new intervals, and diff. Cells held by BOTH sets need no mutation —
+        # they stay claimed straight through the move (no read/re-claim gap).
         old_starts = old_sched.data.get("startsAt")
         old_ends = old_sched.data.get("endsAt")
         if old_starts == None or old_ends == None:
@@ -3568,7 +3659,8 @@ def execute(state, op):
 
         # Terminal-status lifecycle guard: cancelled / completed / noShow are FINAL.
         # Re-setting the SAME terminal value is idempotent (re-run-safe under
-        # at-least-once, and lets a noteless re-set clear a prior note); changing a
+        # at-least-once, and lets a noteless re-set clear a prior note — while a
+        # cancelled re-set carries the late-cancel fee forward, below); changing a
         # terminal status to a DIFFERENT one is rejected — a finished / cancelled visit
         # must not silently revert (e.g. completed→scheduled, cancelled→completed). A
         # non-terminal current status (scheduled / confirmed / checkedIn) still moves
@@ -3596,20 +3688,14 @@ def execute(state, op):
         note = optional_string(p, "note")
         if note != None:
             status_data["note"] = note
-        # No-show fee (billing consequence for a missed visit): only meaningful
-        # when transitioning TO noShow. Caller-supplied noShowFeeCents (must be
-        # positive) or a default placeholder (2500) when omitted — same
+        # No-show fee (billing consequence for a missed visit) when transitioning
+        # TO noShow: caller-supplied or the default (no_show_fee_cents) — same
         # unconditioned-upsert idiom as note above, stored on .status so the
         # clinicNoShowSettlement lens (clinic-ledger) can read it and post a
         # DebitAccount charge (clinic-ledger-design.md).
         if status == "noShow":
-            fee_cents = optional_number(p, "noShowFeeCents")
-            if fee_cents == None:
-                fee_cents = 2500
-            elif fee_cents <= 0:
-                fail("InvalidArgument: noShowFeeCents: must be a positive number")
-            status_data["noShowFeeCents"] = fee_cents
-        mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
+            status_data["noShowFeeCents"] = no_show_fee_cents(p)
+        release = []
         # A FIRST terminal transition (non-terminal → terminal; a same-value re-set is
         # skipped — its cells were already released by the first transition) frees the
         # slot: recompute the held cells from .schedule and tombstone both hubs' claim
@@ -3623,11 +3709,43 @@ def execute(state, op):
             require_matching_provider(appt_id, provider)
             patient = required_string(p, "patient")
             require_matching_patient(appt_id, patient)
+            # The .schedule is read once here and serves the visit clocks
+            # (enforce_started, self_visit_clock) and the cell release alike.
             # read-posture: (a) declared in contextHint.reads by SetAppointmentStatus's
             # dispatcher (cmd/clinic-app/web/app.js setStatus), only on the terminal branch
             sched = kv.Read(appt_key + ".schedule")
             enforce_started(appt_key, status, sched, op.submittedAt)
-            mutations = mutations + release_cells_mutations(provider, patient, sched)
+            # Patient-self clock on the first cancel (the only terminal value the
+            # self path reaches): once the visit has started the front desk
+            # records the outcome (noShow with its fee, or completed), so the
+            # cancel is refused VisitStarted; inside the late-cancel window the
+            # cancel lands but owes the no-show fee — the status carries
+            # lateCancel + noShowFeeCents, which clinic-ledger's
+            # clinicNoShowSettlement bills exactly as a staff-set noShow. A staff
+            # cancel owes nothing (the clinic may be the one calling it off).
+            # authcontext-target: (selector) its presence selects the patient-self
+            # clock — a stricter branch, never an exemption; ownership was proven
+            # by the identifiedBy binding + require_matching_patient above.
+            if op.authContextTarget != "":
+                clock = self_visit_clock(appt_key, sched, op.submittedAt)
+                if clock == "started":
+                    fail("VisitStarted: appointment " + appt_key + " started at " + sched.data.get("startsAt") + " (submitted " + time.rfc3339_utc(op.submittedAt) + "); the front desk records the outcome")
+                if clock == "late":
+                    status_data["lateCancel"] = True
+                    status_data["noShowFeeCents"] = DEFAULT_NO_SHOW_FEE_CENTS
+            release = release_cells_mutations(provider, patient, sched)
+        elif status == "cancelled" and cur_val == "cancelled":
+            # A same-value cancelled re-set (any caller) carries a late cancel's
+            # lateCancel + noShowFeeCents forward from the current .status: the
+            # unconditioned upsert would otherwise drop both and the ledger would
+            # read the fee's absence as a waiver and reverse the charge. The note
+            # keeps its clear-on-omit semantics. Waiving the fee is
+            # CorrectAppointmentStatus(cancelled, note), whose own write carries
+            # no fee.
+            for carried in ["lateCancel", "noShowFeeCents"]:
+                if cur_status.data.get(carried) != None:
+                    status_data[carried] = cur_status.data.get(carried)
+        mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)] + release
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": status}}]
         return {"mutations": mutations, "events": events,
@@ -3695,6 +3813,13 @@ def execute(state, op):
         # correction stays accepted (the re-runnable posture SetAppointmentStatus's
         # own terminal idempotency uses) and simply records the value unchanged.
         status_data = {"value": status, "note": note, "correctedFrom": cur_val}
+        # A correction onto noShow carries the fee exactly as the first
+        # transition does (no_show_fee_cents: caller-supplied or the default),
+        # so clinic-ledger's clinicNoShowSettlement bills it. A correction onto
+        # completed / cancelled writes no fee — that absence is the waiver: the
+        # same lens reverses a charge whose status no longer carries one.
+        if status == "noShow":
+            status_data["noShowFeeCents"] = no_show_fee_cents(p)
         mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
         events = [{"class": "clinic.appointmentStatusCorrected",
                    "data": {"appointmentKey": appt_key, "from": cur_val, "to": status}}]

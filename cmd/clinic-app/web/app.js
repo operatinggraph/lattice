@@ -673,6 +673,12 @@ function friendlyBookingRejection(msg) {
   if (msg.indexOf("AppointmentTooLong") !== -1) {
     return "That appointment is too long (over 24 hours). Shorten the duration.";
   }
+  if (msg.indexOf("VisitStarted") !== -1) {
+    return "This visit has already started and can no longer be moved. The front desk records the outcome instead.";
+  }
+  if (msg.indexOf("LateReschedule") !== -1) {
+    return "This visit starts within 24 hours and can no longer be moved online. Call the front desk to reschedule.";
+  }
   return msg;
 }
 
@@ -4948,19 +4954,39 @@ function renderApptCard(a, opts) {
 
     if (!opts.asSelf) btns.append(lifecycleButtons(a, onDone));
 
-    const reschedule = document.createElement("button");
-    reschedule.className = "ghost";
-    reschedule.textContent = "Reschedule";
-    reschedule.addEventListener("click", () => openReschedule(a, { asSelf: opts.asSelf, onDone }));
-    btns.append(reschedule);
+    // For the patient's own self-service card, selfVisitClock gates
+    // Reschedule and Cancel the same way the server will: once the visit
+    // has started neither is offered (the desk records the outcome);
+    // inside the clinic's no-show-fee window only Cancel remains (a self
+    // reschedule refuses LateReschedule). Staff cards carry no clock.
+    const clock = opts.asSelf ? selfVisitClock(a.startsAt, Date.now()) : "open";
 
-    const cancel = document.createElement("button");
-    cancel.className = "ghost danger";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => setStatus(a, "cancelled", onDone, { asSelf: opts.asSelf }));
-    btns.append(cancel);
+    if (clock !== "started") {
+      if (clock === "open") {
+        const reschedule = document.createElement("button");
+        reschedule.className = "ghost";
+        reschedule.textContent = "Reschedule";
+        reschedule.addEventListener("click", () => openReschedule(a, { asSelf: opts.asSelf, onDone }));
+        btns.append(reschedule);
+      }
 
-    actions.append(btns);
+      const cancel = document.createElement("button");
+      cancel.className = "ghost danger";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", () => setStatus(a, "cancelled", onDone, { asSelf: opts.asSelf }));
+      btns.append(cancel);
+    }
+
+    if (btns.childElementCount) actions.append(btns);
+
+    if (opts.asSelf && clock !== "open") {
+      const hint = document.createElement("span");
+      hint.className = "meta";
+      hint.textContent = clock === "started"
+        ? "This visit has started — the front desk records the outcome."
+        : "Starts within 24 hours — cancelling now is charged the clinic's no-show fee ($25.00); to move it, call the front desk.";
+      actions.append(hint);
+    }
   }
 
   // Missing-site correction (SetAppointmentSite) — staff/bound-provider only,
@@ -5092,6 +5118,25 @@ function lifecycleTransitions(status, started) {
   return next;
 }
 
+const LATE_CANCEL_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// selfVisitClock answers where "now" sits relative to a visit's own start,
+// for the patient self-service path only: "started" once startsAt has
+// passed (the desk records the outcome from here — cancel and reschedule
+// both refuse VisitStarted); "late" inside the clinic's no-show-fee window
+// (a self cancel is accepted and owes the fee; a self reschedule refuses
+// LateReschedule); "open" otherwise. Mirrors
+// LATE_CANCEL_WINDOW_OFFSET (packages/clinic-domain/ddls.go). A missing or
+// unparsable startsAt answers "open" — the server holds the real clock and
+// decides for itself.
+function selfVisitClock(startsAt, nowMs) {
+  const startsMs = new Date(startsAt).getTime();
+  if (!isFinite(startsMs)) return "open";
+  if (nowMs >= startsMs) return "started";
+  if (nowMs >= startsMs - LATE_CANCEL_WINDOW_MS) return "late";
+  return "open";
+}
+
 // setStatus drives SetAppointmentStatus to the given status and reloads via onDone.
 // noShow / cancelled prompt for an optional audit note (a reason recorded on the
 // .status aspect for records / billing); cancelling the prompt aborts. The FIRST
@@ -5119,6 +5164,14 @@ async function setStatus(a, status, onDone, opts) {
       "lnk.appointment." + bareId(a.appointmentKey) + ".forPatient.patient." + bareId(a.patientKey),
     );
   }
+  // Courtesy only — SetAppointmentStatus enforces the window itself. Asked
+  // before the optional-note prompt below so declining leaves the card
+  // exactly as it was.
+  if (asSelf && status === "cancelled" && selfVisitClock(a.startsAt, Date.now()) === "late") {
+    if (!confirm("This visit starts within 24 hours — cancelling now is charged the clinic's no-show fee ($25.00), the same as a no-show. Cancel anyway?")) {
+      return;
+    }
+  }
   if (status === "noShow" || status === "cancelled") {
     const verb = status === "noShow" ? "Mark as no-show" : "Cancel this appointment";
     const note = prompt(verb + ". Optional note (reason):", "");
@@ -5138,8 +5191,13 @@ async function setStatus(a, status, onDone, opts) {
     if (msg) {
       // NotYetStarted: the card was drawn before startsAt passed (the buttons
       // appear only once it has) or the desk's clock runs ahead of the server's.
+      // VisitStarted: a self cancel arrived after the visit's own start time —
+      // the card's clock read stale by the time this landed; the front desk
+      // records the outcome from here.
       toast("Could not update status — " + (msg.indexOf("NotYetStarted") !== -1
         ? "this visit has not started yet; complete or no-show it once its start time has passed."
+        : msg.indexOf("VisitStarted") !== -1
+        ? "this visit has already started; the front desk records the outcome now."
         : msg), "err");
       return;
     }

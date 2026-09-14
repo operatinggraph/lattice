@@ -87,7 +87,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-ledger",
-	Version: "0.3.0",
+	Version: "0.4.0",
 	Description: "Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount, independently-minted " +
 		"id, one per patient via a .ledgerAccount guard aspect on the patient) + the clinictransaction vertex type " +
 		"(ClinicDebitAccount/ClinicCreditAccount, append-only entries linked to the account via postedTo, ClinicDebitAccount " +
@@ -95,8 +95,10 @@ var Package = pkgmgr.Definition{
 		"of recording cash collected and an optional reversesRef back-ref to the debit it reverses) + the " +
 		"clinicLedgerHistory read-model lens (one row per transaction) + the " +
 		"clinicPatientAccounts lens (patient -> account key lookup) + the clinicNoShowSettlement Weaver playbook " +
-		"(lazily opens the account via ClinicCreateAccount, auto-charges the no-show fee, then auto-reverses that charge " +
-		"via ClinicCreditAccount once a CorrectAppointmentStatus correction moves the appointment off noShow). All three " +
+		"(lazily opens the account via ClinicCreateAccount, auto-charges the fee an appointment's status carries — a " +
+		"no-show fee, or the late-cancellation fee a patient's own cancel inside the 24-hour window owes — then " +
+		"auto-reverses that charge via ClinicCreditAccount once a CorrectAppointmentStatus correction moves the " +
+		"appointment to a fee-less status). All three " +
 		"ops grant front-of-house staff alongside the operator, unconfined. ClinicCreditAccount ALSO grants a patient scope=self " +
 		"(pay down their own balance, never waive it — reason:\"waiver\" is rejected server-side for a self-scoped " +
 		"submit), ownership proven server-side and the amount capped at the account's maintained .balance. " +
