@@ -7,15 +7,16 @@ import (
 	"github.com/dop251/goja"
 )
 
-// rivalTaskUIDecls lifts the shipped taskExpired / taskDisposition /
-// tasksSummaryFor declarations out of the embedded app.js (the
+// rivalTaskUIDecls lifts the shipped taskExpired / taskLostToRival /
+// taskDisposition / tasksSummaryFor declarations out of the embedded app.js (the
 // lease_term_ui_test.go pattern: the REAL source runs here, not a copy).
 // fmtDate is stubbed to the identity — taskDisposition only reaches it in the
 // expired branch's title, and its locale formatting is not what these pins
 // are about.
 var rivalTaskUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction taskExpired\(t, nowMs\) \{\n.*?\n\}\n`),
-	regexp.MustCompile(`(?s)\nfunction taskDisposition\(t, nowMs, canComplete, profileTask\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction taskLostToRival\(t, applications\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction taskDisposition\(t, nowMs, canComplete, profileTask, applications\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction tasksSummaryFor\(tasks, nowMs\) \{\n.*?\n\}\n`),
 }
 
@@ -170,10 +171,59 @@ func TestTaskDisposition_ExpiredIsReadOnly(t *testing.T) {
 			t.Errorf("badge=%q disabled=%v", badge, disabled)
 		}
 	})
-	t.Run("a deadline exactly now is not yet expired", func(t *testing.T) {
+	t.Run("a deadline exactly now is expired — the grant holds only while expiresAt > now", func(t *testing.T) {
 		badge, _, _ := run(t, map[string]interface{}{"expiresAt": "2026-09-14T12:00:00Z"}, true, false)
-		if badge != "open" {
-			t.Errorf("badge = %q, want open at the boundary (expired is strictly before now)", badge)
+		if badge != "expired" {
+			t.Errorf("badge = %q, want expired at the boundary (the Processor refuses once now >= expiresAt)", badge)
+		}
+	})
+}
+
+// TestTaskDisposition_LostApplicationTaskIsClosed pins the second read-only
+// case: a live-grant task scoped to an application the applicant has lost
+// (its row's lostToRival) is closed with the reason, whatever the op; a task
+// scoped to a live application, or to no loaded application, is untouched.
+func TestTaskDisposition_LostApplicationTaskIsClosed(t *testing.T) {
+	vm := rivalTaskUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("taskDisposition"))
+	if !ok {
+		t.Fatal("taskDisposition is not a function after evaluating its declaration")
+	}
+	apps := []map[string]interface{}{
+		{"entityKey": "vtx.leaseapp.lost", "lostToRival": true},
+		{"entityKey": "vtx.leaseapp.live", "lostToRival": false},
+	}
+	run := func(t *testing.T, task map[string]interface{}) (badge, label string, disabled bool) {
+		t.Helper()
+		res, err := fn(goja.Undefined(), vm.ToValue(task), vm.ToValue(rivalNowMs), vm.ToValue(true), vm.ToValue(false), vm.ToValue(apps))
+		if err != nil {
+			t.Fatalf("taskDisposition threw: %v", err)
+		}
+		obj := res.ToObject(vm)
+		return obj.Get("badge").String(), obj.Get("label").String(), obj.Get("disabled").ToBoolean()
+	}
+	t.Run("live grant, lost application", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SignLease", "scopedTo": "vtx.leaseapp.lost", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "closed" || label != "Unit no longer available" || !disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want closed/Unit no longer available/true", badge, label, disabled)
+		}
+	})
+	t.Run("expired still wins over lost", func(t *testing.T) {
+		badge, _, _ := run(t, map[string]interface{}{"operationName": "SignLease", "scopedTo": "vtx.leaseapp.lost", "expiresAt": "2026-08-31T00:00:00Z"})
+		if badge != "expired" {
+			t.Errorf("badge = %q, want expired", badge)
+		}
+	})
+	t.Run("live application stays open", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SignLease", "scopedTo": "vtx.leaseapp.live", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "open" || label != "Complete" || disabled {
+			t.Errorf("badge=%q label=%q disabled=%v", badge, label, disabled)
+		}
+	})
+	t.Run("a task scoped to no loaded application is not judged", func(t *testing.T) {
+		badge, _, disabled := run(t, map[string]interface{}{"operationName": "RecordIdentityPII", "scopedTo": "vtx.identity.bob"})
+		if badge != "open" || disabled {
+			t.Errorf("badge=%q disabled=%v, want open", badge, disabled)
 		}
 	})
 }
@@ -205,43 +255,6 @@ func TestTasksSummaryFor_CountsExpiredApart(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := run(t, tc.tasks); got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestEntryPeriodLabel_NamesThePeriodAndDueDate pins the statement's period
-// suffix: a recurring charge reads "covers <start> – <end> · due <due>" by the
-// stamps' UTC calendar dates; a row with no period renders nothing.
-func TestEntryPeriodLabel_NamesThePeriodAndDueDate(t *testing.T) {
-	vm := leaseTermUIVM(t)
-	fn, ok := goja.AssertFunction(vm.Get("entryPeriodLabel"))
-	if !ok {
-		t.Fatal("entryPeriodLabel is not a function after evaluating its declaration")
-	}
-	run := func(t *testing.T, e map[string]interface{}) string {
-		t.Helper()
-		res, err := fn(goja.Undefined(), vm.ToValue(e))
-		if err != nil {
-			t.Fatalf("entryPeriodLabel threw: %v", err)
-		}
-		return res.String()
-	}
-	for _, tc := range []struct {
-		name string
-		e    map[string]interface{}
-		want string
-	}{
-		{"rent period with due date", map[string]interface{}{"periodStart": "2026-09-06T00:00:00Z", "periodEnd": "2026-10-06T00:00:00Z", "dueAt": "2026-09-06T00:00:00Z"},
-			" · covers Sep 6, 2026 – Oct 6, 2026 · due Sep 6, 2026"},
-		{"period without a due date", map[string]interface{}{"periodStart": "2026-09-06T00:00:00Z", "periodEnd": "2026-10-06T00:00:00Z"},
-			" · covers Sep 6, 2026 – Oct 6, 2026"},
-		{"a payment has no period", map[string]interface{}{"type": "credit", "postedAt": "2026-09-14T00:00:00Z"}, ""},
-		{"a half-stamped row renders nothing", map[string]interface{}{"periodStart": "2026-09-06T00:00:00Z"}, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := run(t, tc.e); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})

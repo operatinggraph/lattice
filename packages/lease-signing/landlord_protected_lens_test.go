@@ -561,8 +561,15 @@ func TestLandlordLeaseApplicationsRead_LostToRival(t *testing.T) {
 	f.vtx(t, "bob", "identity")
 	f.edge(t, "applicationFor", "rival", "bob")
 	f.edge(t, "appliesToUnit", "rival", "unit1")
-	f.seedManagedApplication(t, "pending", "carol", "unit2", "larry")
-	f.aspect(t, "pending", "decision", "decision", map[string]any{})
+	// An undecided application on a unit still available: no .decision
+	// aspect at all (the only undecided shape DecideLeaseApplication leaves).
+	f.vtx(t, "pending", "leaseapp")
+	f.vtx(t, "carol", "identity")
+	f.vtx(t, "unit2", "unit")
+	f.aspect(t, "unit2", "listing", "listing", map[string]any{"rentAmount": 3900, "rentCurrency": "USD", "status": "available"})
+	f.edge(t, "applicationFor", "pending", "carol")
+	f.edge(t, "appliesToUnit", "pending", "unit2")
+	f.edge(t, "manages", "larry", "unit2")
 
 	rows := f.projectLandlordRead(t)
 	byApp := map[string]map[string]any{}

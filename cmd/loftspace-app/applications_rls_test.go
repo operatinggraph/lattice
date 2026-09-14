@@ -163,9 +163,9 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 	      false, false, false, false, false, false, false, false, false, false, false)`, []string{subAlice})
 	exec(`INSERT INTO read_lease_applications (app_id, entity_key, applicant, unit_bedrooms, unit_bathrooms, unit_available_from, authz_anchors, projection_seq,
 	      profile_submitted, missing_onboarding, missing_bgcheck, missing_payment, missing_signature, missing_decision,
-	      inflight_bgcheck, inflight_payment, declined_bgcheck, declined_payment, declined)
+	      inflight_bgcheck, inflight_payment, declined_bgcheck, declined_payment, declined, lost_to_rival)
 	      VALUES ('app-B', 'vtx.leaseapp.app-B', 'vtx.identity.`+subBob+`', 3, 2, '2026-09-15', $1, 1,
-	      false, true, true, true, true, false, false, false, false, false, false)`, []string{subBob})
+	      false, true, true, true, true, false, false, false, false, false, false, true)`, []string{subBob})
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subAlice)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -300,6 +300,9 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		if !rows[0].LandlordApproved {
 			t.Errorf("app-A landlord_decision=approved must derive landlordApproved=true")
 		}
+		if rows[0].LostToRival {
+			t.Errorf("app-A's NULL lost_to_rival must read false (COALESCE), not leak a true")
+		}
 		if rows[0].UnitBedrooms == nil || *rows[0].UnitBedrooms != 2 {
 			t.Errorf("app-A unitBedrooms = %v, want 2", rows[0].UnitBedrooms)
 		}
@@ -331,6 +334,9 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 		if len(rows) != 1 || rows[0].EntityKey != "vtx.leaseapp.app-B" {
 			t.Fatalf("B must see exactly app-B, got %+v", rows)
+		}
+		if !rows[0].LostToRival {
+			t.Errorf("app-B lost_to_rival=true must round-trip through the SELECT/Scan as lostToRival=true")
 		}
 	})
 

@@ -20,8 +20,10 @@
 //   - The `transaction` vertex type (DDL `transaction`) — DebitAccount (a
 //     charge: rent, a late fee, a deposit) and CreditAccount (a payment
 //     received) each mint vtx.transaction.<NanoID> (root data {} per D5) with a
-//     .entry aspect {type, amountCents, memo?, postedAt}, linked to the account
-//     via postedTo. The ledger is append-only: a balance is derived by summing
+//     .entry aspect {type, amountCents, memo?, postedAt, periodStart?,
+//     periodEnd?, dueAt?} — the three optional stamps are a recurring charge's
+//     own billing period and due date — linked to the account via postedTo.
+//     The ledger is append-only: a balance is derived by summing
 //     entries (the ledgerHistory lens), never stored as a mutable aspect — so
 //     concurrent debits/credits never race a read-modify-write. DebitAccount's
 //     optional clauseRef additionally writes the authorizedBy link (transaction

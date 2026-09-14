@@ -316,3 +316,37 @@ func TestDebitAccount_TermedClause_FinalPeriodEndsAtValidUntil(t *testing.T) {
 		t.Fatalf("entry.periodEnd = %q, want validUntil (the term ends there), not the April anniversary", got)
 	}
 }
+
+// An untermed monthly clause's charge falls due at its recorded lapse when
+// one is hydrated and already reached (the lens opened the gap there), while
+// its period still runs from the posting — the legacy cadence.
+func TestDebitAccount_UntermedClause_EntryDueAtTheRecordedLapse(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "untermeddebit1")
+	leaseKey := seedLease(t, ctx, conn, "BBLEASEUNTERMDEBHJK1")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctuntermdb01", leaseKey)
+	clauseReqID := testutil.GenReqID("createclauseuntrmdb1")
+	testutil.PublishOp(t, conn, &processor.OperationEnvelope{
+		RequestID:     clauseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateClause",
+		Actor:         scActorKey,
+		SubmittedAt:   "2026-07-02T12:00:00Z",
+		Class:         "clause",
+		Payload: json.RawMessage(`{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey +
+			`","prose":"Monthly smart-home fee.","amountCents":240000,"period":"monthly"}`),
+		ContextHint: &processor.ContextHint{Reads: []string{leaseKey, acctKey}},
+	})
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	clauseKey := "vtx.clause." + nanoIDFromRequestID(clauseReqID)
+	setClauseDue(t, ctx, conn, clauseKey, "2026-08-01T12:00:00Z")
+
+	debitTermed(t, ctx, conn, cp, cons, "debituntermed0000001", acctKey, clauseKey, "2026-08-03T09:00:00Z", processor.OutcomeAccepted)
+	entry := termedEntry(t, ctx, conn, "debituntermed0000001")
+	if got, _ := entry["dueAt"].(string); got != "2026-08-01T12:00:00Z" {
+		t.Fatalf("entry.dueAt = %q, want the recorded lapse 2026-08-01T12:00:00Z", got)
+	}
+	if got, _ := entry["periodStart"].(string); got != "2026-08-03T09:00:00Z" {
+		t.Fatalf("entry.periodStart = %q, want postedAt (the untermed period runs from the posting)", got)
+	}
+}

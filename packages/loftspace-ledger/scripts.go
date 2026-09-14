@@ -618,11 +618,18 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     # clause at read time. The due date is the period's own start: a termed
     # clause's validFrom is its first period's due date and every later
     # period falls due on its anniversary; an untermed monthly clause is due
-    # when it posts. A one-time charge covers no period and stamps nothing.
+    # at its recorded lapse, or when it posts if none is recorded. A
+    # one-time charge covers no period and stamps nothing.
     if period_start != None:
         entry_data["periodStart"] = period_start
         entry_data["periodEnd"] = period_end
-        entry_data["dueAt"] = period_start
+        # An untermed clause's recorded due (the lapse the lens opened the gap
+        # at) is the date it fell due when it is hydrated and already reached;
+        # its period still runs from the posting, the legacy cadence.
+        due_at = period_start
+        if clause_valid_from == None and clause_due != None and clause_due <= posted_at:
+            due_at = clause_due
+        entry_data["dueAt"] = due_at
 
     # postedTo: the transaction (later-arriving) is the source, the
     # pre-existing account is the target (Contract #1 §1.1). Reads as

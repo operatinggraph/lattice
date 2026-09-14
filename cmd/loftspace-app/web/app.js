@@ -1895,17 +1895,22 @@ function renderApplicationCard(row, highlight) {
   banner.className = bannerInfo.cls;
   banner.textContent = bannerInfo.text;
 
-  // Stepper (journey order)
-  const steps = document.createElement("ol");
-  steps.className = "stepper";
-  steps.append(
-    renderStep(1, "Onboarding (identity details)", stepState(!row.missing_onboarding, false, false, false)),
-    renderStep(2, "Background check", stepState(!row.missing_bgcheck, row.inflight_bgcheck, row.escalated_bgcheck, row.declined_bgcheck)),
-    renderStep(3, "Payment", stepState(!row.missing_payment, row.inflight_payment, row.escalated_payment, row.declined_payment)),
-    renderStep(4, "Sign lease", stepState(!row.missing_signature, false, false, false)),
-  );
+  card.append(head, banner);
 
-  card.append(head, banner, steps);
+  // Stepper (journey order). A losing rival's gaps are all closed by the
+  // leased-unit term, which would render four done steps for a journey the
+  // applicant never walked — so the stepper is not shown under the lost banner.
+  if (!row.lostToRival) {
+    const steps = document.createElement("ol");
+    steps.className = "stepper";
+    steps.append(
+      renderStep(1, "Onboarding (identity details)", stepState(!row.missing_onboarding, false, false, false)),
+      renderStep(2, "Background check", stepState(!row.missing_bgcheck, row.inflight_bgcheck, row.escalated_bgcheck, row.declined_bgcheck)),
+      renderStep(3, "Payment", stepState(!row.missing_payment, row.inflight_payment, row.escalated_payment, row.declined_payment)),
+      renderStep(4, "Sign lease", stepState(!row.missing_signature, false, false, false)),
+    );
+    card.append(steps);
+  }
 
   // Lease terms — what the applicant is actually agreeing to (rent, term, move-in,
   // property). Projected by the convergence lens from the unit's .listing/.address
@@ -2409,27 +2414,48 @@ function tasksSummaryFor(tasks, nowMs) {
   return `${n} open task${n === 1 ? "" : "s"}` + (expired > 0 ? ` · ${expired} expired` : "");
 }
 
-// taskExpired: the task's grant deadline has passed. The Processor refuses a
-// completion submitted past expiresAt (the ephemeral grant no longer holds),
-// so the inbox treats such a task as read-only rather than offering a button
-// whose only outcome is that refusal.
+// taskExpired: the task's grant deadline has been reached. The Processor
+// refuses a completion once now is at or past expiresAt (the ephemeral grant
+// holds only while expiresAt > now, Contract #6 §6.6), so the inbox treats
+// such a task as read-only rather than offering a button whose only outcome
+// is that refusal.
 function taskExpired(t, nowMs) {
-  return !!(t.expiresAt && new Date(t.expiresAt).getTime() < nowMs);
+  return !!(t.expiresAt && new Date(t.expiresAt).getTime() <= nowMs);
+}
+
+// taskLostToRival: the task is scoped to an application the applicant has
+// already lost (the unit leased to someone else — that row's lostToRival).
+// Its grant may still be live for weeks, but SignLease refuses
+// UnitNoLongerAvailable every time, so the inbox reads it as closed. A task
+// scoped elsewhere (a RecordIdentityPII task is scoped to the identity), or
+// whose application is not loaded, is not judged here.
+function taskLostToRival(t, applications) {
+  const app = (applications || []).find((a) => a && a.entityKey === t.scopedTo);
+  return !!(app && app.lostToRival);
 }
 
 // taskDisposition decides an assigned task's badge + Complete control as a
-// pure function of the task, the clock and what this app can complete —
-// DOM-free so it is goja-testable. Expired wins over everything: the button
-// is disabled and says so, whatever the op. A profile task completes through
-// the app's own form (its application must be loaded); any other op needs
-// the catalog + module to have marked it completable here.
-function taskDisposition(t, nowMs, canComplete, profileTask) {
+// pure function of the task, the clock, the loaded applications and what
+// this app can complete — DOM-free so it is goja-testable. Expired wins over
+// everything, then a task for a lost application: the button is disabled and
+// says why, whatever the op. A profile task completes through the app's own
+// form (its application must be loaded); any other op needs the catalog +
+// module to have marked it completable here.
+function taskDisposition(t, nowMs, canComplete, profileTask, applications) {
   if (taskExpired(t, nowMs)) {
     return {
       badge: "expired",
       label: "Expired",
       disabled: true,
       title: "This task expired on " + fmtDate(t.expiresAt) + " and can no longer be completed.",
+    };
+  }
+  if (taskLostToRival(t, applications)) {
+    return {
+      badge: "closed",
+      label: "Unit no longer available",
+      disabled: true,
+      title: "This unit went to another applicant, so this task can no longer be completed.",
     };
   }
   if (canComplete) return { badge: "open", label: "Complete", disabled: false, title: "" };
@@ -2483,9 +2509,9 @@ function renderTaskCard(t) {
     btn.addEventListener("click", () => claimTask(t.taskKey));
   } else {
     const canComplete = isProfileTask(t) ? !!profileTaskApplication(t) : canCompleteOp(t.operationName);
-    const disp = taskDisposition(t, Date.now(), canComplete, isProfileTask(t));
+    const disp = taskDisposition(t, Date.now(), canComplete, isProfileTask(t), state.applications);
     badge.textContent = disp.badge;
-    if (expired) badge.className = "badge expired";
+    if (disp.badge !== "open") badge.className = "badge expired";
     btn.textContent = disp.label;
     btn.disabled = disp.disabled;
     btn.title = disp.title;
