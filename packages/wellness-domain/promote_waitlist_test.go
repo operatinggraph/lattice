@@ -25,11 +25,15 @@ import (
 
 // promoteEnv builds a PromoteWaitlistedBookings envelope carrying exactly the
 // contextHint the missing_promotion gap declares (targets.go): the session and
-// its .schedule as required reads, and the forSession-in enumeration. Nothing
+// its .schedule as required reads, and the gap's own enumerations. Nothing
 // else — the seat cells the script reads are deliberately undeclared, since a
 // seat index derives from the session's capacity rather than from any lens row
 // column, and this envelope is the proof that the op still works with only
 // what a real dispatch hands it.
+//
+// The enumerations are RESOLVED from the gap spec rather than restated here,
+// so that deleting a declaration from targets.go reds these tests instead of
+// leaving them green against a hint that agreed with the spec by coincidence.
 func promoteEnv(label, sessionKey, actorKey, submittedAt string) *processor.OperationEnvelope {
 	return &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
@@ -41,9 +45,9 @@ func promoteEnv(label, sessionKey, actorKey, submittedAt string) *processor.Oper
 		Payload:       json.RawMessage(`{"session":"` + sessionKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{sessionKey, sessionKey + ".schedule"},
-			Enumerations: []processor.EnumerationHint{
-				{Hub: sessionKey, Relation: "forSession", Direction: "in"},
-			},
+			Enumerations: testutil.DeclaredGapEnumerations(
+				wellnessdomain.WaitlistPromotionTarget, "missing_promotion", actorKey,
+				map[string]any{"sessionKey": sessionKey}, wellnessdomain.WeaverTargets()),
 		},
 	}
 }

@@ -287,13 +287,6 @@ walk	OpenTab	vtx.unit.<id> containedIn out
 walk	PauseVisitSeries	vtx.building.<id> containedIn out
 walk	PauseVisitSeries	vtx.provider.<id> practicesAt out
 walk	PauseVisitSeries	vtx.visitseries.<id> withProvider out
-# The operator-role walk PromoteWaitlistedBookings runs to enforce its
-# Weaver-only posture (actor_holds_operator, wellness-domain/ddls.go) — the
-# identical shape ReleaseOrphanedBooking's row below records. Its hub is the
-# SUBMITTING ACTOR, not a payload or row value, so no dispatching channel names
-# it: the gap spec templates off the violation row, which carries the session,
-# never the actor Weaver happens to submit under.
-walk	PromoteWaitlistedBookings	vtx.identity.<id> holdsRole out
 walk	ReassignSession	vtx.session.<id> atStudio out
 walk	ReassignSession	vtx.session.<id> ledBy out
 # ReassignSessionSeries' front-of-house binder walks the studio's rooms and
@@ -305,7 +298,6 @@ walk	ReassignSessionSeries	vtx.building.<id> containedIn out
 walk	ReassignSessionSeries	vtx.session.<id> ledBy out
 walk	ReassignSessionSeries	vtx.studio.<id> locatedAt out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
-walk	ReleaseOrphanedBooking	vtx.identity.<id> holdsRole out
 walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> postedTo out
 # RefundCafeCharge's half of CreditCafeAccount's confinement walk (see the read
 # rows above). The heldFor and appliesToUnit hubs are payload-reachable and the

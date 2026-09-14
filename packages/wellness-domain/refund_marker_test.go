@@ -23,19 +23,23 @@ import (
 	wellnessdomain "github.com/operatinggraph/lattice/packages/wellness-domain"
 )
 
-// wdReleaseEnumerations mirrors the missing_release gap's declared walks
+// wdReleaseEnumerations resolves the missing_release gap's declared walks
 // (targets.go's WeaverTargets) for one booking key, so a hand-built
-// ReleaseOrphanedBooking envelope carries exactly what Weaver publishes: the
-// forSession/bookedBy lookups that locate the class and the booker when the
-// .status aspect names neither, and the settles/settlesClassPrice lookups that
-// find an already-posted charge to refund.
+// ReleaseOrphanedBooking envelope carries exactly what Weaver publishes rather
+// than a hand-maintained copy of it: the forSession/bookedBy lookups that
+// locate the class and the booker when the .status aspect names neither, the
+// settles/settlesClassPrice lookups that find an already-posted charge to
+// refund, and the {actor}-hubbed operator-role confinement walk
+// actor_holds_operator runs. Resolving from the spec — instead of restating
+// its hubs as literals — is what lets deleting a declaration from targets.go
+// red these tests instead of leaving them agreeing with a spec they never
+// actually read (docs/components/pkgmgr.md's "agrees by coincidence" entry).
 func wdReleaseEnumerations(bookingKey string) []processor.EnumerationHint {
-	return []processor.EnumerationHint{
-		{Hub: bookingKey, Relation: "forSession", Direction: "out"},
-		{Hub: bookingKey, Relation: "bookedBy", Direction: "out"},
-		{Hub: bookingKey, Relation: "settles", Direction: "in"},
-		{Hub: bookingKey, Relation: "settlesClassPrice", Direction: "in"},
-	}
+	return testutil.DeclaredGapEnumerations(
+		wellnessdomain.OrphanedBookingSettlementTarget, "missing_release", domainActorKey,
+		map[string]any{"bookingKey": bookingKey},
+		wellnessdomain.WeaverTargets(),
+	)
 }
 
 // seedAspect directly seeds an aspect document — the mirror of seedVertex/
