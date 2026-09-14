@@ -1311,6 +1311,13 @@ func (e *Engine) fail(ctx context.Context, inst *Instance, oldToken, reason stri
 // or fail. Dropping is then exactly right, and it is the same drop advance
 // takes on a stale completion.
 //
+// One pairing straddles that: two replicas reading the same revision with
+// clocks either side of the horizon, where the note wins and this terminal is
+// dropped — so the log line's "moved on" is not literally true there. Reaching
+// it needs the step's true age to sit within clock skew of exactly the horizon,
+// which is where the verdict is undecidable anyway, and the surviving answer is
+// the conservative one. Named rather than coded around.
+//
 // The drop is a nil return (⇒ Ack), never a Nak: a MaxAge marker lives one
 // second, so a Nak asks for a redelivery that will not exist, and a re-probe
 // would find nothing to do anyway.
@@ -1343,8 +1350,11 @@ func (e *Engine) probeFail(ctx context.Context, inst *Instance, oldToken, reason
 //     apart once the tracker is gone. The verdict is inconclusive: alert, record
 //     the note on the instance, and leave the instance running on its token
 //     (Contract #10 §10.6 — the engine distinguishes BY EVIDENCE, and alerts
-//     rather than wedging silently when it cannot). Nothing else is spent on it:
-//     the step is not re-armed, so the alert stands on the wait itself.
+//     rather than wedging silently when it cannot). The step is not re-armed, so
+//     no further deadline fires for this instance and the note is the standing
+//     record of it; RedriveInstance accepts a running instance carrying one,
+//     which is the operator's verb for the reading in which no completer will
+//     ever come.
 //   - no token pointer at all → an invariant break, not age: the pointer rides
 //     the step's own batch. It fails the instance with that reason, the posture
 //     a missing pattern pin gets.
@@ -1372,16 +1382,22 @@ func (e *Engine) deadlineRejectedOrLost(ctx context.Context, inst *Instance, old
 //
 // The note's write is conditioned on the revision the probe read the instance
 // at, and a refused condition is the answer rather than an error — the same drop
-// probeFail takes, for the same reason: a bump under a running probe is another
-// actor's advance, completion or fail, and the note describes a step that actor
-// has already left. Two replicas on one late marker therefore write one note.
-// The return is nil either way ⇒ Ack, never a Nak: the marker that woke this
-// probe lives one second, and a redelivery would reach the same verdict.
+// probeFail takes. What the bump most often is here is a SIBLING REPLICA's note
+// on this same late marker, which leaves the step exactly where it is: the note
+// already standing says what this one would have said, so one of the two
+// writing is the whole point of the condition. The other bumps are an advance, a
+// completion or a fail, which have left the step the note describes. The return
+// is nil either way ⇒ Ack, never a Nak: the marker that woke this probe lives
+// one second, and a redelivery would reach the same verdict.
 func (e *Engine) noteInconclusiveDeadline(ctx context.Context, inst *Instance, reason string, epoch time.Time, age time.Duration, expectedRevision uint64) error {
-	note := fmt.Sprintf("%s: INCONCLUSIVE — the step's evidence is older than the %v op-status horizon "+
-		"(step epoch %s, age %v), so an absent op tracker cannot tell an op that committed and aged out "+
-		"from one that was rejected; the instance stays running on its token and its wait continues.",
-		reason, opstatus.TrackerTTL, substrate.FormatTimestamp(epoch), age.Truncate(time.Second))
+	note := fmt.Sprintf("INCONCLUSIVE past the %v op-status horizon — %q cannot be judged: the step's "+
+		"evidence (step epoch %s, age %v) is older than the op tracker the probe reads, so an absent "+
+		"tracker cannot tell an op that committed and aged out from one that was rejected. NO FURTHER "+
+		"DEADLINE WILL FIRE for this instance: nothing re-arms, and it stays running on this token. "+
+		"If the op committed, its completer (the human, or the bridge) can still complete it; if it was "+
+		"rejected, nothing ever will, and `lattice loom redrive` re-submits the step — which past this "+
+		"horizon can run a committed op a second time, the operator's call to make.",
+		opstatus.TrackerTTL, reason, substrate.FormatTimestamp(epoch), age.Truncate(time.Second))
 	if err := e.state.noteDeadlineProbe(ctx, inst, note, e.now(), expectedRevision); err != nil {
 		if substrate.IsRevisionConflict(err) {
 			e.logger.Info("loom: instance moved on under the probe; inconclusive deadline note dropped",

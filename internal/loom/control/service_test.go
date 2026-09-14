@@ -419,12 +419,13 @@ func TestControl_Redrive_HappyPath(t *testing.T) {
 func TestControl_Redrive_NotFailed(t *testing.T) {
 	nc := startTestServer(t)
 	eng := newFakeEngine()
-	eng.errOn["redrive:inst1"] = errors.New(`loom: instance is not in a failed state: "inst1" (status=running)`)
+	eng.errOn["redrive:inst1"] = errors.New(
+		`loom: instance is not in a failed or inconclusively-parked state: "inst1" (status=running, deadlineProbe=false)`)
 	startService(t, nc, eng, control.NewStubCapabilityChecker(nil))
 
 	resp := sendRequest(t, nc, control.NameSubject("inst1", "redrive"))
 	assert.NotEmpty(t, resp.Error)
-	assert.Contains(t, resp.Error, "not in a failed state")
+	assert.Contains(t, resp.Error, "not in a failed or inconclusively-parked state")
 	assert.Nil(t, resp.Redrive)
 }
 

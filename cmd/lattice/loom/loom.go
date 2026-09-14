@@ -114,11 +114,20 @@ func newListCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command {
 				fmt.Println("(no instances)")
 				return nil
 			}
-			fmt.Printf("%-24s %-24s %-20s %-8s %-10s %s\n",
-				"INSTANCE_ID", "PATTERN_REF", "SUBJECT_KEY", "CURSOR", "STATUS", "RETRIES")
+			fmt.Printf("%-24s %-24s %-20s %-8s %-10s %-8s %s\n",
+				"INSTANCE_ID", "PATTERN_REF", "SUBJECT_KEY", "CURSOR", "STATUS", "RETRIES", "PROBE")
 			for _, in := range resp.Instances {
-				fmt.Printf("%-24s %-24s %-20s %-8d %-10s %d\n",
-					in.InstanceID, in.PatternRef, in.SubjectKey, in.Cursor, in.Status, in.RetryCount)
+				// PROBE marks the one state the table cannot otherwise show: an
+				// instance the deadline probe could not adjudicate, left running
+				// and awaiting an operator. Blank for every other instance, which
+				// is nearly all of them; the reason itself is too long for a
+				// column and is printed by `inspect`.
+				probe := ""
+				if in.DeadlineProbe != nil {
+					probe = "inconclusive"
+				}
+				fmt.Printf("%-24s %-24s %-20s %-8d %-10s %-8d %s\n",
+					in.InstanceID, in.PatternRef, in.SubjectKey, in.Cursor, in.Status, in.RetryCount, probe)
 			}
 			return nil
 		},
@@ -204,6 +213,10 @@ func newInspectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 			fmt.Printf("status:      %s\n", d.Instance.Status)
 			fmt.Printf("retryCount:  %d\n", d.Instance.RetryCount)
 			fmt.Printf("terminal:    %t\n", d.Terminal)
+			if n := d.Instance.DeadlineProbe; n != nil {
+				fmt.Printf("deadlineProbe: at=%s\n", n.At)
+				fmt.Printf("  %s\n", n.Reason)
+			}
 			if d.CurrentStep == nil {
 				fmt.Println("currentStep: (none)")
 				return nil

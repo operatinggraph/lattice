@@ -12,10 +12,10 @@ import (
 
 // legacySweepInterval is the gap the conversion pass leaves between two
 // publishes in a family whose subjects are a CDC durable's filter — roughly 100
-// conversions a second. Every conversion is a new empty-body message the durable
-// delivers, and the deadline durable's handler runs one instance probe per
-// delivery (~1 ms), so at this rate the durable drains faster than the pass
-// feeds it and its pending count stays in single digits. That bound is the point
+// conversions a second. Every conversion is a new removal message the durable
+// delivers and has to classify off its headers, so at this rate the durable
+// drains faster than the pass feeds it and its pending count stays in single
+// digits. That bound is the point
 // of the pacing rather than politeness: a genuine step-deadline expiry arrives on
 // that same durable and is delivered in order behind whatever the pass has
 // already queued, so an unpaced pass would delay the off-stream recovery signal
@@ -67,8 +67,9 @@ type legacyTombstoneFamily struct {
 // stand on it.
 //
 // Only deadline.> carries a guard (skipRunningDeadlineMarker): a conversion on
-// that family is a delivery, and the handler it wakes is destructive on a
-// running instance.
+// that family is a delivery to the one handler in the engine that can write a
+// verdict on a live flow, and the guard is what keeps the pass off it —
+// skipRunningDeadlineMarker carries the argument.
 func (e *Engine) legacyTombstoneFamilies() []legacyTombstoneFamily {
 	return []legacyTombstoneFamily{
 		{filter: patternPinFilter},
@@ -81,18 +82,25 @@ func (e *Engine) legacyTombstoneFamilies() []legacyTombstoneFamily {
 // skipRunningDeadlineMarker is deadline.>'s precondition: convert a marker
 // only when its instance exists AND is terminal.
 //
-// Every conversion on this family is a fresh empty-body message the deadline
-// durable delivers, and handleDeadline keys on exactly that. On a TERMINAL
-// instance onDeadline returns at the status check and the probe costs one
-// KVGet. On a RUNNING one it runs the Contract #10 §10.6 probe, whose evidence
-// is the Contract #4 op tracker — and that tracker lives for TrackerTTL (24h)
-// while the wait it backstops does not: a userTask parked on its human is
-// bounded only by the task's own lifetime, up to 30 days. So a running
-// instance whose deadline was disarmed more than a day ago has no tracker and
-// no outbox record left, and the probe reads that absence as "the op was
-// rejected" and FAILS the instance. Converting that instance's legacy marker
-// would re-fire exactly that probe and kill a live human wait, so the marker
-// is left as it is — a permanent subject is the cheaper outcome by far.
+// Every conversion on this family is a removal the deadline durable then
+// delivers — a purge, carrying KV-Operation: PURGE. Two things downstream make
+// that harmless on its own: handleDeadline admits only the server's own expiry
+// provenance (Nats-Marker-Reason: MaxAge), so a conversion is acked without a
+// read; and the probe it would otherwise wake does not terminate a long-parked
+// instance in any case, since past the op tracker's own lifetime the §10.6
+// verdict is inconclusive — an alert and a note — rather than a fail.
+//
+// The guard is what keeps this pass from depending on either of them. It is a
+// second, independent reason a RUNNING instance is never put through the probe,
+// on a path whose mistake is destructive; and the conversion it declines buys
+// nothing the instance's own terminal does not already do — that batch purges
+// deadline.<instanceId> with a TTL, converting this very subject as it ends the
+// instance. So what skipping costs is one permanent subject for as long as the
+// instance runs, against a verdict written on a live flow. On a TERMINAL
+// instance the same delivery costs one KVGet at onDeadline's status check,
+// which is what makes converting there safe. And against a running instance
+// carrying a standing inconclusive verdict, a conversion that did reach the
+// probe would re-note and re-alert it for nothing.
 //
 // A record that cannot be read is a skip too, never a conversion: an instance
 // the pass cannot classify is one whose marker it has no verdict on. A read

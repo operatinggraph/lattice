@@ -22,8 +22,10 @@ const (
 	//
 	// It is bounded above by the evidence the deadline probe reads. The probe
 	// judges rejected-or-lost from the ABSENCE of the op tracker, which lives
-	// processor.TrackerTTL (24h) from op submit, so a marker consumed after
-	// the tracker has aged out would fail a healthy instance. The invariant is
+	// processor.TrackerTTL (24h) from op submit, and past that horizon it
+	// refuses to read absence as rejection at all — so a marker consumed after
+	// the tracker has aged out buys no verdict: the step is alerted and left
+	// parked instead of failed or advanced. The invariant is
 	//
 	//	maxDeadlineArm + LoomStateMarkerTTL < processor.TrackerTTL
 	//

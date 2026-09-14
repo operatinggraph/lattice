@@ -493,8 +493,10 @@ func TestRedriveInstance_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
-// TestRedriveInstance_NotFailed proves Redrive refuses a non-failed instance
-// (running is already progressing; complete has nothing to resume).
+// TestRedriveInstance_NotFailed proves Redrive refuses an instance in neither
+// stalled state: a running instance with no standing inconclusive
+// deadline-probe verdict is progressing and still backstopped by a live
+// deadline, and a complete one has nothing to resume.
 func TestRedriveInstance_NotFailed(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -622,8 +624,8 @@ func TestStateStore_Redrive_ConcurrentCASRejectsLoser(t *testing.T) {
 	winner := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
 	loser := &Instance{InstanceID: "inst1", PatternRef: "vtx.meta.p1", SubjectKey: "vtx.widget.w1", Cursor: 0, Status: StatusRunning}
 
-	require.NoError(t, store.redrive(ctx, winner, winnerPat, revision))
-	require.Error(t, store.redrive(ctx, loser, loserPat, revision),
+	require.NoError(t, store.redrive(ctx, winner, winnerPat, "", revision))
+	require.Error(t, store.redrive(ctx, loser, loserPat, "", revision),
 		"the second racer's stale-revision batch must be rejected")
 
 	// The batch is rejected WHOLE: the loser's pin — an unconditional put — must
@@ -729,7 +731,7 @@ func openRedriveWindow(t *testing.T, ctx context.Context, e *Engine, pat *Patter
 	inst, revision, err := e.state.getInstanceAtRevision(ctx, instanceID)
 	require.NoError(t, err)
 	inst.Status = StatusRunning
-	require.NoError(t, e.state.redrive(ctx, inst, pat, revision))
+	require.NoError(t, e.state.redrive(ctx, inst, pat, "", revision))
 
 	inWindow, err := e.state.getInstance(ctx, instanceID)
 	require.NoError(t, err)
