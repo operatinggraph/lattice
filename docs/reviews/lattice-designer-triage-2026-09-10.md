@@ -159,6 +159,89 @@ grep -n 'KeyPrefix + "\*\."' internal/refractor/capabilityread/capabilityread.go
 go test ./internal/refractor/ -run TestCorpusAnchorHopIndex_PinnedConjuncts -count=1
 ```
 
+### 2.6 Fire brief (build note, 2026-09-14) — Steward/Lattice, branch `claude/exciting-clarke-pccb08`
+
+**1. Scope sentence (verbatim, §2.4).** *"The own-task op walk gets its own read-grant domain"* — `edgeCatalog`
+walk 2 declares a fourth `ReadGrantDomain` (`edgeManifestTask`), so the base producer stops binding `op` over
+two unrelated chains and indexes. **Green bar:** `edgeManifestReadGrants` moves `hopWithDropped` →
+`hopIndexed` in `anchor_hopindex_corpus_census_test.go`; every moved census pin carries its argument; the new
+domain carries its own coverage proof; `lint-cap-read-producers` 0 issues; full suite green with Postgres up.
+
+**2. Verified touch-list** (`file:line` checked live at `1402660`):
+
+| File | Anchor | Edit |
+|---|---|---|
+| `packages/edge-manifest/lenses.go` | `:443-448` const block; `:432-441` `ReadGrantDomains()`; `:151-159` walk 2 | add `domainTask = "edgeManifestTask"`, a fourth `ReadGrantDomainSpec`, walk 2's `GrantDomain` |
+| `packages/edge-manifest/manifest.yaml` | `:2` version; `:105-107` last producer entry | bump; append `edgeManifestTaskReadGrants` (nats-kv/full) **last — the slice order is the manifest order** (`lenses.go:433-434`) |
+| `packages/edge-manifest/package.go` | `:26` `Version`; `:26` Description "three generated producers (…)" | bump + four |
+| `packages/edge-manifest/package_test.go` | `:62-66` `readGrantLensNames`; `:77-98` `TestPackage_NineteenLenses` | fourth name; 19 → 20 |
+| `packages/edge-manifest/coverage_proof_test.go` | `:130-165` `emResidentWorld`; `:167-189` `TestManifestAnchorCoverage_ResidentWorld`; `:64-105` `grantedAnchorIDs`/`assertAnchorsCovered` | task-world case: branch 2's anchors covered by the task producer and **not** by base |
+| `internal/refractor/anchor_hopindex_corpus_census_test.go` | `:148` | base → `hopIndexed`; new producer pin |
+| `internal/refractor/actor_onekey_corpus_census_test.go` | `:120` (`walkIncompleteIndex`) | re-pin + new |
+| `internal/refractor/actor_walk_scope_corpus_census_test.go` | `:141`, `:208` | re-pin + new |
+| `internal/refractor/branch_decomposition_corpus_census_pins_test.go` | `:64` verdict, `:168` `decomposingCorpusLenses`, `:264` footprint map | re-pin + new in all three |
+| `internal/refractor/auth_plane_narrowing_census_test.go` | `:334` `stayBroadCases` | re-pin + new |
+| `internal/refractor/grouping_reduction_corpus_census_test.go` | `:137`, `:339` `armed` | re-pin + new |
+| `internal/refractor/label_derivation_corpus_census_test.go` | `:270` | re-pin + new (`identity meta task`) |
+| `internal/refractor/projection/footprint_classifier_test.go` | `:108-110` | new name |
+| `internal/refractor/ruleengine/full/branch_decomposition_equivalence_test.go` | `:1211-1212` | new name |
+| `internal/refractor/ruleengine/full/grouping_equivalence_test.go` | `:366` | check the `edgeManifestReadGrants` special-case still holds |
+| `internal/refractor/ruleengine/full/grouping_producer_gate_test.go` | `:40`, `:129` | three → four |
+| `docs/components/edge-manifest.md` | `:55-100` domain tables | a task-domain table + its producer row |
+
+Rotted/corrected citations vs §2.4: the classifier pin is at `internal/refractor/projection/footprint_classifier_test.go`
+(not `internal/refractor/`); `grouping_producer_gate_test.go`'s list is at `:40`, not `:108`;
+`branch_decomposition_equivalence_test.go`'s at `:1211`, not `:1195`. `scripts/lint-cap-read-producers.go`
+needs **no** entry — it never sees generated producers (its own `:43-51`).
+
+**3. Precedents to mirror.** `domainProvider` (`lenses.go:448` + `ReadGrantDomains():439`, persona-worlds
+Fire W0) is the shipped four-line shape for "a reachability path not every actor has gets its own slice",
+and `edgeEntitySessions`' provider walk is the shipped "one walk of a multi-walk lens names a non-base
+domain" precedent. Producer name derives from the domain (`anchorwalk.go:209-213`, `<Name>ReadGrants`), so
+no `CanonicalName` override. Coverage-proof case mirrors `TestManifestAnchorCoverage_ResidentWorld`.
+
+**4. Increment order.**
+1. **Package split** — `lenses.go` + `manifest.yaml` + `package.go`, then `go test ./packages/edge-manifest/ -count=1`
+   (expect `TestPackage_NineteenLenses` + `readGrantLensNames` to fail loudly = the split took).
+2. **Package pins + docs** — `package_test.go`, `docs/components/edge-manifest.md`;
+   `DIFF_BASE=origin/main go run ./scripts/lint-package-version.go`.
+3. **Census pins** — driven by the harnesses, not by memory:
+   `go test ./internal/refractor/ -count=1` then `./internal/refractor/projection/` and
+   `./internal/refractor/ruleengine/full/`; each moved pin gets its argument in the commit message.
+   `POSTGRES_TEST_DSN` must be exported (REMOTE.md §3) or `internal/refractor` is falsely green.
+4. **Coverage proof** — the task-world case; revert-prove it by pointing walk 2 back at `domainBase`.
+5. **Gates** — `go build ./...`, `make vet`, `golangci-lint run ./...`, `STRICT=1 go run ./scripts/lint-conventions.go`,
+   `go run ./scripts/lint-cap-read-producers.go`, `go test ./... -p 4`.
+
+**5. In-scope gotchas.**
+- **Package version lockstep** — `manifest.yaml` **and** `package.go`'s `Version` both move or the change is
+  invisible to a running stack (CLAUDE.md).
+- **Domain order is the manifest order** (`lenses.go:433-434`) — append, never insert.
+- **Refractor dossier, applicable entries** (`docs/components/refractor.md`): *a new per-lens analysis ships
+  its corpus census in the same fire, reusing `forEachCorpusCypher`* — here inverted: the harnesses already
+  enumerate from `pkgregistry`, so a new producer **auto-appears and must be pinned**, and a pin moved
+  **toward** indexable needs its argument stated. *A soundness claim's stated REASON is load-bearing* — the
+  claim "the effective grant set is unchanged" rests on the reader's wildcard (`capabilityread.go:56-62`,
+  re-run live: 2 hits) and `IsRelevant` reading `anchorType`, not the domain; both re-verified.
+- **Standing checklist #2** (every census is a premise): §2.5's three censuses re-run live at selection —
+  `hopWithDropped` pinned ✓, two `op` walks in `domainBase` ✓, reader wildcard ✓.
+- **Standing checklist #3** (a fix is proven by reverting it): increment 4's revert-proof.
+- `docs/components/edge-manifest.md` carries **no** dossier section; nothing to copy from it.
+
+**6. Adjacent finds.** None out of scope surfaced at Phase 0. The §2.3 alternative C (per-stage `AnchorVar`
+rename in the generator) stays **recorded, not built** — its revive trigger is a second package's producer
+pinned `hopWithDropped`, which this fire does not create.
+
+**7. Non-goals (the drift fence).** No generator change; no change to `edgeCatalog`'s data-lens cypher or
+`edgeCatalogTail`; no touch to the Inc 2 narrowing or its 41-vector pin; no change to the D1 reader; the
+§2.3 #6 walk-grouping cost item stays sequenced where the varlength design §13 left it.
+
+**Scope-diff gate: PASS.** Every touch above traces to §2.4's four numbered steps (the docs row is step 4,
+the census rows step 2, the coverage row step 3, the package rows step 1); nothing widens it. Declared
+dependencies re-verified both ways: §2.4 names `lint-cap-read-producers` — verified **not** load-bearing
+(generated producers are invisible to it), noted and dropped from the pin list but kept as a green check;
+no unlisted dependency surfaced.
+
 ## 3. [Loom] The deadline probe's evidence is shorter-lived than the wait it backstops
 
 **Filed (`cefa0390`, the marker-TTL fire's close):** *"The probe judges rejected-or-lost from the 24 h
