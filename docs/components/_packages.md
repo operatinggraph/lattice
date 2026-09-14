@@ -698,6 +698,10 @@ the op now applies (`ensureApprovedTenancy` now skips an ended term), found at t
   2026-09-06 close pass). Check: for each gap conjunct, name the op-side read that answers the same question.
   Second sighting 2026-09-13: `capabilityEphemeral`'s population-coverage pin landed fixture-based; the
   shipped-spec fragment pin (`TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment`) is the shape.
+  Third sighting (lease-signing `tenancyEnd`, 2026-09-14, caught cold): two TARGETS over one unit — `missing_relist`
+  counted a rival as live only with a `.tenancy` while `missing_listingLeased` claimed the unit on `approved` alone,
+  a relist/lease ping-pong on a pre-`.tenancy` approval. The membership test a gap conjunct applies to a neighbour
+  must be the neighbour's OWN claim predicate, verbatim.
 - **A recorded value is read as the FACT it records, never as a proxy for the event it was derived from — and
   a hydrated aspect's absence is two facts, not one.** Two shapes in one item (rent-clause term, 2026-09-13,
   both caught cold). (a) `BackfillClauseTerm` re-gridded a clause's recorded DUE (`chargeValidUntil`, always
@@ -722,6 +726,19 @@ the op now applies (`ensureApprovedTenancy` now skips an ended term), found at t
   `OtherType` comes from the KEY as live. Check: a package test pins the literal link-key string each `make_link`
   writes against the target's `vtx.<type>` (`TestClauseSatisfaction_GovernsLinkKeyNamesTheLeaseappType` is the
   shape), and a lens fixture never derives a link's endpoint type from anything but the key.
+- **A consumer-table row that reads "X cannot happen by construction" is a claim about the OP's refusals, not the
+  lens's gate — an operator-callable op reaches every state the lens never dispatches.** The `tenancyEnd` design
+  left `renewalComplete` untouched because the lens ends no term under an open renewal; `EndTenancy` walks no
+  renewals, so a by-hand end stranded the plan's `signRenewal` leg behind a permanent `TenancyEnded` refusal.
+  Minted: lease-signing (2026-09-14), caught cold. Check: for every "by construction" exclusion in a consumer
+  census, name the refusal in the OP that enforces it; if the op admits the state, the consumer takes the conjunct.
+- **A field a self-scoped op stores as informational becomes load-bearing the moment another op derives from it —
+  validate at the mint, not the reader.** `.terms.leaseTermMonths` / `requestedRent` / `moveInDate` were free text
+  the applicant wrote through `require_number` / `optional_string`; once `DecideLeaseApplication` derived the
+  tenancy from them a zero term ended a lease the minute it was approved and a bare `2026-9-15` died as an unnamed
+  ScriptError at approval. Minted: lease-signing (2026-09-14), caught cold by both reviewers. Check: when a script
+  starts reading an aspect another op writes, open that writer's validation and refuse the malformed shapes THERE
+  (`InvalidTerms`), storing the normalized value; the reader keeps a named refusal for rows that predate the check.
 ## Related contracts
 
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.

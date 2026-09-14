@@ -103,4 +103,13 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   midnight-UTC term end with `toLocaleDateString()` (the day before, west of Greenwich) while the script's refusal
   sliced the UTC stamp, so the desk read "ended 6/30" and was then told "ended on 2026-07-01". Minted: café
   `TenancyEnded` (2026-09-14), caught cold. Check: when an FE label and a script `fail(` text name the same recorded
-  stamp, render both from the same slice of it, and say which zone it is.
+  stamp, render both from the same slice of it, and say which zone it is. Second sighting (LoftSpace lease terms, 2026-09-14,
+  caught cold): the recorded lease rendered by its UTC date beside a pre-approval ask rendered through
+  `toLocaleDateString` — the same instant, a day apart. **Mechanize on the next sighting:** a goja pin per app that
+  renders every date-bearing card from a midnight-UTC fixture under `TZ=America/Los_Angeles` and asserts the day.
+- **A new terminal state on a row is a census of every status switch and render gate in the app, not of the banner
+  that named it** — `ended` reached the applicant banner and the terms panel, and missed `applicationStatus` (the
+  by-unit console read an ended tenant as "Approved — leasing" and dealt it a ledger panel), the decide gate
+  (Approve/Decline re-offered on an ended row as a silent no-op) and the search chip. Minted: LoftSpace
+  (2026-09-14), three sites caught cold. Check: grep the app for every `status`/`DISPOSITION`/`case "approved"`
+  switch and every `if (a.qualified` / `landlordApproved` gate, and decide the new state's arm at each.

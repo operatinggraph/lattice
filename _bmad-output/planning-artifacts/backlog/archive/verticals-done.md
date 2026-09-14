@@ -2,6 +2,9 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-13 · `d51c950a` · 8 bookings `booked` on ended classes — resolved live before any replay: `pastDueBookings` shows 0 violating, every 07-20…08-23 booking is `noShow`; the gate was the fire classifier's, not Andrew's.
+- 2026-09-13 · `a87e06b3` · The executed lease names its tenant — `SignLease` snapshots the name under the `executedLeaseRecord` class, docGen egresses it as a top-level ref, the floor tolerates a legacy signed app; live: `Tenant: Priya Raman`.
+- 2026-09-13 · `5f9888b1` · A recurring class moves to a new weekday/time in one act — `ReassignSessionSeries` shifts every still-upcoming occurrence at the studio by one delta, cells one batch per hub, pinned to the anchor the desk saw.
 - 2026-09-13 · `f655e9c8` · The front desk sees which booked visits a provider's time off overlaps — derived in the FE from held projections (`timeOffConflict`, goja-pinned): reschedule worklist leads Follow-ups, card badge, editor preview.
 - 2026-09-13 · `ae197820` · A booking that still owes stays — a late cancel on a priced class keeps the booking live as `forfeited` (no seat), the desk keeps the guest's name and the charge; the Facet's booking tail filters it; proven live.
 - 2026-09-13 · `3e2e65c4` · A rogue-claimed patient login has an operator undo — `RevokeIdentityClaim` cuts every credential, returns the identity to unclaimed, re-issues the secret; clinic "Reset login"; refresh re-resolves; proven live.

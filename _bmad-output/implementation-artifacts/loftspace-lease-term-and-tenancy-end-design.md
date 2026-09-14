@@ -68,8 +68,9 @@ Two gaps, both frozen-table `directOp`s under Weaver's service actor (the `SetLi
   timer re-arms on the new end). A cancelled or never-opened renewal does not hold it.
 - **`missing_relist`** = `endedAt <> null AND unitKey <> null AND unitStatus = 'leased' AND
   otherLiveTenancyCount = 0` → `SetListingStatus{unit: row.unitKey, status: "available"}`.
-  `otherLiveTenancyCount` counts OTHER approved applications on the same unit whose `.tenancy` exists and is not
-  ended — **the load-bearing conjunct**: once the unit re-leases to a new tenant the old ended row must never flip
+  `otherLiveTenancyCount` counts OTHER approved applications on the same unit that are not ended (with or without
+  a `.tenancy` — amended at build, 2026-09-14: a pre-`.tenancy` approval claims the unit through
+  `missing_listingLeased`, so it holds the relist too) — **the load-bearing conjunct**: once the unit re-leases to a new tenant the old ended row must never flip
   it back. (`Reads: [row.unitKey, row.unitKey.listing]`, as `missing_listingLeased` declares.)
 - `violating = missing_tenancyEnded OR missing_relist`.
 
@@ -88,7 +89,9 @@ Emits `leaseapp.tenancyEnded`.
 |---|---|---|
 | `leaseApplicationComplete` — 4 applicant gaps, `missing_listingLeased`, `violating` | approved+signed+relisted unit ⇒ `missing_listingLeased` re-opens and Weaver re-leases; a stale bgcheck re-opens `missing_bgcheck` for an ended tenant | new column `tenancyEndedAt`; conjunct `(tenancyEndedAt = null)` on the four applicant gaps and on `missing_listingLeased`; an ended tenancy is terminal-not-violating, the decline's shape |
 | `leaseExpiry` — `missing_renewalCycle` | an ended lease with no renewal ever opened re-opens a cycle | conjunct `(endedAt = null)`; `freshUntil` null once ended |
-| `renewalComplete` | anchored on renewals; ended ⇒ no open renewal by construction | untouched |
+| `renewalComplete` | anchored on renewals; the lens never dispatches an end under an open renewal, but the operator-callable op admits one | `open` / `missing_renewalComplete` / `violating` conjoin `(tenancyEndedAt = null)` (amended at build, 2026-09-14) |
+| `applicantOnboarding` | counts approved leaseapps regardless of `endedAt` | conjunct `(endedAt = null)` in the count (amended at build, 2026-09-14) |
+| clinic `residentVisit` · wellness resident rate | `.tenancy` presence only | read `endedAt` — a moved-out tenant is not a resident (amended at build, 2026-09-14) |
 | `leaseRentSettlement` (semantic-contracts) | bills `[termStart, leaseEnd)` — already bounded by the recorded end | untouched |
 | `leaseApplicationsRead` / `landlordLeaseApplicationsRead` / `renewalsRead` | no `.tenancy` columns | §2.3 |
 | `staleUserTasks` | tasks close on the aspect the op writes | untouched |
@@ -116,7 +119,8 @@ verified 2026-09-13).
   `.tenancy` is recorded it states the recorded lease instead — "Lease: <leaseStart> → <leaseEnd> · $<rentAmount>/
   month", and after a renewal "current term from <termStart>". **Every `.tenancy` stamp renders by its UTC
   calendar date** (`YYYY-MM-DD` slice, not `toLocaleDateString` — a midnight-UTC stamp reads as the day before
-  west of Greenwich, the café `TenancyEnded` class); the pre-approval ask keeps `fmtDate`.
+  west of Greenwich, the café `TenancyEnded` class) — and so does the pre-approval ask, the listing's `availableFrom`
+  and a renewal's `cycleEnd`: every one is a midnight-UTC instant (amended at build, 2026-09-14).
 - **Application status banner** (≈1817): `tenancyEndedAt` ⇒ "Lease ended <date>" (terminal; wins over every
   other banner), still showing the terms panel.
 - **Renewed card** (≈2874): "term ends <cycleEnd>" → "renewed the term ending <cycleEnd> · new term ends
@@ -124,11 +128,12 @@ verified 2026-09-13).
 - **Landlord decide surface** (`renderApplicantRow` / `decideApplication` ≈4404): the approve control states the
   terms the approval signs (the same three facts); an approved row shows the recorded lease; an ended row reads
   "Lease ended <date>".
-- **Landlord unit card** (≈4261): a `leased` unit whose approved applications all carry `tenancyEndedAt` (or none
-  carries a live tenancy) renders **Relist** → `SetListingStatus(available)` — the manual path for §2.2's
-  double-approval and for a unit whose automatic relist has not landed yet; a `leased` unit with a live tenancy
-  still renders no status button (a manual relist there would be flipped straight back by
-  `missing_listingLeased`).
+- **Landlord unit card** (≈4261): a `leased` unit on which ANY approved tenancy has ended, or none is live, renders
+  **Relist** → `SetListingStatus(available)` (`relistOffered`; amended at build, 2026-09-14) — the manual path for
+  §2.2's double-approval tie-break (the button says an approved applicant with a live lease re-takes the unit
+  automatically) and for a unit whose automatic relist has not landed yet; a `leased` unit with only live
+  tenancies renders no status button (a manual relist there would be flipped straight back by
+  `missing_listingLeased`). A decided or ended row never re-offers Approve/Decline (`decisionOffered`).
 - Every dispatcher of `DecideLeaseApplication` declares `{leaseAppKey}.terms` in `optionalReads` (the decide
   form, `seed-classic-demo`; `lint-seed-declared-reads` pins the seed).
 
@@ -226,3 +231,42 @@ filed to the board only if the close pass finds it live (it is not: 0 double-app
 surface), R2 (`tenancyEnd` + `EndTenancy` + relist + the two conjunct sets + ended state + Relist) or R4 (five
 columns + `lease_end` + the card). The `SignRenewal` `TenancyEnded` refusal is R2's state-table obligation
 (carry-vs-drop of `endedAt`), not a widening. Nothing substitutes an adjacent mechanism; no contract is touched.
+
+## 5. Build note (2026-09-14) — shipped
+
+**Commits:** `d629b87a` (Inc 1, R1 + read-lens columns) · `89b940e8` (Inc 2, `tenancyEnd` + `EndTenancy` + the
+consumer conjuncts) · `9b00f28a` (Inc 3, the app) · `ce28fa9f` (clinic/wellness resident checks read `endedAt`) ·
+`b56bc0f0` (the cold review's fix round + the end-to-end convergence proof). Live: lease-signing 0.36.1,
+loftspace-domain 0.12.3, clinic-domain 0.35.1, wellness-domain 0.27.5; Priya Raman's 9 Backfill Ave application
+approved through the Gateway as the landlord — `.tenancy` = `{leaseStart 2026-09-15, leaseEnd 2027-09-15,
+rentAmount 1800}` (her ask; the listing said 08-23 / 2050) and the unit flipped `leased`.
+
+**Deviations from §2 (each amended where it stands above, dated here):**
+- §2.2 `otherLiveTenancyCount` counts every OTHER approved, not-ended application on the unit — **not** only those
+  with a `.tenancy`: a pre-`.tenancy` approval claims the unit through `missing_listingLeased` (which needs only
+  `tenancyEndedAt = null`), so counting it as live is what keeps the two targets from a relist/lease ping-pong.
+- §2.2 consumer table: `renewalComplete` is NOT untouched — an operator may `EndTenancy` under an open renewal (the
+  op walks no renewals, by design), so `open` / `missing_renewalComplete` / `violating` conjoin
+  `(tenancyEndedAt = null)`; `applicantOnboarding` conjoins it too. Clinic's `residentVisit` and wellness's
+  resident rate read `endedAt` (a moved-out tenant is not a resident).
+- §2.1 malformed terms are refused where they are minted: `CreateLeaseApplication` stores `moveInDate` as the
+  normalized RFC3339 instant and refuses `InvalidTerms` (term < 1 month or non-integer, non-positive or
+  non-numeric rent, unparseable date); `DecideLeaseApplication` refuses a stored zero term and lets a
+  non-positive offer fall through to the listing rent.
+- §2.4 Relist on a `leased` unit renders when ANY tenancy on it has ended (`relistOffered`), so the landlord's
+  manual relist is the double-approval tie-break §2.2 names (with a live approval still present the button says
+  the approved applicant re-takes the unit automatically); a decided or ended row never re-offers Approve/Decline
+  (`decisionOffered`); the by-unit console and search carry the `ended` disposition; the pre-approval ask, the
+  listing's available-from and a renewal's cycle end render by their UTC calendar date too (the "keeps
+  `fmtDate`" clause is struck — every `.terms`/`.tenancy`/`cycleEnd`/`availableFrom` stamp is a midnight-UTC
+  instant); rent lines honour the listing currency; both read lenses project the listing's `availableFrom` /
+  `leaseTermMonths` so the landlord's approval hint has its fallback.
+
+**Known cost (measured live, not a defect):** `tenancyEnd`'s `other` fan is O(applications-per-unit²) per event on
+a unit — on 12 Classic Demo Ave (52 seed-litter rival applications) an event re-anchors 52 rows at ≈6 s each on
+a swapping host; a real unit carries a handful. The litter is the losing-rival row's subject, not this design's.
+
+**Accounting of what the reviews found:** every finding fixed in `b56bc0f0` except two NITs left as stated
+behaviour — the OCC conflict is pinned at the script level (the pipeline harness has no seam to interpose a
+write between hydration and commit), and an operator hand-marking a unit `leased` with only ended tenancies is
+flipped back on every evaluation (`withdrawn` is the off-platform hold; stated in the target description).
