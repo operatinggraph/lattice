@@ -180,7 +180,16 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	// read-cap decline, an error — it does cross the meta to every owned
 	// instance. A meta's OWN aspect write reaches every live owned anchor under
 	// either arm, which is the package-install cost that design prices.
-	"supersededBackgroundChecks":        walkMultiPosition,
+	"supersededBackgroundChecks": walkMultiPosition,
+	// `(other:leaseapp)` — the unit's OTHER applications, walked back across
+	// appliesToUnit from the anchor's unit — is a SECOND leaseapp-typed
+	// position (index 3, alongside the anchor at 0), so a write to any
+	// application on the unit binds off-anchor and the walk is the right
+	// answer: the ended row's missing_relist reads whether ANOTHER approved
+	// tenancy now holds the unit (otherLiveTenancyCount), so the new tenant's
+	// .tenancy landing must reproject the old tenant's row, and a one-key
+	// answer would leave it dispatching a relist on a re-leased unit.
+	"tenancyEnd":                        walkMultiPosition,
 	"unroutedTasks":                     oneKey,
 	"visitSeriesDue":                    oneKey,
 	"visitSeriesSiteBackfill":           oneKey,

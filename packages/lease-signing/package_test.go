@@ -222,19 +222,19 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 15; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 10; got != want {
+	if got, want := len(Package.Lenses), 11; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 25; got != want {
+	if got, want := len(Package.Permissions), 26; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 15; got != want {
+	if got, want := len(Package.OpMetas), 16; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 7; got != want {
+	if got, want := len(Package.WeaverTargets), 8; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 4; got != want {
@@ -292,6 +292,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"leaseExpiry", "nats-kv", false},
 		{"renewalComplete", "nats-kv", false},
 		{"renewalsRead", "postgres", true},
+		{"tenancyEnd", "nats-kv", false},
 	}
 	for i, want := range wantLenses {
 		if i >= len(Package.Lenses) {
@@ -321,6 +322,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"VerifyGuarantor", "any"}, {"VerifyGuarantor", "self"},
 		{"SignRenewal", "any"},
 		{"CancelRenewal", "any"}, {"CancelRenewal", "self"},
+		{"EndTenancy", "any"},
 	}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {

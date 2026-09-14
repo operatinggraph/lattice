@@ -79,6 +79,14 @@
 //     Weaver target, Contract #10 §10.8 Planner extension). See
 //     _bmad-output/implementation-artifacts/loftspace-lease-renewal-goal-authored-target-design.md.
 //
+//   - The tenancyEnd frozen-table target + EndTenancy (leaseapp DDL,
+//     operator-granted): leaseExpiry's sibling one horizon later — a timer on
+//     each signed, approved tenancy's leaseEnd, the recorded lapse ending the
+//     term (.tenancy.endedAt = leaseEnd) unless an open renewal holds it, and
+//     the ended tenancy's unit relisted via SetListingStatus unless another
+//     approved tenancy now holds it. See
+//     _bmad-output/implementation-artifacts/loftspace-lease-term-and-tenancy-end-design.md.
+//
 // The external-call outcome lives in the .outcome aspect (D5); the leaseapp /
 // service vertex roots stay minimal. Depends identity-domain + service-domain +
 // orchestration-base. Install via the InstallPackage kernel op.
@@ -89,7 +97,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.35.0",
+	Version: "0.36.0",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -126,7 +134,11 @@ var Package = pkgmgr.Definition{
 		"first approve), the renewal vertex type + its five ops, the leaseExpiry frozen-table target (opens a " +
 		"cycle), and the renewalComplete mode:planned target — the first goal-authored Weaver target (Contract #10 " +
 		"§10.8 Planner extension), sequencing a per-tenant-variable chain (conditional bgcheck refresh, conditional " +
-		"guarantor re-verify, rent-term set, tenant signature) from one declared goal + a 4-action catalog. Depends " +
+		"guarantor re-verify, rent-term set, tenant signature) from one declared goal + a 4-action catalog. A lease that " +
+		"ends frees its unit: the tenancyEnd frozen-table target arms a timer on each signed, approved tenancy's leaseEnd, " +
+		"dispatches EndTenancy (operator-granted) to record .tenancy.endedAt once the recorded lapse reaches it with no " +
+		"open renewal, and relists the ended tenancy's unit via SetListingStatus unless another approved tenancy now holds " +
+		"it; an ended tenancy is terminal in leaseApplicationComplete and leaseExpiry, and SignRenewal refuses it. Depends " +
 		"identity-domain + service-domain + orchestration-base.",
 	Depends:          []string{"identity-domain", "service-domain", "orchestration-base"},
 	DDLs:             DDLs(),

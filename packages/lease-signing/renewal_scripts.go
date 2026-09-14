@@ -433,6 +433,14 @@ def execute(state, op):
         tenancy = kv.Read(tenancy_key)
         if tenancy == None or tenancy.isDeleted:
             fail("NoTenancy: application " + app_key + " has no .tenancy aspect to extend")
+        # An ended term cannot be extended: EndTenancy has recorded endedAt,
+        # and the whole-aspect rewrite below would silently drop it — the
+        # relist that end drives would then be undone by a term that reads
+        # live again. The refusal names the end by its UTC calendar date, the
+        # same slice every .tenancy stamp renders by.
+        ended_at = tenancy.data.get("endedAt")
+        if ended_at != None:
+            fail("TenancyEnded: lease " + app_key + " ended on " + str(ended_at)[:10] + " (UTC); an ended term cannot be renewed")
         previous_lease_end = tenancy.data.get("leaseEnd")
         new_lease_end = time.rfc3339_add_months(previous_lease_end, int(term_months))
         new_renewal_opens_at = time.rfc3339_add(new_lease_end, "-__RENEWAL_WINDOW__")

@@ -48,6 +48,21 @@ def make_aspect_upsert(vtx_key, local_name, cls, data):
             "document": {"class": cls, "isDeleted": False,
                          "vertexKey": vtx_key, "localName": local_name, "data": data}}
 
+def make_aspect_update_occ(vtx_key, local_name, cls, data, expected_revision):
+    # An update PINNED to the revision the script read the aspect at. A batch is
+    # atomic within itself, which says nothing about a DIFFERENT op writing the
+    # same key between this script's hydration and its commit -- the .tenancy
+    # rewrite below reads the aspect's CONTENT to decide what to write (every
+    # field preserved, endedAt added), and SignRenewal rewrites the same aspect
+    # whole, so an unconditioned update would silently swallow a term extension
+    # that landed in that window. The revision comes from the DECLARED read: a
+    # caller that omits the declaration gets no hydrated document and the
+    # branch refuses before it can write.
+    return {"op": "update", "key": vtx_key + "." + local_name,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data},
+            "expectedRevision": expected_revision}
+
 def make_vtx_tombstone(key, cls):
     # Soft-delete a vertex (isDeleted=True). UNCONDITIONED — a concurrent withdraw
     # tombstones to the same state (idempotent), and nothing else writes the
@@ -1454,6 +1469,73 @@ def execute(state, op):
         mutations = [make_aspect_upsert(app_key, "terms", "terms", merged)]
         events = [{"class": "leaseapp.termsBackfilled",
                    "data": {"leaseAppKey": app_key, "requestedRent": rent}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": app_key}}
+
+    if ot == "EndTenancy":
+        # Weaver's service-actor directOp (the OpenRenewal / SetListingStatus
+        # precedent), dispatched by the tenancyEnd target once a signed,
+        # approved tenancy's leaseEnd has lapsed with no open renewal — and
+        # runnable by an operator by hand. It records that the term ended,
+        # ON ITS OWN END DATE: endedAt = leaseEnd, never the instant this op
+        # ran (a recorded value is read as the fact it records — the cards
+        # and the TenancyEnded refusal name the end date). The write-path
+        # honesty check is its own: it does not trust the dispatcher's clock,
+        # so a submission ahead of leaseEnd is refused NotYetEnded whatever
+        # the lens said. It does NOT walk renewals — the open-renewal hold is
+        # the lens's dispatch gate (tenancy_end_lenses.go); an operator ending
+        # a term under an open cycle is admitted, and SignRenewal then
+        # refuses TenancyEnded rather than dropping the endedAt.
+        app_key = required_string(p, "leaseAppKey")
+        parts_of(app_key, "leaseAppKey", "leaseapp")
+        if not vertex_alive(state, app_key):
+            fail("UnknownLeaseApplication: " + app_key)
+
+        # The .tenancy is a REQUIRED declared read (the descriptor's
+        # Dispatch.Reads and the target's row.entityKey.tenancy both list it):
+        # the gap only opens on a leaseapp with a tenancy, so absence is a
+        # wiring fault, and the op refuses it rather than lazily reading —
+        # read from state, which holds only what the submitter declared, so
+        # an empty contextHint is refused here and never served by an
+        # on-demand GET. The hydrated revision is what the OCC pin below
+        # rests on.
+        tenancy_key = app_key + ".tenancy"
+        tenancy = state[tenancy_key] if tenancy_key in state else None
+        if tenancy == None or tenancy.isDeleted:
+            fail("NoTenancy: application " + app_key + " has no .tenancy aspect; there is no term to end")
+        lease_end = tenancy.data.get("leaseEnd")
+        if lease_end == None or type(lease_end) != type(""):
+            fail("NoTenancy: application " + app_key + "'s .tenancy aspect is missing leaseEnd")
+
+        # Idempotent: an at-least-once re-dispatch of an already-ended term
+        # emits NOTHING — no mutation, no event. No primaryKey: an empty
+        # write footprint has nothing for the reply-constraint to validate
+        # it against (the SetListingStatus no-op shape).
+        if tenancy.data.get("endedAt") != None:
+            return {"mutations": [], "events": [], "response": {}}
+
+        # Both stamps are canonical-UTC RFC3339 (leaseEnd is rfc3339_utc /
+        # rfc3339_add_months output, fixed-width and zero-padded), so the
+        # string comparison orders chronologically. The refusal names the
+        # end by its UTC calendar date — the same YYYY-MM-DD slice every
+        # .tenancy stamp renders by (a midnight-UTC instant reads as the day
+        # before west of Greenwich, so no local-zone date ever appears).
+        submitted_at = time.rfc3339_utc(op.submittedAt)
+        if submitted_at < lease_end:
+            fail("NotYetEnded: lease " + app_key + " runs until " + lease_end[:10] + " (UTC)")
+
+        # Every existing field preserved (leaseStart / renewalOpensAt, and a
+        # renewed term's termStart / rentAmount), endedAt added — pinned to
+        # the hydrated revision so a SignRenewal extension that committed
+        # between this op's hydration and its commit conflicts instead of
+        # being overwritten with an end it no longer has.
+        ended = {}
+        for k in tenancy.data:
+            ended[k] = tenancy.data[k]
+        ended["endedAt"] = lease_end
+        mutations = [make_aspect_update_occ(app_key, "tenancy", "tenancy", ended, tenancy.revision)]
+        events = [{"class": "leaseapp.tenancyEnded",
+                   "data": {"leaseAppKey": app_key, "leaseEnd": lease_end}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": app_key}}
 

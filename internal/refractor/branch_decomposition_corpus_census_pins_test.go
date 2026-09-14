@@ -122,6 +122,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	// forOperation branch.
 	"staleUserTasks":                    {"g4/o4!no-aggregating-item g0/o0!no-aggregating-item", 0, 4},
 	"supersededBackgroundChecks":        {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
+	"tenancyEnd":                        {"g2/o3[other;rn] g0/o0!no-aggregating-item", 2, 2}, // [other] hangs below the base-row unit hop; differential in ruleengine/full branch_decomposition_equivalence_test.go
 	"unroutedTasks":                     {"g0/o0!no-aggregating-item", 0, 0},
 	"visitSeriesDue":                    {"g2/o3[a,apr] g0/o0!no-aggregating-item", 1, 2},
 	"visitSeriesRead":                   {"g3/o3!no-aggregating-item", 0, 3},
@@ -180,6 +181,7 @@ var decomposingCorpusLenses = []string{
 	"objectAttachments",
 	"opCatalog",
 	"renewalComplete",
+	"tenancyEnd",
 	"visitSeriesDue",
 	"wellnessWaitlistPromotion",
 }
@@ -211,6 +213,7 @@ var siblingBranchGroupLenses = []string{
 	"pastDueBookings",
 	"providerAppointmentsRead",
 	"staleUserTasks",
+	"tenancyEnd",
 	"visitSeriesDue",
 	"visitSeriesRead",
 	"visitSeriesSiteBackfill",
@@ -238,6 +241,7 @@ var multiGroupDecomposingLenses = []string{
 	"leaseApplicationsRead",
 	"leaseExpiry",
 	"myTasks",
+	"tenancyEnd",
 	"visitSeriesDue",
 }
 
@@ -271,6 +275,7 @@ var footprintValidationVerdicts = map[string]bool{
 	"identityErasureResidue":            true,
 	"leaseApplicationComplete":          true,
 	"leaseExpiry":                       true,
+	"tenancyEnd":                        true,
 	"leaseRentSettlement":               true,
 	"myTasks":                           true,
 	"objectAttachments":                 true,

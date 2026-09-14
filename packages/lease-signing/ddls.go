@@ -102,7 +102,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "leaseapp",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit"},
+		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy"},
 		Description: "Lease-application DDL. Vertex shape: vtx.leaseapp.<NanoID>, class=leaseapp, root data = {} " +
 			"(minimal, D5 — the application status/gaps are LENS-computed, not stored). The application's applicant " +
 			"is a LINK (applicationFor → identity: the later-arriving leaseapp is the source, the pre-existing " +
@@ -199,7 +199,22 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"contract is at most one live application per (applicant, unit), so a moved lease no longer justifies holding " +
 			"the pair it left, and a later re-apply or a move back to that unit must not collide with its own stale guard. " +
 			"No-ops cleanly when the application already applies to newUnitKey. Emits " +
-			"leaseapp.unitReassigned{leaseAppKey, oldUnitKey, newUnitKey}.",
+			"leaseapp.unitReassigned{leaseAppKey, oldUnitKey, newUnitKey}. " +
+			"EndTenancy{leaseAppKey} is operator-granted (never person-facing) and records that a lease term ended — " +
+			"the directOp the tenancyEnd target dispatches once a signed, approved tenancy's leaseEnd has lapsed with " +
+			"no OPEN renewal for that cycle (an open renewal holds the term; a cancelled or never-opened one does not), " +
+			"and runnable by hand. It reads the application + its .tenancy (both REQUIRED declared reads — the gap only " +
+			"opens on a leaseapp with a tenancy; an undeclared or absent .tenancy is refused NoTenancy, never lazily " +
+			"read), refuses NotYetEnded when submittedAt is before leaseEnd (write-path honesty — the op does not trust " +
+			"the dispatcher's clock; the refusal names the end by its UTC calendar date), no-ops with zero mutations " +
+			"when endedAt is already set, and otherwise rewrites .tenancy with every existing field preserved plus " +
+			"endedAt = leaseEnd (the term ended on its own end date, never the fire instant), pinned to the hydrated " +
+			".tenancy revision so a SignRenewal extension that lands between hydration and commit conflicts instead of " +
+			"being overwritten. It does not walk renewals — the open-renewal hold is the lens's dispatch gate. " +
+			"Emits leaseapp.tenancyEnded{leaseAppKey, leaseEnd}. Once endedAt is set, SignRenewal refuses TenancyEnded, " +
+			"leaseApplicationComplete's applicant gaps and listing flip close (an ended tenancy is terminal, the decline's " +
+			"shape — a relisted unit is never re-leased to the ended tenant), leaseExpiry opens no cycle, and tenancyEnd's " +
+			"own missing_relist relists the unit unless another approved tenancy now holds it.",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
@@ -208,7 +223,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months (CreateLeaseApplication; required when moveInDate is supplied)."},` +
 			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent (CreateLeaseApplication; optional, only with moveInDate). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
 			`"leaseAppId":{"type":"string","description":"Optional bare NanoID for the application vertex (CreateLeaseApplication); absent → minted. The write-ahead seam, mirroring service-domain's instanceId."},` +
-			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), backfill (BackfillLeaseTerms), or re-point at a different unit (ReassignLeaseUnit); required, validated alive."},` +
+			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), backfill (BackfillLeaseTerms), re-point at a different unit (ReassignLeaseUnit), or whose lease term to record as ended (EndTenancy); required, validated alive."},` +
 			`"newUnitKey":{"type":"string","description":"vtx.unit.<NanoID> of the unit to re-point the application's appliesToUnit link at (ReassignLeaseUnit; required, validated alive). The operator repair for an application whose unit was tombstoned."},` +
 			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition."},` +
 			`"reason":{"type":"string","description":"Optional free-text rationale for a DecideLeaseApplication decline (applicant feedback + a fair-housing record). Stored on the .decision aspect and projected as the declineReason lens column; ignored on an approve."},` +
@@ -233,7 +248,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"leaseTermMonths":       "Requested lease term in months. Required when moveInDate is supplied; written to the .terms aspect.",
 			"requestedRent":         "Optional monthly rent the applicant offers. Written to the .terms aspect when supplied (only meaningful alongside moveInDate).",
 			"leaseAppId":            "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
-			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent; ReassignLeaseUnit validates it is alive and re-points its appliesToUnit link at newUnitKey. The caller lists it in ContextHint.Reads.",
+			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent; ReassignLeaseUnit validates it is alive and re-points its appliesToUnit link at newUnitKey; EndTenancy validates it is alive and rewrites its .tenancy aspect with endedAt = leaseEnd (the .tenancy is a required declared read too). The caller lists it in ContextHint.Reads.",
 			"newUnitKey":            "Full vtx.unit.<NanoID> key of the unit ReassignLeaseUnit re-points the application at (required, validated alive). The operator names the unit directly — the application's OWN appliesToUnit / applicationFor links, never payload fields, are what the op reads to find the CURRENT unit and the applicant.",
 			"annualIncome":          "The applicant's gross annual income (SetApplicantProfile; required, > 0). SENSITIVE: stored in the .profile aspect, custodied on the package's underwritingRecord retention class (RetentionClasses) rather than the applicant's identity, and NEVER projected. The op derives incomeToRentMet (gross monthly income ≥ 3× the unit's listing rent) from it into the non-sensitive .applicationSignals aspect, and only that boolean reaches the read model.",
 			"employmentStatus":      "The applicant's employment status (SetApplicantProfile; required): employed | self-employed | unemployed | student | retired. SENSITIVE — stored in .profile. employed / self-employed derive the projected employmentVerified=true (an active income source); the rest are captured honestly and read as unverified.",
@@ -371,6 +386,20 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"application (UnknownLeaseApplication) or unit (UnknownUnit), one carrying no live appliesToUnit or " +
 					"applicationFor link (InvalidState), or a newUnitKey the applicant already has a live application on " +
 					"(DuplicateApplication).",
+			},
+			{
+				Name:    "EndTenancy — record that a lease term ended",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
+				ExpectedOutcome: "Reads the application and its .tenancy (both declared in ContextHint.Reads — required). " +
+					"If .tenancy already carries endedAt, no-ops with zero mutations and no event (idempotent under " +
+					"at-least-once dispatch; no primaryKey). If op.submittedAt is before .tenancy.leaseEnd, rejects " +
+					"NotYetEnded naming the end's UTC calendar date. Otherwise rewrites .tenancy with every existing field " +
+					"preserved (leaseStart, renewalOpensAt, a renewed term's termStart / rentAmount) plus endedAt = leaseEnd, " +
+					"pinned to the revision the read hydrated (a concurrent SignRenewal rewrite RevisionConflicts). Emits " +
+					"leaseapp.tenancyEnded{leaseAppKey, leaseEnd}. Returns primaryKey. Operator-only (Weaver's service " +
+					"actor via the tenancyEnd target, or by hand). Rejects a non-existent application (UnknownLeaseApplication) " +
+					"or one with no .tenancy / no leaseEnd (NoTenancy) — including a submission that failed to declare the " +
+					".tenancy read, which is refused rather than read on demand.",
 			},
 		},
 		Effects: map[string][]json.RawMessage{

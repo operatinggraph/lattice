@@ -524,10 +524,24 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 	putAspect(t, reg, coreKV, app, "tenancy", map[string]any{
 		"leaseStart": "2019-01-01T00:00:00Z", "leaseEnd": "2020-01-01T00:00:00Z", "renewalOpensAt": "2019-12-01T00:00:00Z",
 	})
+	// tenancyEnd reads the same marker under ITS OWN key: an entry at leaseEnd
+	// is the recorded lapse that opens missing_tenancyEnded, provided no OPEN
+	// renewal covers this cycle — the seeded renewal below is open but carries
+	// no cycleEnd, so it binds in the renewal branch and the fold must exclude
+	// it. leaseExpiry reads only the leaseExpiry entry, so its row is unmoved.
 	putAspect(t, reg, coreKV, app, "freshnessExpiry", map[string]any{
-		"expiredAt": "2019-12-01T00:00:00Z",
-		"byTarget":  map[string]any{"leaseExpiry": "2019-12-01T00:00:00Z"},
+		"expiredAt": "2020-01-01T00:00:00Z",
+		"byTarget":  map[string]any{"leaseExpiry": "2019-12-01T00:00:00Z", "tenancyEnd": "2020-01-01T00:00:00Z"},
 	})
+	// A second, undecided application on the same unit: tenancyEnd's other
+	// sibling branch walks back across appliesToUnit to every application on
+	// the unit (otherLiveTenancyCount), so this makes that branch bind a real
+	// vertex the fold must then exclude (no decision, no tenancy). It reaches no
+	// other lens's anchor: leaseApplicationComplete is anchored on the primary
+	// application and never walks a unit's other applications.
+	rival := name("unitrival")
+	putVertex(t, reg, coreKV, rival, "leaseapp", nil)
+	putEdge(t, reg, adjKV, "appliesToUnit", rival, unit)
 	putAspect(t, reg, coreKV, app, "ledgerAccount", map[string]any{"accountKey": vtxKey(reg, acctName(p))})
 	for i := 0; i < s.Proposals; i++ {
 		prop := name("prop%d", i)
@@ -990,6 +1004,18 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 				boolEvidence(t, row, "missing_renewalCycle", true, "unit-manager")
 			},
 			content: func(row map[string]any) int { return boolsTrue(row, "missing_renewalCycle") }},
+		{name: "tenancyEnd", spec: corpusSpec(t, "tenancyEnd"), anchor: c.leaseAppKey,
+			evidence: func(t *testing.T, row map[string]any) {
+				// missing_tenancyEnded is true only through openRenewalCount = 0
+				// over a renewal branch that binds the seeded open renewal (no
+				// cycleEnd, so excluded by the CASE) and a unit branch that binds
+				// the seeded rival application (undecided, so excluded too): both
+				// folded subtrees are non-empty and the row's truth is the fold
+				// excluding them correctly.
+				boolEvidence(t, row, "missing_tenancyEnded", true, "renewal")
+				require.NotNil(t, row["unitKey"], "the unit hop below which the rival branch hangs must bind")
+			},
+			content: func(row map[string]any) int { return boolsTrue(row, "missing_tenancyEnded", "missing_relist") }},
 		{name: "leaseRentSettlement", spec: corpusSpec(t, "leaseRentSettlement"), anchor: c.leaseAppKey,
 			evidence: func(t *testing.T, row map[string]any) {
 				// The seeded tenancy carries leaseStart + leaseEnd, so
@@ -1212,7 +1238,7 @@ func TestBranchDecomposition_EveryDecomposingCorpusLensReachesADifferential(t *t
 		"edgeManifestStaffReadGrants", "edgeManifestTaskReadGrants", "identityAnchors", "identityErasureResidue",
 		"landlordLeaseApplicationsRead", "leaseApplicationComplete", "leaseApplicationsRead",
 		"leaseExpiry", "leaseRentSettlement", "myTasks", "objectAttachments", "opCatalog",
-		"renewalComplete", "wellnessWaitlistPromotion",
+		"renewalComplete", "tenancyEnd", "wellnessWaitlistPromotion",
 	} {
 		require.Truef(t, covered[name],
 			"%s decomposes in the shipped corpus but no differential in this package executes it "+

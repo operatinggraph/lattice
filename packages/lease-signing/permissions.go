@@ -30,6 +30,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	CancelRenewal                   → operator
 //	CancelRenewal (self)            → consumer
 //	ReassignLeaseUnit               → operator
+//	EndTenancy                      → operator
 //
 // The orchestrator-submitted ops are operator-driven (the same operator-grant
 // idiom service-domain / orchestration-base use):
@@ -214,6 +215,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "self",
 			Note:          "Grants a landlord the right to decline a renewal cycle on a unit they MANAGE (the script walks renewal→renews→leaseapp→appliesToUnit to the unit and requires the acting identity's manages link).",
 			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "EndTenancy",
+			Scope:         "any",
+			Note:          "Grants the operator (Weaver's service actor) the right to submit EndTenancy — the directOp the tenancyEnd target dispatches once a signed, approved tenancy's leaseEnd has lapsed with no open renewal (the OpenRenewal / SetListingStatus cross-package directOp precedent); an operator may also run it by hand. Never a person-facing action: the term ends on its own recorded date, and the op refuses NotYetEnded ahead of it.",
+			GrantsTo:      []string{"operator"},
 		},
 	}
 }
@@ -508,6 +515,45 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
 					{Hub: "{payload.leaseAppKey}", Relation: "applicationFor", Direction: "out"},
+				},
+			},
+		},
+		{
+			// EndTenancy is dispatched by Weaver off the tenancyEnd target and
+			// carries a standing operator grant alone — the ReassignLeaseUnit
+			// posture: no scope=self path, so "standing" and no authContext
+			// target to bind. The descriptor exists so a by-hand operator
+			// submission (Loupe) and any descriptor-driven dispatcher declare
+			// the same two REQUIRED reads the target's playbook routes
+			// (tenancy_end_targets.go): the application and its .tenancy. Both
+			// are fail-closed (a) reads on purpose — the gap only opens on a
+			// leaseapp that has a tenancy, and the script reads the aspect from
+			// hydration (never on demand), so an undeclared .tenancy is a
+			// NoTenancy refusal, not a lazy GET.
+			OperationType: "EndTenancy",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "End a lease term",
+				ShortLabel:  "End tenancy",
+				Description: "Record that a lease term ended on its end date. Refused before the term's end; a no-op once recorded.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Record term end",
+				Group:       "Operator repairs",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","x-entityRef":"leaseapp","description":"vtx.leaseapp.<NanoID> of the application whose lease term ended."}},` +
+				`"required":["leaseAppKey"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The application whose lease term ended. Its .tenancy.leaseEnd is the date recorded as endedAt; a term that has not reached it yet is refused.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "leaseapp",
+				AuthContext: "standing",
+				TargetField: "leaseAppKey",
+				TargetType:  "leaseapp",
+				Reads: []string{
+					"{payload.leaseAppKey}",
+					"{payload.leaseAppKey}.tenancy",
 				},
 			},
 		},

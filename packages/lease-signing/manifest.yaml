@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.35.0
+version: 0.36.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -47,7 +47,13 @@ description: |
   ops (OpenRenewal / SetRenewalTerms / VerifyGuarantor / SignRenewal /
   CancelRenewal), the leaseExpiry frozen-table target, and the
   renewalComplete mode:planned target — the first goal-authored Weaver target
-  (Contract #10 §10.8 Planner extension).
+  (Contract #10 §10.8 Planner extension). A lease that ends frees its unit:
+  the tenancyEnd frozen-table target arms a timer on each signed, approved
+  tenancy's leaseEnd, dispatches EndTenancy (operator-granted) to record
+  .tenancy.endedAt once the lapse is recorded with no open renewal, and
+  relists the ended tenancy's unit via SetListingStatus unless another
+  approved tenancy now holds it; an ended tenancy is terminal in
+  leaseApplicationComplete and leaseExpiry, and SignRenewal refuses it.
   Depends on identity-domain, service-domain, and orchestration-base.
 depends:
   - identity-domain
@@ -122,6 +128,10 @@ declares:
       engine: full
     - canonicalName: renewalsRead
       adapter: postgres
+      engine: full
+    - canonicalName: tenancyEnd
+      adapter: nats-kv
+      bucket: weaver-targets
       engine: full
   permissions:
     - operationType: CreateLeaseApplication
@@ -199,6 +209,9 @@ declares:
     - operationType: CancelRenewal
       scope: self
       grantsTo: [consumer]
+    - operationType: EndTenancy
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: leaseApplicationComplete
       lensRef: leaseApplicationComplete
@@ -214,6 +227,8 @@ declares:
       lensRef: leaseExpiry
     - targetId: renewalComplete
       lensRef: renewalComplete
+    - targetId: tenancyEnd
+      lensRef: tenancyEnd
   loomPatterns:
     - patternId: backgroundCheck
       subjectType: identity
@@ -228,6 +243,7 @@ declares:
     - operationType: CreateLeaseApplication
     - operationType: WithdrawLeaseApplication
     - operationType: ReassignLeaseUnit
+    - operationType: EndTenancy
     - operationType: SetApplicantProfile
     - operationType: SetRenewalTerms
     - operationType: VerifyGuarantor

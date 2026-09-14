@@ -163,6 +163,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"identityErasureResidue":     hopIndexed,
 	"leaseApplicationComplete":   hopIndexed,
 	"leaseExpiry":                hopIndexed,
+	"tenancyEnd":                 hopIndexed,
 	"leaseRentSettlement":        hopIndexed,
 	"myTasks":                    hopIndexed,
 	// Its untyped `-[r]->` is a WILDCARD hop: it names no relation, and every

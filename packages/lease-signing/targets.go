@@ -242,5 +242,6 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			},
 		},
 	}}
-	return append(targets, RenewalTargets()...)
+	targets = append(targets, RenewalTargets()...)
+	return append(targets, TenancyEndTargets()...)
 }

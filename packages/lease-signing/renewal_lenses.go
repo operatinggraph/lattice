@@ -165,6 +165,14 @@ func RenewalLenses() []pkgmgr.LensSpec {
 // tombstoned renewal — never produced in v1, no revive op — would fail to
 // count). The renewal fan-out is walked INBOUND across the renews link
 // (renewal→leaseapp), the same inbound-traversal idiom the manages link uses.
+//
+// An ENDED tenancy (.tenancy.endedAt recorded by EndTenancy, the tenancyEnd
+// target) opens no cycle and arms no horizon: the (endedAt = null) conjunct
+// closes missing_renewalCycle — a lease whose term has ended with no renewal
+// ever opened must not have one opened for it now, since the sweep would
+// otherwise mint a cycle on a former tenant's lease every time the row is
+// re-evaluated — and freshUntil goes null so the @at is never re-armed on a
+// term that is over.
 // Built with fmt.Sprintf so the target id comes from the constant the
 // WeaverTargetSpec uses, which puts this Spec out of lint-lens-anchors'
 // static reach; its advisory asks for a hand check for a narrowing range
@@ -179,6 +187,7 @@ WITH
   app.key                          AS entityKey,
   app.tenancy.data.leaseEnd        AS leaseEnd,
   app.tenancy.data.renewalOpensAt  AS renewalOpensAt,
+  app.tenancy.data.endedAt         AS endedAt,
   app.decision.data.value          AS landlordDecision,
   app.signature.data.signedAt      AS signedAt,
   u.key                            AS unitKey,
@@ -188,9 +197,9 @@ WITH
 RETURN
   entityKey AS actorKey,
   entityKey,
-  CASE WHEN lapsedAt >= renewalOpensAt THEN null ELSE renewalOpensAt END AS freshUntil,
-  ((renewalOpensAt <> null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS missing_renewalCycle,
-  ((renewalOpensAt <> null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS violating
+  CASE WHEN (endedAt <> null) OR (lapsedAt >= renewalOpensAt) THEN null ELSE renewalOpensAt END AS freshUntil,
+  ((renewalOpensAt <> null) AND (endedAt = null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS missing_renewalCycle,
+  ((renewalOpensAt <> null) AND (endedAt = null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS violating
 `, LeaseExpiryTarget)
 
 // renewalCompleteSpec anchors on EVERY renewal vertex, unfiltered by status

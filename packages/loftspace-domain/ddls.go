@@ -447,11 +447,14 @@ def execute(state, op):
 
     if ot == "SetListingStatus":
         # Status-only transition: rewrite ONLY .listing.status, preserving the
-        # economics. The directOp the leaseApplicationComplete convergence target
-        # dispatches to mark a unit leased once its application is approved; also
-        # operator-callable by hand (a landlord-driven revert leased->available is
-        # allowed — convergence only ever drives it to leased). The unit root is
-        # hydrated via ContextHint.Reads=[unit] (the playbook routes row.unitKey).
+        # economics. The directOp lease-signing's convergence targets dispatch:
+        # leaseApplicationComplete marks a unit leased once its application is
+        # approved, and tenancyEnd marks it available again once the recorded
+        # term has ended and no other live tenancy holds it. Also callable by a
+        # managing landlord by hand (any transition is admitted; a manual relist
+        # under a live tenancy is flipped straight back by missing_listingLeased).
+        # The unit root is hydrated via ContextHint.Reads=[unit] (the playbook
+        # routes row.unitKey).
         unit = required_string(p, "unit")
         parts_of(unit, "unit", "unit")
         # workplace-exempt: (ownership-bound) the ownership probe answers before

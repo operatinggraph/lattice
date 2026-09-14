@@ -523,3 +523,30 @@ func TestLeaseApplicationsRead_ProjectsProfileSignals(t *testing.T) {
 	require.Nil(t, noProfile["income_to_rent_met"], "no .applicationSignals -> null income signal")
 	require.Nil(t, noProfile["reference_count"])
 }
+
+// TestLeaseApplicationsRead_EndedTenancyClosesTheStepper — the applicant read
+// model's four stepper columns carry the same (tenancyEndedAt = null) conjunct
+// leaseApplicationCompleteSpec's gaps do: an ended tenancy whose onboarding /
+// payment records are absent (or whose background check has lapsed) shows no
+// open step — the convergence lens dispatches nothing for it, so the card must
+// not ask for anything either.
+func TestLeaseApplicationsRead_EndedTenancyClosesTheStepper(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedApplication(t, "app", "alice", "unit1")
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2025-09-01T00:00:00Z",
+		"leaseEnd":   "2026-09-01T00:00:00Z",
+		"endedAt":    "2026-09-01T00:00:00Z",
+	})
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "2026-09-01T00:00:00Z", v["tenancy_ended_at"])
+	for _, col := range []string{"missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature"} {
+		require.Equal(t, false, v[col], "%s stays closed on an ended tenancy", col)
+	}
+}

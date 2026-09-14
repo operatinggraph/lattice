@@ -48,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_manager", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_manager", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "tenancyEndedAt", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -460,7 +460,8 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 	}
-	return append(lenses, RenewalLenses()...)
+	lenses = append(lenses, RenewalLenses()...)
+	return append(lenses, TenancyEndLenses()...)
 }
 
 // leaseApplicationCompleteSpec is the one-row-per-anchor convergence cypher.
@@ -548,6 +549,28 @@ func Lenses() []pkgmgr.LensSpec {
 // the same terminal-not-violating state via the (unitStatus <> 'leased') term
 // instead — its own decision may still be null, but there is no unit left to
 // lease.
+//
+// ENDED TENANCY — the third terminal-not-violating shape, beside the decline
+// and the lost unit. The four applicant gaps AND missing_listingLeased each
+// carry (tenancyEndedAt = null): once EndTenancy has recorded .tenancy.endedAt
+// (the tenancyEnd target, tenancy_end_lenses.go), the application is a lease
+// whose term is over, and none of its remediations is wanted any more. The
+// conjunct is load-bearing on two of them. missing_listingLeased: the ended
+// term's relist flips its unit back to 'available', and this row still reads
+// approved + qualified + signed — without the conjunct that is exactly the
+// listing-flip shape, so Weaver would re-lease the unit to the tenant who
+// just left, and tenancyEnd would relist it again, forever. missing_bgcheck:
+// the winning applicant's (landlordDecision = 'approved') escape hatch above
+// keeps their bgcheck gap reopenable after their unit leases — the right
+// posture while they live there, and exactly wrong once they have left: a
+// bgcheck lapsing after the term ended would re-dispatch a vendor check on a
+// former tenant. missing_decision needs no conjunct — it requires
+// landlordDecision = null, and an ended tenancy is by construction approved.
+// missing_manager / missing_leaseDoc / missing_leaseDocAttach are untouched:
+// an unmanaged unit is still an operator's problem, and the executed lease
+// document is a record of the term whether or not it has ended. tenancyEndedAt
+// projects as a read-only column so a reader can tell this terminal shape
+// from the other two.
 //
 // unitKey / unitAddress / unitRent / unitStatus are columns carried from the
 // appliesToUnit walk (the unit's key, its .address.line1, its .listing.rentAmount
@@ -1051,6 +1074,7 @@ WITH
   u.listing.data.leaseTermMonths AS unitLeaseTermMonths,
   u.listing.data.availableFrom AS unitAvailableFrom,
   u.listing.data.status     AS unitStatus,
+  app.tenancy.data.endedAt  AS tenancyEndedAt,
   app.terms.data.moveInDate AS termsMoveInDate,
   app.terms.data.leaseTermMonths AS termsLeaseTermMonths,
   app.terms.data.requestedRent AS termsRequestedRent,
@@ -1093,6 +1117,7 @@ RETURN
   unitLeaseTermMonths,
   unitAvailableFrom,
   unitStatus,
+  tenancyEndedAt,
   termsMoveInDate,
   termsLeaseTermMonths,
   termsRequestedRent,
@@ -1106,10 +1131,10 @@ RETURN
   signedAt,
   landlordDecision,
   declineReason,
-  ((unitKey <> null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))        AS missing_onboarding,
-  ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))  AS missing_bgcheck,
-  ((unitKey <> null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_payment,
-  ((unitKey <> null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_signature,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))        AS missing_onboarding,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))  AS missing_bgcheck,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_payment,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_signature,
   (bgInflight > 0)       AS inflight_bgcheck,
   (payInflight > 0)      AS inflight_payment,
   (docGenInflight > 0)   AS inflight_docGen,
@@ -1131,11 +1156,11 @@ RETURN
   ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) AS missing_leaseDocAttach,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null)) AS applicantApproved,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) AS missing_decision,
-  ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) AS missing_listingLeased,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) AS missing_listingLeased,
   ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0)) AS missing_manager,
   %d                     AS maxretries_bgcheck,
   %d                     AS maxretries_payment,
-  (((unitKey <> null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) OR ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0))) AS violating
+  (((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved'))) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0))) AS violating
 `, readinessOptionalMatch, readinessWithItems, maxBgcheckRetries, maxPaymentRetries)
 
 // applicantOnboardingSpec is the identity-anchored onboarding convergence
@@ -1441,10 +1466,10 @@ RETURN
   docStoreName                   AS doc_store_name,
   docFilename                    AS doc_filename,
   docContentType                 AS doc_content_type,
-  ((unitKey <> null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                  AS missing_onboarding,
-  ((unitKey <> null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_bgcheck,
-  ((unitKey <> null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                 AS missing_payment,
-  ((unitKey <> null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                 AS missing_signature,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                  AS missing_onboarding,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))      AS missing_bgcheck,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                 AS missing_payment,
+  ((unitKey <> null) AND (tenancyEndedAt = null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')))                                 AS missing_signature,
   ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) AS missing_decision,
   (bgInflight > 0)                                  AS inflight_bgcheck,
   (payInflight > 0)                                 AS inflight_payment,

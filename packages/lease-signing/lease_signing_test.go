@@ -115,6 +115,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "VerifyGuarantor", Scope: "any"},
 			{OperationType: "SignRenewal", Scope: "any"},
 			{OperationType: "CancelRenewal", Scope: "any"},
+			{OperationType: "EndTenancy", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

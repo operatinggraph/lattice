@@ -197,6 +197,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"staleAssignedTasks":                "identity:assignedTo|task:assignedTo",
 	"staleUserTasks":                    "identity:scopedTo|leaseapp:scopedTo|meta:forOperation|renewal:scopedTo|task:forOperation,scopedTo",
 	"supersededBackgroundChecks":        "identity:providedTo|meta:instanceOf|service:instanceOf,providedTo",
+	"tenancyEnd":                        "leaseapp:appliesToUnit,renews|renewal:renews|unit:appliesToUnit", // leaseExpiry's walk without the landlord hop; the unit's other applications ride the same appliesToUnit relation
 	"unroutedTasks":                     "role:queuedFor|task:queuedFor",
 	"visitSeriesDue":                    "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider|visitseries:forPatient,withProvider",
 	"visitSeriesSiteBackfill":           "building:atSite|provider:withProvider|visitseries:atSite,withProvider",
