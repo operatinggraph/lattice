@@ -181,17 +181,27 @@ pending step matches any completion.
 
 ### Failure detection — bounded machine waits, unbounded async waits, never a silent wedge
 
-- **A systemOp step is bounded end to end.** Its op's commit **is** its completion. A rejected, failed,
+- **A systemOp step is bounded end to end for as long as the evidence of its outcome lives.**
+  *(📐 PROPOSED — UNRATIFIED, 2026-09-14, Lattice Steward: the opening qualifier and branch (d) below.)*
+  Its op's commit **is** its completion. A rejected, failed,
   or unseen outcome is detected by the **per-step deadline**; the engine then distinguishes, by
   evidence, and (a) a committed op whose completion event was missed (a mis-declared
   `completionDomains`, a lost event) **advances and alerts** — the flow stays live; (b) a submission
   still in flight extends the wait; (c) a genuinely rejected/lost op **fails the instance per its
-  retry policy, with an alert** — never a silent wedge (FR29). A late completion after a declared
+  retry policy, with an alert** — never a silent wedge (FR29); **(d) an outcome the engine cannot
+  distinguish — the pending step is older than the Contract #4 op tracker whose absence the probe
+  reads, so a committed op whose tracker has expired and a genuinely rejected one are
+  indistinguishable — is alerted and recorded on the instance, which stays running on its token.**
+  The engine asserts no verdict its evidence can support; a step in (d) is bounded by the flow's own
+  completer, or by an operator, and not by the deadline. A late completion after a declared
   failure is dropped — a bounded, alerted divergence, not a silent one.
 - **A userTask / externalTask step is two waits in sequence:** a **bounded** wait for the
   task/claim to be *created* (a machine action — sized to commit latency, not human latency), then an
   **unbounded** wait for the human / the bridge. A rejected or lost creation **fails the instance
-  with an alert** instead of parking forever; once creation commits, the deadline **disarms** and the
+  with an alert** instead of parking forever — **except past the evidence horizon (d), where the
+  engine alerts and records the inconclusive verdict on the instance rather than assert a terminal
+  its evidence cannot support** *(📐 PROPOSED — UNRATIFIED, 2026-09-14, Lattice Steward)*; once
+  creation commits, the deadline **disarms** and the
   async wait has **no runtime timeout** — the human may take days, and a never-answering bridge is
   bounded by the bridge's own give-up obligation (§10.5 Async resolution). The creation deadline
   **never advances the cursor** — only the completion event does.
