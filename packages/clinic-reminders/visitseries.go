@@ -4,13 +4,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // The clinic vertical's recurring forcing function: a patient on a standing cadence
 // (chronic-care monthly check-ins, weekly PT) gets a self-rolling "next visit due"
-// worklist gap instead of a per-entity @every schedule. Structurally a ROLLING
-// generalization of followups.go's one-shot follow-up: the same convergence
-// machinery (aspect + op + freshUntil-armed @at lens + directOp playbook), made to
-// re-arm its own next deadline each time it converges instead of firing once. See
-// _bmad-output/implementation-artifacts/clinic-recurring-visit-series-design.md §3
-// for why this is a package-level rolling-@at series rather than a per-series
-// @every schedule (state lives in the read model; timers are derived from it).
+// worklist gap instead of a per-entity @every schedule. An occurrence is credited
+// by a VISIT, never by the clock: the gap opens only once a qualifying appointment
+// exists at or after the series' own nextDueAt, and the advance re-anchors the
+// cadence on that visit's own start time. See
+// _bmad-output/implementation-artifacts/clinic-recurring-visit-series-design.md §9
+// for the visit-credit model (state lives in the read model; a deadline passing
+// with no booked visit changes nothing on the platform — it is the desk's own
+// worklist bucket, not a Weaver gap).
 //
 //	vtx.visitseries.<id>              class=visitseries   root {}
 //	  .series   = {intervalDays, startAt, activeUntil?}          (write-once at Start)
@@ -33,18 +34,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	  in this direction too — rejects VisitSeriesAlreadyEnded if already set); the same
 //	  "clean termination" activeUntil StartVisitSeries can seed up front, now reachable
 //	  after the fact so a series need not be given an end date at booking time to ever get one
-//	op AdvanceVisitSeries{seriesKey, dueFor, intervalDays, occurrenceCount?}  (the directOp the playbook dispatches)
+//	op AdvanceVisitSeries{seriesKey, dueFor, handledAt, intervalDays, occurrenceCount?}  (the directOp the playbook dispatches)
 //	op BackfillVisitSeriesSite{seriesKey} / SetVisitSeriesSite{seriesKey, site}  (the atSite link — visitseries_site.go)
-//	lens visitSeriesDue (weaver-target, full)   (freshUntil = .progress.nextDueAt; rolls forward on each advance)
-//	playbook missing_series_advance → directOp(AdvanceVisitSeries, dueFor: row.nextDueAt, intervalDays: row.intervalDays, occurrenceCount: row.occurrenceCount)
+//	lens visitSeriesDue (weaver-target, full)   (handledAt = the LATEST qualifying visit at/after nextDueAt; one advance consumes the whole booked run)
+//	playbook missing_series_advance → directOp(AdvanceVisitSeries, dueFor: row.nextDueAt, handledAt: row.handledAt, intervalDays: row.intervalDays, occurrenceCount: row.occurrenceCount)
 //
 // nextDueAt is precomputed AT WRITE TIME (Start / Advance), never derived by the
 // lens — the full engine's cypher has no date-arithmetic support (no duration()/
 // date-add function), so every deadline in this codebase is a stored field the
 // lens compares lexically, never computed in the cypher itself (the remindAt /
-// followUpDate precedent). AdvanceVisitSeries rolls nextDueAt forward from the
-// deadline it just serviced (dueFor), NOT from $now, keeping the cadence on a fixed
-// grid immune to fire latency drift — the same rule followUpReminders documents.
+// followUpDate precedent). AdvanceVisitSeries rolls nextDueAt forward from
+// handledAt — the crediting visit's own start time — NOT from dueFor and NOT from
+// $now, so the cadence is "every N days from the last visit", anchored on a
+// recorded fact rather than a dispatch instant.
 const (
 	visitSeriesVertexDDL       = "visitseries"
 	visitSeriesAspectDDL       = "visitSeriesDefinition"
@@ -97,9 +99,13 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			"cutoff is already set — the same clean-termination field StartVisitSeries can seed up front, now " +
 			"settable after the fact so a series left open-ended can still be given an end date. " +
 			"AdvanceVisitSeries is the directOp the visitSeriesDue §10.8 " +
-			"playbook dispatches when missing_series_advance opens: it rolls .progress forward — lastOccurrenceAt = dueFor (the " +
-			"deadline just serviced, NOT $now — keeps the cadence on a fixed grid), nextDueAt = dueFor + " +
-			"intervalDays·days, occurrenceCount + 1 — re-arming the next occurrence. " +
+			"playbook dispatches when missing_series_advance opens: it rolls .progress forward — lastOccurrenceAt = handledAt (the " +
+			"LATEST qualifying visit's own start time, so one advance consumes every visit booked ahead of the " +
+			"gap in a single dispatch), nextDueAt = handledAt + intervalDays·days, occurrenceCount + 1 — " +
+			"re-anchoring the cadence on the visit that serviced it. dueFor is kept as the audit fact (the deadline " +
+			"being serviced) and the op refuses InvalidArgument if handledAt is before dueFor, and StaleRow if the " +
+			"series' CURRENT .progress.nextDueAt (re-read here, never trusted from the row) no longer matches dueFor " +
+			"— a redelivered or racing dispatch of a row evaluated before an earlier advance already landed. " +
 			"BackfillVisitSeriesSite{seriesKey} is the orchestration-internal auto-remediation that fills in the " +
 			"series' atSite link (visitseries → building), dispatched by the visitSeriesSiteBackfill Weaver " +
 			"target's missing_series_site gap for a LIVE series carrying none — the corpus started before the " +
@@ -135,7 +141,8 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			`"activeUntil":{"type":"string","description":"RFC3339 instant the series stops re-arming past (StartVisitSeries; optional — absent means no end)."},` +
 			`"seriesKey":{"type":"string","description":"vtx.visitseries.<NanoID> of an existing series (PauseVisitSeries/ResumeVisitSeries/EndVisitSeries/AdvanceVisitSeries/BackfillVisitSeriesSite/SetVisitSeriesSite; required, validated alive). The caller MUST list it in ContextHint.Reads."},` +
 			`"site":{"type":"string","description":"vtx.building.<NanoID> clinic site the series' visits happen at (SetVisitSeriesSite; required). Must be one of the series' own provider's live practicesAt sites — a building that is not assigned to that provider, or has since been decommissioned, is REJECTED (ProviderNotAtSite), never a silent fall-through. Writes an atSite link (visitseries→building). A no-op if the series already carries one."},` +
-			`"dueFor":{"type":"string","description":"The .progress.nextDueAt deadline this advance is servicing (AdvanceVisitSeries; the playbook supplies row.nextDueAt)."},` +
+			`"dueFor":{"type":"string","description":"The .progress.nextDueAt deadline this advance is servicing (AdvanceVisitSeries; the playbook supplies row.nextDueAt) — kept as the audit fact, never the base the roll-forward math uses."},` +
+			`"handledAt":{"type":"string","description":"RFC3339 start time of the LATEST qualifying visit crediting this occurrence (AdvanceVisitSeries; required; the playbook supplies row.handledAt) — one advance consumes every qualifying visit booked at/after dueFor, not just the first. Must be on or after dueFor (InvalidArgument otherwise). Becomes .progress.lastOccurrenceAt and the base nextDueAt rolls forward from."},` +
 			`"occurrenceCount":{"type":"integer","description":"The series' current occurrence count before this advance (AdvanceVisitSeries; the playbook supplies row.occurrenceCount; defaults 0 if omitted)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
@@ -148,7 +155,8 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			"activeUntil":     "Optional RFC3339 instant past which the series stops re-arming (clean termination — no cancel op needed). Absent means the series never ends on its own.",
 			"seriesKey":       "Full vtx.visitseries.<NanoID> key of an existing series.",
 			"site":            "Full vtx.building.<NanoID> clinic site key (SetVisitSeriesSite; required, and only there — BackfillVisitSeriesSite resolves the site itself). Validated to be one of the series' own provider's LIVE practicesAt sites (ProviderNotAtSite otherwise), so it names a real, still-operating site the provider actually works at. Writes an atSite link (visitseries→building), which is what keeps the series inside its front desk's world once the provider is tombstoned.",
-			"dueFor":          "The .progress.nextDueAt deadline this AdvanceVisitSeries is servicing. Stored as the new .progress.lastOccurrenceAt and used as the base the next nextDueAt rolls forward from (fixed-grid cadence, immune to dispatch latency).",
+			"dueFor":          "The .progress.nextDueAt deadline this AdvanceVisitSeries is servicing. Kept as the audit fact (occurredFor in the emitted event) — never the base the roll-forward math uses. The op refuses InvalidArgument if handledAt is before dueFor.",
+			"handledAt":       "RFC3339 start time of the LATEST qualifying visit credited by this occurrence — one advance consumes the whole booked run, not just its first visit. Stored as the new .progress.lastOccurrenceAt and used as the base the next nextDueAt rolls forward from — the cadence re-anchors on the visit that serviced it, not on the deadline or on $now.",
 			"occurrenceCount": "The series' occurrence count going into this advance (the visitSeriesDue playbook supplies row.occurrenceCount). Stored back incremented by one; purely informational (not gate-affecting).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -165,7 +173,7 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "PauseVisitSeries — suspend a series",
 				Payload:         map[string]any{"seriesKey": "vtx.visitseries.<NanoID>"},
-				ExpectedOutcome: "Upserts .paused {value:true}; the visitSeriesDue lens stops projecting a due gap or an armed @at until resumed.",
+				ExpectedOutcome: "Upserts .paused {value:true}; the visitSeriesDue lens stops projecting a due gap until resumed.",
 			},
 			{
 				Name:            "ResumeVisitSeries — un-pause a series",
@@ -180,14 +188,14 @@ func visitSeriesVertexTypeDDL() pkgmgr.DDLSpec {
 					"given at StartVisitSeries time would — clean termination, no cancel-in-flight special case.",
 			},
 			{
-				Name: "AdvanceVisitSeries — roll the series forward one occurrence",
+				Name: "AdvanceVisitSeries — roll the series forward one occurrence, credited by the visit that serviced it",
 				Payload: map[string]any{
 					"seriesKey": "vtx.visitseries.<NanoID>", "dueFor": "2026-08-01T09:00:00Z",
-					"intervalDays": 30, "occurrenceCount": 0,
+					"handledAt": "2026-08-03T09:00:00Z", "intervalDays": 30, "occurrenceCount": 0,
 				},
-				ExpectedOutcome: "Validates the series is alive, then writes .progress {lastOccurrenceAt: dueFor, " +
-					"nextDueAt: dueFor + 30 days, occurrenceCount:1}. Re-runs cleanly (idempotent in effect — the " +
-					"MarkExpired / reminder-marker idiom).",
+				ExpectedOutcome: "Validates the series is alive, then writes .progress {lastOccurrenceAt: handledAt, " +
+					"nextDueAt: handledAt + 30 days, occurrenceCount:1}. Re-runs cleanly (idempotent in effect — the " +
+					"MarkExpired / reminder-marker idiom). Rejects InvalidArgument if handledAt is before dueFor.",
 			},
 			{
 				Name:    "BackfillVisitSeriesSite — backfill a missing atSite link (orchestration-internal)",
@@ -257,9 +265,9 @@ func visitSeriesDefinitionAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
-// visitSeriesProgressAspectTypeDDL declares the .progress rolling state — the field
-// the visitSeriesDue lens reads for its freshUntil / missing_series_advance gate, and the ONLY
-// aspect AdvanceVisitSeries writes.
+// visitSeriesProgressAspectTypeDDL declares the .progress rolling state — the
+// field the visitSeriesDue lens reads for its handledAt / missing_series_advance
+// gate, and the ONLY aspect AdvanceVisitSeries writes.
 func visitSeriesProgressAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     visitSeriesProgressAspect,
@@ -269,18 +277,19 @@ func visitSeriesProgressAspectTypeDDL() pkgmgr.DDLSpec {
 			"vtx.visitseries.<NanoID>.progress (class visitSeriesProgress) = {nextDueAt, occurrenceCount, " +
 			"lastOccurrenceAt?}. Non-sensitive. Written by StartVisitSeries (seeds nextDueAt = startAt, " +
 			"occurrenceCount = 0) and rolled forward by AdvanceVisitSeries (the directOp the visitSeriesDue §10.8 " +
-			"playbook dispatches) each time an occurrence comes due. UNCONDITIONED updates (create-if-absent / " +
-			"overwrite-if-present) — idempotent in effect, re-run-safe under at-least-once (the reminder-marker idiom).",
+			"playbook dispatches) once a qualifying visit credits the occurrence. UNCONDITIONED updates " +
+			"(create-if-absent / overwrite-if-present) — idempotent in effect, re-run-safe under at-least-once " +
+			"(the reminder-marker idiom).",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"nextDueAt":{"type":"string","description":"RFC3339 instant of the next occurrence — the lens's freshUntil / missing_series_advance gate deadline."},` +
+			`{"nextDueAt":{"type":"string","description":"RFC3339 instant of the next occurrence — the lens's missing_series_advance gate deadline."},` +
 			`"occurrenceCount":{"type":"integer","description":"Count of occurrences serviced so far (informational)."},` +
-			`"lastOccurrenceAt":{"type":"string","description":"RFC3339 instant of the most recently serviced occurrence (absent until the first advance)."}}}`,
+			`"lastOccurrenceAt":{"type":"string","description":"RFC3339 start time of the visit that credited the most recently serviced occurrence (absent until the first advance)."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"nextDueAt":        "RFC3339 instant of the next occurrence. The visitSeriesDue lens arms freshUntil = nextDueAt while future, and opens missing_series_advance once it passes.",
+			"nextDueAt":        "RFC3339 instant of the next occurrence. The visitSeriesDue lens opens missing_series_advance once a qualifying visit exists at or after it.",
 			"occurrenceCount":  "Count of occurrences serviced so far. Purely informational — not gate-affecting.",
-			"lastOccurrenceAt": "RFC3339 instant of the most recently serviced occurrence (the dueFor AdvanceVisitSeries was given). Absent until the first advance.",
+			"lastOccurrenceAt": "RFC3339 start time of the visit that credited the most recently serviced occurrence (the handledAt AdvanceVisitSeries was given). Absent until the first advance.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -304,14 +313,14 @@ func visitSeriesPausedAspectTypeDDL() pkgmgr.DDLSpec {
 			"vtx.visitseries.<NanoID>.paused (class visitSeriesPaused) = {value: bool}. Non-sensitive. Written ONLY " +
 			"by PauseVisitSeries / ResumeVisitSeries; absent means not paused (the visitSeriesDue lens tests " +
 			"value <> true, which is true when the aspect is absent — null-safe). While paused the lens projects " +
-			"no due gap and no armed @at timer, and the current .progress.nextDueAt is preserved (resuming picks up " +
-			"exactly where it left off, no missed-occurrence catch-up burst).",
+			"no due gap, and the current .progress.nextDueAt is preserved (resuming picks up exactly where it " +
+			"left off, no missed-occurrence catch-up burst).",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"value":{"type":"boolean","description":"true = paused, false = resumed."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"value": "true = paused (the series stops projecting a due gap or an armed timer); false = resumed.",
+			"value": "true = paused (the series stops projecting a due gap); false = resumed.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -896,22 +905,52 @@ def execute(state, op):
         if not vertex_alive(state, series_key):
             fail("UnknownVisitSeries: " + series_key + " is absent or tombstoned; no advance written")
 
-        due_for = required_string(p, "dueFor")
+        due_for = time.rfc3339_utc(required_string(p, "dueFor"))
+        handled_at = time.rfc3339_utc(required_string(p, "handledAt"))
         interval_days = required_int(p, "intervalDays")
         if interval_days <= 0:
             fail("InvalidArgument: intervalDays: must be positive")
         occurrence_count = optional_int(p, "occurrenceCount", 0)
 
-        # nextDueAt rolls forward from dueFor (the deadline JUST serviced), not
-        # $now — keeps the cadence on a fixed grid, immune to dispatch latency (the
-        # followUpReminders idiom). intervalDays is re-supplied by the playbook
-        # (row.intervalDays) so this op needs no second read of .series.
-        next_due = time.rfc3339_add(due_for, str(interval_days * 24) + "h")
+        # handledAt is the crediting visit's own start time (the visitSeriesDue
+        # playbook supplies row.handledAt, the LATEST qualifying appointment at
+        # or after dueFor — one advance consumes the whole booked run, however
+        # many qualifying visits it contains) — it must not predate the deadline
+        # it is credited against. String comparison is exact because both sides
+        # are normalized RFC3339 UTC above.
+        if handled_at < due_for:
+            fail("InvalidArgument: handledAt: must be on or after dueFor")
 
-        progress = {"lastOccurrenceAt": due_for, "nextDueAt": next_due, "occurrenceCount": occurrence_count + 1}
-        mutations = [make_aspect_upsert(series_key, "progress", "visitSeriesProgress", progress)]
+        # The op reads .progress itself (ContextHint.Reads declares
+        # row.entityKey.progress alongside the anchor) rather than trusting
+        # dueFor/occurrenceCount as the CURRENT state: a redelivered or racing
+        # dispatch of a stale row — one evaluated before an earlier advance
+        # already landed — carries an older nextDueAt/occurrenceCount than what
+        # is live, and applying it would roll the series BACKWARD. Absence means
+        # undeclared (StartVisitSeries always writes .progress atomically with
+        # the series vertex) — fail closed rather than silently treat it as a
+        # fresh series.
+        progress_aspect_key = series_key + ".progress"
+        if not vertex_alive(state, progress_aspect_key):
+            fail("UnknownVisitSeries: " + series_key + " has no progress")
+        progress_doc = state[progress_aspect_key]
+        current_next_due = progress_doc.data.get("nextDueAt")
+        if current_next_due != due_for:
+            fail("StaleRow: " + series_key + " nextDueAt is " + str(current_next_due) + ", dispatch was for " + due_for)
+
+        # nextDueAt rolls forward from handledAt (the visit that credited this
+        # occurrence), NOT from dueFor and NOT from $now — the cadence is "every
+        # intervalDays days from the last visit". One advance is one occurrence,
+        # whatever the size of the run it consumed — occurrenceCount ticks by
+        # exactly one, not by however many visits qualified. intervalDays is re-supplied by
+        # the playbook (row.intervalDays) so this op needs no second read of
+        # .series.
+        next_due = time.rfc3339_add(handled_at, str(interval_days * 24) + "h")
+
+        progress = {"lastOccurrenceAt": handled_at, "nextDueAt": next_due, "occurrenceCount": occurrence_count + 1}
+        mutations = [make_aspect_upsert_occ(series_key, "progress", "visitSeriesProgress", progress, progress_doc.revision)]
         events = [{"class": "clinic.visitSeriesAdvanced",
-                   "data": {"seriesKey": series_key, "occurredFor": due_for, "nextDueAt": next_due}}]
+                   "data": {"seriesKey": series_key, "occurredFor": due_for, "handledAt": handled_at, "nextDueAt": next_due}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": series_key}}
 
     if ot == "BackfillVisitSeriesSite":
@@ -1040,9 +1079,10 @@ def execute(state, op):
 `
 
 // visitSeriesDueLens is the recurring visit-series convergence lens — one row per
-// series, mirroring appointmentRemindersSpec/followUpRemindersSpec's freshness
-// inversion (freshUntil = the deadline arms the @at; the gap OPENS once it passes)
-// but re-arming a NEW freshUntil on every convergence instead of clearing to null.
+// series. The gap is level-triggered on a recorded FACT, not a clock lapse: it
+// opens once a qualifying visit exists at or after the series' own nextDueAt, and
+// closes the instant AdvanceVisitSeries re-anchors nextDueAt past that visit — no
+// clearing write, no armed timer, no freshUntil column at all.
 func visitSeriesDueLens() pkgmgr.LensSpec {
 	return pkgmgr.LensSpec{
 		CanonicalName:  "visitSeriesDue",
@@ -1055,7 +1095,7 @@ func visitSeriesDueLens() pkgmgr.LensSpec {
 		Output: &pkgmgr.OutputDescriptorSpec{
 			AnchorType:       "visitseries",
 			OutputKeyPattern: "visitSeriesDue.{actorSuffix}",
-			BodyColumns:      []string{"violating", "missing_series_advance", "entityKey", "freshUntil", "nextDueAt", "intervalDays", "occurrenceCount", "active", "patientKey", "providerKey"},
+			BodyColumns:      []string{"violating", "missing_series_advance", "entityKey", "handledAt", "nextDueAt", "intervalDays", "occurrenceCount", "active", "patientKey", "providerKey"},
 			EmptyBehavior:    "delete",
 			KeyColumn:        "entityId",
 		},
@@ -1065,68 +1105,98 @@ func visitSeriesDueLens() pkgmgr.LensSpec {
 // visitSeriesDueSpec is the one-row-per-series convergence cypher.
 //
 // active = NOT paused AND (no activeUntil OR nextDueAt <= activeUntil) — a paused
-// series or one whose next occurrence would fall past its end projects no gap and
-// no armed timer (clean termination / suspension, no cancel-schedule dance).
+// series or one whose next occurrence would fall past its end projects no gap
+// (clean termination / suspension, no cancel-schedule dance).
 //
-// The gate:
+// handledAt is the LATEST QUALIFYING visit crediting the series' current
+// nextDueAt: an appointment forPatient the series' own patient, whose recorded
+// status is neither cancelled nor noShow, whose schedule.startsAt is at or after
+// nextDueAt, and — when the series carries a withProvider link — held with that
+// same provider (a provider-less series accepts any provider). max() folds the
+// candidate set down to the LATEST such startsAt, dropping every non-qualifying
+// row to null (Cypher aggregate semantics — internal/refractor/ruleengine/full/
+// aggregate.go), so a series with no qualifying visit projects handledAt = null.
 //
-//   - freshUntil = nextDueAt WHILE active AND this target has recorded no lapse
-//     reaching nextDueAt (a wake-up arming Weaver's @at temporal lane). A
-//     nextDueAt already in the past — a series whose cadence fell behind — is
-//     projected VERBATIM so the overdue @at fires at once and records the lapse,
-//     which is the only path that opens the gap.
-//   - missing_series_advance = active AND
-//     freshnessExpiry.data.byTarget.visitSeriesDue >= nextDueAt (the violating row
-//     the playbook converges via AdvanceVisitSeries). Both operands are stored
-//     graph data — the lens reads no clock, so the row is a pure function of the
-//     subgraph. compareAny answers false when either is nil, so a series no timer
-//     has fired on, and one carrying no nextDueAt, both read not-due.
+// max, not min: a Weaver gap is a level-triggered episode, not a per-visit
+// event — the mark-and-lease anti-storm guard acks the row it dispatched
+// against, and a gap that stays violating with a CHANGED handledAt (a second
+// visit booked ahead, arriving before the first advance lands) never passes
+// through "closed", so the 30-minute mark-lease reclaim plus the 3-attempt
+// per-gap directOp budget can wedge a series with several visits booked ahead
+// (GapBudgetExhausted). Crediting the LATEST qualifying visit means ONE
+// AdvanceVisitSeries consumes the WHOLE booked run: after the advance every
+// qualifying visit satisfies startsAt <= handledAt < nextDueAt, so none of
+// them can satisfy `startsAt >= nextDueAt` on the next projection and the gap
+// closes in a single dispatch, however many visits were booked ahead.
+// occurrenceCount still advances by exactly one per dispatch — one advance is
+// one occurrence, whatever the size of the run it consumed; a mid-run
+// occurrence is not separately recorded (no reader needs it: the desk sees
+// the series caught up, not each intermediate visit).
 //
-// Unlike the one-shot reminders, convergence here does NOT clear the gate to
-// permanently false — AdvanceVisitSeries rewrites nextDueAt to a NEW future
-// deadline, so the row re-projects PENDING (not due, freshUntil re-armed) rather
-// than SENT. That is the "roll" — the series never fully converges while active;
-// it just keeps re-arming its own next wake-up. The marker needs no clearing
-// write for that: the advance moves nextDueAt PAST the recorded instant, so the
-// comparison reads not-due again on its own.
+//   - missing_series_advance = active AND handledAt <> null — a qualifying visit
+//     exists but the series has not yet been rolled past it. Both operands are
+//     stored graph data plus the fold over it; the lens reads no clock, so the
+//     row is a pure function of the subgraph.
+//
+// The gap needs no clearing write to close: AdvanceVisitSeries rewrites
+// nextDueAt to a NEW future deadline anchored on the crediting visit's own
+// startsAt, so no visit already booked can still satisfy `startsAt >= nextDueAt`
+// on the next projection and handledAt folds back to null on its own.
+//
+// A series overdue with no qualifying visit projects active=true,
+// missing_series_advance=false: "book the patient" is the desk's job, not
+// something Weaver can converge, so the row stays a worklist entry (the FE's own
+// seriesUrgency bucket off nextDueAt), never a violating one.
 //
 // '<> true' (not '= false') is the paused null-test: an absent .paused aspect
 // reads null, and null <> true is true in the full engine (the remindedFor <>
 // startsAt idiom) — so a series that has never been paused is correctly treated as
 // not-paused without a separate absence check. '= null' (not the unsupported IS
-// NULL) is the activeUntil absence test.
+// NULL) is the activeUntil / provider-absence test; the same null-safety makes
+// `a.status.data.value <> 'cancelled'` read true for a visit with no .status
+// aspect at all — status absence, like a never-set .paused, is "not this value",
+// never a silent exclusion.
 //
 // forPatient is a REQUIRED match, and it is what bounds the population: a
 // series carrying no patient link — or one whose patient is tombstoned, which
-// Contract #1 filters out of every graph walk — projects NO row, so it arms no
-// @at and dispatches no AdvanceVisitSeries. That is exactly the population
-// visitSeriesReadSpec projects, so a cadence no hat can see is also a cadence no
-// target keeps rolling: the DUE lens and the READ lens are one population, not
-// two. That pairing is the claim, not a package-wide rule — visitSeriesSiteBackfillSpec
-// deliberately walks no forPatient, so every live series vertex stays a candidate
-// for the missing-site gap whatever its lifecycle or patient state (its own doc
-// comment: staff need to reach a finished cadence, and a tombstoned series is
-// already filtered by the anchor MATCH). withProvider stays OPTIONAL — a
-// display-only neighbour, not the anchor.
+// Contract #1 filters out of every graph walk — projects NO row, so it dispatches
+// no AdvanceVisitSeries. That is exactly the population visitSeriesReadSpec
+// projects, so a cadence no hat can see is also a cadence nothing keeps rolling:
+// the DUE lens and the READ lens are one population, not two. That pairing is the
+// claim, not a package-wide rule — visitSeriesSiteBackfillSpec deliberately walks
+// no forPatient, so every live series vertex stays a candidate for the
+// missing-site gap whatever its lifecycle or patient state (its own doc comment:
+// staff need to reach a finished cadence, and a tombstoned series is already
+// filtered by the anchor MATCH). withProvider stays OPTIONAL on the series side —
+// a display-only neighbour when absent, the provider-match filter when present.
 //
-// One-row-per-anchor: forPatient / withProvider are 0..1 (StartVisitSeries writes
-// exactly one of each, deterministic keys), so neither walk fans the row out.
+// One-row-per-anchor: forPatient / withProvider off the series are 0..1
+// (StartVisitSeries writes exactly one of each, deterministic keys), so neither
+// walk fans the row out; the reverse forPatient walk to the patient's other
+// appointments, and each appointment's own withProvider, are folded away by the
+// max() aggregate in the WITH before RETURN.
 const visitSeriesDueSpec = `MATCH (s:visitseries {key: $actorKey})
 MATCH (s)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (s)-[:withProvider]->(pr:provider)
+OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)
+OPTIONAL MATCH (a)-[:withProvider]->(apr:provider)
+WITH s, p, pr,
+  max(CASE WHEN (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow')
+            AND (a.schedule.data.startsAt >= s.progress.data.nextDueAt)
+            AND ((pr.key = null) OR (apr.key = pr.key))
+       THEN a.schedule.data.startsAt ELSE null END) AS handledAt
 RETURN
   s.key AS actorKey,
   s.key AS entityKey,
   s.series.data.intervalDays AS intervalDays,
-  s.series.data.activeUntil AS activeUntil,
   s.progress.data.nextDueAt AS nextDueAt,
   s.progress.data.occurrenceCount AS occurrenceCount,
   p.key AS patientKey,
   pr.key AS providerKey,
+  handledAt,
   ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil))) AS active,
-  CASE WHEN (s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND NOT (s.freshnessExpiry.data.byTarget.visitSeriesDue >= s.progress.data.nextDueAt) THEN s.progress.data.nextDueAt ELSE null END AS freshUntil,
-  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.freshnessExpiry.data.byTarget.visitSeriesDue >= s.progress.data.nextDueAt)) AS missing_series_advance,
-  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (s.freshnessExpiry.data.byTarget.visitSeriesDue >= s.progress.data.nextDueAt)) AS violating`
+  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (handledAt <> null)) AS missing_series_advance,
+  ((s.paused.data.value <> true) AND ((s.series.data.activeUntil = null) OR (s.progress.data.nextDueAt <= s.series.data.activeUntil)) AND (handledAt <> null)) AS violating`
 
 // visitSeriesReadLens is the PATIENT-anchored protected Postgres read model for
 // the recurring-visit-series view (D1.5, mirroring clinic-domain's
@@ -1174,7 +1244,7 @@ RETURN
 // OPTIONAL: a display-only neighbour, not the anchor. series_status /
 // next_due_at / interval_days / occurrence_count are the same display columns
 // the unprotected visitSeriesDue lens's own active/nextDueAt/etc. derive from;
-// the Weaver-dispatch machinery columns (freshUntil, missing_series_advance,
+// the Weaver-dispatch machinery columns (handledAt, missing_series_advance,
 // violating) are NOT projected here — this is a read model, not a convergence
 // target.
 func visitSeriesReadLens() pkgmgr.LensSpec {
@@ -1218,7 +1288,7 @@ func visitSeriesReadLens() pkgmgr.LensSpec {
 
 // visitSeriesReadSpec is the PATIENT-anchored protected Postgres read model's
 // cypher (D1.5). Same nextDueAt derivation as visitSeriesDueSpec, minus the
-// freshUntil/missing_series_advance/violating dispatch columns.
+// handledAt/missing_series_advance/violating dispatch columns.
 //
 // series_status is the raw three-state read a client renders directly
 // (mirroring clinic-domain's own appointmentStatus idiom) rather than the
@@ -1274,14 +1344,29 @@ RETURN
 `
 
 // visitSeriesDueTarget returns the §10.8 playbook: the single missing_series_advance gap →
-// directOp(AdvanceVisitSeries) over the series, supplying dueFor + intervalDays +
-// occurrenceCount from the row so the op needs no second read.
+// directOp(AdvanceVisitSeries) over the series, supplying dueFor + handledAt +
+// intervalDays + occurrenceCount from the row so the op needs no second read.
+// handledAt rides the lens's OPTIONAL walk to the LATEST qualifying appointment,
+// but it is non-null by construction whenever this gap is open — the gap IS
+// `handledAt <> null` — so the dispatch never fires with the param missing.
+// Crediting the LATEST (not the earliest) qualifying visit is what lets one
+// advance consume the WHOLE booked run: several visits booked ahead of a gap
+// Weaver has not yet dispatched against would otherwise keep the row
+// perpetually violating with a moving handledAt, which the mark-and-lease
+// anti-storm guard's 3-attempt-per-episode budget cannot outlast
+// (GapBudgetExhausted) — see the spec's own doc comment for the full argument.
+// Reads declares `.progress` alongside the anchor itself: the op refuses a
+// dispatch against a nextDueAt Weaver has since moved past (a redelivered or
+// racing dispatch of a stale row), so it must read the CURRENT progress rather
+// than trust the row's own copy.
 func visitSeriesDueTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: VisitSeriesDueTarget,
-		Description: "An active recurring visit series always has a future next-visit date. When a visit comes due " +
-			"the series records that occurrence and rolls forward to the next; paused or ended series stand " +
-			"still.",
+		Description: "An active recurring visit series is due once a visit exists at or after its next-visit " +
+			"date. When that qualifying visit — or the latest of several booked ahead — is found, the series " +
+			"records it as the occurrence and rolls the cadence forward from it, consuming every qualifying " +
+			"visit in one advance; a series overdue with no such visit stays a worklist entry, not a gap " +
+			"Weaver converges — booking the patient is the desk's job. Paused or ended series stand still.",
 		LensRef: "visitSeriesDue",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_series_advance": {
@@ -1290,10 +1375,11 @@ func visitSeriesDueTarget() pkgmgr.WeaverTargetSpec {
 				Params: map[string]string{
 					"seriesKey":       "row.entityKey",
 					"dueFor":          "row.nextDueAt",
+					"handledAt":       "row.handledAt",
 					"intervalDays":    "row.intervalDays",
 					"occurrenceCount": "row.occurrenceCount",
 				},
-				Reads: []string{"row.entityKey"},
+				Reads: []string{"row.entityKey", "row.entityKey.progress"},
 			},
 		},
 	}

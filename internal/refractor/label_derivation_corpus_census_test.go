@@ -228,7 +228,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"staleUserTasks":                    {narrow, "identity leaseapp meta renewal task", modeLabel},
 	"supersededBackgroundChecks":        {narrow, "identity meta service", modeRelation},
 	"unroutedTasks":                     {narrow, "role task", modeRelation},
-	"visitSeriesDue":                    {narrow, "patient provider visitseries", modeRelation},
+	"visitSeriesDue":                    {narrow, "appointment patient provider visitseries", modeRelation},
 	"visitSeriesRead":                   {narrow, "building identity patient provider visitseries", modeLabel},
 	"visitSeriesSiteBackfill":           {narrow, "building provider visitseries", modeRelation},
 	"wellnessBookingReminders":          {narrow, "booking identity session", modeRelation},

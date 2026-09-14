@@ -122,7 +122,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"staleUserTasks":                    {"g4/o4!no-aggregating-item g0/o0!no-aggregating-item", 0, 4},
 	"supersededBackgroundChecks":        {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
 	"unroutedTasks":                     {"g0/o0!no-aggregating-item", 0, 0},
-	"visitSeriesDue":                    {"g1/o1!no-aggregating-item", 0, 1},
+	"visitSeriesDue":                    {"g2/o3[a,apr] g0/o0!no-aggregating-item", 1, 2},
 	"visitSeriesRead":                   {"g3/o3!no-aggregating-item", 0, 3},
 	"visitSeriesSiteBackfill":           {"g2/o2!no-aggregating-item", 0, 2},
 	"wellnessBookers":                   {"g0/o0!no-aggregating-item", 0, 0},
@@ -178,6 +178,7 @@ var decomposingCorpusLenses = []string{
 	"objectAttachments",
 	"opCatalog",
 	"renewalComplete",
+	"visitSeriesDue",
 	"wellnessWaitlistPromotion",
 }
 
@@ -208,6 +209,7 @@ var siblingBranchGroupLenses = []string{
 	"pastDueBookings",
 	"providerAppointmentsRead",
 	"staleUserTasks",
+	"visitSeriesDue",
 	"visitSeriesRead",
 	"visitSeriesSiteBackfill",
 	"wellnessBookingReminders",
@@ -234,6 +236,7 @@ var multiGroupDecomposingLenses = []string{
 	"leaseApplicationsRead",
 	"leaseExpiry",
 	"myTasks",
+	"visitSeriesDue",
 }
 
 // footprintValidationVerdicts pins every actorAggregate lens's

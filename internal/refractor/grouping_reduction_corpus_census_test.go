@@ -190,7 +190,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"staleUserTasks":                    {"p p!guarantorVerifiedAt", 0},
 	"supersededBackgroundChecks":        {"key(entityKey instanceOfLink subjectKey) p", 0},
 	"unroutedTasks":                     {"p", 0},
-	"visitSeriesDue":                    {"p", 0},
+	"visitSeriesDue":                    {"key(p pr s) p!p", 0},
 	"visitSeriesRead":                   {"p", 0},
 	"visitSeriesSiteBackfill":           {"p", 0},
 	"wellnessBookers":                   {"p", 0},

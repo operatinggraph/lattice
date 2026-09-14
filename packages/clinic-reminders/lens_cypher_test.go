@@ -507,8 +507,10 @@ func TestConvergenceLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
 			tgt.LensRef, tgt.TargetID)
 		checked++
 	}
-	require.Equal(t, 4, checked,
-		"appointmentReminders, followUpReminders, visitSeriesDue and pastDueAppointments each read a recorded lapse; a drop here is a lens that went back to a clock")
+	require.Equal(t, 3, checked,
+		"appointmentReminders, followUpReminders and pastDueAppointments each read a recorded lapse; visitSeriesDue "+
+			"reads a qualifying visit instead of a freshnessExpiry marker, so it is deliberately not one of the "+
+			"three — a drop below 3 is a lens that went back to a clock")
 }
 
 // TestReminders_TerminalStatusNeverViolates is the agreement vector between the

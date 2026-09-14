@@ -186,7 +186,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"staleUserTasks":                    "identity:scopedTo|leaseapp:scopedTo|meta:forOperation|renewal:scopedTo|task:forOperation,scopedTo",
 	"supersededBackgroundChecks":        "identity:providedTo|meta:instanceOf|service:instanceOf,providedTo",
 	"unroutedTasks":                     "role:queuedFor|task:queuedFor",
-	"visitSeriesDue":                    "patient:forPatient|provider:withProvider|visitseries:forPatient,withProvider",
+	"visitSeriesDue":                    "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider|visitseries:forPatient,withProvider",
 	"visitSeriesSiteBackfill":           "building:atSite|provider:withProvider|visitseries:atSite,withProvider",
 	"wellnessBookingReminders":          "booking:bookedBy,forSession|identity:bookedBy|session:forSession",
 	"wellnessClassPriceSettlement":      "booking:bookedBy,forSession,settlesClassPrice|identity:bookedBy,heldFor|session:forSession|wellnessaccount:heldFor|wellnesstransaction:settlesClassPrice",

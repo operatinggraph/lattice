@@ -215,6 +215,40 @@ func crSubmitOpt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pr
 	return crNanoIDFromRequestID(reqID)
 }
 
+// crReason submits op as the staff actor and returns the script's failure text
+// — the rejection REASON is what a StaleRow/InvalidArgument vector pins, since
+// every refusal collapses to "rejected" at the outcome level (the clinic-domain
+// clStaffReason idiom, packages/clinic-domain/status_clock_guard_test.go).
+func crReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, op, class, payload string, reads []string) string {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         crStaffActorKey,
+		SubmittedAt:   crSubmittedAnchor,
+		Class:         class,
+		Payload:       json.RawMessage(payload),
+	}
+	enums := testutil.DeclaredEnumerations(op, crStaffActorKey, clinicreminders.OpMetas(), clinicdomain.OpMetas())
+	if len(reads) > 0 || len(enums) > 0 {
+		env.ContextHint = &processor.ContextHint{Reads: reads, Enumerations: enums}
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("%s: outcome = %v, want Rejected", label, outcome)
+	}
+	if reply.Error == nil {
+		t.Fatalf("%s: rejected reply carries no error", label)
+	}
+	msg := reply.Error.Message
+	i := strings.Index(msg, "fail: ")
+	if i < 0 {
+		t.Fatalf("%s: rejection carries no script failure: %s", label, msg)
+	}
+	return msg[i+len("fail: "):]
+}
+
 // TestRecordAppointmentReminder_WritesMarker mints a bookable appointment then
 // drives RecordAppointmentReminder, asserting the .reminder.sentAt marker lands
 // (class appointmentReminder) — the directOp write-path the appointmentReminders
@@ -695,9 +729,14 @@ func TestStartVisitSeries_RejectsUnknownPatient(t *testing.T) {
 }
 
 // TestAdvanceVisitSeries_RollsForward drives AdvanceVisitSeries directly (the
-// directOp shape Weaver dispatches — class left empty) and asserts .progress rolls:
-// lastOccurrenceAt = dueFor, nextDueAt = dueFor + intervalDays, occurrenceCount+1.
-// Then re-runs it to prove the unconditioned overwrite is idempotent in effect.
+// directOp shape Weaver dispatches — class left empty) and asserts .progress
+// rolls: lastOccurrenceAt = handledAt (the crediting visit's own start time, NOT
+// dueFor), nextDueAt = handledAt + intervalDays, occurrenceCount+1. Then re-runs
+// it with the SAME params — a same-requestId redelivery is deduped by the
+// Processor before the script ever runs, so a script-level re-run is always a
+// genuinely different dispatch against the state the first advance already
+// wrote, and it is refused StaleRow (reason pinned below) rather than silently
+// re-applied.
 func TestAdvanceVisitSeries_RollsForward(t *testing.T) {
 	ctx, conn := setupRemEnv(t)
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsadv", Instance: "cr-vsadv"})
@@ -711,27 +750,102 @@ func TestAdvanceVisitSeries_RollsForward(t *testing.T) {
 		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
 	seriesKey := "vtx.visitseries." + seriesID
 
+	// handledAt (the crediting visit) is 3 days AFTER dueFor (the deadline being
+	// serviced) — the roll-forward base is handledAt, not dueFor. .progress is
+	// declared alongside the anchor — the op reads it itself to guard against a
+	// stale dispatch.
 	crSubmit(t, ctx, conn, cp, cons, "crvsadv001", "AdvanceVisitSeries", "",
-		`{"seriesKey":"`+seriesKey+`","dueFor":"2026-08-01T09:00:00Z","intervalDays":30,"occurrenceCount":0}`,
-		[]string{seriesKey}, processor.OutcomeAccepted)
+		`{"seriesKey":"`+seriesKey+`","dueFor":"2026-08-01T09:00:00Z","handledAt":"2026-08-04T09:00:00Z","intervalDays":30,"occurrenceCount":0}`,
+		[]string{seriesKey, seriesKey + ".progress"}, processor.OutcomeAccepted)
 
 	progress := crReadDoc(t, ctx, conn, seriesKey+".progress")
 	pd, _ := progress["data"].(map[string]any)
-	if pd["lastOccurrenceAt"] != "2026-08-01T09:00:00Z" {
-		t.Fatalf("progress lastOccurrenceAt = %v, want 2026-08-01T09:00:00Z", pd["lastOccurrenceAt"])
+	if pd["lastOccurrenceAt"] != "2026-08-04T09:00:00Z" {
+		t.Fatalf("progress lastOccurrenceAt = %v, want 2026-08-04T09:00:00Z (the crediting visit's own start)", pd["lastOccurrenceAt"])
 	}
-	if pd["nextDueAt"] != "2026-08-31T09:00:00Z" {
-		t.Fatalf("progress nextDueAt = %v, want 2026-08-31T09:00:00Z (rolled 30 days forward)", pd["nextDueAt"])
+	if pd["nextDueAt"] != "2026-09-03T09:00:00Z" {
+		t.Fatalf("progress nextDueAt = %v, want 2026-09-03T09:00:00Z (handledAt rolled 30 days forward)", pd["nextDueAt"])
 	}
 	if v, _ := pd["occurrenceCount"].(float64); v != 1 {
 		t.Fatalf("progress occurrenceCount = %v, want 1", pd["occurrenceCount"])
 	}
 
-	// Idempotent in effect: a second AdvanceVisitSeries with the SAME dueFor is
-	// ACCEPTED (unconditioned overwrite, not a create-only insert).
-	crSubmit(t, ctx, conn, cp, cons, "crvsadv002", "AdvanceVisitSeries", "",
-		`{"seriesKey":"`+seriesKey+`","dueFor":"2026-08-01T09:00:00Z","intervalDays":30,"occurrenceCount":0}`,
-		[]string{seriesKey}, processor.OutcomeAccepted)
+	// A replay with the SAME params AFTER the first advance already landed now
+	// reads nextDueAt = 2026-09-03 (rolled) but was dispatched for dueFor =
+	// 2026-08-01 — StaleRow, not idempotent-accept: the op cannot tell a
+	// deliberate same-value re-advance from a stale/racing dispatch of a row
+	// evaluated before the first advance, so it fails closed either way.
+	reason := crReason(t, ctx, conn, cp, cons, "crvsadv002", "AdvanceVisitSeries", "",
+		`{"seriesKey":"`+seriesKey+`","dueFor":"2026-08-01T09:00:00Z","handledAt":"2026-08-04T09:00:00Z","intervalDays":30,"occurrenceCount":0}`,
+		[]string{seriesKey, seriesKey + ".progress"})
+	if !strings.HasPrefix(reason, "StaleRow:") {
+		t.Fatalf("replay after the first advance landed: reason = %q, want a StaleRow prefix", reason)
+	}
+}
+
+// TestAdvanceVisitSeries_CreditsLatestOfThreeBookedVisits is the op-level
+// counterpart to the visitSeriesDue lens folding several visits booked ahead
+// of nextDueAt down to the LATEST one's startsAt
+// (visitseries_cypher_test.go's _LatestHandledAt vector): it proves the op
+// rolls nextDueAt from THAT single value regardless of how many visits fed it
+// — one dispatch, one advance, whatever the size of the booked run.
+func TestAdvanceVisitSeries_CreditsLatestOfThreeBookedVisits(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsadv3", Instance: "cr-vsadv3"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvs3pat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvs3prv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+	seriesID := crSubmitOpt(t, ctx, conn, cp, cons, "crvs3start", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
+	seriesKey := "vtx.visitseries." + seriesID
+
+	// Three visits booked ahead of dueFor (2026-08-01, -05, -10) would fold to
+	// handledAt = the LATEST, 2026-08-10 — supplied directly here, mirroring
+	// exactly what the playbook would dispatch off that lens row.
+	const latestOfThree = "2026-08-10T09:00:00Z"
+	crSubmit(t, ctx, conn, cp, cons, "crvs3adv01", "AdvanceVisitSeries", "",
+		`{"seriesKey":"`+seriesKey+`","dueFor":"2026-08-01T09:00:00Z","handledAt":"`+latestOfThree+`","intervalDays":30,"occurrenceCount":0}`,
+		[]string{seriesKey, seriesKey + ".progress"}, processor.OutcomeAccepted)
+
+	progress := crReadDoc(t, ctx, conn, seriesKey+".progress")
+	pd, _ := progress["data"].(map[string]any)
+	if pd["nextDueAt"] != "2026-09-09T09:00:00Z" {
+		t.Fatalf("progress nextDueAt = %v, want 2026-09-09T09:00:00Z (the latest-of-three handledAt rolled 30 days forward)", pd["nextDueAt"])
+	}
+	if v, _ := pd["occurrenceCount"].(float64); v != 1 {
+		t.Fatalf("progress occurrenceCount = %v, want 1 — one advance is one occurrence, however many booked visits it consumed", pd["occurrenceCount"])
+	}
+}
+
+// TestAdvanceVisitSeries_RejectsHandledAtBeforeDueFor proves the credit floor: a
+// handledAt earlier than the dueFor deadline it claims to service is rejected,
+// writing no .progress advance.
+func TestAdvanceVisitSeries_RejectsHandledAtBeforeDueFor(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "vsadvearly", Instance: "cr-vsadvearly"})
+
+	patientID := crSubmit(t, ctx, conn, cp, cons, "crvsepat01", "CreatePatient", "patient", `{"fullName":"Alice Rivera"}`, nil, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	providerID := crSubmit(t, ctx, conn, cp, cons, "crvseprv01", "CreateProvider", "provider", `{"fullName":"Dr. Sam Okafor","specialty":"Cardiology"}`, nil, processor.OutcomeAccepted)
+	providerKey := "vtx.provider." + providerID
+	seriesID := crSubmitOpt(t, ctx, conn, cp, cons, "crvsestart", "StartVisitSeries", "visitseries",
+		`{"patientKey":"`+patientKey+`","providerKey":"`+providerKey+`","intervalDays":30,"startAt":"2026-08-01T09:00:00Z"}`,
+		[]string{patientKey, providerKey}, []string{crActiveVisitSeriesKey(patientKey, providerKey)}, processor.OutcomeAccepted)
+	seriesKey := "vtx.visitseries." + seriesID
+
+	// handledAt is BEFORE dueFor — refused, no advance written.
+	crSubmit(t, ctx, conn, cp, cons, "crvsadve01", "AdvanceVisitSeries", "",
+		`{"seriesKey":"`+seriesKey+`","dueFor":"2026-08-01T09:00:00Z","handledAt":"2026-07-28T09:00:00Z","intervalDays":30,"occurrenceCount":0}`,
+		[]string{seriesKey, seriesKey + ".progress"}, processor.OutcomeRejected)
+
+	progress := crReadDoc(t, ctx, conn, seriesKey+".progress")
+	pd, _ := progress["data"].(map[string]any)
+	if pd["lastOccurrenceAt"] != nil {
+		t.Fatalf("a rejected AdvanceVisitSeries must NOT write .progress.lastOccurrenceAt, got %v", pd["lastOccurrenceAt"])
+	}
 }
 
 // TestAdvanceVisitSeries_RejectsTombstonedSeries proves the liveness guard: a
@@ -748,7 +862,7 @@ func TestAdvanceVisitSeries_RejectsTombstonedSeries(t *testing.T) {
 	}
 
 	crSubmit(t, ctx, conn, cp, cons, "crvsadv003", "AdvanceVisitSeries", "",
-		`{"seriesKey":"`+dead+`","dueFor":"2026-08-01T09:00:00Z","intervalDays":30}`, []string{dead}, processor.OutcomeRejected)
+		`{"seriesKey":"`+dead+`","dueFor":"2026-08-01T09:00:00Z","intervalDays":30}`, []string{dead, dead + ".progress"}, processor.OutcomeRejected)
 
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, dead+".progress"); err == nil {
 		t.Fatalf("a visit-series advance must NOT be written for a tombstoned series")
