@@ -189,10 +189,10 @@ func (e *Engine) InspectInstance(ctx context.Context, instanceID string) (Instan
 // inspectResolved resolves the current step for inst, branching on status first.
 func (e *Engine) inspectResolved(ctx context.Context, inst *Instance) (InstanceDetail, error) {
 	summary := InstanceSummary{
-		InstanceID: inst.InstanceID,
-		PatternRef: inst.PatternRef,
-		SubjectKey: inst.SubjectKey,
-		Cursor:     inst.Cursor,
+		InstanceID:    inst.InstanceID,
+		PatternRef:    inst.PatternRef,
+		SubjectKey:    inst.SubjectKey,
+		Cursor:        inst.Cursor,
 		Status:        inst.Status,
 		RetryCount:    inst.RetryCount,
 		DeadlineProbe: inst.DeadlineProbe,
