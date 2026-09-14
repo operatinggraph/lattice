@@ -392,18 +392,40 @@ downgrade clears a note, acceptable.
 | 7 | **A TTL'd Health-KV key per inconclusive instance** (the auth-trace shape) | Rejected: a standing fact needs a lifecycle, and clearing it at every transition is an unconditional purge on a usually-absent subject — the marker-minting hazard `deleteToken` documents (`state.go:631-645`) |
 | 8 | **Nak / re-arm instead of alert** | Rejected: a Nak asks for evidence that cannot appear; a re-arm loops every arm with the same verdict |
 
-### 3.4 Contract surface — builds to Contract #10 §10.6, no edit
+### 3.4 Contract surface — Contract #10 §10.6 NEEDS AN EDIT (this section's original claim is falsified)
 
-§10.6's failure-detection clause ([10-orchestration-loom.md:182-195](../../docs/contracts/10-orchestration-loom.md)):
-*"the engine then distinguishes, **by evidence**, and (a)… (b)… (c) a genuinely rejected/lost op fails the
-instance … with an alert — never a silent wedge"*; *"A rejected or lost creation fails the instance with an
-alert instead of parking forever"*. The guard makes the first sentence true past the evidence's lifetime — the
-engine refuses to *distinguish* without evidence — and keeps the last: the inconclusive path is alerted, not
-silent, and the operator verb (`redrive`) is the same one a false fail needs today. **The one consequence a
-reader could observe:** in the day-long-outage scenario only, a creation that was genuinely rejected before the
-outage is alerted-and-parked rather than failed. Today that same delivery fails healthy instances too; no
-runtime can tell the two apart once the tracker is gone, and the contract nowhere promises a verdict without
-evidence. Stated for Andrew's one look (§4); no `docs/contracts/*` edit.
+**Amended 2026-09-14 at build time, per the body-stays-true rule.** This section asserted that the guard
+builds to §10.6 with no `docs/contracts/*` edit. **That is wrong, and it was wrong when ratified.** Two of
+§10.6's clauses are *structural* promises about termination, not epistemic rules about evidence, and the guard
+contradicts both; a third sentence below rested on an operator verb that does not exist. The original text is
+struck and replaced here rather than annotated, because a builder reading it would have shipped against a
+contract it violates.
+
+§10.6's failure-detection clauses ([10-orchestration-loom.md](../../docs/contracts/10-orchestration-loom.md),
+the "Failure detection" subsection): *"**A systemOp step is bounded end to end.** … the engine then
+distinguishes, **by evidence**, and (a)… (b)… (c) a genuinely rejected/lost op fails the instance … with an
+alert — never a silent wedge (FR29)"*; *"A rejected or lost creation fails the instance with an alert **instead
+of parking forever**"*.
+
+- **What the original argument got right.** "Distinguishes **by evidence**" is an epistemic rule, and the guard
+  honours it: past the horizon the engine declines to establish (c)'s antecedent at all. Read as an enumeration
+  of what the engine *knows*, (a)/(b)/(c) is not contradicted.
+- **What it missed.** *"Bounded end to end"* and *"instead of parking forever"* are promises about the
+  **outcome**, and past the horizon the instance genuinely parks. §3.2's own state table contains the row where
+  (c)'s antecedent is TRUE — *"late-minted `MaxAge`, op genuinely rejected before the outage"* — and the
+  shipped outcome for that row is the one those clauses forbid by name. Conceding it as "the one consequence a
+  reader could observe" and then declining to edit the contract *was* the contradiction.
+- **The sentence that was simply false.** *"the operator verb (`redrive`) is the same one a false fail needs
+  today"* — `RedriveInstance` accepts only a `failed` instance, so no verb reaches the parked state. Widening it
+  was built and then **withdrawn** in this fire (§3.8); the gap is real and filed.
+
+**Resolution (2026-09-14).** The build shipped; the contract edit is **prepared as a proposal for Andrew, never
+committed by the Steward** (CLAUDE.md; `agents/steward/REMOTE.md` §2 — a proposal branch off `main` whose diff
+*is* the proposal, with `📐 PROPOSED — UNRATIFIED` banners). Its shape: qualify *"bounded end to end"* to the
+lifetime of the evidence, add a **(d)** branch for an outcome the engine cannot distinguish (alerted and
+recorded on the instance, which stays running on its token), and qualify the *"parking forever"* clause with
+that same exception. (d) deliberately names no operator verb, because there is none to name and a contract
+carries observable promises only.
 
 ### 3.5 Verdict — `📋 ready · S–M · ★`: the probe refuses to read absence as rejection past the evidence horizon
 
@@ -484,9 +506,14 @@ names no such sentences** — the live text is dossier entry 11 (`:672-679`); th
   fire **adds** it, mirroring `internal/weaver/engine.go:293-321` verbatim in shape (a `clock` field plus an
   `e.now()` accessor that tolerates the zero value, so a hand-built Engine keeps the wall clock). This narrows
   nothing and substitutes nothing; it is the seam the ratified test needs.
-- **`natsfixture` cannot restart a file-backed server** (`natsfixture.go:82-138`; `jsstore.Dir` removes the
-  dir on `t.Cleanup`, with no reuse API). §3.5 anticipates exactly this: the `filestore.go` cites stand as
-  T8's pin and **the fixture gap is an adjacent find** (part 6).
+- ~~**`natsfixture` cannot restart a file-backed server**~~ — **true when this brief was compiled, FALSIFIED
+  by this same run** (struck 2026-09-14, body-stays-true). The fixture gap was absorbed as the batch's own
+  second unit rather than left as a find: `natsfixture.StartRestartableServer` /
+  `RestartableServer.{Stop,Start,StoreDir}` gives the JetStream store to the *test* instead of to any one
+  server (`8f25624`), and **T8 is pinned live** by
+  `TestKVMarkerProvenance_TTLPastDueAtRecoveryStillMintsAMaxAgeMarker` in
+  `internal/substrate/kv_marker_provenance_test.go` — the stronger of §3.5's two options, not the
+  `filestore.go`-cites fallback. A reader must not take this bullet as licence to skip the pin: it exists.
 
 **3. Precedents to mirror.**
 
@@ -528,10 +555,8 @@ leaves behind"* — T1 seeds through `createInstance` + `transition`, never `put
 checklist applies whole, #1 hardest: **the note is new state, so its state table is §3.2's, and every row of
 it is a test** (created / reset at four boundaries / carried across restart / ordered by the CAS).
 
-**6. Adjacent finds.** (a) **`natsfixture` cannot restart a file-backed NATS server**, so no test in the tree
-can exercise a past-due per-message TTL across a recovery — the shape T8 wants. Absorbed into this run's batch
-as its own unit if it is a bounded fixture option; a genuinely new fixture lifecycle is the one designer out.
-(b) §3.2's `docs/components/loom.md:351,363,587` and the `platform-bucket-marker-ttl-design.md:26` sentence
+**6. Adjacent finds.** (a) ~~**`natsfixture` cannot restart a file-backed NATS server**~~ — **CLOSED by this
+run**, absorbed as the batch's second unit (`8f25624`), not filed. (b) §3.2's `docs/components/loom.md:351,363,587` and the `platform-bucket-marker-ttl-design.md:26` sentence
 are stale *instructions* pointing at a "separate, unbuilt row" this fire closes — fixed in increment 5, in the
 same commit (the body-stays-true rule).
 
@@ -548,6 +573,65 @@ executable censuses re-run live: the three bounds read `1h / 1h / 24h`, the inva
 stated. The one census whose *form* differs: §3.6's `probeFail(ctx, inst, .*rejected` expects 3 and matches
 **0**, because two of the three verdicts carry their reason through `fmt.Sprintf` on a separate line; the
 three sites are `:1488`, `:1542`, `:1612` as designed — the count holds, the grep does not.
+
+### 3.8 Close note — SHIPPED 2026-09-14, and what did not ship
+
+**Shipped on `main`** (Steward/Lattice, branch `claude/exciting-clarke-re5z2f`): `8f25624` the T8 fixture seam
++ live pin · `711d468` the guard · `ce9843a` the fix round · `c1fc104` the withdrawal below. CI green.
+
+**The guard is the ratified design, whole.** All three rejected-or-lost verdicts date the step before reading
+absence as rejection; the epoch is the `token.<pendingToken>` pointer's substrate stamp; past
+`opstatus.TrackerTTL` the verdict is inconclusive (Warn + a CAS-written `deadlineProbe` note + Ack, instance
+left running); a missing pointer stays a terminal. The horizon moved to `internal/opstatus` with `processor`
+aliasing it.
+
+**Withdrawn: the operator verb.** §3.4's false "the operator verb (`redrive`) is the same one a false fail
+needs" was addressed mid-fire by widening `RedriveInstance` to accept a running instance carrying a note. The
+cumulative close pass broke it twice, both proved, and it was reverted in `c1fc104`:
+
+1. A running instance's **pattern pin is authoritative** (which is why `advance` and `onDeadline` read it), and
+   the widened path re-pinned from the live source — so with the pattern edited since, the redrive resumed a
+   **different step** than the one the instance was parked on. `errCursorOutOfRange` cannot see an insert or a
+   same-length reorder. `resumeStepZero` is the engine's own precedent for resuming this exact state *from the
+   pin*, and the widening did not use it.
+2. Redriving a parked userTask re-submits `CreateTask` with the same taskId → its declared dedup arm commits
+   with no mutations and no events → the Processor still writes a tracker → the next creation-deadline finds
+   `trackerExists` true and takes the "committed, unbounded human wait" branch, **clearing the note and arming
+   nothing**. An alerted, redrivable park becomes a silent, unredrivable one — strictly worse than the state
+   this item exists to fix.
+
+Also established: `transition`'s own safety argument for `tokenPutUnderRedriveCAS` ("after redrive's CAS this
+instance has no live advancer — **it was terminal**") is a second, independent reason the parked state cannot
+reuse that path. **The verb is filed as the one designer row** (`lattice.md`), with this proved catalogue and
+the three candidate mechanisms: resume from the pin; a distinct verb for the parked state; re-arm on the
+verdict (already refused by §3.3 alt 8). What ships today therefore parks with an alert and a record and **no
+verb** — stated plainly in the alert text, `docs/components/loom.md`'s failure row and the dossier entry,
+rather than papered over.
+
+**Review classification** (four cold passes: state-lifecycle, contract-posture, test-inertness, cumulative
+close). Two BLOCKING were **test-inertness**, both proved by a mutation that left the suite green: the systemOp
+and instanceOp arms could be reverted to `probeFail` undetected (every case drove the userTask arm), and the
+epoch's *source* was unpinned — the design's own §3.3-rejected alternative 6 passed everything, because the
+test parked the injected clock at an absolute instant so both sides of the comparison moved together. Both are
+now pinned, the second by staging the separating instant. One BLOCKING + one SHOULD-FIX were **design-gap**,
+and both landed on the same seam: §3.4's contract claim, and the verb it asserted. Four were **brief-gap** —
+`tombstone_sweep.go`'s `skipRunningDeadlineMarker` rationale, `platform_buckets.go`'s constant doc,
+`TestWithDefaults_ClampsTheDeadlineArmBothWays`'s doc, and `loom.md`'s failure row — every one a statement
+describing the harm this guard retired, none in the brief's rewrite set. The rest were convention (two
+history-narrating comments, an alert whose first words were the verdict it contradicted). **No review
+over-reach.**
+
+Two dossier entries in `docs/components/loom.md`: the class itself (*date the evidence, not just the wait*),
+and the withdrawal's lesson (*withholding a verdict is only kinder than a wrong one if some verb still reaches
+the flow*). The cap held at 12 by retiring the TTL'd-purge entry into `lint-conventions`' `checkLoomStateDelete`,
+which has been doing its catching since it shipped.
+
+**Process note, for the fleet rather than for Loom.** A second scheduled Steward fire
+(`claude/exciting-clarke-ulleji`) judged this branch idle at 16:10 UTC and rebuilt the same guard concurrently;
+the remote build lock is void (`REMOTE.md` §4) and nothing prevented it. The row's take-over rule reads
+**branch** idleness as **fire** idleness, and they diverge whenever a builder is mid-round and the last push is
+hours old. That branch was left untouched; one genuine improvement was taken from it (one clock read per
+verdict, now pinned with a stepping clock).
 
 ## 4. Adjudication
 
