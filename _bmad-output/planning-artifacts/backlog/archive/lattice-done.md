@@ -1,5 +1,7 @@
 # Done log archive — lattice (older shipped items, newest first)
 
+- 2026-09-05 · `424e2740` · [Refractor] Secure plain lenses audit under a mask + retract by derivation; the neighbour-retraction transport gate ([design](../../../implementation-artifacts/secure-plain-lens-retraction-and-audit-design.md))
+- 2026-09-05 · `89b61556` · [Weaver] an exhausted goal gap re-plans at its leg boundary; the budget books attempts, the escalation books nothing and is paced ([design](../../../implementation-artifacts/weaver-exhausted-gap-leg-boundary-design.md))
 - 2026-09-04 · `3c54ddb3` · [Weaver] a surface gap is ONE counted entry per (target, gap column); refused raises paced, overflow windowed ([design](../../../implementation-artifacts/weaver-surface-workload-vs-fault-issues-design.md))
 - 2026-09-04 · `ade79cee` · [Refractor/objects-base] an untyped hop is a wildcard: objectLiveness on the `vtx.object.>` filter, objectAttachments derives live ([design](../../../implementation-artifacts/untyped-hop-anchor-derivation-design.md))
 - 2026-09-04 · `d9db9deb` · [Processor/Bootstrap] the write gate reads the STORED class; the kernel's 12 topology links protected ([design](../../../implementation-artifacts/stored-class-write-gate-and-kernel-topology-protection-design.md))

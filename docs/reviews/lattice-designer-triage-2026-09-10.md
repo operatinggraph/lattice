@@ -236,6 +236,33 @@ pinned `hopWithDropped`, which this fire does not create.
 `edgeCatalogTail`; no touch to the Inc 2 narrowing or its 41-vector pin; no change to the D1 reader; the
 §2.3 #6 walk-grouping cost item stays sequenced where the varlength design §13 left it.
 
+**Build note — SHIPPED `5c9912af` (2026-09-14).** Deviations from the touch-list above, all narrowing or
+gap-closing, none widening the scope sentence:
+
+- **The touch-list was incomplete in one direction the harnesses could not catch.** `composed_test.go`'s three
+  producer enumerations are HAND-WRITTEN, so the fourth domain escaped all three while the package stayed
+  green — including the realness-filter pin, whose absence would leave a placeholder-only
+  `cap-read.edgeManifestTask.<actor>` document written forever. Two now derive their population from the
+  compiled lens set; the third asserts its case list covers every generated producer. The lesson for part 2 of
+  the next brief: a census site that *auto-enumerates* needs a pin moved, and one that *hand-lists* needs a
+  name added — grep alone does not distinguish them, and only the second can fail silently.
+- **The corpus could not reach the new domain.** `seedReadGrantCorpus` seeds `assignedTo` but no
+  `forOperation`, so every `ruleengine/full` differential over the task producer compared two empty
+  projections. Fixed with an op-per-task knob; the granting claim moved outside the armed filter, and
+  `TestBranchDecomposition_GeneratedProducersProjectIdenticalRows` — which carried no content assertion at
+  all — gained a productivity guard.
+- **Two pins the §2.4 list did not foresee**, both earned by the base producer's flip to answered:
+  `edge_manifest_base_staged_graph_test.go` (its staged-vs-unstaged graph and its withScopeVerdict consumers,
+  mirroring the staff pair) and a T8 subtest in `pipeline/anchor_derivation_ranged_internal_test.go`, which
+  the predicate can only evaluate now that the index is complete.
+- **The producer gate's floor became an equality.** `stages >= 3` cannot hold for a one-walk domain; rather
+  than lower it, the gate asserts the generated staging-clause count equals the domain's declared Walk count.
+- **§2.2's prediction corrected:** the task case lands in `narrowingCases`, not `stayBroadCases` — the walk is
+  labelled at every node, so it narrows.
+- Truth fixes in files the list did not name: the hop-index census header (no row is refused any more), a
+  shipped e2e header asserting the base producer "stays refused", the walk-scope argument's relations, and
+  `docs/components/edge-manifest.md`'s own-task-path-deferred note.
+
 **Scope-diff gate: PASS.** Every touch above traces to §2.4's four numbered steps (the docs row is step 4,
 the census rows step 2, the coverage row step 3, the package rows step 1); nothing widens it. Declared
 dependencies re-verified both ways: §2.4 names `lint-cap-read-producers` — verified **not** load-bearing

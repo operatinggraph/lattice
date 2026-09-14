@@ -234,3 +234,24 @@ path — is proven in-browser against `cmd/facet` (`make up-facet`); see `facet-
 walkthrough. `make seed-edge-demo` / `make seed-showcase` also claim the seeded tenant (`ClaimIdentity`,
 submitted as the tenant itself) so `manifest.me.claimed` is true from the first hydrate, per
 `facet-app-ux.md` §3.0.
+
+## Review keeps catching (dossier)
+
+The component's recurring review-finding classes — fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`), the item-close review appends new ones (`agents/steward/SKILL.md` §4).
+**Capped at 12 one-liners**; an entry RETIRES when a lint/test gate mechanizes it (name the gate, strike
+the entry).
+
+- **A test population that is HAND-LISTED exempts its next member silently, and a fixture SHAPE that does
+  not grow with the package cannot reach it at all.** The two halves fail in opposite directions and a
+  repo-wide grep distinguishes neither: an auto-enumerating census reds until its new row is pinned, while a
+  hand-written list stays green and simply never asserts anything about the new member. Adding a fourth
+  `ReadGrantDomain` escaped all three of `composed_test.go`'s enumerations — including the realness-filter
+  pin, whose absence leaves a placeholder-only `cap-read.<domain>.<actor>` document written forever for every
+  identity with no binding in that domain instead of deleted — while `seedReadGrantCorpus` seeded no
+  `(task)-[:forOperation]->(op:meta)` edge, so every `ruleengine/full` differential over the new producer
+  compared two EMPTY projections and agreed. Equality tests are the vulnerable shape: two empty results are
+  equal. Minted: the `edgeManifestTask` split (2026-09-14), both halves found by cold review, neither by the
+  fire's own touch-list. Check: `emGeneratedProducerNames` derives the population from the compiled lens set,
+  `TestMigration_GeneratedProducersEmitNoDuplicateAnchors` asserts its case list covers every generated
+  producer, and the branch/grouping differentials assert each producer GRANTED something before comparing.
