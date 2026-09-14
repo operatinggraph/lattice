@@ -8,6 +8,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
+
+	"github.com/operatinggraph/lattice/internal/natsfixture"
 )
 
 // markerCollector drains a KV subject's messages through the same newMessage
@@ -68,6 +70,31 @@ func awaitMarker(t *testing.T, mc *markerCollector, subject string, n int, why s
 		}
 		got = msgs[n-1]
 		return true
+	}, 30*time.Second, 50*time.Millisecond, why)
+	return got
+}
+
+// awaitRemoval polls the collector for the first REMOVAL delivered on subject,
+// selected by shape — an empty body, which every removal has and no value the
+// tests here write does — and says nothing about which kind of removal it is.
+// Provenance is then a separate assertion on the headers it carries, which is
+// the only thing that tells an expiry from a delete or a purge.
+//
+// Selecting by shape rather than by position is what makes it usable where a
+// value may or may not still be replayed ahead of its own removal: a consumer
+// attached around the instant the server sweeps sees one or two messages on the
+// subject depending on the timing, but exactly one of them is empty-bodied.
+func awaitRemoval(t *testing.T, mc *markerCollector, subject, why string) Message {
+	t.Helper()
+	var got Message
+	require.Eventually(t, func() bool {
+		for _, m := range mc.forSubject(subject) {
+			if len(m.Body) == 0 {
+				got = m
+				return true
+			}
+		}
+		return false
 	}, 30*time.Second, 50*time.Millisecond, why)
 	return got
 }
@@ -315,6 +342,135 @@ func TestKVMarkerProvenance_MarkerLifetimeIsTheBucketsMarkerTTL(t *testing.T) {
 	require.Eventually(t, func() bool { return !subjectPresent(ctx, c, expiring, key) },
 		40*time.Second, 100*time.Millisecond,
 		"the subject must drop once the marker's own TTL elapses")
+}
+
+// newRecoveryTestConn starts an embedded server on a JetStream store the test
+// owns for its whole life — not the server's — and connects to it, returning the
+// restart handle so the test can bring that server down and a fresh one up on the
+// same store. The budget outlasts a whole down-and-up cycle: an arm's lifetime
+// spent with nothing serving, plus the slow-host budget of every wait after
+// recovery.
+//
+// Each server has its own client URL, so the returned *Conn is only valid until
+// the handle is stopped; after a restart the test connects again through
+// connectRecoveryConn against the new server.
+func newRecoveryTestConn(t *testing.T) (*natsfixture.RestartableServer, *Conn, context.Context) {
+	t.Helper()
+	r := natsfixture.StartRestartableServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	t.Cleanup(cancel)
+	return r, connectRecoveryConn(ctx, t, r.Server().ClientURL()), ctx
+}
+
+// connectRecoveryConn opens a substrate connection to one particular embedded
+// server, closing it at test end.
+func connectRecoveryConn(ctx context.Context, t *testing.T, url string) *Conn {
+	t.Helper()
+	c, err := Connect(ctx, ConnectOpts{URL: url, Name: "substrate-recovery-test"})
+	require.NoError(t, err)
+	t.Cleanup(c.Close)
+	return c
+}
+
+// TestKVMarkerProvenance_TTLPastDueAtRecoveryStillMintsAMaxAgeMarker pins the
+// premise Loom's deadline watcher rests on across a server restart: an arm whose
+// per-key TTL falls due while NOTHING IS SERVING is not quietly dropped and not
+// silently kept — it is expired with a MaxAge marker once the server comes back,
+// and that marker is delivered to a watcher that attaches after recovery. A
+// deadline is therefore never lost to a substrate outage; it arrives late, on the
+// recovery clock, rather than never.
+//
+// Three pieces of nats-server v2.14.0 compose to that, and a vendor bump that
+// changes any of them reds here:
+//
+//   - fileStore.expireMsgsOnRecover returns early when the stream configures
+//     subject-delete markers (server/filestore.go:2515-2523), so recovery itself
+//     expires nothing — the arm is still on the stream when the server opens;
+//   - fileStore.recoverTTLState rebuilds the timed hash wheel from the store and
+//     schedules the age check immediately, `defer fs.resetAgeChk(0)`
+//     (:2148-2173) — so the past-due deadline is looked at, not left until some
+//     later write;
+//   - fileStore.expireMsgs drains every past-due wheel entry and
+//     handleRemovalOrSdm stamps each emptied subject's marker with
+//     JSMarkerReasonMaxAge (:6790-6905, :6948-6966) — so what the watcher
+//     receives is an expiry by provenance, indistinguishable from one that fired
+//     while the server was up.
+//
+// Were the first of those to change, the arm would be expired during recovery
+// with no marker minted and the deadline would vanish; were the second to
+// change, the marker would wait for unrelated traffic on the stream.
+func TestKVMarkerProvenance_TTLPastDueAtRecoveryStillMintsAMaxAgeMarker(t *testing.T) {
+	t.Parallel()
+	r, c, ctx := newRecoveryTestConn(t)
+	const (
+		bucket = "loom-state"
+		key    = "deadline.armedAcrossRestart"
+		// Long enough that the marker minted at recovery is still standing
+		// when the late watcher attaches, however slow the host.
+		markerTTL = 60 * time.Second
+		// Above the server's one-second floor, and generous enough that the
+		// put and the shutdown cannot plausibly consume it — the arm must
+		// still be live when the server goes down, or the expiry would be a
+		// live one and the test would pin nothing.
+		armTTL = 4 * time.Second
+		// How far past armedAt+armTTL the server stays down. It covers the put's
+		// own round trip (the server's deadline is stamped that much after
+		// armedAt) and leaves recovery an unambiguously past-due wheel entry.
+		downOvershoot = time.Second
+	)
+	provisionMarkerTTLBucket(ctx, t, c, bucket, markerTTL)
+
+	// Read before the put, so armedAt is provably no later than the instant the
+	// server stamped the arm: the deadline the server holds is then at or after
+	// armedAt+armTTL, which makes the liveness guard below sound rather than
+	// approximate.
+	armedAt := time.Now()
+	_, err := c.KVPutWithTTL(ctx, bucket, key, []byte(`{"setAt":"t0"}`), armTTL)
+	require.NoError(t, err)
+	_, err = c.KVGet(ctx, bucket, key)
+	require.NoError(t, err, "the arm must be live before the server goes down")
+
+	// Down, and fully down: Stop does not return until the server has finished
+	// shutting down and released the store.
+	r.Stop()
+	require.WithinDuration(t, armedAt, time.Now(), armTTL,
+		"the arm's TTL must still be in the future when the server stops — otherwise the "+
+			"expiry happened live and nothing here is about recovery")
+
+	// The only wait in this test that is a DURATION rather than a condition,
+	// and necessarily so: the deadline is absolute, and there is no server to
+	// poll while it passes. Nothing is being synchronised on — every wait for
+	// an event below polls a condition.
+	deadline := armedAt.Add(armTTL + downOvershoot)
+	time.Sleep(time.Until(deadline))
+
+	// Up again, on the same store, at a new URL — so the connection above is
+	// finished and the test needs one of its own.
+	second := r.Start()
+	c2 := connectRecoveryConn(ctx, t, second.ClientURL())
+
+	// The watcher exists only now, after recovery — Loom's shape when the
+	// substrate restarts under it.
+	subj := kvBucketSubject(bucket, key)
+	mc := startMarkerCollector(ctx, t, c2, bucket, kvBucketSubject(bucket, "deadline.>"))
+
+	// The removal arrives at all: a server that carried the arm forward
+	// unexpired, or that dropped it during recovery without minting anything,
+	// delivers nothing here and is caught by this wait.
+	got := awaitRemoval(t, mc, subj,
+		"the arm whose TTL fell due while the server was down must be removed after recovery")
+	require.Equal(t, subj, got.Subject, "the removal stands on the armed key's own subject")
+
+	// And the removal is an EXPIRY by provenance — minted on the recovery clock,
+	// but indistinguishable from one that fired while the server was up. This is
+	// the whole of what the deadline watcher admits on.
+	require.Equal(t, MarkerReasonMaxAge, got.Header(MarkerReasonHeader),
+		"an expiry that fell due during downtime is minted at recovery as a MaxAge marker, not as a bare removal")
+	require.Empty(t, got.Header(KVOperationHeader),
+		"a server-minted expiry carries no KV-Operation — that header means a client asked")
+
+	_, err = c2.KVGet(ctx, bucket, key)
+	require.ErrorIs(t, err, ErrKeyNotFound, "the arm reads absent after recovery")
 }
 
 // TestKVMarkerProvenance_ShortPerKeyTTLNotRaisedToMarkerTTL pins the exception

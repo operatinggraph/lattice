@@ -38,6 +38,36 @@ func TestDistinctServersGetDistinctPorts(t *testing.T) {
 	require.NotEqual(t, a.Addr().(*net.TCPAddr).Port, b.Addr().(*net.TCPAddr).Port)
 }
 
+// TestRestartableServerKeepsItsStore is the self-test for the recovery seam: a
+// stream written on the first server is recovered by the second, which proves
+// the store outlived the server rather than being reallocated, and the new
+// server is reached at a NEW client URL — the fact that makes any connection
+// held across the Stop dead.
+func TestRestartableServerKeepsItsStore(t *testing.T) {
+	r := natsfixture.StartRestartableServer(t)
+	firstURL := r.Server().ClientURL()
+
+	kv, err := jetstream.New(natsfixture.Connect(t, firstURL))
+	require.NoError(t, err)
+	bucket, err := kv.CreateKeyValue(t.Context(), jetstream.KeyValueConfig{Bucket: "natsfixture-restart"})
+	require.NoError(t, err)
+	_, err = bucket.Put(t.Context(), "survives", []byte("across the restart"))
+	require.NoError(t, err)
+
+	r.Stop()
+	second := r.Start()
+	require.NotEqual(t, firstURL, second.ClientURL(),
+		"a restarted server gets a kernel-assigned port of its own, so the old URL is stale")
+
+	recovered, err := jetstream.New(natsfixture.Connect(t, second.ClientURL()))
+	require.NoError(t, err)
+	after, err := recovered.KeyValue(t.Context(), "natsfixture-restart")
+	require.NoError(t, err, "the second server must recover the first server's store")
+	entry, err := after.Get(t.Context(), "survives")
+	require.NoError(t, err)
+	require.Equal(t, "across the restart", string(entry.Value()))
+}
+
 // stallProxy forwards to backend but withholds the server->client direction for
 // stall, standing in for a host that denied the handshake CPU.
 func stallProxy(t *testing.T, backend string, stall time.Duration) string {
