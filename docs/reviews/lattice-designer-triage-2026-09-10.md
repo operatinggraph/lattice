@@ -236,8 +236,16 @@ pinned `hopWithDropped`, which this fire does not create.
 `edgeCatalogTail`; no touch to the Inc 2 narrowing or its 41-vector pin; no change to the D1 reader; the
 §2.3 #6 walk-grouping cost item stays sequenced where the varlength design §13 left it.
 
-**Build note — SHIPPED `5c9912af` (2026-09-14).** Deviations from the touch-list above, all narrowing or
-gap-closing, none widening the scope sentence:
+**Build note — SHIPPED `5c9912af` (2026-09-14), CI green (run 34809952836, 13/13).** The install was
+observed on a live stack, which is the one thing no test proves: a native NATS + Postgres + Processor +
+Refractor stack, `edge-manifest 0.17.16` installed over its dependency chain (`writeCount=128`),
+`verify-package-edge-manifest` 89/89, and the generated producers enumerated out of Core KV — **four
+`vtx.meta.*.canonicalName` producer vertices for four declared domains**, `edgeManifestTaskReadGrants`
+among them. A new lens in an already-installed package is a `diffManifest` **create**, not the additive-apply
+gap the board's Pkgmgr row describes (that row scopes `Apply`'s in-place branch, i.e. a capability proposal
+carrying a partial Definition).
+
+Deviations from the touch-list above, all narrowing or gap-closing, none widening the scope sentence:
 
 - **The touch-list was incomplete in one direction the harnesses could not catch.** `composed_test.go`'s three
   producer enumerations are HAND-WRITTEN, so the fourth domain escaped all three while the package stayed
