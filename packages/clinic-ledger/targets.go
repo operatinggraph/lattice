@@ -12,25 +12,27 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // (clinic-domain-owned clinic-noshow-fee-design.md §"Package boundary").
 //
 //   - missing_account → directOp(ClinicCreateAccount), opening the patient's
-//     clinic-ledger account lazily on first no-show rather than requiring a
-//     registered patient's account to pre-exist (previously the only route:
-//     clinic's standing front-desk/billing ClinicCreateAccount flow, which
-//     silently starved unopened patients' no-show fees of ever converging).
-//   - missing_charge → directOp(ClinicDebitAccount) over the now-real account,
-//     same as before.
-//   - missing_reversal → directOp(ClinicCreditAccount), reversing a charge a
-//     CorrectAppointmentStatus correction moved off `noShow` — the gap
-//     clinicNoShowSettlement's own doc comment (lenses.go) named as
-//     currently-undone (filed as a Clinic backlog row, verticals.md).
-//     clinic-domain's CorrectAppointmentStatus itself never touches the
-//     ledger; this target is what converges the reversal it leaves open.
+//     clinic-ledger account lazily on the first fee rather than requiring a
+//     registered patient's account to pre-exist (the standing front-desk /
+//     billing ClinicCreateAccount flow alone would silently starve unopened
+//     patients' fees of ever converging).
+//   - missing_charge → directOp(ClinicDebitAccount) over the now-real
+//     account, with the lens's memo naming what was billed: a no-show fee or
+//     a late-cancellation fee (a patient's own cancel inside the 24-hour
+//     window carries the same fee on its status).
+//   - missing_reversal → directOp(ClinicCreditAccount), reversing a charge
+//     whose appointment's CURRENT status no longer carries a fee — a
+//     CorrectAppointmentStatus correction to completed / cancelled, the
+//     waiver. clinic-domain's CorrectAppointmentStatus itself never touches
+//     the ledger; this target is what converges the reversal it leaves open.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
 			TargetID: NoShowSettlementTarget,
-			Description: "Every no-show appointment carrying a fee is charged once to the patient's clinic account. " +
+			Description: "Every appointment whose status carries a fee — a no-show, or a patient's own cancellation " +
+				"inside the 24-hour late-cancel window — is charged once to the patient's clinic account. " +
 				"If the patient has no account yet, one is opened first and the fee is then posted against " +
-				"the visit.",
+				"the visit. A charge whose appointment is later corrected to a fee-less status is reversed once.",
 			LensRef: NoShowSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_account": {
@@ -53,7 +55,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.feeCents", "appointmentRef": "row.appointmentKey", "memo": "row.memo"},
 					// Reads the two bare vertex keys the DDL's vertex_alive() checks
 					// hydrate (accountKey, appointmentKey). memo is free text ('No-show
-					// fee', never a vtx.* key) and belongs in Params only. Declaring it
+					// fee' / 'Late-cancellation fee', never a vtx.* key) and belongs in Params only. Declaring it
 					// here made every dispatch fail at step4 hydrate (`KV get
 					// core-kv/No-show fee: nats: invalid key`), so the charge never
 					// executed and the gap never closed — confirmed live in
@@ -84,7 +86,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 						"amountCents": "row.chargedAmountCents",
 						"reason":      "waiver",
 						"reversesRef": "row.chargeTxKey",
-						"memo":        "No-show fee reversal (corrected)",
+						"memo":        "Fee reversal (corrected)",
 					},
 					// Reads the two bare vertex keys ClinicCreditAccount's
 					// vertex_alive() checks hydrate (accountKey, chargeTxKey) — reason

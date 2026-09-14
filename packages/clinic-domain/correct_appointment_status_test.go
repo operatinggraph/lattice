@@ -137,8 +137,9 @@ func TestClinic_CorrectAppointmentStatus_Corrects(t *testing.T) {
 	if note, _ := st["note"].(string); note != "Patient was present and seen; auto no-show was wrong." {
 		t.Fatalf("note = %q, want the submitted correction reason", note)
 	}
-	// The op writes only .status, so the fee the wrong no-show posted is not
-	// reversed here — a ledger credit is a separate, deliberate action.
+	// A correction onto completed carries no fee: that absence on the current
+	// .status is what clinic-ledger's missing_reversal gap reads to credit
+	// back the charge the wrong no-show posted.
 	if _, present := st["noShowFeeCents"]; present {
 		t.Fatalf("a correction upsert must not carry the prior noShowFeeCents forward, got %v", st["noShowFeeCents"])
 	}

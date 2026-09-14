@@ -155,7 +155,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"reason":{"type":"string","title":"Reason","description":"Optional visit reason; omitted clears the existing one."}},` +
 				`"required":["appointmentKey","provider","patient","startsAt","endsAt"]}`,
 			FieldDescriptions: map[string]string{
-				"appointmentKey": "The appointment being rescheduled — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered. A cancelled / completed / no-show appointment cannot be moved (TerminalStatus).",
+				"appointmentKey": "The appointment being rescheduled — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered. A cancelled / completed / no-show appointment cannot be moved (TerminalStatus). A patient moving their own appointment is refused once the visit has started (VisitStarted) and inside the 24 hours before it starts (LateReschedule — cancel, which carries the no-show fee, or call the front desk); staff move freely.",
 				"provider":       "The provider the appointment is with — a rescheduled appointment keeps its provider, so a different one is rejected.",
 				"patient":        "The appointment's own patient — you can only reschedule your own appointment.",
 				"startsAt":       "The new start time. Must land in the future and align to the 15-minute grid.",
@@ -169,7 +169,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetType:  "appointment",
 				// The appointment's own .schedule is REQUIRED: the script reads
 				// it (appointmentDDLScript's "read-posture: (a)" old_sched read)
-				// to know which cells the move releases, and faults InvalidState
+				// for the patient-self clock and to know which cells the move
+				// releases, and faults InvalidState
 				// on its absence rather than rendering a business rejection. The
 				// provider/patient match probes are the SAME "(a)" required class
 				// (require_matching_provider/require_matching_patient's own doc
@@ -238,7 +239,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"required":["appointmentKey","status","provider","patient"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey": "The appointment being updated — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"status":         "The new status. A self-service patient may only cancel (the script enforces this); front-desk/provider staff may set any status. completed / noShow are accepted only once the visit's start time has passed (NotYetStarted before then); cancel has no such clock.",
+				"status":         "The new status. A self-service patient may only cancel (the script enforces this); front-desk/provider staff may set any status. completed / noShow are accepted only once the visit's start time has passed (NotYetStarted before then); a staff cancel has no clock. A patient's own cancel is refused once the visit has started (VisitStarted) and, inside the 24 hours before it starts, still lands but carries the $25.00 no-show fee (lateCancel).",
 				"provider":       "The appointment's own provider — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual provider.",
 				"patient":        "The appointment's own patient — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual patient.",
 				"note":           "Optional status note, kept with the appointment.",
@@ -258,6 +259,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// explicitly alongside RescheduleAppointment.
 				Reads: []string{
 					"{payload.appointmentKey}",
+					// The appointment's own .schedule: a terminal transition
+					// reads the visit's startsAt (enforce_started, the
+					// patient-self clock) and recomputes the held slot cells
+					// from it; a live appointment always carries one.
+					"{payload.appointmentKey}.schedule",
 					"lnk.appointment.{payload.appointmentKey:id}.withProvider.provider.{payload.provider:id}",
 					"lnk.appointment.{payload.appointmentKey:id}.forPatient.patient.{payload.patient:id}",
 				},
@@ -279,7 +285,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "CorrectAppointmentStatus",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Correct status",
-				Description: "Correct a wrong terminal status (e.g. a no-show who actually showed). Does not reverse a no-show fee already charged — use a manual credit for that.",
+				Description: "Correct a wrong terminal status (e.g. a no-show who actually showed). A correction onto no-show charges the no-show fee ($25.00 unless set); a correction onto completed or cancelled — including cancelled → cancelled on a late cancellation — writes no fee, and a charge already posted for the visit is reversed on the patient's ledger.",
 				Icon:        "clipboard",
 				Tone:        "primary",
 				SubmitLabel: "Correct status",
@@ -294,16 +300,24 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// No provider/patient: the first terminal transition already
 			// released the slot-claim cells, and a terminal→terminal move
 			// touches none, so there is nothing for them to validate against.
+			// noShowFeeCents renders as a money field (the *Cents name,
+			// internal/descriptorform) and only when status is noShow
+			// (x-visibleWhen, the followUpDate precedent): a correction onto
+			// no-show carries the fee the script validates and defaults
+			// exactly as SetAppointmentStatus does; onto completed /
+			// cancelled the script writes none, which is the waiver.
 			InputSchema: `{"type":"object","properties":` +
 				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment — auto-filled from the appointment being viewed."},` +
 				`"status":{"type":"string","title":"What actually happened","enum":["completed","cancelled","noShow"],` +
 				`"enumLabels":{"completed":"Completed — the visit happened","cancelled":"Cancelled — the visit was called off","noShow":"No-show — the patient never came"},` +
 				`"description":"What the appointment's outcome actually was. Only the terminal values — this op corrects a final call, it does not re-open the appointment."},` +
+				`"noShowFeeCents":{"type":"integer","title":"No-show fee","x-visibleWhen":{"field":"status","equals":"noShow"},"description":"The no-show fee to charge, in whole cents; defaults to $25.00 when left blank. Must be more than zero. Charged to the patient's ledger account once the correction lands."},` +
 				`"note":{"type":"string","title":"Reason","maxLength":500,"description":"Why the recorded status was wrong. Required — the correction's audit trail."}},` +
 				`"required":["appointmentKey","status","note"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey": "The appointment being corrected — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"status":         "The outcome that actually happened: completed, cancelled or noShow. The appointment must already be in one of those three states; completed / noShow only once the visit's start time has passed (NotYetStarted before then).",
+				"status":         "The outcome that actually happened: completed, cancelled or noShow. The appointment must already be in one of those three states; completed / noShow only once the visit's start time has passed (NotYetStarted before then). Correcting onto noShow charges the no-show fee; correcting onto completed or cancelled (a late cancellation re-corrected to cancelled included) waives it — a posted charge is reversed.",
+				"noShowFeeCents": "The no-show fee, entered in dollars — e.g. 25.00; shown only when the outcome is no-show. Defaults to $25.00 when left blank; must be more than zero. Posted to the patient's ledger account by the clinic ledger's settlement playbook.",
 				"note":           "Required reason for the correction, kept on the appointment alongside the status it replaced.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
