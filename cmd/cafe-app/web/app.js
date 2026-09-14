@@ -682,7 +682,10 @@ async function loadLeasePickerContext() {
 // POSITIVE evidence of non-approval, never on its absence. Callers that
 // don't gate on OpenTab (e.g. the Resident tab's front-desk picker, which
 // only reaches ledger viewing and Record Payment) pass gateOnApproval=false
-// so an unapproved lease's debt stays collectable.
+// so an unapproved lease's debt stays collectable. The same gate disables a
+// lease whose tenancy has ended (tenancyEnded — OpenTab refuses TenancyEnded
+// past the term the front-desk lens projects), again only on positive
+// evidence: a lease with no projected term stays selectable.
 function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, approvedByLease, gateOnApproval) {
   const prev = select.value;
   select.innerHTML = "";
@@ -704,12 +707,26 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, 
     if (gateOnApproval && approved === false) {
       opt.disabled = true;
       opt.textContent = who + unit + " (awaiting landlord approval)";
+    } else if (gateOnApproval && tenancyEnded(detail, new Date())) {
+      opt.disabled = true;
+      opt.textContent = who + unit + " (lease ended " + new Date(detail.leaseEnd).toLocaleDateString() + ")";
     } else {
       opt.textContent = who + unit + (l.accountKey ? "" : " (no café account yet)");
     }
     select.appendChild(opt);
   }
   if (prev && leases.some((l) => l.leaseAppKey === prev)) select.value = prev;
+}
+
+// tenancyEnded reports whether a lease-details row carries a leaseEnd that
+// `now` has reached — the same inclusive boundary OpenTab's TenancyEnded
+// guard applies (packages/cafe-domain/ddls.go). A row with no leaseEnd, or
+// one that does not parse, is not evidence the term ended.
+function tenancyEnded(detail, now) {
+  if (!detail || !detail.leaseEnd) return false;
+  const end = new Date(detail.leaseEnd).getTime();
+  if (isNaN(end)) return false;
+  return now.getTime() >= end;
 }
 
 // ---- POS view (staff only) --------------------------------------------
@@ -755,7 +772,7 @@ async function renderPos() {
             operationType: "OpenTab",
             class: "tab",
             reads: [leaseAppKey],
-            optionalReads: [leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision"],
+            optionalReads: [leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision", leaseAppKey + ".tenancy"],
             payload: { leaseAppKey },
           },
           "open the tab"
@@ -1016,6 +1033,85 @@ function keepSoonest(byLease, item) {
   if (itemAt < prevAt) byLease[item.leaseAppKey] = item;
 }
 
+// summarizeToday folds the tabs settled on `now`'s local calendar day into
+// the desk's Today panel: how many tabs settled, the gross they took, what
+// sold (per line description, non-voided lines only) and what was voided.
+// Gross is the sum of each tab's frozen totalCents — the figure the ledger
+// was charged — not a re-sum of its lines: a legacy amount-only void
+// subtracts from the total without marking a line, so the two can differ,
+// and the difference (if any) is reported as an unitemized remainder rather
+// than hidden inside an item. A tab is "today's" by its settledAt, the
+// instant the money moved; open tabs are the grid's, not this panel's.
+function summarizeToday(tabs, now) {
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+  const byItem = new Map();
+  const out = { tabs: 0, grossCents: 0, items: [], voidCount: 0, voidCents: 0, unitemizedCents: 0 };
+  let itemizedCents = 0;
+  for (const t of tabs || []) {
+    if (t.status !== "settled" || !t.settledAt) continue;
+    const at = new Date(t.settledAt).getTime();
+    if (isNaN(at) || at < dayStart || at >= dayEnd) continue;
+    // A tab opened and settled with nothing ever rung up is not a sale —
+    // not a tab count, not a $0.00 line. One whose every line was voided
+    // still counts: the voids are the story.
+    if (!(t.totalCents || 0) && !(t.lines || []).length) continue;
+    out.tabs += 1;
+    out.grossCents += t.totalCents || 0;
+    for (const l of t.lines || []) {
+      const cents = l.amountCents || 0;
+      if (l.voided) {
+        out.voidCount += 1;
+        out.voidCents += cents;
+        continue;
+      }
+      itemizedCents += cents;
+      const name = l.description || "(unnamed)";
+      const row = byItem.get(name) || { description: name, count: 0, cents: 0 };
+      row.count += 1;
+      row.cents += cents;
+      byItem.set(name, row);
+    }
+  }
+  out.items = Array.from(byItem.values()).sort((a, b) => b.cents - a.cents || b.count - a.count || (a.description < b.description ? -1 : 1));
+  out.unitemizedCents = out.grossCents - itemizedCents;
+  return out;
+}
+
+// renderFrontDeskToday paints summarizeToday's fold into #frontdesk-today.
+// The panel hides on a day with no settled tab rather than announcing $0.00.
+function renderFrontDeskToday(summary) {
+  const panel = document.getElementById("frontdesk-today");
+  if (!panel) return;
+  if (!summary.tabs) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  document.getElementById("frontdesk-today-gross").textContent = money(summary.grossCents);
+  document.getElementById("frontdesk-today-tabs").textContent =
+    summary.tabs + " tab" + (summary.tabs === 1 ? "" : "s") + " settled";
+  const list = document.getElementById("frontdesk-today-items");
+  list.innerHTML = "";
+  // Item descriptions are staff-typed (an off-menu Charge) — built as text
+  // nodes, never markup.
+  const itemRow = (label, qty, cents) => {
+    const li = document.createElement("li");
+    li.append(label + " ");
+    const q = document.createElement("span");
+    q.className = "qty";
+    q.textContent = qty;
+    li.append(q, " " + money(cents));
+    list.append(li);
+  };
+  for (const it of summary.items) itemRow(it.description, "×" + it.count, it.cents);
+  if (summary.unitemizedCents) itemRow("Unitemized", "(amount-only charges/voids)", summary.unitemizedCents);
+  const voids = document.getElementById("frontdesk-today-voids");
+  voids.textContent = summary.voidCount
+    ? summary.voidCount + " line" + (summary.voidCount === 1 ? "" : "s") + " voided · " + money(summary.voidCents) + " not charged"
+    : "No voids.";
+}
+
 async function loadFrontDesk() {
   const grid = document.getElementById("frontdesk-grid");
   const summary = document.getElementById("frontdesk-summary");
@@ -1024,6 +1120,7 @@ async function loadFrontDesk() {
   let tabs;
   try {
     const r = await appGet("/api/tabs");
+    renderFrontDeskToday(summarizeToday(r.tabs || [], new Date()));
     tabs = (r.tabs || []).filter((t) => t.status === "open");
   } catch (e) {
     grid.innerHTML = '<div class="empty">' + escapeHtml(e.message) + "</div>";
@@ -1864,7 +1961,7 @@ async function renderResident() {
               operationType: "OpenTab",
               class: "tab",
               reads: [leaseAppKey],
-              optionalReads: [leaseAppKey + ".cafeOpenTab", applicationForOptionalRead(leaseAppKey), leaseAppKey + ".decision"],
+              optionalReads: [leaseAppKey + ".cafeOpenTab", applicationForOptionalRead(leaseAppKey), leaseAppKey + ".decision", leaseAppKey + ".tenancy"],
               payload: { leaseAppKey },
             },
             "open the tab",

@@ -93,7 +93,7 @@ func main() {
 		return submit(ctx, conn, actor, "OpenTab", "tab",
 			map[string]any{"leaseAppKey": lease},
 			&processor.ContextHint{Reads: []string{lease},
-				OptionalReads: []string{lease + ".cafeOpenTab"}})
+				OptionalReads: []string{lease + ".cafeOpenTab", lease + ".decision", lease + ".tenancy"}})
 	}
 
 	fmt.Println("=== F4 vectors ===")

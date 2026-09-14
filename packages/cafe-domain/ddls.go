@@ -44,7 +44,8 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 		Description: "Café house-tab session DDL. Vertex shape: vtx.tab.<NanoID>, class=tab, root data = {} " +
 			"(minimal, D5 — the running total lives on the .status aspect). OpenTab{leaseAppKey} validates the lease " +
 			"is alive, rejects LeaseNotApproved unless the lease's own lease-signing .decision aspect reads " +
-			"approved, rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
+			"approved, rejects TenancyEnded once submittedAt reaches the lease's .tenancy leaseEnd (rent stops there too, so the " +
+			"house tab closes to a moved-out resident at the same instant; a lease with no .tenancy has no term to have ended), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
 			"cafeOpenTabGuard aspect on the leaseapp, mirroring cafe-ledger's cafeLedgerAccountGuard: a class-(d) " +
 			"optionalReads dedup — create the guard fresh on a lease's first-ever tab, OCC-revive it from its prior " +
 			"tombstone on a later one), mints the tab, writes .status {value: open, totalCents: 0, openedAt, " +
@@ -147,7 +148,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"{value: open, totalCents: 0, itemsMemo: \"\", lines: [], openedAt, leaseAppKey} + the chargedTo and openFor links " +
 					"(both tab→leaseapp) + claims " +
 					"the lease's cafeOpenTabGuard. Returns primaryKey (the tab key). Rejects UnknownLeaseApplication " +
-					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, or OpenTabAlreadyExists if the lease already has an open tab.",
+					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, TenancyEnded if its .tenancy leaseEnd has passed, or OpenTabAlreadyExists if the lease already has an open tab.",
 			},
 			{
 				Name:    "Charge — ring up an off-menu item on an open tab (operator)",
@@ -1064,6 +1065,22 @@ def execute(state, op):
             decision_value = decision.data.get("value")
         if decision_value != "approved":
             fail("LeaseNotApproved: lease " + lease_key + " has not been approved by its landlord")
+
+        # read-posture: (d) declared in contextHint.optionalReads by the
+        # caller — absent on a lease approved before lease-signing minted
+        # tenancies, and on a decided-but-never-approved lease; either way
+        # there is no term to have ended. An approved lease carries the term
+        # DecideLeaseApplication computed (SignRenewal extends leaseEnd on a
+        # renewal), and the rent clause already stops billing at leaseEnd
+        # (semantic-contracts' BackfillClauseTerm), so a house tab — a charge
+        # against that same lease's ledger — closes to the resident at the
+        # same instant. Both stamps are RFC3339 UTC, so the comparison is the
+        # same string ordering the clinic's late-cancel window relies on.
+        tenancy = kv.Read(lease_key + ".tenancy")
+        if tenancy != None and not tenancy.isDeleted:
+            lease_end = tenancy.data.get("leaseEnd")
+            if lease_end != None and time.rfc3339_utc(op.submittedAt) >= time.rfc3339_utc(lease_end):
+                fail("TenancyEnded: this lease's tenancy ended on " + lease_end[:10] + "; a house tab can no longer be opened against it")
 
         # One open tab per lease, guarded by a deterministic aspect on the
         # LEASEAPP (not the tab — the tab's own id is independent and

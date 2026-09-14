@@ -298,7 +298,7 @@ func main() {
 			map[string]any{"leaseAppKey": leaseAppKey},
 			&processor.ContextHint{
 				Reads:         []string{leaseAppKey},
-				OptionalReads: []string{leaseAppKey + ".cafeOpenTab"},
+				OptionalReads: []string{leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
 			})
 		tabKey = tabReply.PrimaryKey
 		fmt.Printf("==> tab:             %s (open)\n", tabKey)

@@ -188,6 +188,21 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .field-row { display: flex; gap: 10px; align-items: center; }
 .panel-actions { display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
 
+.today {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.today-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.today-head h2 { margin: 0; font-size: 15px; }
+.today-gross { font-size: 20px; font-weight: 600; }
+.today-items { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.today-items li { font-size: 12px; font-family: var(--mono); }
+.today-items .qty { color: var(--text-dim); }
+.today .meta { margin: 6px 0 0; font-size: 12px; }
+
 .ledger-balance { font-weight: 600; font-size: 15px; margin: 8px 0 4px; }
 .ledger-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .ledger-entry { font-size: 12px; font-family: var(--mono); }

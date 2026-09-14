@@ -72,6 +72,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // LeaseNotApproved: a house tab, and the charges it accrues, must never open
 // against a lease the landlord hasn't signed off on (a self-order against an
 // unapproved lease posted a live $4.50 charge before this guard existed).
+// The same lease's `.tenancy` aspect rides alongside it (OptionalReads — a
+// lease approved before tenancies were minted carries none): once
+// submittedAt reaches its leaseEnd the op rejects TenancyEnded, so a
+// moved-out resident's lease stops taking house tabs the moment its rent
+// clause stops billing.
 //
 // VoidCharge declares no ownership probe: it has no self grant at all (a POS
 // correction is a staff decision even when reversing a resident's own mis-tap),
@@ -103,6 +108,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.leaseAppKey}.cafeOpenTab",
 					"lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{actor:id}",
 					"{payload.leaseAppKey}.decision",
+					"{payload.leaseAppKey}.tenancy",
 				},
 				// The operator-role confinement probe: require_workplace's
 				// workplace-exempt short-circuit walks the actor's own

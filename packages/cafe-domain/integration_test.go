@@ -327,7 +327,7 @@ func openTabExpect(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseAppKey},
-			OptionalReads: []string{leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision"},
+			OptionalReads: []string{leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
 			},
@@ -421,7 +421,7 @@ func TestOpenTab_RejectsUnapprovedLease(t *testing.T) {
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
-			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision"},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision", leaseKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
 			},
@@ -429,6 +429,84 @@ func TestOpenTab_RejectsUnapprovedLease(t *testing.T) {
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// openTabEnv is the OpenTab envelope openTabExpect submits, exposed so a test
+// can assert the refusal text rather than only the outcome.
+func openTabEnv(label, leaseAppKey, submittedAt string) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "OpenTab",
+		Actor:         domainActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{leaseAppKey},
+			OptionalReads: []string{leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+}
+
+// seedTenancy stamps the lease-signing .tenancy aspect DecideLeaseApplication
+// writes on approval — the term OpenTab's TenancyEnded guard reads.
+func seedTenancy(t *testing.T, ctx context.Context, conn *substrate.Conn, leaseKey, leaseStart, leaseEnd string) {
+	t.Helper()
+	seedAspect(t, ctx, conn, leaseKey, "tenancy", "tenancy", map[string]any{
+		"leaseStart": leaseStart, "leaseEnd": leaseEnd, "renewalOpensAt": leaseEnd,
+	})
+}
+
+// TestOpenTab_RejectsEndedTenancy proves a house tab closes to a lease the
+// moment its term ends: the rent clause already stops billing at leaseEnd,
+// and a moved-out resident must not keep charging the same ledger. The
+// boundary is inclusive (a submit AT leaseEnd is refused), the instant before
+// it is accepted, and a lease with no .tenancy at all — one approved before
+// lease-signing minted terms — still opens, since it has no term to have
+// ended.
+func TestOpenTab_RejectsEndedTenancy(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "endedtenancy")
+
+	ended := seedLease(t, ctx, conn, "BBCAFEDMNTNCYENDEDHJ")
+	seedTenancy(t, ctx, conn, ended, "2025-07-01T00:00:00Z", "2026-07-01T00:00:00Z")
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		openTabEnv("cdopentenancyended01", ended, "2026-07-07T12:00:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("OpenTab past leaseEnd: outcome = %q, want rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "TenancyEnded: this lease's tenancy ended on 2026-07-01") {
+		t.Fatalf("OpenTab past leaseEnd rejected with %+v, want TenancyEnded naming the end date", reply.Error)
+	}
+
+	// The boundary itself: a submit at exactly leaseEnd is past the term.
+	atEnd := seedLease(t, ctx, conn, "BBCAFEDMNTNCYATENDHJ")
+	seedTenancy(t, ctx, conn, atEnd, "2025-07-07T12:00:00Z", "2026-07-07T12:00:00Z")
+	outcome, reply = testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		openTabEnv("cdopentenancyatend01", atEnd, "2026-07-07T12:00:00Z"))
+	if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, "TenancyEnded") {
+		t.Fatalf("OpenTab at leaseEnd: outcome = %q error = %+v, want a TenancyEnded rejection", outcome, reply.Error)
+	}
+
+	// The positive vector the guard must not swallow: one second before the
+	// term ends the tab opens.
+	live := seedLease(t, ctx, conn, "BBCAFEDMNTNCYLYVEHJK")
+	seedTenancy(t, ctx, conn, live, "2025-07-07T12:00:00Z", "2026-07-07T12:00:01Z")
+	if outcome, reply = testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		openTabEnv("cdopentenancylive001", live, "2026-07-07T12:00:00Z")); outcome != processor.OutcomeAccepted {
+		t.Fatalf("OpenTab one second before leaseEnd: outcome = %q error = %+v, want accepted", outcome, reply.Error)
+	}
+
+	// And the term-less lease (seedLease carries .decision only) — every
+	// other fixture in this file, unchanged by the guard.
+	if outcome, reply = testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		openTabEnv("cdopentenancynone001", seedLease(t, ctx, conn, "BBCAFEDMNTNCYNQNEHJK"), "2026-07-07T12:00:00Z")); outcome != processor.OutcomeAccepted {
+		t.Fatalf("OpenTab with no .tenancy: outcome = %q error = %+v, want accepted", outcome, reply.Error)
+	}
 }
 
 func TestCharge_AccumulatesTotalCents(t *testing.T) {
@@ -1072,7 +1150,7 @@ func TestVoidCharge_RejectsForConsumer(t *testing.T) {
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
-			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision"},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision", leaseKey + ".tenancy"},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}
@@ -1670,7 +1748,7 @@ func TestOpenTab_ConsumerSelfScope_Allowed(t *testing.T) {
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
-			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision"},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision", leaseKey + ".tenancy"},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}

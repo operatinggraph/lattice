@@ -141,7 +141,7 @@ func submitOpenTabAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
-			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision"},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision", leaseKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
 			},

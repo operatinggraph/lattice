@@ -183,6 +183,9 @@ func TestFrontDeskLeaseDetails_ProjectsUnitRow(t *testing.T) {
 	}
 	f := newFdFixture(t)
 	f.vtx(t, "l1", "leaseapp")
+	f.aspect(t, "l1", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-07-01T00:00:00Z", "leaseEnd": "2027-07-01T00:00:00Z", "renewalOpensAt": "2027-05-02T00:00:00Z",
+	})
 	f.mkUnit(t, "l1_unit", 2500, "USD", 12, "123 Main St")
 	f.edge(t, "appliesToUnit", "l1", "l1_unit")
 
@@ -196,6 +199,8 @@ func TestFrontDeskLeaseDetails_ProjectsUnitRow(t *testing.T) {
 	require.Equal(t, 2500.0, v["unitRent"])
 	require.Equal(t, "USD", v["unitCurrency"])
 	require.Equal(t, 12.0, v["unitLeaseTermMonths"])
+	require.Equal(t, "2026-07-01T00:00:00Z", v["leaseStart"])
+	require.Equal(t, "2027-07-01T00:00:00Z", v["leaseEnd"])
 }
 
 func TestFrontDeskLeaseDetails_NullsWhenNoUnit(t *testing.T) {
@@ -210,6 +215,7 @@ func TestFrontDeskLeaseDetails_NullsWhenNoUnit(t *testing.T) {
 	v := rows[0].Values
 	require.Nil(t, v["unitKey"])
 	require.Nil(t, v["unitRent"])
+	require.Nil(t, v["leaseEnd"], "a lease with no .tenancy projects a null term, not a missing row")
 }
 
 // mkAppointment seeds an appointment with a .schedule + .status aspect,

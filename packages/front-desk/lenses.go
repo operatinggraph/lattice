@@ -117,6 +117,10 @@ RETURN
 // leaseApplicationCompleteSpec): unit is required at CreateLeaseApplication
 // so a live application always resolves one, but a tombstoned unit must not
 // drop the anchor — it degrades to null rent/term rather than no row.
+// leaseStart/leaseEnd come off the lease's own lease-signing .tenancy aspect
+// (null on a lease approved before terms were minted) — the term the café's
+// OpenTab refuses TenancyEnded past, so the desk's lease pickers can say a
+// tenancy has ended before a staffer tries.
 const leaseDetailsSpec = `MATCH (l:leaseapp)
 OPTIONAL MATCH (l)-[:appliesToUnit]->(u:unit)
 RETURN
@@ -126,7 +130,9 @@ RETURN
   u.address.data.line1 AS unitAddress,
   u.listing.data.rentAmount AS unitRent,
   u.listing.data.rentCurrency AS unitCurrency,
-  u.listing.data.leaseTermMonths AS unitLeaseTermMonths`
+  u.listing.data.leaseTermMonths AS unitLeaseTermMonths,
+  l.tenancy.data.leaseStart AS leaseStart,
+  l.tenancy.data.leaseEnd AS leaseEnd`
 
 // visitsSpec projects one row per LIVE, scheduled clinic appointment carrying
 // a residentVisit link (appointment→leaseapp) — clinic-domain's

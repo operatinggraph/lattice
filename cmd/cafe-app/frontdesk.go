@@ -131,6 +131,8 @@ type leaseDetailRow struct {
 	UnitRent        float64 `json:"unitRent"`
 	UnitCurrency    string  `json:"unitCurrency"`
 	UnitLeaseTermMo float64 `json:"unitLeaseTermMonths"`
+	LeaseStart      string  `json:"leaseStart,omitempty"`
+	LeaseEnd        string  `json:"leaseEnd,omitempty"`
 }
 
 // computeFrontDeskLeaseDetails decodes every frontDeskLeaseDetails row in

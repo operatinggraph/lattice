@@ -38,6 +38,15 @@
       <button id="frontdesk-refresh" class="ghost">Refresh</button>
       <span class="summary" id="frontdesk-summary"></span>
     </div>
+    <section id="frontdesk-today" class="today" aria-live="polite" hidden>
+      <div class="today-head">
+        <h2>Today</h2>
+        <span class="today-gross" id="frontdesk-today-gross"></span>
+        <span class="meta" id="frontdesk-today-tabs"></span>
+      </div>
+      <ul class="today-items" id="frontdesk-today-items"></ul>
+      <p class="meta" id="frontdesk-today-voids"></p>
+    </section>
     <ul id="frontdesk-arrears" class="ledger-list" aria-live="polite"></ul>
     <div id="frontdesk-arrears-empty" class="empty" hidden>Nobody owes money and nobody is in credit right now.</div>
     <div id="frontdesk-grid" class="grid" aria-live="polite"></div>
