@@ -78,7 +78,8 @@ func requireNoted(ctx context.Context, t *testing.T, s *stateStore, instanceID, 
 // userTask whose CreateTask committed long ago, whose op tracker has since aged
 // out of its 24 h life, and whose deadline marker only now reaches the watcher.
 // Every read the probe makes says "no tracker, no outbox" — the same two
-// absences a genuinely rejected op leaves — and today that is a terminal.
+// absences a genuinely rejected op leaves, and an unguarded probe reads them as
+// a terminal on an instance whose human task is still open.
 //
 // The one thing that separates them is the AGE of those absences, which the
 // probe takes from the pending step's token pointer, and which only an injected
@@ -88,10 +89,10 @@ func requireNoted(ctx context.Context, t *testing.T, s *stateStore, instanceID, 
 // the record at the revision it read, ack, and leave the instance running on its
 // token so the human task it backstops can still complete.
 //
-// MUTATION (T2): delete the `age < opstatus.TrackerTTL` comparison in
-// probeRejectedOrLost — i.e. make it always probeFail — and this test reds on
-// the status assertion (failed, not running) inside requireNoted. Verified by
-// hand while building.
+// MUTATION: with the `age < opstatus.TrackerTTL` comparison in
+// probeRejectedOrLost removed — the branch taken unconditionally — this test
+// reds on requireNoted's status assertion, observed "expected running, actual
+// failed". A guard whose deletion leaves a green suite is not a guard.
 func TestProbeRejectedOrLost_EvidencePastItsOwnLifetimeIsNoVerdict(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -125,8 +126,8 @@ func TestProbeRejectedOrLost_EvidencePastItsOwnLifetimeIsNoVerdict(t *testing.T)
 }
 
 // TestProbeRejectedOrLost_FreshEvidenceStillFails is T1's positive vector on the
-// same seed: with the wall clock, the token pointer was written seconds ago, the
-// absences are current, and the verdict is the terminal it has always been.
+// same seed: with the wall clock, the token pointer was written seconds ago, so
+// the absences are current and the verdict is the terminal §10.6 asks for.
 // Without this, a probe that had simply stopped failing anything would pass the
 // test above.
 func TestProbeRejectedOrLost_FreshEvidenceStillFails(t *testing.T) {

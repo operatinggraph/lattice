@@ -1348,7 +1348,8 @@ func (e *Engine) probeFail(ctx context.Context, inst *Instance, oldToken, reason
 //     an operator has the alert and the redrive verb. This is the §10.6
 //     "distinguishes BY EVIDENCE" clause honoured past the evidence's life,
 //     and it is alerted, never a silent wedge.
-//   - Otherwise — fail, exactly as before, at the revision the probe read.
+//   - Epoch inside the horizon — the ordinary terminal, at the revision the
+//     probe read the instance at.
 //
 // The return is nil (⇒ Ack) on the inconclusive arm, never a Nak: a Nak asks
 // for a redelivery that would read the same absences and reach the same refusal.
@@ -1361,7 +1362,8 @@ func (e *Engine) probeRejectedOrLost(ctx context.Context, inst *Instance, reason
 		}
 		return err
 	}
-	age := e.now().Sub(epoch)
+	at := e.now()
+	age := at.Sub(epoch)
 	if age < opstatus.TrackerTTL {
 		return e.probeFail(ctx, inst, token, reason, expectedRevision)
 	}
@@ -1372,7 +1374,7 @@ func (e *Engine) probeRejectedOrLost(ctx context.Context, inst *Instance, reason
 		"readings", "the op may have committed and its tracker aged out, or it was genuinely rejected — "+
 			"no runtime can tell the two apart once the tracker is gone",
 		"operatorAction", "lattice loom redrive")
-	nerr := e.state.noteDeadlineProbe(ctx, inst, reason, e.now(), expectedRevision)
+	nerr := e.state.noteDeadlineProbe(ctx, inst, reason, at, expectedRevision)
 	if nerr != nil && substrate.IsRevisionConflict(nerr) {
 		e.logger.Info("loom: instance moved on under the probe; inconclusive note dropped",
 			"instanceId", inst.InstanceID, "expectedRevision", expectedRevision, "reason", reason)

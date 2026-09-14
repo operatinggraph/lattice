@@ -204,6 +204,13 @@ func newInspectCommand(natsURL, outputFmt, defaultActor *string) *cobra.Command 
 			fmt.Printf("status:      %s\n", d.Instance.Status)
 			fmt.Printf("retryCount:  %d\n", d.Instance.RetryCount)
 			fmt.Printf("terminal:    %t\n", d.Terminal)
+			if n := d.Instance.DeadlineProbe; n != nil {
+				// The engine's inconclusive-deadline alert names `lattice loom
+				// redrive` as the operator's move, and this is the command they
+				// reach for first — so the refusal has to be readable here, not
+				// only in --output json.
+				fmt.Printf("deadlineProbe: inconclusive at %s — %s (redrive to resume)\n", n.At, n.Reason)
+			}
 			if d.CurrentStep == nil {
 				fmt.Println("currentStep: (none)")
 				return nil
