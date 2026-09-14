@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dop251/goja"
 )
@@ -130,5 +131,34 @@ func TestSummarizeToday_EmptyDayIsZero(t *testing.T) {
 	}
 	if got := jsString(t, vm, `JSON.stringify(summarizeToday(undefined, now))`); !strings.HasPrefix(got, `{"tabs":0`) {
 		t.Fatalf("undefined tabs = %s", got)
+	}
+}
+
+// TestSummarizeToday_DSTDayKeepsItsLastHour pins the day end as the next
+// local midnight rather than start+24h: on the 25-hour fall-back day a fixed
+// span ends at 23:00, dropping every tab settled in the day's last hour.
+// goja's Date uses Go's time.Local, so the zone is pinned for the test's
+// duration (the package's tests do not run in parallel).
+func TestSummarizeToday_DSTDayKeepsItsLastHour(t *testing.T) {
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skip("tzdata unavailable:", err)
+	}
+	prev := time.Local
+	time.Local = la
+	t.Cleanup(func() { time.Local = prev })
+
+	vm := summarizeTodayVM(t)
+	got := jsString(t, vm, `
+(() => {
+  const dst = new Date(2026, 10, 1, 12, 0, 0);
+  if (new Date(2026, 10, 2).getTime() - new Date(2026, 10, 1).getTime() !== 25 * 3600 * 1000) return "not-a-25h-day";
+  const late = { tabKey: "vtx.tab.L", status: "settled", settledAt: new Date(2026, 10, 1, 23, 30, 0).toISOString(), totalCents: 350, lines: [line("line-1", "Croissant", 350, false)] };
+  const next = { tabKey: "vtx.tab.N", status: "settled", settledAt: new Date(2026, 10, 2, 0, 0, 0).toISOString(), totalCents: 999, lines: [line("line-1", "Feast", 999, false)] };
+  const s = summarizeToday([late, next], dst);
+  return s.tabs + ":" + s.grossCents;
+})()`)
+	if got != "1:350" {
+		t.Fatalf("fall-back day fold = %q, want 1:350 (the 23:30 tab kept, the next-midnight tab excluded)", got)
 	}
 }

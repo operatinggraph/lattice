@@ -1043,8 +1043,10 @@ function keepSoonest(byLease, item) {
 // than hidden inside an item. A tab is "today's" by its settledAt, the
 // instant the money moved; open tabs are the grid's, not this panel's.
 function summarizeToday(tabs, now) {
+  // Next-midnight via the date constructor, not +24h: a DST day is 23 or 25
+  // hours long and a fixed span would drop or borrow its last hour.
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+  const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
   const byItem = new Map();
   const out = { tabs: 0, grossCents: 0, items: [], voidCount: 0, voidCents: 0, unitemizedCents: 0 };
   let itemizedCents = 0;
