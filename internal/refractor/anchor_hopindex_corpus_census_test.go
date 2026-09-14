@@ -153,14 +153,14 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"edgeStaffWorkOrders":        hopIndexed, // Personal — see edgeEntityMenuItems.
 	"edgeTasks#0":                hopIndexed,
 	"edgeTasks#1":                hopIndexed,
-	"followUpReminders":        hopIndexed,
-	"applicantOnboarding":      hopIndexed,
-	"identityAnchors":          hopIndexed,
-	"identityErasureResidue":   hopIndexed,
-	"leaseApplicationComplete": hopIndexed,
-	"leaseExpiry":              hopIndexed,
-	"leaseRentSettlement":      hopIndexed,
-	"myTasks":                  hopIndexed,
+	"followUpReminders":          hopIndexed,
+	"applicantOnboarding":        hopIndexed,
+	"identityAnchors":            hopIndexed,
+	"identityErasureResidue":     hopIndexed,
+	"leaseApplicationComplete":   hopIndexed,
+	"leaseExpiry":                hopIndexed,
+	"leaseRentSettlement":        hopIndexed,
+	"myTasks":                    hopIndexed,
 	// Its untyped `-[r]->` is a WILDCARD hop: it names no relation, and every
 	// consumer of the index reads that as admit-any.
 	"objectAttachments":                 hopIndexed,

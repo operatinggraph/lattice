@@ -168,10 +168,10 @@ var corpusActorWalkScopeDigests = map[string]string{
 	// unlabelled position is followable from every type — the same two
 	// positions that keep this lens off the one-key answer
 	// (actor_onekey_corpus_census_test.go).
-	"edgeManifestStaffReadGrants":       "identity:holdsRole,worksAt|meta:forOperation,offeredTo|permission:forOperation,grantedBy|role:grantedBy,holdsRole,offeredTo,queuedFor|studio:locatedAt|task:queuedFor|workorder:locatedAt|any:containedIn,locatedAt,worksAt",
+	"edgeManifestStaffReadGrants": "identity:holdsRole,worksAt|meta:forOperation,offeredTo|permission:forOperation,grantedBy|role:grantedBy,holdsRole,offeredTo,queuedFor|studio:locatedAt|task:queuedFor|workorder:locatedAt|any:containedIn,locatedAt,worksAt",
 	// Single walk, fully labelled, no unlabelled position at all:
 	// `(identity)<-[:assignedTo]-(task:task)`, `(task)-[:forOperation]->(op:meta)`.
-	"edgeManifestTaskReadGrants": "identity:assignedTo|meta:forOperation|task:assignedTo,forOperation",
+	"edgeManifestTaskReadGrants":        "identity:assignedTo|meta:forOperation|task:assignedTo,forOperation",
 	"edgeProviderQueue":                 "identity:identifiedBy|service:instanceOf,providedBy|serviceprovider:identifiedBy,providedBy",
 	"edgeProviderSchedule":              "appointment:withProvider|identity:identifiedBy|provider:identifiedBy,withProvider",
 	"edgeServices":                      "identity:residesIn|service:availableAt,providedBy|any:availableAt,containedIn,providedBy,residesIn",
