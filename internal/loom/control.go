@@ -25,7 +25,7 @@ type InstanceSummary struct {
 	// evidence too old to decide on. It is the operator's whole signal that a
 	// redrive may be wanted, so an omitted note means the record has none, not
 	// that the summary declined to look.
-	DeadlineProbe *probeNote `json:"deadlineProbe,omitempty"`
+	DeadlineProbe *ProbeNote `json:"deadlineProbe,omitempty"`
 }
 
 // ConsumerStatus is the operator-facing snapshot of one managed consumer: its
@@ -71,25 +71,6 @@ var errConsumerNotManaged = errors.New("consumer not managed")
 // Redrive accepts (isResumable): it is complete, or it is running and making
 // its own progress.
 var errInstanceNotFailed = errors.New("instance is not in a failed or deadline-inconclusive state")
-
-// isResumable reports whether an operator redrive has anything to resume.
-//
-// Two states qualify, and they are the two an instance cannot leave on its own.
-// A FAILED instance is the ordinary one: terminal, and only an operator restarts
-// it. A RUNNING instance carrying a DeadlineProbe note is the other: its step
-// deadline fired, the probe found evidence too old to decide on and refused to
-// call it (probeRejectedOrLost), so the record stands running on a pending token
-// that nothing will ever resolve — the deadline is not re-armed, so no later
-// probe revisits it, and a rejected op emits no completion. It is parked, not
-// progressing, and the alert the refusal raises names this verb as the way out.
-//
-// A running instance with no note is refused, unchanged: that one is genuinely
-// in flight, and re-submitting its step would duplicate an op that is still on
-// its way to a verdict of its own.
-func isResumable(inst *Instance) bool {
-	return inst.Status == StatusFailed ||
-		(inst.Status == StatusRunning && inst.DeadlineProbe != nil)
-}
 
 // errPatternNotLoaded reports that a Redrive target's pattern is not (or no
 // longer) registered in the live source — nothing to re-pin against.
@@ -321,8 +302,29 @@ func (e *Engine) ResumeConsumer(ctx context.Context, name string) error {
 	return nil
 }
 
-// RedriveInstance manually resumes a FAILED instance AT ITS RECORDED CURSOR —
-// never restarts it under a fresh id. Restarting would re-run every step from
+// isResumable reports whether an operator redrive has anything to resume.
+//
+// Two states qualify, and they are the two an instance cannot leave on its own.
+// A FAILED instance is the ordinary one: terminal, and only an operator restarts
+// it. A RUNNING instance carrying a DeadlineProbe note is the other: its step
+// deadline fired, the probe found evidence too old to decide on and refused to
+// call it (probeRejectedOrLost), so the record stands running on a pending token
+// that nothing will ever resolve — the deadline is not re-armed, so no later
+// probe revisits it, and a rejected op emits no completion. It is parked, not
+// progressing, and the alert the refusal raises names this verb as the way out.
+//
+// A running instance with no note is refused, unchanged: that one is genuinely
+// in flight, and re-submitting its step would duplicate an op that is still on
+// its way to a verdict of its own.
+func isResumable(inst *Instance) bool {
+	return inst.Status == StatusFailed ||
+		(inst.Status == StatusRunning && inst.DeadlineProbe != nil)
+}
+
+// RedriveInstance manually resumes a STUCK instance AT ITS RECORDED CURSOR —
+// never restarts it under a fresh id. Stuck is what isResumable defines: failed,
+// or running and parked on an inconclusive deadline verdict.
+// Restarting would re-run every step from
 // 0, re-executing side effects the failed run already committed; resuming at
 // cursor re-submits (or re-evaluates the guard of) only the step that never
 // completed, exactly the recovery `resumeStepZero` already performs for a

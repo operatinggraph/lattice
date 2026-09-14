@@ -27,17 +27,26 @@ import (
 const Subject = "lattice.op.status"
 
 // TrackerTTL is the lifetime of every Contract #4 §4.1 op tracker: the
-// Processor stamps each tracker write with it, and 24h is fixed
-// platform-wide by Contract #4 §4.3.
+// Processor stamps each tracker write with it. Contract #4 §4.3 makes the
+// exact TTL deployment-configurable and 24h the architecture-locked default;
+// this constant is that default, and nothing in the tree wires a deployment
+// override to it.
 //
 // It lives here, beside the RPC that projects the tracker, because it is two
 // facts at once. It is how long a committed op's receipt can be read back —
-// the horizon internal/bridge's re-dispatch test already rests on. And it is
+// the platform's idempotency guarantee, time-bounded (§4.3). And it is
 // therefore the horizon past which the tracker's ABSENCE stops being
 // evidence: past it, "no tracker" no longer distinguishes an op that never
 // committed from one whose receipt has simply aged out. Any reader that
 // decides something from absence must compare the age of what it read against
-// this bound (Loom's deadline probe is the one that does).
+// this bound — Loom's deadline probe is the one that does, and it reads this
+// constant directly, so a deployment that overrode the Processor's TTL would
+// have to re-derive that comparison rather than inherit it.
+//
+// Other 24h values in the platform are not this one and must not be coupled to
+// it: internal/bridge's defaultCallDeadline (engine.go) is a poll-lane horizon
+// that happens to match, and its resultAlreadyLanded reads tracker presence
+// without consulting any age at all.
 const TrackerTTL = 24 * time.Hour
 
 // serviceName is the NATS Services registration name (exposed via

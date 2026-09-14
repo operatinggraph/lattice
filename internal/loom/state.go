@@ -158,16 +158,16 @@ type Instance struct {
 	// moves (a new token, a terminal status, a redrive). Additive JSON: a
 	// binary that does not know the field decodes the record and drops the note
 	// on its next write.
-	DeadlineProbe *probeNote `json:"deadlineProbe,omitempty"`
+	DeadlineProbe *ProbeNote `json:"deadlineProbe,omitempty"`
 }
 
-// probeNote is the durable trace of one inconclusive deadline verdict. At is
+// ProbeNote is the durable trace of one inconclusive deadline verdict. At is
 // the instant the probe refused, RFC3339 UTC (substrate.FormatTimestamp, the
 // same encoding deadlineMark.SetAt uses); Reason is the verdict the probe would
 // have written had its evidence still been current, verbatim — so the operator
 // reads the same sentence a fail would have carried, under the header that it
 // was not asserted.
-type probeNote struct {
+type ProbeNote struct {
 	At     string `json:"at"`
 	Reason string `json:"reason"`
 }
@@ -879,7 +879,7 @@ func (s *stateStore) tokenEpoch(ctx context.Context, token string) (time.Time, e
 // documents, and the one shape this verdict must never create. For the same
 // reason it is not an AtomicBatch: the record is the only thing that changes.
 func (s *stateStore) noteDeadlineProbe(ctx context.Context, inst *Instance, reason string, at time.Time, expectedRevision uint64) error {
-	inst.DeadlineProbe = &probeNote{At: substrate.FormatTimestamp(at), Reason: reason}
+	inst.DeadlineProbe = &ProbeNote{At: substrate.FormatTimestamp(at), Reason: reason}
 	body, err := json.Marshal(inst)
 	if err != nil {
 		return fmt.Errorf("loom: marshal instance %q: %w", inst.InstanceID, err)
