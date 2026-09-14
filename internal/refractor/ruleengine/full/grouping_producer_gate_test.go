@@ -99,6 +99,29 @@ func countGroupingClauses(q *Query) int {
 	return n
 }
 
+// declaredWalkCounts maps each generated producer to the number of Walks its
+// domain collects, read from the same Definition the generator compiles. It is
+// the exact form of "one staging clause per declared walk": a floor would let a
+// producer that silently lost a walk still pass, and the triangular shedding
+// equality beside it is vacuous at a single stage.
+func declaredWalkCounts(t testing.TB) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for _, d := range edgemanifest.Package.ReadGrantDomains {
+		out[d.Name+"ReadGrants"] = 0
+	}
+	for _, l := range edgemanifest.Package.Lenses {
+		for _, w := range l.Walks {
+			name := w.GrantDomain + "ReadGrants"
+			_, declared := out[name]
+			require.Truef(t, declared,
+				"lens %s names GrantDomain %q, which declares no producer", l.CanonicalName, w.GrantDomain)
+			out[name]++
+		}
+	}
+	return out
+}
+
 // armedReadGrantProducerNames is generatedReadGrantProducers filtered to the
 // ones whose staging actually sheds an accumulator. A domain with a single
 // Walk stages one clause with nothing carried before it to drop, so forcing
@@ -131,7 +154,8 @@ func TestGeneratedReadGrantProducers_GroupOnTheActorAlone(t *testing.T) {
 				name, spec)
 
 			stages := countGroupingClauses(q)
-			require.GreaterOrEqual(t, stages, 1, "%s should stage one WITH per declared walk", name)
+			require.Equalf(t, declaredWalkCounts(t)[name], stages,
+				"%s stages one WITH per declared walk", name)
 			require.Equalf(t, stages*(stages-1)/2, countRedundant(q),
 				"stage k of %s carries k accumulators and every one of them must be shed", name)
 		})
