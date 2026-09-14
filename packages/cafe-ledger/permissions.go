@@ -6,10 +6,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // and DebitAccount are orchestrator-submitted (the operator-grant idiom every
 // ledger package uses): CreateAccount when a resident opens a house tab for the
 // first time, DebitAccount when the cafeTabSettlement playbook posts a settled
-// tab. CreditCafeAccount and RefundCafeCharge are the two a human runs — a
-// payment handed over at the counter, and a charge the café decides was wrong —
-// so both also grant frontOfHouse, bound by the workplace confinement in
-// transactionDDLScript to the buildings that staffer actually works at.
+// tab. CreditCafeAccount, RefundCafeCharge and PayoutCafeCredit are the three a
+// human runs — a payment handed over at the counter (or a balance the café
+// writes off), a charge the café decides was wrong, and credit handed back in
+// cash — so all three also grant frontOfHouse, bound by the workplace
+// confinement in transactionDDLScript to the buildings that staffer actually
+// works at.
 //
 // The vertical prefix on CreditCafeAccount is load-bearing, not decoration —
 // do not "tidy" it back to CreditAccount. A standing grant is matched by
@@ -88,6 +90,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "RefundCafeCharge",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit RefundCafeCharge (gives back a charge already posted, anchored on that charge by a reverses link). A staffer is confined to accounts whose lease sits at a location they worksAt; the operator is unconfined. There is deliberately NO consumer grant at any scope: deciding a charge was wrong is the café's call, not the person who owes it, and a resident who could refund their own charges would simply erase what they drank.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "PayoutCafeCredit",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit PayoutCafeCredit (hands back, in cash, credit an account holds — a debit capped at that credit). A staffer is confined to accounts whose lease sits at a location they worksAt; the operator is unconfined. There is deliberately NO consumer grant at any scope: cash leaves the till only when the desk hands it over, and a resident who could pay themselves out would simply post debits against their own credit for money nobody gave them.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{

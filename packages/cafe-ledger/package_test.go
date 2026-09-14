@@ -36,7 +36,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 7; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 7; got != want {
+	if got, want := len(Package.Permissions), 8; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 3; got != want {
@@ -48,7 +48,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 4; got != want {
+	if got, want := len(Package.OpMetas), 5; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
@@ -59,7 +59,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"CreateAccount", "any"}, {"DebitAccount", "any"}, {"CreditCafeAccount", "any"}, {"CreditCafeAccount", "self"}, {"RefundCafeCharge", "any"}, {"EvaluateCafeArrears", "any"}, {"RecordCafeArrearsReminderNotification", "any"}}
+	wantPerms := []struct{ op, scope string }{{"CreateAccount", "any"}, {"DebitAccount", "any"}, {"CreditCafeAccount", "any"}, {"CreditCafeAccount", "self"}, {"RefundCafeCharge", "any"}, {"PayoutCafeCredit", "any"}, {"EvaluateCafeArrears", "any"}, {"RecordCafeArrearsReminderNotification", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break
@@ -70,7 +70,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantOpMetas := []string{"CreditCafeAccount", "RefundCafeCharge", "EvaluateCafeArrears", "RecordCafeArrearsReminderNotification"}
+	wantOpMetas := []string{"CreditCafeAccount", "RefundCafeCharge", "PayoutCafeCredit", "EvaluateCafeArrears", "RecordCafeArrearsReminderNotification"}
 	for i, m := range Package.OpMetas {
 		if i < len(wantOpMetas) && m.OperationType != wantOpMetas[i] {
 			t.Errorf("OpMetas[%d]: got %q, want %q", i, m.OperationType, wantOpMetas[i])

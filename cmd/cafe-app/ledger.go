@@ -22,6 +22,7 @@ type ledgerEntryProjection struct {
 	PostedAt       string   `json:"postedAt"`
 	ReversesKey    string   `json:"reversesKey"`
 	TabKey         string   `json:"tabKey"`
+	Reason         string   `json:"reason"`
 }
 
 // ledgerEntryRow is the posted-charge-history row the resident house-tab view
@@ -29,7 +30,11 @@ type ledgerEntryProjection struct {
 // back — the statement reads it to say a line is a correction rather than a
 // payment the resident made, since the entry itself is an ordinary credit.
 // TabKey is set only on a charge the tab-settlement playbook posted, and is
-// what tells the front desk which debits can be refunded at all.
+// what tells the front desk which debits can be refunded at all. Reason
+// classifies the entry beyond debit/credit: a credit carries "waiver" (a
+// staff write-off) or "refund" (RefundCafeCharge), a debit carries "payout"
+// (cash handed back out of a credit), and an ordinary payment or charge
+// carries none.
 type ledgerEntryRow struct {
 	TransactionKey string `json:"transactionKey"`
 	Type           string `json:"type"`
@@ -38,6 +43,7 @@ type ledgerEntryRow struct {
 	PostedAt       string `json:"postedAt"`
 	ReversesKey    string `json:"reversesKey,omitempty"`
 	TabKey         string `json:"tabKey,omitempty"`
+	Reason         string `json:"reason,omitempty"`
 }
 
 // computeLedgerHistory filters the cafeLedgerHistory lens rows to one lease,
@@ -71,6 +77,7 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 			PostedAt:       p.PostedAt,
 			ReversesKey:    p.ReversesKey,
 			TabKey:         p.TabKey,
+			Reason:         p.Reason,
 		})
 	}
 	sortLedgerRows(rows)
@@ -111,6 +118,7 @@ func sumBalance(rows []ledgerEntryRow) int64 {
 // the one leaseAppKey a resident names.
 type balanceRow struct {
 	LeaseAppKey    string `json:"leaseAppKey"`
+	AccountKey     string `json:"accountKey"`
 	BalanceCents   int64  `json:"balanceCents"`
 	DueDate        string `json:"dueDate"`
 	IsOverdue      bool   `json:"isOverdue"`
@@ -122,12 +130,18 @@ type balanceRow struct {
 // leaseAppKey and derives each lease's balance/due-date/overdue state in one
 // pass — the front-desk grid needs every visible lease's statement at once,
 // and re-running computeLedgerHistory's per-lease scan once per lease found
-// in the bucket would redecode the same rows N times over. A lease whose
-// balance settles to zero or credit is left out of the result entirely —
+// in the bucket would redecode the same rows N times over. Only a lease
+// whose balance settles to exactly zero is left out of the result entirely —
 // deriveStatement's own "nothing to age" case for one lease, applied per
-// group.
+// group. A lease in CREDIT (balance negative) is kept — no due date, never
+// overdue, the sign the front desk's Pay-out affordance reads — since the
+// house owes that resident money and dropping the row would make the debt
+// invisible. AccountKey is read off the first row seen for the lease: every
+// entry of one lease's history posts to the same café account, so any row
+// names it.
 func computeLedgerBalances(keys []string, get kvGetter, now time.Time) []balanceRow {
 	byLease := make(map[string][]ledgerEntryRow)
+	acctByLease := make(map[string]string)
 	for _, k := range keys {
 		raw, ok := get(k)
 		if !ok {
@@ -140,6 +154,9 @@ func computeLedgerBalances(keys []string, get kvGetter, now time.Time) []balance
 		var amount int64
 		if p.AmountCents != nil {
 			amount = int64(*p.AmountCents)
+		}
+		if _, ok := acctByLease[p.LeaseAppKey]; !ok {
+			acctByLease[p.LeaseAppKey] = p.AccountKey
 		}
 		byLease[p.LeaseAppKey] = append(byLease[p.LeaseAppKey], ledgerEntryRow{
 			TransactionKey: p.TransactionKey,
@@ -155,12 +172,13 @@ func computeLedgerBalances(keys []string, get kvGetter, now time.Time) []balance
 	for leaseAppKey, entries := range byLease {
 		sortLedgerRows(entries)
 		balance := sumBalance(entries)
-		if balance <= 0 {
+		if balance == 0 {
 			continue
 		}
 		dueDate, isOverdue, daysOverdue := deriveStatement(entries, balance, now)
 		rows = append(rows, balanceRow{
 			LeaseAppKey:  leaseAppKey,
+			AccountKey:   acctByLease[leaseAppKey],
 			BalanceCents: balance,
 			DueDate:      dueDate,
 			IsOverdue:    isOverdue,

@@ -32,7 +32,7 @@ func accountDDL() pkgmgr.DDLSpec {
 		Description: "House-tab ledger account DDL. Vertex shape: vtx.cafeaccount.<NanoID>, class=cafeaccount, root " +
 			"data = {} (minimal, D5 — the DISPLAYED balance is LENS-derived by summing transactions). " +
 			"CreateAccount also mints a .balance aspect ({balanceCents: 0}, cafeAccountBalance DDL) alongside the " +
-			"account — the running total transactionDDL's DebitAccount/CreditCafeAccount/RefundCafeCharge keep in " +
+			"account — the running total transactionDDL's DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit keep in " +
 			"lockstep with every posted entry (an auto-conditioned update, retry-eligible on a concurrent-writer " +
 			"conflict), an O(1) authorization cache the cafeLedgerHistory lens's own independent full-history sum " +
 			"remains the display source of truth for. " +
@@ -152,17 +152,18 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 // cafeAccountBalance) on the ACCOUNT — the maintained O(1) running-total cache
 // accountDDLScript mints at CreateAccount ({balanceCents: 0}) and
 // transactionDDLScript moves by the signed amount on every
-// DebitAccount/CreditCafeAccount/RefundCafeCharge posted to an account that
-// carries it. Declaration-only, mirroring
-// accountGuardAspectTypeDDL: the aspect is written by those four ops' own
+// DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit posted to an
+// account that carries it. Declaration-only, mirroring
+// accountGuardAspectTypeDDL: the aspect is written by those five ops' own
 // handlers, never has an operationType of its own.
 //
 // Its LIFETIME, end to end: created at CreateAccount at zero; on an account
 // minted under cafe-ledger < 0.4.0, which carries none, computed once from a
-// bounded replay of the account's postedTo history by the first PAYMENT posted
-// to it — a charge or a refund against such an account posts without writing
-// any .balance, leaving it legacy until that payment, whose replay then sums
-// the whole history including those entries. Updated by the signed amount on
+// bounded replay of the account's postedTo history by the first PAYMENT (or
+// write-off, or PAYOUT) posted to it — a charge or a refund against such an
+// account posts without writing any .balance, leaving it legacy until one of
+// those, whose replay then sums the whole history including those entries.
+// Updated by the signed amount on
 // every entry posted to an account that carries it, and never settable by a
 // caller (no op takes balanceCents as a payload field). Absent on a legacy
 // account is why every dispatcher declares it optionalReads and not reads, and
@@ -174,32 +175,42 @@ func accountBalanceAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "cafeAccountBalance",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAccount", "DebitAccount", "CreditCafeAccount", "RefundCafeCharge"},
+		PermittedCommands: []string{"CreateAccount", "DebitAccount", "CreditCafeAccount", "RefundCafeCharge", "PayoutCafeCredit"},
 		Description: "Per-account running-balance cache aspect. Stored as vtx.cafeaccount.<NanoID>.balance " +
-			"(class cafeAccountBalance) = {balanceCents: <integer>}. Non-sensitive. Minted at {balanceCents: 0} by " +
-			"CreateAccount alongside the account vertex it names, then kept in lockstep with every posted entry by " +
-			"DebitAccount (+= amountCents), CreditCafeAccount (-= amountCents) and RefundCafeCharge (-= amountCents) " +
-			"via a bare update — auto-conditioned on the step-4 hydrated revision (a declared read) rather than an " +
-			"explicit expectedRevision, which is what makes it retry-eligible under a concurrent writer instead of " +
-			"hard-conflicting. An account minted under cafe-ledger < 0.4.0 carries no .balance; the key is declared " +
-			"optionalReads (not reads) by every dispatcher and by the transaction DDL's own derive_reads, and the " +
-			"first PAYMENT posted to such an account computes the aspect from a bounded replay of its postedTo " +
-			"history — a charge or a refund against one posts without writing any .balance at all. Exists purely as " +
-			"this package's own O(1) authorization " +
-			"cache (the CreditCafeAccount amount-owed cap, on the resident and staff legs alike); the " +
-			"cafeLedgerHistory lens remains the independently-derived display source of truth and never reads this " +
-			"aspect. Declaration-only: no op handler of its own.",
+			"(class cafeAccountBalance) = {balanceCents: <integer>, cashCents: <integer>}. Non-sensitive. Minted at " +
+			"{balanceCents: 0, cashCents: 0} by CreateAccount alongside the account vertex it names, then kept in " +
+			"lockstep with every posted entry: balanceCents by DebitAccount (+= amountCents), CreditCafeAccount " +
+			"(-= amountCents), RefundCafeCharge (-= amountCents) and PayoutCafeCredit (+= amountCents); cashCents — " +
+			"the NET CASH paid in — by CreditCafeAccount reason payment (+= amountCents) and PayoutCafeCredit " +
+			"(-= amountCents) alone, a charge, a write-off or a refund leaving it untouched. Both fields ride every " +
+			"write, via a bare update — auto-conditioned on the step-4 hydrated revision (a declared read) rather " +
+			"than an explicit expectedRevision, which is what makes it retry-eligible under a concurrent writer " +
+			"instead of hard-conflicting. cashCents is the floor under the credit a refund may mint: an account's " +
+			"credit may never exceed the cash behind it (RefundExceedsPaid), so a charge written off and then " +
+			"refunded cannot mint credit the desk pays out for money nobody paid; a payout is bounded by it too " +
+			"(PayoutExceedsCash). A live .balance document WITHOUT cashCents predates the field — absence means not " +
+			"yet computed, never zero — and the legs that need the number (a payment, a refund, a payout) compute " +
+			"it once from a bounded replay of the postedTo history and write it with their entry, while a charge " +
+			"leaves it absent rather than seed it from a partial view. An account minted under cafe-ledger < 0.4.0 " +
+			"carries no .balance at all; the key is declared optionalReads (not reads) by every dispatcher and by " +
+			"the transaction DDL's own derive_reads, and the first PAYMENT, write-off, REFUND or PAYOUT posted to " +
+			"such an account computes the whole aspect from that same replay — a charge against one posts without " +
+			"writing any .balance at all. Exists purely as this package's own O(1) authorization cache (the " +
+			"CreditCafeAccount amount-owed cap on the resident and staff legs alike, the RefundCafeCharge cash " +
+			"floor, the PayoutCafeCredit credit cap); the cafeLedgerHistory lens remains the independently-derived " +
+			"display source of truth and never reads this aspect. Declaration-only: no op handler of its own.",
 		Script:       aspectDeclarationOnlyScript,
-		InputSchema:  `{"type":"object","properties":{"balanceCents":{"type":"integer"}}}`,
+		InputSchema:  `{"type":"object","properties":{"balanceCents":{"type":"integer"},"cashCents":{"type":"integer"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"balanceCents": "The account's current running balance in integer cents (positive = owed, can go negative when a refund gives back a charge the resident had already paid). Maintained by DebitAccount/CreditCafeAccount/RefundCafeCharge, never set directly by a caller.",
+			"balanceCents": "The account's current running balance in integer cents (positive = owed, negative = credit the café owes back — a refund gave back a charge the resident had already paid; a payout brings it back toward zero). Maintained by DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit, never set directly by a caller.",
+			"cashCents":    "The net cash this account has paid in, in integer cents: payments (CreditCafeAccount reason payment) add, payouts (PayoutCafeCredit) subtract, and a charge, a write-off or a refund leaves it alone. The floor under the account's credit — a refund may never take the balance further below zero than this (RefundExceedsPaid), and a payout may never exceed it (PayoutExceedsCash). ABSENT on a document written before the field existed, which means not yet computed, never zero: the next payment, refund or payout computes it from the account's postedTo history and writes it; a charge leaves it absent. Never set directly by a caller.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "account running-balance cache aspect",
-				Payload:         map[string]any{"balanceCents": 1425},
-				ExpectedOutcome: "Stored as vtx.cafeaccount.<NanoID>.balance; minted at 0 by CreateAccount, updated by the signed amount on every DebitAccount/CreditCafeAccount/RefundCafeCharge.",
+				Payload:         map[string]any{"balanceCents": -1000, "cashCents": 1000},
+				ExpectedOutcome: "Stored as vtx.cafeaccount.<NanoID>.balance; minted at {0, 0} by CreateAccount, balanceCents updated by the signed amount on every DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit, cashCents by payments and payouts alone. This shape — $10.00 in credit against $10.00 paid in — is a paid charge refunded; a payout of up to $10.00 is admissible.",
 			},
 		},
 	}
@@ -226,6 +237,10 @@ func accountBalanceAspectTypeDDL() pkgmgr.DDLSpec {
 //     today. Nor does a debit that leaves the account still IN CREDIT (a refund
 //     took it below zero and this charge only eats into that surplus) — the
 //     surplus prepays the charge outright, so there is no open debit to age.
+//     PayoutCafeCredit is the other debit, and it is NOT a writer of this aspect
+//     at all: its cap bounds it at the credit the account holds, so the balance
+//     it leaves is at most zero and the episode branch never opens — which is
+//     why it is absent from PermittedCommands here while present on .balance.
 //   - CreditCafeAccount / RefundCafeCharge that take the balance to zero or
 //     below end the episode: {evaluatedAt} alone, so no timer stays armed.
 //   - CreditCafeAccount / RefundCafeCharge that leave a balance mark the state
@@ -270,7 +285,9 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"with) and is a request for a fresh EvaluateCafeArrears, which rewrites the aspect and so never carries " +
 			"it forward. Written by DebitAccount (opens an episode on an account that owed nothing), " +
 			"CreditCafeAccount / RefundCafeCharge (end the episode at zero, else mark stale) and EvaluateCafeArrears " +
-			"(recomputes the head). Read by the cafeArrearsReminders convergence lens and projected for the front " +
+			"(recomputes the head). PayoutCafeCredit never writes it: a payout is capped at the credit the account " +
+			"holds, so the balance it leaves is at most zero and no episode can open. Read by the " +
+			"cafeArrearsReminders convergence lens and projected for the front " +
 			"desk by cafeLeaseAccounts. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{"evaluatedAt":{"type":"string"},"dueAt":{"type":"string"},"remindedFor":{"type":"string"},"sentAt":{"type":"string"},"stale":{"type":"boolean"},"historyTooLong":{"type":"boolean"}}}`,
@@ -307,15 +324,17 @@ func transactionDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "cafetransaction",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge"},
+		PermittedCommands: []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge", "PayoutCafeCredit"},
 		Description: "House-tab ledger transaction DDL. Vertex shape: vtx.cafetransaction.<NanoID>, " +
 			"class=cafetransaction, root data = {} (minimal, D5 — the entry detail is a .entry aspect). " +
 			"DebitAccount{accountKey, amountCents, memo?, tabRef?} records a café charge (a settled tab); " +
-			"CreditCafeAccount{accountKey, amountCents, memo?} records a payment received; " +
+			"CreditCafeAccount{accountKey, amountCents, memo?, reason?} records a payment received (reason " +
+			"\"payment\", the default) or writes off what is owed (reason \"waiver\", staff only); " +
 			"RefundCafeCharge{accountKey, reversesRef, amountCents, memo?} gives back part or all of a charge " +
-			"already posted. Each mints a fresh " +
+			"already posted; PayoutCafeCredit{accountKey, amountCents, memo?} hands back, in cash, credit the " +
+			"account holds. Each mints a fresh " +
 			"vtx.cafetransaction.<NanoID> + a .entry aspect " +
-			"{type (debit|credit), amountCents, memo?, postedAt, refundedCents?} + the " +
+			"{type (debit|credit), amountCents, memo?, postedAt, reason?, refundedCents?} + the " +
 			"postedTo link (cafetransaction→cafeaccount, the cafetransaction is the later-arriving vertex so it is " +
 			"the source — Contract #1 §1.1) + a bare (no explicit expectedRevision) update of the account's own " +
 			".balance aspect (accountDDL) by the signed amount, where the account carries one — auto-conditioned on " +
@@ -328,8 +347,12 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"CreditCafeAccount's amountCents may never exceed the account's outstanding balance, and is refused " +
 			"outright on an account that owes nothing (AuthDenied) — on the resident's own scope=self submit and on " +
 			"a staff scope=any submit alike, since nothing on this platform verifies that a payment actually " +
-			"happened whoever keyed it. Requires the accountKey be a live account and amountCents be a positive " +
-			"number. DebitAccount-only optional tabRef (the cafe-domain Settle consumer, mirroring loftspace-ledger's " +
+			"happened whoever keyed it; a write-off (reason \"waiver\") is the same credit under the same cap, " +
+			"refused AuthDenied on a self-scoped submit because forgiving a debt is the café's call. " +
+			".entry.reason is a complete classification: a credit is payment / waiver / refund, a debit carries " +
+			"none (a charge) or payout. Only CreditCafeAccount accepts a payload reason; every other op writes " +
+			"its own and refuses one (InvalidArgument). Requires the accountKey be a live account and amountCents " +
+			"be a positive number. DebitAccount-only optional tabRef (the cafe-domain Settle consumer, mirroring loftspace-ledger's " +
 			"clauseRef): when present and the referenced tab is alive, writes the settles audit link " +
 			"(cafetransaction→tab) the cafeTabSettlement Weaver target reads to detect the charge is posted; a plain " +
 			"human-submitted DebitAccount omitting tabRef is byte-for-byte unaffected. " +
@@ -341,7 +364,11 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"amountCents may not exceed that charge's own amount minus what has already been given back against it " +
 			"(RefundExceedsCharge), so partial refunds accumulate to at most the charge. That charge-scoped ceiling " +
 			"is a refund's ONLY cap — a refund is not bounded by the outstanding balance the way a payment is, so " +
-			"giving back a charge the resident already paid legitimately takes .balance negative. The refunded " +
+			"giving back a charge the resident already paid legitimately takes .balance negative — but never further " +
+			"than the cash the account has paid in (.balance.cashCents): a refund that would leave a credit larger " +
+			"than that is refused RefundExceedsPaid, which is what keeps a written-off charge from being refunded " +
+			"into credit the desk then pays out. Only a posted CHARGE can be refunded — a payout is a debit too, and " +
+			"naming one is refused (InvalidArgument), or a refund could hand a payout straight back. The refunded " +
 			"amount is maintained as a " +
 			"refundedCents field on the reversed charge's own .entry aspect, upserted in the refund's batch under " +
 			"a compare-and-set pinned to the revision that aspect was read at. That single tally is the ceiling: " +
@@ -349,23 +376,31 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"compare-and-set outright or, on an account whose own .balance update is auto-conditioned too, " +
 			"re-hydrates and re-runs and is then refused on the fresh tally. " +
 			"A refund is a front-desk act and is never self-scoped: a submit carrying an authContext target is " +
-			"refused.",
+			"refused. PayoutCafeCredit posts a DEBIT with reason \"payout\": cash the desk handed back against " +
+			"credit the account holds (a refund of a charge already paid). It is capped at that credit — refused " +
+			"NoCreditToPayOut on an account that owes or is square, PayoutExceedsCredit past the credit, " +
+			"PayoutExceedsCash past the cash paid in — so " +
+			"Σdebit−Σcredit returns to at most zero and the arrears episode never opens; it backfills a legacy " +
+			"account's .balance exactly as a payment does, and emits account.paidOut. Staff-only, never " +
+			"self-scoped, workplace-confined like a payment.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"accountKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> the transaction posts to (DebitAccount/CreditCafeAccount/RefundCafeCharge; required, validated alive)."},` +
-			`"amountCents":{"type":"integer","description":"The transaction amount in whole cents; required, must be > 0. A debit is a charge (increases what the resident owes on the house tab); a credit is a payment (decreases it) and may never exceed what is owed; a refund is a credit bounded instead by the charge it reverses."},` +
-			`"memo":{"type":"string","description":"Optional free-text description of the charge, payment or refund (e.g. \"Settled tab — table 4\", \"House tab payment\", \"Wrong item charged\"). Optional."},` +
+			`{"accountKey":{"type":"string","description":"vtx.cafeaccount.<NanoID> the transaction posts to (DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit; required, validated alive)."},` +
+			`"amountCents":{"type":"integer","description":"The transaction amount in whole cents; required, must be > 0. A debit is a charge (increases what the resident owes on the house tab) or a payout (cash handed back, bounded by the credit the account holds); a credit is a payment or write-off (decreases it) and may never exceed what is owed; a refund is a credit bounded instead by the charge it reverses."},` +
+			`"memo":{"type":"string","description":"Optional free-text description of the charge, payment, refund or payout (e.g. \"Settled tab — table 4\", \"House tab payment\", \"Wrong item charged\", \"Paid from till\"). Optional."},` +
+			`"reason":{"type":"string","enum":["payment","waiver"],"description":"CreditCafeAccount only: why the credit is posted — \"payment\" (cash collected, the default) or \"waiver\" (debt written off; staff only, refused AuthDenied on a self-scoped submit). Refused (InvalidArgument) on every other op, each of which writes its own reason: a refund \"refund\", a payout \"payout\", a charge none."},` +
 			`"tabRef":{"type":"string","description":"DebitAccount only: vtx.tab.<NanoID> of the cafe-domain tab this charge settles (optional, validated alive when supplied). Writes the settles audit link."},` +
 			`"reversesRef":{"type":"string","description":"RefundCafeCharge only: vtx.cafetransaction.<NanoID> of the posted charge being given back (required, validated alive, must be a debit on the same account). Writes the reverses link."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.cafetransaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"accountKey":  "Full vtx.cafeaccount.<NanoID> key the transaction posts to. DebitAccount/CreditCafeAccount/RefundCafeCharge validate it is alive and write the postedTo link (transaction→account) the cafeLedgerHistory lens walks.",
-			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the cafeLedgerHistory lens — a refund never alters the charge's own amountCents. On CreditCafeAccount it is additionally capped by the account's own outstanding balance (server-verified against the maintained .balance aspect, on the resident and staff legs alike), and refused outright on an account that owes nothing. On RefundCafeCharge it is capped instead by what the reversed charge still has un-refunded (its amountCents minus its refundedCents tally).",
-			"memo":        "Optional free-text description of the charge, payment or refund (e.g. \"Settled tab — table 4\", \"House tab payment\", \"Wrong item charged\"). Stored on the .entry aspect when supplied; projected by the cafeLedgerHistory lens.",
-			"tabRef":      "DebitAccount only. Full vtx.tab.<NanoID> key of the cafe-domain tab this charge settles. Validated alive when supplied; writes the settles audit link (transaction→tab) the cafeTabSettlement Weaver target's missing_charge gap reads. Omitted on a plain human-submitted DebitAccount, and refused outright (InvalidArgument) on RefundCafeCharge, whose credit settles no tab.",
-			"reversesRef": "RefundCafeCharge only, and required there. Full vtx.cafetransaction.<NanoID> key of the posted charge being given back — validated alive, required to be a DEBIT posted to the same accountKey, and the ceiling on amountCents (its own amountCents minus its refundedCents). Writes the reverses link (refund→charge) the cafeLedgerHistory lens projects as reversesKey, and adds this refund to the charge's refundedCents tally under a compare-and-set on that .entry aspect's hydrated revision.",
+			"accountKey":  "Full vtx.cafeaccount.<NanoID> key the transaction posts to. DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit validate it is alive and write the postedTo link (transaction→account) the cafeLedgerHistory lens walks.",
+			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the cafeLedgerHistory lens — a refund never alters the charge's own amountCents. On CreditCafeAccount it is additionally capped by the account's own outstanding balance (server-verified against the maintained .balance aspect, on the resident and staff legs alike, payment and write-off alike), and refused outright on an account that owes nothing. On RefundCafeCharge it is capped instead by what the reversed charge still has un-refunded (its amountCents minus its refundedCents tally). On PayoutCafeCredit it is capped by the credit the account holds (a negative .balance): refused NoCreditToPayOut when the account owes or is square, PayoutExceedsCredit past the credit.",
+			"memo":        "Optional free-text description of the charge, payment, refund or payout (e.g. \"Settled tab — table 4\", \"House tab payment\", \"Wrong item charged\", \"Paid from till\"). Stored on the .entry aspect when supplied; projected by the cafeLedgerHistory lens.",
+			"reason":      "CreditCafeAccount only. \"payment\" (default) records cash collected; \"waiver\" writes off what is owed and is staff-only — refused AuthDenied on a self-scoped submit. Both are capped at the outstanding balance. Stored on the .entry aspect as reason and projected by the cafeLedgerHistory lens, alongside the reasons the other ops write for themselves (RefundCafeCharge \"refund\", PayoutCafeCredit \"payout\"; a DebitAccount charge carries none). Sending the field to any op but CreditCafeAccount is refused (InvalidArgument) rather than ignored.",
+			"tabRef":      "DebitAccount only. Full vtx.tab.<NanoID> key of the cafe-domain tab this charge settles. Validated alive when supplied; writes the settles audit link (transaction→tab) the cafeTabSettlement Weaver target's missing_charge gap reads. Omitted on a plain human-submitted DebitAccount, and refused outright (InvalidArgument) on RefundCafeCharge and PayoutCafeCredit, neither of which settles a tab.",
+			"reversesRef": "RefundCafeCharge only, and required there. Full vtx.cafetransaction.<NanoID> key of the posted charge being given back — validated alive, required to be a DEBIT with NO reason (a charge — a payout is a debit too and is refused, so a refund can never hand a payout back) posted to the same accountKey, and the ceiling on amountCents (its own amountCents minus its refundedCents). Writes the reverses link (refund→charge) the cafeLedgerHistory lens projects as reversesKey, and adds this refund to the charge's refundedCents tally under a compare-and-set on that .entry aspect's hydrated revision.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -400,8 +435,30 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"un-refunded. Commits the ordinary credit shape (transaction + .entry{type: credit, …} + postedTo) " +
 					"plus the reverses link (refund→charge) and the charge's own refundedCents tally, conditioned on " +
 					"the revision its .entry was read at, and emits account.credited. Rejects UnknownTransaction if " +
-					"the reference is absent, InvalidArgument if it is a credit or posted to another account, " +
-					"RefundExceedsCharge if the amount runs past the charge, and AuthDenied on a self-scoped submit.",
+					"the reference is absent, InvalidArgument if it is a credit, a payout or posted to another account, " +
+					"RefundExceedsCharge if the amount runs past the charge, RefundExceedsPaid if it would leave the " +
+					"account in more credit than the cash it has paid in, and AuthDenied on a self-scoped submit.",
+			},
+			{
+				Name:    "CreditCafeAccount — write off a house tab the café will never collect",
+				Payload: map[string]any{"accountKey": "vtx.cafeaccount.<NanoID>", "amountCents": 1800, "reason": "waiver", "memo": "Lease never approved"},
+				ExpectedOutcome: "The payment shape exactly, with .entry{type: credit, reason: \"waiver\", …} — every balance " +
+					"consumer sums it as a credit, and the statement reads the reason to say the debt was forgiven " +
+					"rather than paid. Capped at the outstanding balance like a payment (\"a write-off of $X exceeds " +
+					"the outstanding balance of $Y\"). Rejects AuthDenied on a self-scoped submit: a resident pays " +
+					"their tab down, never writes it off.",
+			},
+			{
+				Name:    "PayoutCafeCredit — hand back credit in cash",
+				Payload: map[string]any{"accountKey": "vtx.cafeaccount.<NanoID>", "amountCents": 3575, "memo": "Paid from till"},
+				ExpectedOutcome: "Validates the account is alive and holds at least 3575 of credit (.balance <= -3575, " +
+					"backfilled from the postedTo history on a legacy account). Commits the debit shape (transaction + " +
+					".entry{type: debit, reason: \"payout\", …} + postedTo) and moves .balance by +3575, back toward " +
+					"zero; never writes .arrears (the balance it leaves is at most zero). Emits " +
+					"account.paidOut{accountKey, transactionKey, amountCents}. Rejects NoCreditToPayOut if the account " +
+					"owes or is square, PayoutExceedsCredit if the amount runs past the credit, AuthDenied on a " +
+					"self-scoped submit, PayoutExceedsCash past the cash paid in, and InvalidArgument on a tabRef, " +
+					"reversesRef or reason field.",
 			},
 		},
 	}

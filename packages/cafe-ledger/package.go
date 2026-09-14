@@ -1,7 +1,7 @@
 // Package cafeledger is the Café house-tab payment ledger: a per-lease
-// financial account that records café charges (settled tabs), payments and
-// refunds as a transaction history no posted entry's money fields are ever
-// rewritten in.
+// financial account that records café charges (settled tabs), payments,
+// write-offs, refunds and cash payouts as a transaction history no posted
+// entry's money fields are ever rewritten in.
 //
 // It declares:
 //
@@ -24,16 +24,19 @@
 //
 //   - The `cafetransaction` vertex type (DDL `cafetransaction`) —
 //     DebitAccount (a charge: a settled café tab), CreditCafeAccount (a
-//     payment received) and RefundCafeCharge (a charge given back) each mint
-//     vtx.cafetransaction.<NanoID> (root data {} per D5) with a .entry aspect
-//     {type, amountCents, memo?, postedAt}, linked to the account via
-//     postedTo. The DISPLAYED balance is derived by summing entries (the
-//     cafeLedgerHistory lens) and stays the display source of truth. That is
-//     also why a refund is an ordinary credit entry plus a `reverses` link to
-//     the charge it gives back, rather than a third entry type: the link
-//     carries the correction's identity, so every balance consumer keeps
-//     summing two kinds of entry and none of them has to learn a third. Two
-//     tallies are maintained: `refundedCents` on a charge's own .entry aspect
+//     payment received, or — staff only — a balance written off),
+//     RefundCafeCharge (a charge given back) and PayoutCafeCredit (credit
+//     handed back in cash) each mint vtx.cafetransaction.<NanoID> (root data
+//     {} per D5) with a .entry aspect {type, amountCents, memo?, postedAt,
+//     reason?}, linked to the account via postedTo. The DISPLAYED balance is
+//     derived by summing entries by type (the cafeLedgerHistory lens) and
+//     stays the display source of truth; `reason` (payment / waiver / refund
+//     on a credit, payout on a debit, none on a charge) is what a statement
+//     reads to say WHY a line was posted, and never changes the arithmetic.
+//     That is also why a refund is an ordinary credit entry plus a `reverses`
+//     link to the charge it gives back, and a payout an ordinary debit, rather
+//     than new entry types: every balance consumer keeps summing two kinds of
+//     entry and none of them has to learn a third. Two tallies are maintained: `refundedCents` on a charge's own .entry aspect
 //     — the refund ceiling, upserted under a compare-and-set on the revision
 //     that aspect was hydrated at, so two refunds racing the same charge
 //     serialize instead of jointly overrunning it — and the account's own
@@ -50,12 +53,19 @@
 //     as well). It exists so CreditCafeAccount can cap a payment at what the
 //     account actually owes without replaying a long house tab — the cap binds
 //     every leg, resident scope=self and staff scope=any alike, since no
-//     payment rail witnesses either. RefundCafeCharge maintains it but is not
-//     bounded by it: its ceiling is the reversed charge's un-refunded
-//     remainder, so giving back an already-paid charge takes the balance
-//     negative. An account minted under 0.4.0's predecessors carries none until
-//     a payment computes it from the account's own history; a charge or refund
-//     against such an account posts and leaves it alone.
+//     payment rail witnesses either, and a write-off is the same credit under
+//     the same cap. RefundCafeCharge maintains it but is not bounded by it:
+//     its ceiling is the reversed charge's un-refunded remainder, so giving
+//     back an already-paid charge takes the balance negative. PayoutCafeCredit
+//     is capped at exactly that negative — the credit the account holds — so
+//     a payout brings the balance back to at most zero. The aspect's second
+//     field, cashCents (payments − payouts), is the floor under that credit:
+//     a refund may never take the account further into credit than the cash
+//     behind it (RefundExceedsPaid), so a written-off charge cannot be
+//     refunded into credit the desk pays out. An account minted under 0.4.0's
+//     predecessors carries none until a payment, a refund or a payout
+//     computes it from the account's own history; a charge against such an
+//     account posts and leaves it alone.
 //
 //   - The `cafeAccountArrears` aspect type (DDL `cafeAccountArrears`) —
 //     vtx.cafeaccount.<NanoID>.arrears = {evaluatedAt, dueAt?, remindedFor?,
@@ -111,17 +121,22 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-ledger",
-	Version: "0.5.2",
+	Version: "0.6.0",
 	Description: "Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount, independently-minted " +
 		"id, one per lease via a .cafeLedgerAccount guard aspect on the leaseapp) + the cafetransaction vertex type " +
-		"(DebitAccount/CreditCafeAccount/RefundCafeCharge, entries linked to the account via postedTo, each " +
-		"keeping the account's .balance running-total aspect in lockstep) " +
-		"+ the cafeLedgerHistory read-model lens (one row per transaction, carrying the reverses and settles hops) " +
-		"+ the cafeLeaseAccounts lens (lease -> account key lookup). CreditCafeAccount ALSO grants a resident " +
-		"scope=self (pay down their own house tab), ownership proven server-side and the amount capped at the " +
-		"account's outstanding balance on every leg. RefundCafeCharge gives " +
+		"(DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit, entries linked to the account via " +
+		"postedTo, each keeping the account's .balance running-total aspect in lockstep, each entry's reason " +
+		"saying why it was posted — payment / waiver / refund on a credit, payout on a debit) " +
+		"+ the cafeLedgerHistory read-model lens (one row per transaction, carrying reason and the reverses and " +
+		"settles hops) + the cafeLeaseAccounts lens (lease -> account key lookup). CreditCafeAccount ALSO grants " +
+		"a resident scope=self (pay down their own house tab), ownership proven server-side and the amount " +
+		"capped at the account's outstanding balance on every leg; its staff-only reason \"waiver\" writes the " +
+		"balance off under the same cap. RefundCafeCharge gives " +
 		"back a posted charge as a credit anchored on that charge by a reverses link, bounded by a CAS-pinned " +
-		"refundedCents tally on that charge's own entry rather than by the balance, staff-only at every scope. " +
+		"refundedCents tally on that charge's own entry rather than by the balance — and never past the cash the " +
+		"account has paid in (.balance.cashCents) — staff-only at every scope. " +
+		"PayoutCafeCredit hands credit back in cash as a debit capped at the credit the account holds, " +
+		"staff-only and never self-scoped. " +
 		"Also ships the arrears reminder: the account's .arrears episode aspect (a charge against an account that " +
 		"owed nothing records the due date its own postedAt implies; a payment that clears the balance ends the " +
 		"episode; a partial one marks it stale) + the cafeArrearsReminders weaver-target convergence lens, whose " +

@@ -72,6 +72,7 @@ func staffCapDocFor(actorKey string) *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreditCafeAccount", Scope: "any"},
 			{OperationType: "RefundCafeCharge", Scope: "any"},
+			{OperationType: "PayoutCafeCredit", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -385,4 +386,51 @@ func TestCreditWorkplace_UnlocatableAccountIsOperatorOnly(t *testing.T) {
 		wcStaffKey, orphanAcct, "", processor.OutcomeRejected)
 	creditAs(t, ctx, conn, cp, cons, "cafewcorphanroot0001",
 		ledgerActorKey, orphanAcct, "", processor.OutcomeAccepted)
+}
+
+// TestPayoutWorkplace_StaffConfinedToWorkplace is the confinement pair run for
+// PayoutCafeCredit, and it is not redundant with the payment's or the refund's:
+// the payout reaches post_entry's require_workplace site through its own
+// execute() branch, so a payout branch that forgot confine=True would leave a
+// front-desk staffer handing out cash against accounts at buildings across town
+// while both sibling vectors stayed green. Each account is driven into credit
+// as the operator first — the payout question under test is the workplace's,
+// not the fixture's. The accepted vector runs first: a rejection-only test would
+// pass against a guard that denied everyone.
+func TestPayoutWorkplace_StaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutworkplace")
+
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+	acctA := seedCreditAccount(t, ctx, conn, cp, cons, "cafepwaaaa", leaseA, 900)
+	acctB := seedCreditAccount(t, ctx, conn, cp, cons, "cafepwbbbb", leaseB, 900)
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+
+	payoutAs(t, ctx, conn, cp, cons, "cafepwpayoutathome",
+		wcStaffKey, acctA, 900, processor.OutcomeAccepted)
+	payoutAs(t, ctx, conn, cp, cons, "cafepwpayoutaway",
+		wcStaffKey, acctB, 900, processor.OutcomeRejected)
+	if got := balanceCents(t, ctx, conn, acctB); got != -900 {
+		t.Fatalf("the away account's credit = %v, want the untouched -900", got)
+	}
+}
+
+// TestPayoutWorkplace_UnwiredStaffDeniedNotWidened covers the tombstone for the
+// payout branch: a soft-deleted worksAt link hydrates as a DOCUMENT, not None,
+// so unwiring a staffer must narrow their payout surface to nothing rather than
+// widen it from one building to all of them.
+func TestPayoutWorkplace_UnwiredStaffDeniedNotWidened(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutunwired")
+
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+	acctA := seedCreditAccount(t, ctx, conn, cp, cons, "cafepwuwaa", leaseA, 900)
+	acctB := seedCreditAccount(t, ctx, conn, cp, cons, "cafepwuwbb", leaseB, 900)
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+	tombstoneWorksAt(t, ctx, conn)
+
+	payoutAs(t, ctx, conn, cp, cons, "cafepwuwpayouthome",
+		wcStaffKey, acctA, 900, processor.OutcomeRejected)
+	payoutAs(t, ctx, conn, cp, cons, "cafepwuwpayoutaway",
+		wcStaffKey, acctB, 900, processor.OutcomeRejected)
 }

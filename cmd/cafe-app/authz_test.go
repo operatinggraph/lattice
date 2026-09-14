@@ -1247,10 +1247,12 @@ func TestHandleFrontDeskVisits_Staff_SeesOnlyCoveredLeases(t *testing.T) {
 // TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement proves the
 // grouped balance computation: (a) an old unpaid debit ages past the
 // statement grace period into an overdue balance with the right
-// daysOverdue, (b) a lease whose debit is fully offset by a credit — balance
-// <= 0 — is omitted from the response entirely rather than coming back with
-// balanceCents 0, and (c) staff only see balances for leases their
-// workplace covers, mirroring
+// daysOverdue, with accountKey carried onto the row, (b) a lease whose
+// debit is fully offset by a credit — balance exactly zero — is omitted
+// from the response entirely rather than coming back with balanceCents 0,
+// (c) a lease left in CREDIT — balance negative — is kept, with a negative
+// balanceCents, no due date, and isOverdue false, and (d) staff only see
+// balances for leases their workplace covers, mirroring
 // TestHandleFrontDeskVisits_Staff_SeesOnlyCoveredLeases's confinement check.
 func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
 	s, cookieFor, staff := staffAtOneBuilding(t)
@@ -1265,7 +1267,8 @@ func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
 	})
 
 	// vtx.leaseapp.paid: also at the staffer's building, but an old debit
-	// fully offset by a credit — balance <= 0 — must be omitted entirely.
+	// fully offset by a credit — balance exactly zero — must be omitted
+	// entirely.
 	seedLeaseAt(t, s.conn, "vtx.leaseapp.paid", "DDDDDDDDDDDDDDDDDDDD", staffWorkplace)
 	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.paid1", map[string]any{
 		"transactionKey": "vtx.tx.paid1", "accountKey": "vtx.account.paid",
@@ -1276,6 +1279,22 @@ func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
 		"transactionKey": "vtx.tx.paid2", "accountKey": "vtx.account.paid",
 		"leaseAppKey": "vtx.leaseapp.paid", "type": "credit", "amountCents": 2000.0,
 		"memo": "Paid", "postedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// vtx.leaseapp.credit: also at the staffer's building, a lease left in
+	// CREDIT after a refund larger than the remaining charge — must appear
+	// with a negative balance, not be dropped alongside the exactly-paid-off
+	// lease above.
+	seedLeaseAt(t, s.conn, "vtx.leaseapp.credit", "EEEEEEEEEEEEEEEEEEEE", staffWorkplace)
+	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.credit1", map[string]any{
+		"transactionKey": "vtx.tx.credit1", "accountKey": "vtx.account.credit",
+		"leaseAppKey": "vtx.leaseapp.credit", "type": "debit", "amountCents": 1000.0,
+		"memo": "House tab", "postedAt": old,
+	})
+	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.credit2", map[string]any{
+		"transactionKey": "vtx.tx.credit2", "accountKey": "vtx.account.credit",
+		"leaseAppKey": "vtx.leaseapp.credit", "type": "credit", "amountCents": 3575.0,
+		"memo": "Refund", "postedAt": time.Now().UTC().Format(time.RFC3339),
 	})
 
 	// vtx.leaseapp.theirs: an old unpaid debit at a building this staffer
@@ -1296,12 +1315,19 @@ func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(body.Balances) != 1 || body.Balances[0].LeaseAppKey != "vtx.leaseapp.mine" {
-		t.Fatalf("front-desk balances = %+v, want exactly the overdue covered lease (paid-off and foreign leases omitted)", body.Balances)
+	byLease := map[string]balanceRow{}
+	for _, r := range body.Balances {
+		byLease[r.LeaseAppKey] = r
 	}
-	row := body.Balances[0]
+	if len(body.Balances) != 2 || byLease["vtx.leaseapp.mine"].LeaseAppKey == "" || byLease["vtx.leaseapp.credit"].LeaseAppKey == "" {
+		t.Fatalf("front-desk balances = %+v, want exactly the overdue covered lease and the credit lease (paid-off and foreign leases omitted)", body.Balances)
+	}
+	row := byLease["vtx.leaseapp.mine"]
 	if row.BalanceCents != 4500 {
 		t.Fatalf("balanceCents = %d, want 4500", row.BalanceCents)
+	}
+	if row.AccountKey != "vtx.account.mine" {
+		t.Fatalf("accountKey = %q, want vtx.account.mine", row.AccountKey)
 	}
 	if !row.IsOverdue {
 		t.Fatalf("isOverdue = false, want true for a debit %d days old (grace period is %d days)",
@@ -1309,6 +1335,16 @@ func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
 	}
 	if row.DaysOverdue < 1 {
 		t.Fatalf("daysOverdue = %d, want >= 1", row.DaysOverdue)
+	}
+	credit := byLease["vtx.leaseapp.credit"]
+	if credit.BalanceCents != -2575 {
+		t.Fatalf("credit lease balanceCents = %d, want -2575 (1000 debit, 3575 credit)", credit.BalanceCents)
+	}
+	if credit.AccountKey != "vtx.account.credit" {
+		t.Fatalf("credit lease accountKey = %q, want vtx.account.credit", credit.AccountKey)
+	}
+	if credit.DueDate != "" || credit.IsOverdue {
+		t.Fatalf("credit lease due date/overdue = %q/%v, want empty/false", credit.DueDate, credit.IsOverdue)
 	}
 }
 

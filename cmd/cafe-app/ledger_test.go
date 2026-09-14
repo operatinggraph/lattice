@@ -101,6 +101,68 @@ func TestComputeLedgerHistory_NoTransactionsZeroBalance(t *testing.T) {
 	}
 }
 
+// TestComputeLedgerHistory_ReasonEqualsProjection pins the statement's
+// Reason column to the exact value the lens projects — not merely
+// non-empty, which would still pass if the field were wired to the wrong
+// source column entirely.
+func TestComputeLedgerHistory_ReasonEqualsProjection(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"vtx.cafetransaction.1": map[string]any{"transactionKey": "vtx.cafetransaction.1", "accountKey": "vtx.cafeaccount.aaa", "leaseAppKey": "vtx.leaseapp.aaa", "type": "debit", "amountCents": 1000, "postedAt": "2026-07-06T00:00:00Z"},
+		"vtx.cafetransaction.2": map[string]any{"transactionKey": "vtx.cafetransaction.2", "accountKey": "vtx.cafeaccount.aaa", "leaseAppKey": "vtx.leaseapp.aaa", "type": "credit", "amountCents": 1000, "postedAt": "2026-07-07T00:00:00Z", "reason": "waiver"},
+		"vtx.cafetransaction.3": map[string]any{"transactionKey": "vtx.cafetransaction.3", "accountKey": "vtx.cafeaccount.aaa", "leaseAppKey": "vtx.leaseapp.aaa", "type": "debit", "amountCents": 500, "postedAt": "2026-07-08T00:00:00Z", "reason": "payout"},
+	})
+	rows, _ := computeLedgerHistory(keys, get, "vtx.leaseapp.aaa")
+	if len(rows) != 3 {
+		t.Fatalf("want 3 rows, got %d (%+v)", len(rows), rows)
+	}
+	if rows[0].Reason != "" {
+		t.Errorf("charge reason = %q, want empty (an ordinary charge)", rows[0].Reason)
+	}
+	if rows[1].Reason != "waiver" {
+		t.Errorf("credit reason = %q, want exactly %q as the lens projected it", rows[1].Reason, "waiver")
+	}
+	if rows[2].Reason != "payout" {
+		t.Errorf("debit reason = %q, want exactly %q as the lens projected it", rows[2].Reason, "payout")
+	}
+}
+
+// TestComputeLedgerBalances_KeepsCreditOmitsZeroCarriesAccountKey proves the
+// grouped balance scan's post-fix behavior directly (authz_test.go's
+// TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement covers the same
+// shape through the HTTP handler): a lease whose balance settles to exactly
+// zero is left out, a lease left in CREDIT is kept with a negative
+// balanceCents and no due date, and every row carries the accountKey read
+// off its own history rows.
+func TestComputeLedgerBalances_KeepsCreditOmitsZeroCarriesAccountKey(t *testing.T) {
+	now := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
+	keys, get := fakeKV(map[string]any{
+		// vtx.leaseapp.zero: a debit fully offset by a credit — omitted.
+		"vtx.tx.zero1": map[string]any{"transactionKey": "vtx.tx.zero1", "accountKey": "vtx.account.zero", "leaseAppKey": "vtx.leaseapp.zero", "type": "debit", "amountCents": 1000, "postedAt": "2026-08-01T00:00:00Z"},
+		"vtx.tx.zero2": map[string]any{"transactionKey": "vtx.tx.zero2", "accountKey": "vtx.account.zero", "leaseAppKey": "vtx.leaseapp.zero", "type": "credit", "amountCents": 1000, "postedAt": "2026-08-02T00:00:00Z"},
+		// vtx.leaseapp.credit: a refund larger than the remaining charge —
+		// kept, negative balance, no due date, accountKey carried.
+		"vtx.tx.credit1": map[string]any{"transactionKey": "vtx.tx.credit1", "accountKey": "vtx.account.credit", "leaseAppKey": "vtx.leaseapp.credit", "type": "debit", "amountCents": 1000, "postedAt": "2026-08-01T00:00:00Z"},
+		"vtx.tx.credit2": map[string]any{"transactionKey": "vtx.tx.credit2", "accountKey": "vtx.account.credit", "leaseAppKey": "vtx.leaseapp.credit", "type": "credit", "amountCents": 3575, "postedAt": "2026-08-02T00:00:00Z"},
+	})
+	rows := computeLedgerBalances(keys, get, now)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row (the zero-balance lease omitted), got %d (%+v)", len(rows), rows)
+	}
+	row := rows[0]
+	if row.LeaseAppKey != "vtx.leaseapp.credit" {
+		t.Fatalf("leaseAppKey = %q, want vtx.leaseapp.credit", row.LeaseAppKey)
+	}
+	if row.BalanceCents != -2575 {
+		t.Errorf("balanceCents = %d, want -2575 (1000 debit, 3575 credit)", row.BalanceCents)
+	}
+	if row.AccountKey != "vtx.account.credit" {
+		t.Errorf("accountKey = %q, want vtx.account.credit", row.AccountKey)
+	}
+	if row.DueDate != "" || row.IsOverdue {
+		t.Errorf("due date/overdue = %q/%v, want empty/false for a credit balance", row.DueDate, row.IsOverdue)
+	}
+}
+
 func TestDeriveStatement_ZeroOrCreditBalanceHasNoDueDate(t *testing.T) {
 	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
 	if due, overdue, days := deriveStatement(nil, 0, now); due != "" || overdue || days != 0 {
