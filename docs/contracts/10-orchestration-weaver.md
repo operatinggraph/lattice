@@ -227,10 +227,6 @@ dispatch surface, so an operation declaring the same walk on both dispatching su
 identically. The "no expressions" rule is unchanged: `{actor}` resolves by substitution, exactly as
 `row.<column>` does.
 
-*Transitional (2026-08-31): ratified ahead of its build — the engine does not yet substitute the
-token, and until the build lands a `{actor}` hub is not refused but dispatches as a plain literal.
-Struck when substitution + refusal ship.*
-
 ### `triggerLoom` authorization — `StartLoomPattern` + pattern-as-target
 
 Starting a Loom instance is the op `StartLoomPattern` carrying **`authContext.target =
