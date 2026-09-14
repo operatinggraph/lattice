@@ -26,6 +26,18 @@
 // budget and a bounded retry, and by naming the signature in the failure message
 // so a triaging reader does not have to rediscover it.
 //
+// # Restarting a server on its own store
+//
+// A server from Options/StartServer/Server gets a private JetStream file store
+// that is born and dies with it, so such a test only ever observes a server that
+// has been up since its store was empty. Some server behaviour is only reachable
+// the other way round: JetStream does work at RECOVERY that it does not do while
+// running — rebuilding TTL state off the store, then acting on deadlines that
+// fell due while nothing was serving. RestartableServer (see
+// StartRestartableServer) is the seam for that: one store directory, owned for
+// the whole test, which a server can be brought down from and a fresh server
+// brought back up on, so a test can observe what recovery itself does.
+//
 // # What this does NOT do
 //
 // Nothing here relaxes a gate, and nothing here retries a test.
@@ -38,6 +50,12 @@
 // this package. Do not generalise these retries into "retry the flaky test":
 // a retry around an assertion hides real bugs, which is a different thing
 // entirely from tolerating a stalled TCP handshake to a server we just booted.
+//
+// A restart is held to the same line. It belongs in a test whose PROPOSITION is
+// about recovery — the store surviving the server is the thing being asserted
+// about. It is never a way to give a failing assertion another go: cycling the
+// server under a flaky expectation hides the same real bugs a retry does, and
+// costs a process restart to do it.
 package natsfixture
 
 import (
@@ -81,10 +99,16 @@ const (
 // never trips the macOS firewall prompt.
 func Options(t testing.TB) *natsserver.Options {
 	t.Helper()
+	return optionsOn(jsstore.Dir(t))
+}
+
+// optionsOn is the canonical option set over an already-allocated JetStream
+// store directory, so a store can be handed to more than one server in turn.
+func optionsOn(storeDir string) *natsserver.Options {
 	return &natsserver.Options{
 		Host:      "127.0.0.1",
 		JetStream: true,
-		StoreDir:  jsstore.Dir(t),
+		StoreDir:  storeDir,
 		NoLog:     true,
 		NoSigs:    true,
 		Port:      natsserver.RANDOM_PORT,
@@ -130,6 +154,84 @@ func Server(t testing.TB) (*natsserver.Server, *nats.Conn) {
 	t.Helper()
 	s := StartServer(t)
 	return s, Connect(t, s.ClientURL())
+}
+
+// RestartableServer is an embedded server together with the JetStream store
+// directory it runs on, where the store belongs to the TEST rather than to any
+// one server: the running server can be stopped, time can pass with nothing
+// serving, and a fresh server can be started on the same store. That makes
+// JetStream's recovery path observable — TTL state rebuilt from disk, deadlines
+// that fell due while nothing was running acted on after the fact — which no
+// single-server fixture can reach.
+//
+// A restarted server is a DIFFERENT server with a DIFFERENT client URL, because
+// the port invariant is RANDOM_PORT and the kernel picks again. Every *nats.Conn
+// held across a Stop is therefore dead, and dialling the old URL is at best a
+// connection to nothing: take the server Start returns and obtain a fresh
+// connection from Connect.
+//
+// It is scoped to tests whose subject is recovery. It is not a way to re-run an
+// assertion that failed; see this package's "What this does NOT do".
+type RestartableServer struct {
+	t        testing.TB
+	storeDir string
+	running  *natsserver.Server
+}
+
+// StartRestartableServer allocates a JetStream store directory that outlives any
+// single server, starts a server on it, and returns the handle. Teardown of each
+// server and of the store is registered via t.Cleanup, the store's removal last
+// (jsstore.Dir absorbs JetStream's post-shutdown flush), so a caller never has a
+// removal path of its own to run.
+func StartRestartableServer(t testing.TB) *RestartableServer {
+	t.Helper()
+	r := &RestartableServer{t: t, storeDir: jsstore.Dir(t)}
+	r.Start()
+	return r
+}
+
+// Server returns the server currently running on the store, or nil between a
+// Stop and the next Start.
+func (r *RestartableServer) Server() *natsserver.Server {
+	return r.running
+}
+
+// StoreDir returns the JetStream store directory shared by every server this
+// handle starts.
+func (r *RestartableServer) StoreDir() string {
+	return r.storeDir
+}
+
+// Stop brings the running server down and does not return until it is fully
+// down, so nothing of it overlaps the next server on the same store. Connections
+// to it are finished at that point. Calling it with nothing running is a no-op.
+func (r *RestartableServer) Stop() {
+	r.t.Helper()
+	if r.running == nil {
+		return
+	}
+	// Shutdown only kicks out the accept loop and starts closing clients;
+	// WaitForShutdown is the documented barrier for it having finished, and
+	// here it is also the barrier for the store's file locks being released.
+	r.running.Shutdown()
+	r.running.WaitForShutdown()
+	r.running = nil
+}
+
+// Start boots a server on the store and returns it. The returned server is the
+// only valid source of a client URL from here on: it listens on a freshly
+// assigned port, so a connection made before the preceding Stop cannot be
+// carried over and must be replaced via Connect.
+//
+// Two servers must never hold the same store at once, so starting one while
+// another is running fails the test rather than corrupting the store.
+func (r *RestartableServer) Start() *natsserver.Server {
+	r.t.Helper()
+	if r.running != nil {
+		r.t.Fatalf("natsfixture: a server is already running on store %s — Stop it before starting another", r.storeDir)
+	}
+	r.running = StartServerWith(r.t, optionsOn(r.storeDir))
+	return r.running
 }
 
 // Connect dials url with a stall-tolerant handshake budget and a bounded retry,
