@@ -27,6 +27,12 @@ the same `.entry` aspect).
   leaving is its own entry: `PayoutCafeCredit` posts a **debit** (`reason: payout`) capped at the account's
   credit, so Σdebit−Σcredit returns to zero — the credit was settled in cash, not spent. Every balance
   consumer sums it unchanged (a debit), and the arrears branch never opens because the new balance is ≤ 0.
+  **Amended at build (2026-09-14):** "moves no cash" is not enough once a waiver exists — write off $18,
+  refund the same charge, and the credit reads as payable. The conserved quantity is **cash**: an account's
+  credit balance may never exceed the net cash it has paid in, `cashCents = Σ payment − Σ payout`, a second
+  maintained field on `.balance`, enforced where the phantom credit would be minted (`RefundExceedsPaid`) and
+  again at the payout (`PayoutExceedsCash`). And a payout, being a debit, must never itself be refundable —
+  `reversed_charge` refuses a debit carrying any `reason`.
 - **`.entry.reason` becomes a complete classification, not a payment-only flag.** Credits: `payment` (default)
   · `waiver` (CreditCafeAccount, staff only) · `refund` (written by `RefundCafeCharge` itself). Debits:
   absent (a charge) · `payout` (written by `PayoutCafeCredit` itself). A caller-supplied `reason` is accepted
@@ -64,9 +70,15 @@ the same `.entry` aspect).
 2. `RefundCafeCharge` writes `reason: refund` itself and refuses a payload `reason`; `DebitAccount` refuses one.
 3. `PayoutCafeCredit{accountKey, amountCents, memo?}` — a debit with `reason: payout`; staff-only, never
    self-scoped, workplace-confined; reads `.balance` (backfilling a legacy account); refuses `NoCreditToPayOut`
-   when `balance ≥ 0` and `PayoutExceedsCredit` when `amount > −balance`; moves `.balance` by `+amount`; never
-   writes `.arrears` (the debit branch opens an episode only when the new balance is > 0, which the cap forbids);
-   emits `account.paidOut`.
+   when `balance ≥ 0`, `PayoutExceedsCredit` when `amount > −balance` and `PayoutExceedsCash` when
+   `amount > cashCents`; moves `.balance` by `+amount` and `cashCents` by `−amount`; never writes `.arrears`
+   (the debit branch opens an episode only when the new balance is > 0, which the cap forbids); emits
+   `account.paidOut`. A payout is never refundable (`reversesRef` naming a debit with a `reason` is refused).
+3b. **The cash invariant** — `.balance` carries `cashCents = Σ payment credits − Σ payout debits` (minted 0 by
+   `CreateAccount`, carried on every write; on a pre-0.6.0 document or a legacy account it is computed once by
+   the bounded `postedTo` replay from the payment / refund / payout legs — a reason-less credit is a payment
+   iff it carries no live `reverses` link — and left absent by a charge). `RefundCafeCharge` refuses
+   `RefundExceedsPaid` when the refund would leave the credit balance above `cashCents`.
 4. `cafeLedgerHistory` projects `t.entry.data.reason AS reason`.
 5. `cmd/cafe-app`: `Reason` threads through the statement rows; `computeLedgerBalances` keeps credit leases
    (`balanceCents < 0`, no due date) and every row carries `accountKey`; the desk list shows debtors with a
@@ -140,3 +152,22 @@ Every refusal reverted-proven in the worktree.
    separate board rows, untouched.
 7. **Non-goals:** no `settledAs` on the refund; no consumer grant for the payout; no change to the FIFO,
    the arrears episode rules or the reminder; no Today panel; no clinic/wellness/loftspace edit.
+
+### Build note (2026-09-14)
+
+Shipped at `50987c67` (merge `83b78ff3`, CI green first run); cafe-ledger 0.6.0 refreshed live, `bin/cafe-app`
+cycled. Live: the $10 / 39-day seed debtor written off (`.entry.reason = waiver`, balance 0, episode closed);
+Riley Chen's $35.75 paid out (`reason: payout`, balance 0, `cashCents` computed from her 15-entry history, the
+credit lease left the desk grid); a second payout refused `NoCreditToPayOut`; a refund of the payout refused.
+The desk renders Write off on every debtor row (front-of-house sign-in); the button's own dispatch was not
+driven in-browser — the native `confirm()` blocks the automation — so the FE path is proven by the descriptor
+tests + the identical `renderOpForm` shape of the payment form, not by a click. Brief deviations: the design's
+empty-`contextHint` test is an empty-`optionalReads` submit (dropping `Reads` fails earlier at `vertex_alive`);
+a refund against a legacy account now replays and mints `.balance` so the cash floor binds there too (a >500-
+entry legacy history is refused fail-closed on the refund leg where it posted before). Cold review (opus) found
+one BLOCKING and one composition hole, both closed in the fire and both **design-gap** class: (B1) a payout is a
+debit, so the refund cap written for charges admitted it — an unbounded cash loop; (S1) waiver → refund → payout
+handed out cash for a charge nobody paid — the design's grounding premise ("a refund of an unpaid charge moves
+no cash") stopped holding the moment a second clearing verb existed. Both appended to the `_packages.md`
+dossier. The FE review found one wording defect (a definitive rejection toasted as "may have landed"), fixed
+by marking rejected replies on the error.

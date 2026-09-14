@@ -633,6 +633,21 @@ sibling groups, label set, grouping key, walk scope, hop index) fail by lens nam
   never the paged `history_too_long` degrade written for it. Minted: cafe-ledger `arrears_entries` (2026-09-13, caught
   cold as BLOCKING). Check: every `kv.Links` whose relation is single-valued passes `None, 1`; price a per-candidate
   walk as `candidates × (1 + limit)` against `DefaultLiveReadBudget` at the sweep's page cap.
+- **A new KIND of an existing entry type passes every predicate written over the TYPE — a cap for "a debit" caps
+  the new debit too, or admits it, and only a census of that field's comparisons says which.** `RefundCafeCharge`'s
+  `reversed_charge` refused `type != "debit"`; the fire that added a `payout` debit left it accepting a payout as
+  `reversesRef` — an unbounded cash loop (pay → refund → pay out → refund the payout). Minted: cafe-ledger
+  `PayoutCafeCredit` (2026-09-14), caught cold as BLOCKING. Check: when a script writes a new value into a
+  classification field (`type`, `status`, `reason`), grep every `data.get("<field>")` comparison in the package
+  and decide per site whether the new kind is in or out; the third sighting of *the "leg" is every writer of the
+  guarded VALUE* — a generic gate does not exist, the check is a census per new kind.
+- **Two individually-capped verbs compose into a leak neither cap states — name the CONSERVED QUANTITY and enforce it
+  where the phantom is minted.** A waiver (capped at owed), a refund (capped at the charge) and a payout (capped at
+  the credit) each held, and waiver → refund → payout handed out cash for a charge nobody paid. Minted: cafe-ledger
+  (2026-09-14), caught cold; closed by `cashCents` on `.balance` (credit may never exceed net cash in). Check: for
+  any ledger with more than one clearing verb, write the quantity that must be conserved across ALL of them
+  (cash in ≥ cash out) as a maintained field and refuse at the verb that would mint the surplus, not at the one
+  that spends it.
 - **A link that TWO ops walk needs the idempotency probe on both — "dispatched at most once per booking" is a claim
   about one op, not about the link.** `SetBookingAttendance` guarded its no-show refund with a `reverses in` probe
   because it is re-markable; `ReleaseOrphanedBooking` walked the same `settles` link with none, so a fee reversed by an

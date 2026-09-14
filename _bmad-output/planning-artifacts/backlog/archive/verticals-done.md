@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-10 · `5495fdc` · A submitted application is visible to applicant AND landlord within a second — `landlordLeaseApplicationsRead` seeds on its own leaseapp's events; live-verified after cycling the Refractor.
+- 2026-09-10 · `2a8d135e` · A new target's first dispatches before its grant projects are a bounded, self-healing install lag (≤ one mark lease; `Revoke`→`Enable` clears it at once) — documented in `_packages.md`; no mechanism.
 - 2026-09-06 · `b5c8e7a8` + `bdfb344d` · A resident who owes the café is told so — `cafeArrearsReminders` sends one reminder per arrears episode off a recorded `.arrears` due fact; live: 5 sent, 2 timers armed, grid + statement show it.
 - 2026-09-06 · `ac80bf74` · A name-only patient can be connected to a login — `BindPatientIdentity` (unclaimed identity only, name moved onto the identity's `.name`), `UnbindPatientIdentity` as the operator repair, FE Connect-a-login ceremony.
 - 2026-09-06 · `82e26df5` · Staff can re-issue an unclaimed applicant's claim secret — Applicants & tenants panel offers `RotateClaimKey` via the shared ceremony; New-applicant button follows its grant (staff, not landlord).
