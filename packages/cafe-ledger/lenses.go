@@ -87,19 +87,24 @@ func Lenses() []pkgmgr.LensSpec {
 // leaseAppKey with no extra hop. Those hops are REQUIRED (not OPTIONAL): a
 // transaction projects a row only when it is genuinely posted to a live
 // account held for a live lease (the normal shape every
-// DebitAccount/CreditCafeAccount/RefundCafeCharge commit produces). The
-// per-row key is the transaction key (the IntoKey default), so the read model
-// is keyed by vtx.cafetransaction.<id>; transactionKey repeats it in the body
-// for the reader.
+// DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit commit
+// produces). The per-row key is the transaction key (the IntoKey default), so
+// the read model is keyed by vtx.cafetransaction.<id>; transactionKey repeats
+// it in the body for the reader.
+//
+// reason is what tells a statement what kind of line it is reading: a credit
+// was cash collected (payment), forgiven (waiver) or given back (refund); a
+// debit was a charge (no reason) or cash paid out (payout). The balance sums
+// type alone — reason never changes arithmetic, only the words beside it.
 //
 // The last two hops ARE optional, and both are anchor-rooted out-hops (no new
 // anchor, still partitionable by the transaction):
 //
 //   - reverses, present only on a refund, names the charge being given back.
-//     It is what lets a statement say "this line is a correction of that one"
-//     instead of rendering a refund identically to cash the resident handed
-//     over — the entry itself is an ordinary credit, deliberately, so every
-//     balance consumer sums it unchanged.
+//     It is what lets a statement say "this line is a correction of THAT one"
+//     — reason says the line is a refund, the hop says of what — and the entry
+//     itself is an ordinary credit, deliberately, so every balance consumer
+//     sums it unchanged.
 //   - settles, present only on a charge posted by the cafeTabSettlement
 //     playbook, names the tab it settled. It is what tells a reader which
 //     debits are refundable café charges at all: a hand-posted debit with no
@@ -118,6 +123,7 @@ RETURN
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
   t.entry.data.postedAt AS postedAt,
+  t.entry.data.reason AS reason,
   rt.key AS reversesKey,
   tb.key AS tabKey`
 

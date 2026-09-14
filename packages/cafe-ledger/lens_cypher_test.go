@@ -218,6 +218,64 @@ func TestCafeLedgerHistory_PlainCharge_NullsBothOptionalHops(t *testing.T) {
 	require.Len(t, rows, 1, "an unreversed, un-settled charge still projects")
 	require.Nil(t, rows[0].Values["reversesKey"])
 	require.Nil(t, rows[0].Values["tabKey"])
+	require.Nil(t, rows[0].Values["reason"], "a charge carries no reason — its absence on a debit IS the classification")
+}
+
+// TestCafeLedgerHistory_ReasonProjectsOnWaiverAndPayout pins the reason
+// column, on the two rows nothing else distinguishes. A write-off is an
+// ordinary credit with no reverses hop — identical to a payment in every other
+// column — and a payout is an ordinary debit with no settles hop, identical to
+// a hand-posted charge. reason is the ONLY thing that lets a statement say one
+// was forgiven rather than paid and the other cash handed back rather than
+// coffee bought; a lens that dropped the column would render both as the thing
+// they are not, with every balance still summing correctly.
+func TestCafeLedgerHistory_ReasonProjectsOnWaiverAndPayout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "rsn_lease", "leaseapp")
+	f.vtx(t, "rsn_acct", "cafeaccount")
+	f.edge(t, "heldFor", "rsn_acct", "rsn_lease")
+
+	f.vtx(t, "waiver_tx", "cafetransaction")
+	f.edge(t, "postedTo", "waiver_tx", "rsn_acct")
+	f.aspect(t, "waiver_tx", "entry", "transactionEntry", map[string]any{
+		"type":        "credit",
+		"amountCents": 1800.0,
+		"reason":      "waiver",
+		"memo":        "Lease never approved",
+		"postedAt":    "2026-07-25T00:00:00Z",
+	})
+
+	f.vtx(t, "payout_tx", "cafetransaction")
+	f.edge(t, "postedTo", "payout_tx", "rsn_acct")
+	f.aspect(t, "payout_tx", "entry", "transactionEntry", map[string]any{
+		"type":        "debit",
+		"amountCents": 3575.0,
+		"reason":      "payout",
+		"memo":        "Paid from till",
+		"postedAt":    "2026-07-26T00:00:00Z",
+	})
+
+	rows := f.project(t, "cafeLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["transactionKey"].(string)] = r.Values
+	}
+
+	waiver := byKey["vtx.cafetransaction."+f.ids["waiver_tx"]]
+	require.NotNil(t, waiver)
+	require.Equal(t, "credit", waiver["type"], "a write-off posts an ordinary credit — every balance consumer sums it unchanged")
+	require.Equal(t, "waiver", waiver["reason"], "reason is the only column telling a write-off from a payment")
+	require.Nil(t, waiver["reversesKey"], "a write-off reverses no charge")
+
+	payout := byKey["vtx.cafetransaction."+f.ids["payout_tx"]]
+	require.NotNil(t, payout)
+	require.Equal(t, "debit", payout["type"], "a payout posts an ordinary debit — every balance consumer sums it unchanged")
+	require.Equal(t, "payout", payout["reason"], "reason is the only column telling cash paid out from a charge")
+	require.Nil(t, payout["tabKey"], "a payout settles no tab")
 }
 
 func TestCafeLedgerHistory_UnpostedTransaction_ProjectsNothing(t *testing.T) {

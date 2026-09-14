@@ -1,21 +1,27 @@
 name: cafe-ledger
-version: 0.5.2
+version: 0.6.0
 description: |
   Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount,
   independently-minted id, one per lease via a .cafeLedgerAccount guard
   aspect on the leaseapp) + the cafetransaction vertex type (DebitAccount /
-  CreditCafeAccount / RefundCafeCharge, append-only entries linked to the
-  account via postedTo, each keeping the account's .balance running-total
-  aspect in lockstep) + the cafeLedgerHistory read-model lens (one row per
-  transaction, carrying the reverses and settles hops) + the cafeLeaseAccounts
-  lens (lease -> account key lookup). CreditCafeAccount ALSO grants a resident
-  scope=self (pay down their own house tab) — ownership proven server-side
-  against the account's own heldFor->leaseapp->applicationFor topology, and the
-  amount capped at the account's outstanding .balance on every leg, resident
-  and staff alike. RefundCafeCharge gives back a posted charge as
-  a credit anchored on that charge by a reverses link, bounded by a CAS-pinned
-  refundedCents tally on that charge's own entry rather than by the balance,
-  and is staff-only at every scope. Also ships the arrears reminder: the
+  CreditCafeAccount / RefundCafeCharge / PayoutCafeCredit, append-only entries
+  linked to the account via postedTo, each keeping the account's .balance
+  running-total aspect in lockstep, each entry's reason saying why it was
+  posted — payment / waiver / refund on a credit, payout on a debit) + the
+  cafeLedgerHistory read-model lens (one row per transaction, carrying reason
+  and the reverses and settles hops) + the cafeLeaseAccounts lens (lease ->
+  account key lookup). CreditCafeAccount ALSO grants a resident scope=self (pay
+  down their own house tab) — ownership proven server-side against the
+  account's own heldFor->leaseapp->applicationFor topology, and the amount
+  capped at the account's outstanding .balance on every leg, resident and
+  staff alike; its staff-only reason "waiver" writes the balance off under the
+  same cap. RefundCafeCharge gives back a posted charge as a credit anchored on
+  that charge by a reverses link, bounded by a CAS-pinned refundedCents tally
+  on that charge's own entry rather than by the balance — and never past the
+  cash the account has paid in (.balance.cashCents) — and is staff-only at
+  every scope. PayoutCafeCredit hands credit back in cash as a debit capped at
+  the credit the account holds, staff-only and never self-scoped. Also ships
+  the arrears reminder: the
   account's .arrears episode aspect (a charge against an account that owed
   nothing records the due date its own postedAt implies; a payment that clears
   the balance ends the episode; a partial one marks it stale) + the
@@ -63,6 +69,7 @@ declares:
   opMetas:
     - operationType: CreditCafeAccount
     - operationType: RefundCafeCharge
+    - operationType: PayoutCafeCredit
     - operationType: EvaluateCafeArrears
     - operationType: RecordCafeArrearsReminderNotification
   permissions:
@@ -79,6 +86,9 @@ declares:
       scope: self
       grantsTo: [consumer]
     - operationType: RefundCafeCharge
+      scope: any
+      grantsTo: [operator, frontOfHouse]
+    - operationType: PayoutCafeCredit
       scope: any
       grantsTo: [operator, frontOfHouse]
     - operationType: EvaluateCafeArrears

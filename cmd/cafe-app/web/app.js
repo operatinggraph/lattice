@@ -205,7 +205,7 @@ function chargedToOptionalRead(tabKey, leaseAppKey) {
 // hasn't declared the op yet — a silent failure, so
 // TestKnownCatalogOpsCoversEveryCacheRead (op_catalog_test.go) reads this
 // file and fails the build when an `opCatalogCache.<Op>` read has no entry.
-const KNOWN_CATALOG_OPS = ["VoidCharge", "CreditCafeAccount", "RefundCafeCharge"];
+const KNOWN_CATALOG_OPS = ["VoidCharge", "CreditCafeAccount", "RefundCafeCharge", "PayoutCafeCredit"];
 let opCatalogPromise = null;
 let opCatalogCache = null;
 async function loadOpCatalog() {
@@ -348,7 +348,15 @@ async function submitCatalogOp(envelope, what) {
   }
   if (reply && reply.status === "rejected") {
     const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
-    throw new Error(`Could not ${what} — ${msg}`);
+    const err = new Error(`Could not ${what} — ${msg}`);
+    // rejected marks this as a CONFIRMED non-commit — the Processor answered
+    // and refused — as opposed to a transport/unknown throw, whose landing
+    // is ambiguous (the write may have reached the Processor and committed
+    // even though the reply never arrived). A caller that narrates the
+    // throw path branches on it: a rejection's own message already says
+    // exactly what happened and needs no "may have landed" hedge.
+    err.rejected = true;
+    throw err;
   }
   return reply || {};
 }
@@ -1100,14 +1108,17 @@ async function loadFrontDesk() {
   });
 }
 
-// frontDeskBalanceBadge renders a joined balance row's overdue/owed state
-// for the front-desk card — the staff counterpart to the resident's own
-// overdue banner (ledger.go's deriveStatement, this file's statementLine()).
-// An overdue lease reuses statementLine() unchanged (same field names —
-// dueDate/isOverdue/daysOverdue — so the red banner reads identically on
-// both surfaces); a lease that owes something but isn't overdue yet gets a
-// neutral due-by note with the amount; a lease with nothing owed (no joined
-// row at all — handleFrontDeskBalances omits zero/credit leases) renders
+// frontDeskBalanceBadge renders a joined balance row's overdue/owed/credit
+// state for the front-desk card — the staff counterpart to the resident's
+// own overdue banner (ledger.go's deriveStatement, this file's
+// statementLine()). An overdue lease reuses statementLine() unchanged (same
+// field names — dueDate/isOverdue/daysOverdue — so the red banner reads
+// identically on both surfaces); a lease that owes something but isn't
+// overdue yet gets a neutral due-by note with the amount; a lease left in
+// CREDIT (balanceCents negative — handleFrontDeskBalances serves these rows,
+// ledger.go's computeLedgerBalances) gets an "In credit" note; a lease with
+// nothing owed and nothing in credit (no joined row at all —
+// handleFrontDeskBalances omits only exact-zero-balance leases) renders
 // nothing.
 function frontDeskBalanceBadge(balance) {
   if (!balance) return "";
@@ -1115,6 +1126,9 @@ function frontDeskBalanceBadge(balance) {
   if (balance.balanceCents > 0) {
     const due = balance.dueDate ? new Date(balance.dueDate).toLocaleDateString() : "?";
     return '<div class="meta">Owes ' + money(balance.balanceCents) + ", due " + due + "</div>";
+  }
+  if (balance.balanceCents < 0) {
+    return '<div class="meta">In credit ' + money(-balance.balanceCents) + "</div>";
   }
   return "";
 }
@@ -1138,18 +1152,25 @@ function frontDeskArrearsLine(row) {
 }
 
 // renderFrontDeskArrears populates the front desk's standalone arrears list
-// (#frontdesk-arrears) — every lease that currently owes money
-// (/api/frontdesk-balances), worst-first, whether or not it has an open tab.
-// A resident who has settled their tab but still owes the house money would
-// otherwise be invisible the moment the tab closes (frontDeskBalanceBadge
-// only renders on an open tab's card) — this list is the fix. Sorted
-// client-side (café's Go handler is unchanged) with the same comparator
-// wellness-app's handleFrontDeskArrears uses server-side: isOverdue desc,
-// then daysOverdue desc, then balanceCents desc.
+// (#frontdesk-arrears) — every lease with a non-zero balance
+// (/api/frontdesk-balances), whether or not it has an open tab. A resident
+// who has settled their tab but still owes the house money would otherwise
+// be invisible the moment the tab closes (frontDeskBalanceBadge only
+// renders on an open tab's card) — this list is the fix. Sorted client-side
+// (café's Go handler is unchanged) with the same comparator wellness-app's
+// handleFrontDeskArrears uses server-side: isOverdue desc, then daysOverdue
+// desc, then balanceCents desc — a credit lease's balanceCents is negative,
+// so this single sort already places every debtor ahead of every credit
+// lease with no separate pass. A debtor row gets a Write off button
+// (confirm → CreditCafeAccount reason: waiver, capped at the balance shown);
+// a credit row renders "in credit $X" with a Pay out button (confirm →
+// PayoutCafeCredit, capped at the credit shown) — wireArrearsActions binds
+// both, once, via one delegated click handler on the list itself.
 function renderFrontDeskArrears(balances, residentsByLease) {
   const list = document.getElementById("frontdesk-arrears");
   const empty = document.getElementById("frontdesk-arrears-empty");
   if (!list || !empty) return;
+  wireArrearsActions(list);
   const rows = (balances || []).slice().sort((a, b) => {
     if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
     if (a.daysOverdue !== b.daysOverdue) return (b.daysOverdue || 0) - (a.daysOverdue || 0);
@@ -1166,8 +1187,140 @@ function renderFrontDeskArrears(balances, residentsByLease) {
     const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(row.leaseAppKey);
     const li = document.createElement("li");
     li.className = "ledger-entry arrears-row";
-    li.innerHTML = escapeHtml(who) + " — " + money(row.balanceCents) + " · " + frontDeskArrearsLine(row);
+    if (row.balanceCents < 0) {
+      li.innerHTML =
+        escapeHtml(who) + " — in credit " + money(-row.balanceCents) +
+        ' <span class="ledger-entry-actions"><button type="button" class="payout-credit-btn" data-account="' +
+        escapeHtml(row.accountKey || "") + '" data-amount="' + (-row.balanceCents) +
+        '" data-who="' + escapeHtml(who) + '">Pay out</button></span>';
+    } else {
+      li.innerHTML =
+        escapeHtml(who) + " — " + money(row.balanceCents) + " · " + frontDeskArrearsLine(row) +
+        ' <span class="ledger-entry-actions"><button type="button" class="writeoff-debt-btn" data-account="' +
+        escapeHtml(row.accountKey || "") + '" data-amount="' + (+row.balanceCents) +
+        '" data-who="' + escapeHtml(who) + '">Write off</button></span>';
+    }
     list.append(li);
+  }
+}
+
+// wireArrearsActions binds ONE delegated click handler to the arrears list
+// (#frontdesk-arrears), covering both the Write off and Pay out buttons
+// renderFrontDeskArrears draws into it — bound once ever (list.dataset.wired
+// guards re-registration across every renderFrontDeskArrears call, since the
+// list element itself persists across renders while its rows are replaced).
+// Delegating onto the persistent list, rather than a listener per button,
+// means a re-render never has to re-wire, and every row's data-account/
+// data-amount/data-who attributes carry everything the handler needs — no
+// closure over the render's own data.
+function wireArrearsActions(list) {
+  if (list.dataset.wired) return;
+  list.dataset.wired = "1";
+  list.addEventListener("click", (ev) => {
+    const writeoffBtn = ev.target.closest(".writeoff-debt-btn");
+    if (writeoffBtn) { handleWriteOffDebt(writeoffBtn); return; }
+    const payoutBtn = ev.target.closest(".payout-credit-btn");
+    if (payoutBtn) { handlePayoutCredit(payoutBtn); return; }
+  });
+}
+
+// handleWriteOffDebt forgives a debtor's balance — a staff-only
+// CreditCafeAccount submitted with reason: "waiver", capped at the balance
+// shown (the op's own cap, PayoutCafeCredit's mirror on the credit side).
+// This is an irreversible money-adjacent decision (the debt is gone, not
+// collected), so it is confirmed before it dispatches, and its throw path
+// narrates the landed-ambiguity vocabulary (lint-ceremony-throw-path.go) —
+// a failed write here may already have forgiven the debt.
+async function handleWriteOffDebt(btn) {
+  const accountKey = btn.getAttribute("data-account");
+  const amountCents = parseInt(btn.getAttribute("data-amount"), 10);
+  const who = btn.getAttribute("data-who");
+  if (!accountKey || !amountCents) { toast("This lease has no café account to write off.", false); return; }
+  if (!confirm("Write off " + money(amountCents) + " owed by " + who + "? This forgives the debt — it is not cash collected.")) return;
+  btn.disabled = true;
+  try {
+    await loadOpCatalogQuiet();
+    const { renderOpForm } = await loadDescriptorform();
+    const row = opCatalogCache && opCatalogCache.CreditCafeAccount;
+    if (!row) throw new Error("this action is unavailable");
+    // me is set because CreditCafeAccount's descriptor declares an
+    // `{actor} holdsRole out` enumeration (the workplace-confinement walk
+    // the script runs) — not for buildAuthContext, which ignores context.me
+    // entirely once selfVoice is false.
+    const context = {
+      target: accountKey,
+      me: identityKey(),
+      selfVoice: false,
+      prefill: { amountCents: amountCents, reason: "waiver", memo: "Written off" },
+    };
+    const handle = renderOpForm(row, context, document.createElement("div"));
+    if (!handle) throw new Error("this action is unavailable");
+    const { envelope, reveal } = await handle.submit();
+    const reply = await submitCatalogOp(envelope, "write off the balance");
+    revealCeremonySecret(reveal, reply);
+    toast("Wrote off " + money(amountCents) + ".", true);
+    setTimeout(loadFrontDesk, 700);
+  } catch (e) {
+    // A rejected reply (e.rejected, submitCatalogOp) is a CONFIRMED
+    // non-commit — NoCreditToPayOut/PayoutExceedsCharge-shaped refusals, the
+    // write-off cap, AuthDenied — and its own message already says exactly
+    // why, so it toasts bare. Anything else is a transport/unknown throw
+    // whose landing is ambiguous, so it gets the landed-ambiguity wording.
+    if (e.rejected) {
+      toast(e.message, false);
+    } else {
+      toast("Could not confirm the write-off reached the server — it may have landed; check the ledger before trying again. " + e.message, false);
+    }
+    btn.disabled = false;
+  }
+}
+
+// handlePayoutCredit hands a resident's credit back as cash — a staff-only
+// PayoutCafeCredit submitted as a debit capped at the credit shown (the
+// op's own cap, CreditCafeAccount's waiver mirror on the debt side). Same
+// irreversibility posture as handleWriteOffDebt: confirmed before dispatch,
+// landed-ambiguity wording on the throw path.
+async function handlePayoutCredit(btn) {
+  const accountKey = btn.getAttribute("data-account");
+  const amountCents = parseInt(btn.getAttribute("data-amount"), 10);
+  const who = btn.getAttribute("data-who");
+  if (!accountKey || !amountCents) { toast("This lease has no café account to pay out.", false); return; }
+  if (!confirm("Pay out " + money(amountCents) + " in credit to " + who + "? This is cash handed over, not spent as credit.")) return;
+  btn.disabled = true;
+  try {
+    await loadOpCatalogQuiet();
+    const { renderOpForm } = await loadDescriptorform();
+    const row = opCatalogCache && opCatalogCache.PayoutCafeCredit;
+    if (!row) throw new Error("this action is unavailable");
+    // me is set because PayoutCafeCredit's descriptor declares BOTH
+    // `{actor} holdsRole out` (the workplace-confinement walk) and
+    // `{payload.accountKey} postedTo in` (the backfill replay) — not for
+    // buildAuthContext, which ignores context.me entirely once selfVoice is
+    // false.
+    const context = {
+      target: accountKey,
+      me: identityKey(),
+      selfVoice: false,
+      prefill: { amountCents: amountCents, memo: "Paid out in cash" },
+    };
+    const handle = renderOpForm(row, context, document.createElement("div"));
+    if (!handle) throw new Error("this action is unavailable");
+    const { envelope, reveal } = await handle.submit();
+    const reply = await submitCatalogOp(envelope, "pay out the credit");
+    revealCeremonySecret(reveal, reply);
+    toast("Paid out " + money(amountCents) + ".", true);
+    setTimeout(loadFrontDesk, 700);
+  } catch (e) {
+    // See handleWriteOffDebt's own catch: e.rejected (submitCatalogOp) marks
+    // a CONFIRMED non-commit — NoCreditToPayOut, PayoutExceedsCredit,
+    // AuthDenied — whose message already says exactly why, toasted bare.
+    // Anything else is a transport/unknown throw with an ambiguous landing.
+    if (e.rejected) {
+      toast(e.message, false);
+    } else {
+      toast("Could not confirm the payout reached the server — it may have landed; check the ledger before trying again. " + e.message, false);
+    }
+    btn.disabled = false;
   }
 }
 
@@ -1522,11 +1675,16 @@ async function renderResident() {
             // to operator/frontOfHouse and to no consumer at any scope. A
             // charge already given back in full is not offered again: the
             // remaining amount is what the script will accept, so an
-            // exhausted charge has no refund left to start.
+            // exhausted charge has no refund left to start. A PayoutCafeCredit
+            // debit carries no tabKey either (it settles a credit in cash, not
+            // a café purchase), so this predicate already excludes it — a
+            // payout is not itself refundable.
             const refundable = !selfMode && r.type === "debit" && !!r.tabKey && remaining > 0;
             return (
               '<li class="ledger-entry ' + escapeHtml(r.type) + (r.reversesKey ? " refund" : "") + '">' +
               (r.reversesKey ? '<span class="badge-refund">Refund</span>' : "") +
+              (r.type === "credit" && r.reason === "waiver" ? '<span class="badge-refund">Waived</span>' : "") +
+              (r.type === "debit" && r.reason === "payout" ? '<span class="badge-refund">Paid out</span>' : "") +
               (r.type === "debit" ? "+" : "−") + money(r.amountCents) +
               (r.memo ? " — " + escapeHtml(customerMemo(r.memo)) : "") +
               " (" + escapeHtml(r.postedAt) + ")" +

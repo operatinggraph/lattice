@@ -57,6 +57,7 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "DebitAccount", Scope: "any"},
 			{OperationType: "CreditCafeAccount", Scope: "any"},
 			{OperationType: "RefundCafeCharge", Scope: "any"},
+			{OperationType: "PayoutCafeCredit", Scope: "any"},
 			// Deliberately the SAME grant Weaver holds for EvaluateCafeArrears
 			// (arrearsWeaverCapDoc below). That is what makes the forged-send
 			// vector attributable: the refusal can only come from the script's
@@ -577,10 +578,11 @@ func refundEnv(label, actorKey, acctKey, reversesRef string, amountCents int,
 			`","amountCents":` + strconv.Itoa(amountCents) + `,"memo":"Wrong item charged"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{acctKey, reversesRef, reversesRef + ".entry"},
-			OptionalReads: []string{acctKey + ".balance"},
+			OptionalReads: []string{acctKey + ".balance", acctKey + ".arrears"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
 				{Hub: reversesRef, Relation: "postedTo", Direction: "out"},
+				{Hub: acctKey, Relation: "postedTo", Direction: "in"},
 			},
 		},
 	}
@@ -1885,7 +1887,7 @@ func TestCreditCafeAccount_BackfillBudgetExhausted(t *testing.T) {
 // reads .balance through kv.Read and an undeclared read falls through to a live
 // Core KV GET that returns the same number. Only the concurrent test above shows
 // the difference behaviourally, and only this shows the derivation still covers
-// all three ops rather than the one that test happens to drive.
+// all four ops rather than the one that test happens to drive.
 func TestDeriveReads_BalanceKey(t *testing.T) {
 	var script string
 	for _, d := range cafeledger.DDLs() {
@@ -1902,7 +1904,7 @@ func TestDeriveReads_BalanceKey(t *testing.T) {
 		t.Fatalf("cannot locate derive_reads in the cafetransaction script (derive=%d execute=%d)", deriveIdx, executeIdx)
 	}
 	derive := script[deriveIdx:executeIdx]
-	for _, want := range []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge"} {
+	for _, want := range []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge", "PayoutCafeCredit"} {
 		if !strings.Contains(derive, want) {
 			t.Fatalf("derive_reads does not mention %q — that op's .balance update would be unconditioned whenever its submitter omits the declaration", want)
 		}
@@ -3059,4 +3061,820 @@ func seedEntryAt(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	seedLink(t, ctx, conn,
 		"lnk.cafetransaction."+txID+".postedTo.cafeaccount."+acctID,
 		txKey, acctKey, "postedTo", "postedTo")
+}
+
+// --- .entry.reason + PayoutCafeCredit ---------------------------------------
+
+// entryReason reads the reason a posted entry carries — "" when it carries
+// none, which is the classification a plain charge records.
+func entryReason(t *testing.T, ctx context.Context, conn *substrate.Conn, txKey string) string {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, txKey+".entry")
+	data, _ := doc["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("%s.entry carries no data", txKey)
+	}
+	reason, _ := data["reason"].(string)
+	return reason
+}
+
+// creditEnvWithPayload is creditEnvFor with the payload spelled out, for the
+// vectors that carry a reason.
+func creditEnvWithPayload(label, actorKey, acctKey, payload string) (*processor.OperationEnvelope, string) {
+	env, txKey := creditEnvFor(label, actorKey, acctKey, 0)
+	env.Payload = json.RawMessage(payload)
+	return env, txKey
+}
+
+// payoutEnv builds one PayoutCafeCredit submission and the transaction key it
+// will mint, declaring exactly the reads and enumerations the descriptor
+// promises (opmetas.go): the account, its absence-tolerant .balance and
+// .arrears, the operator-probe holdsRole walk and the legacy-backfill postedTo
+// walk. authContextTarget is the raw client-supplied hint the script refuses
+// outright.
+func payoutEnv(label, actorKey, acctKey, payload string, authContextTarget string) (*processor.OperationEnvelope, string) {
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "PayoutCafeCredit",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-21T09:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(payload),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{acctKey},
+			OptionalReads: []string{acctKey + ".balance", acctKey + ".arrears"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+			},
+		},
+	}
+	if authContextTarget != "" {
+		env.AuthContext = &processor.AuthContext{Target: authContextTarget}
+	}
+	return env, "vtx.cafetransaction." + nanoIDFromRequestID(reqID)
+}
+
+func payoutPayload(acctKey string, amountCents int) string {
+	return `{"accountKey":"` + acctKey + `","amountCents":` + strconv.Itoa(amountCents) + `,"memo":"Paid from till"}`
+}
+
+// payoutAs submits one PayoutCafeCredit of amountCents as the given actor,
+// drives it, asserts the outcome and returns the payout's transaction key.
+func payoutAs(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, actorKey, acctKey string, amountCents int, want processor.MessageOutcome) string {
+	t.Helper()
+	env, txKey := payoutEnv(label, actorKey, acctKey, payoutPayload(acctKey, amountCents), "")
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, want)
+	return txKey
+}
+
+// seedCreditAccount opens an account for leaseKey and drives it into CREDIT
+// by the only route the ledger offers: a charge, paid in full, then refunded —
+// the shape a resident who paid for a wrong item and got the charge given back
+// is left in. Returns the account key, its .balance at -creditCents.
+func seedCreditAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, prefix, leaseKey string, creditCents int) string {
+	t.Helper()
+	acctKey := createAccount(t, ctx, conn, cp, cons, prefix+"acct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, prefix+"debit", acctKey, creditCents, "Settled tab")
+	creditAmount(t, ctx, conn, cp, cons, prefix+"pay", ledgerActorKey, acctKey, creditCents, processor.OutcomeAccepted)
+	refundAs(t, ctx, conn, cp, cons, prefix+"refund", ledgerActorKey, acctKey, chargeKey, creditCents, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -float64(creditCents) {
+		t.Fatalf("fixture balance = %v, want %d (in credit)", got, -creditCents)
+	}
+	return acctKey
+}
+
+// TestEntryReason_PaymentDefaultsAndWaiverRecorded pins the two credit
+// reasons a caller may choose. A payment that names no reason records
+// "payment" — the default is written, not left absent, so a statement never
+// has to infer it — and a staff write-off records "waiver". Both are ordinary
+// credits: the balance moves identically, and the reason is the only thing
+// that tells a statement one was cash and the other forgiven.
+func TestEntryReason_PaymentDefaultsAndWaiverRecorded(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "reasonwaiver")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFERSNWVRLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafereasonwaiveracct", leaseKey)
+	postDebit(t, ctx, conn, cp, cons, "cafereasonwaiverdebit", acctKey, 1800, "Settled tab")
+
+	payKey := creditAmount(t, ctx, conn, cp, cons, "cafereasonwaiverpay",
+		ledgerActorKey, acctKey, 300, processor.OutcomeAccepted)
+	if got := entryReason(t, ctx, conn, payKey); got != "payment" {
+		t.Fatalf("a payment naming no reason records reason = %q, want payment", got)
+	}
+
+	env, waiverKey := creditEnvWithPayload("cafereasonwaiverwoff", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":1500,"reason":"waiver","memo":"Lease never approved"}`)
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := entryReason(t, ctx, conn, waiverKey); got != "waiver" {
+		t.Fatalf("a write-off records reason = %q, want waiver", got)
+	}
+	entryDoc := readDoc(t, ctx, conn, waiverKey+".entry")
+	entryData, _ := entryDoc["data"].(map[string]any)
+	if got, _ := entryData["type"].(string); got != "credit" {
+		t.Fatalf("a write-off posts entry.type = %q, want credit — every balance consumer sums it unchanged", got)
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying 300 and writing off 1500 of 1800 = %v, want 0", got)
+	}
+
+	// A reason outside the two is refused, not defaulted.
+	bad, _ := creditEnvWithPayload("cafereasonwaiverbad", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":100,"reason":"gift"}`)
+	assertRejectedBecause(t, ctx, conn, cp, cons, bad,
+		`InvalidArgument: reason: must be "payment" or "waiver", got gift`)
+}
+
+// TestEntryReason_SelfScopedWaiverRefused: forgiving a debt is the café's
+// call, never the debtor's. The resident OWNS this account — the same submit
+// with reason "payment" is accepted — so the refusal is the reason and nothing
+// else, and it lands before the ownership walk.
+func TestEntryReason_SelfScopedWaiverRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "reasonselfwaiver")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFERSNSLFLEASEHJK", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafereasonselfacct", leaseKey)
+	postDebit(t, ctx, conn, cp, cons, "cafereasonselfdebit", acctKey, 1850, "Settled tab")
+
+	selfEnv := func(label, reason string) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "CreditCafeAccount",
+			Actor:         ledgerSelfConsumerKey,
+			SubmittedAt:   "2026-07-08T09:00:00Z",
+			Class:         "cafetransaction",
+			Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":100,"reason":"` + reason + `"}`),
+			ContextHint:   selfCreditHint(acctKey),
+			AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+		}
+	}
+	assertRejectedBecause(t, ctx, conn, cp, cons, selfEnv("cafereasonselfwaiver", "waiver"),
+		"AuthDenied: a resident may only pay down their own account, not write it off")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1850 {
+		t.Fatalf("balance after the refused write-off = %v, want the untouched 1850", got)
+	}
+	testutil.PublishOp(t, conn, selfEnv("cafereasonselfpaymnt", "payment"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// TestEntryReason_WaiverOverBalanceRefused: a write-off is a credit that is not
+// a refund, so the outstanding-balance cap binds it exactly as it binds a
+// payment — forgiving more than is owed would put the resident in credit the
+// café then owes back. Only the refusal's wording changes, because it is
+// toasted verbatim at the staffer who clicked Write off.
+func TestEntryReason_WaiverOverBalanceRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "reasonwaivercap")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFERSNCAPLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafereasoncapacct", leaseKey)
+	postDebit(t, ctx, conn, cp, cons, "cafereasoncapdebit", acctKey, 1425, "Settled tab")
+
+	over, _ := creditEnvWithPayload("cafereasoncapover", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":5000,"reason":"waiver"}`)
+	assertRejectedBecause(t, ctx, conn, cp, cons, over,
+		"AuthDenied: a write-off of $50.00 exceeds the outstanding balance of $14.25")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1425 {
+		t.Fatalf("balance after the refused write-off = %v, want the untouched 1425", got)
+	}
+
+	// Exactly what is owed is fine — the cap is `>`, not `>=`.
+	exact, _ := creditEnvWithPayload("cafereasoncapexact", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":1425,"reason":"waiver"}`)
+	testutil.PublishOp(t, conn, exact)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after writing off the whole tab = %v, want 0", got)
+	}
+}
+
+// TestEntryReason_RefundWritesItsOwn: a refund's reason is the op's to write,
+// not the caller's — "refund" lands on the entry alongside the reverses link,
+// so a statement can badge the line without walking the hop.
+func TestEntryReason_RefundWritesItsOwn(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "reasonrefund")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFERSNRFDLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafereasonrefundacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafereasonrefunddebit", acctKey, 900, "Settled tab")
+	if got := entryReason(t, ctx, conn, chargeKey); got != "" {
+		t.Fatalf("a charge records reason = %q, want none — absence on a debit IS the classification", got)
+	}
+
+	refundKey := refundAs(t, ctx, conn, cp, cons, "cafereasonrefundrfd",
+		ledgerActorKey, acctKey, chargeKey, 900, "", processor.OutcomeAccepted)
+	if got := entryReason(t, ctx, conn, refundKey); got != "refund" {
+		t.Fatalf("a refund records reason = %q, want refund", got)
+	}
+}
+
+// TestEntryReason_PayloadReasonRefusedOffCreditCafeAccount is the
+// cross-refusal: a reason sent to any op but CreditCafeAccount is refused
+// rather than ignored, the reversesRef / tabRef idiom. A caller that sends
+// reason "waiver" to a refund means a write-off, and silently posting the
+// refund would record a different fact than the one asked for. The positive
+// vector for each op runs first so the refusal is the field alone.
+func TestEntryReason_PayloadReasonRefusedOffCreditCafeAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "reasoncrossrefuse")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFERSNXRFLEASEHJK")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "cafereasonxrf", leaseKey, 900)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafereasonxrfchargeb", acctKey, 300, "Settled tab")
+
+	// DebitAccount.
+	debit := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cafereasonxrfdebitrsn"),
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-10T08:00:00Z",
+		Class:         "cafetransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":100,"reason":"payment"}`),
+		ContextHint:   debitHint(acctKey),
+	}
+	assertRejectedBecause(t, ctx, conn, cp, cons, debit,
+		"InvalidArgument: reason: only valid on CreditCafeAccount, not DebitAccount")
+
+	// RefundCafeCharge — the charge is refundable (100 of 300 given back first).
+	refundAs(t, ctx, conn, cp, cons, "cafereasonxrfrefundok",
+		ledgerActorKey, acctKey, chargeKey, 100, "", processor.OutcomeAccepted)
+	refund, _ := refundEnv("cafereasonxrfrefundrsn", ledgerActorKey, acctKey, chargeKey, 100, "")
+	refund.Payload = json.RawMessage(`{"accountKey":"` + acctKey + `","reversesRef":"` + chargeKey +
+		`","amountCents":100,"reason":"waiver"}`)
+	assertRejectedBecause(t, ctx, conn, cp, cons, refund,
+		"InvalidArgument: reason: only valid on CreditCafeAccount, not RefundCafeCharge")
+
+	// PayoutCafeCredit — the account holds credit (900 − 300 + 100 = 700).
+	payoutAs(t, ctx, conn, cp, cons, "cafereasonxrfpayoutok", ledgerActorKey, acctKey, 100, processor.OutcomeAccepted)
+	payout, _ := payoutEnv("cafereasonxrfpayoutrsn", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":100,"reason":"payout"}`, "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, payout,
+		"InvalidArgument: reason: only valid on CreditCafeAccount, not PayoutCafeCredit")
+}
+
+// TestPayoutCafeCredit_SettlesCreditInCash is the positive vector every
+// refusal below is measured against. An account left in credit by a refund of
+// a paid charge is paid out in full: the commit carries an ordinary DEBIT
+// (transaction + .entry{debit, reason: payout} + postedTo), .balance returns
+// to zero, account.paidOut is emitted — and the account's live .arrears
+// episode state is left byte-identical, because the balance a payout leaves
+// is at most zero and the debit branch opens an episode only above it.
+func TestPayoutCafeCredit_SettlesCreditInCash(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutok")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEPAYQTLEASEHJKM")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "cafepayoutok", leaseKey, 3575)
+
+	// The fixture's charge opened an episode and its payment ended it, so the
+	// account carries a live {evaluatedAt} — the shape a payout must not touch.
+	arrearsBefore, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, acctKey+".arrears")
+	if err != nil {
+		t.Fatalf("read .arrears before the payout: %v", err)
+	}
+	if data := arrearsData(t, ctx, conn, acctKey); data == nil || data["evaluatedAt"] == nil {
+		t.Fatalf("fixture must leave a live .arrears {evaluatedAt} for the payout to leave alone, got %v", data)
+	}
+
+	env, payoutKey := payoutEnv("cafepayoutokpayout", ledgerActorKey, acctKey, payoutPayload(acctKey, 3575), "")
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	entryDoc := readDoc(t, ctx, conn, payoutKey+".entry")
+	entryData, _ := entryDoc["data"].(map[string]any)
+	if got, _ := entryData["type"].(string); got != "debit" {
+		t.Fatalf("payout entry.type = %q, want debit — cash leaving is what the resident's credit bought", got)
+	}
+	if got, _ := entryData["amountCents"].(float64); got != 3575 {
+		t.Fatalf("payout entry.amountCents = %v, want 3575", got)
+	}
+	if got, _ := entryData["reason"].(string); got != "payout" {
+		t.Fatalf("payout entry.reason = %q, want payout", got)
+	}
+	if got, _ := entryData["memo"].(string); got != "Paid from till" {
+		t.Fatalf("payout entry.memo = %q, want %q", got, "Paid from till")
+	}
+	acctID := acctKey[len("vtx.cafeaccount."):]
+	payoutID := payoutKey[len("vtx.cafetransaction."):]
+	if !keyExists(t, ctx, conn, "lnk.cafetransaction."+payoutID+".postedTo.cafeaccount."+acctID) {
+		t.Fatalf("a payout must post to the account like any other entry")
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying the credit out in full = %v, want 0", got)
+	}
+
+	arrearsAfter, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, acctKey+".arrears")
+	if err != nil {
+		t.Fatalf("read .arrears after the payout: %v", err)
+	}
+	if string(arrearsAfter.Value) != string(arrearsBefore.Value) || arrearsAfter.Revision != arrearsBefore.Revision {
+		t.Fatalf("a payout rewrote .arrears (rev %d → %d):\n before %s\n after  %s",
+			arrearsBefore.Revision, arrearsAfter.Revision, arrearsBefore.Value, arrearsAfter.Value)
+	}
+
+	// The event class is the payout's own, not a charge's.
+	outbox, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(env.RequestID))
+	if err != nil {
+		t.Fatalf("read outbox aspect: %v", err)
+	}
+	ob, err := processor.ParseOutboxAspect(outbox.Value)
+	if err != nil {
+		t.Fatalf("parse outbox aspect: %v", err)
+	}
+	var classes []string
+	for _, e := range ob.Data.Events {
+		classes = append(classes, e.EventType)
+	}
+	if len(classes) != 1 || classes[0] != "account.paidOut" {
+		t.Fatalf("payout emitted %v, want exactly [account.paidOut]", classes)
+	}
+}
+
+// TestPayoutCafeCredit_NoCreditToPayOut: an account that owes, or is square,
+// holds nothing to hand back — paying it out would be lending it money. Both
+// shapes are pinned, at a positive balance and at exactly zero, because the
+// guard is `>= 0` and a test at one of them passes against `> 0` too.
+func TestPayoutCafeCredit_NoCreditToPayOut(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutnocredit")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEPAYNQCRLEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafepayoutnocracct", leaseKey)
+
+	// Square: a fresh account at zero.
+	zero, _ := payoutEnv("cafepayoutnocrzero", ledgerActorKey, acctKey, payoutPayload(acctKey, 100), "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, zero,
+		"NoCreditToPayOut: this account holds no credit to pay out")
+
+	// Owing: a charge outstanding.
+	postDebit(t, ctx, conn, cp, cons, "cafepayoutnocrdebit", acctKey, 900, "Settled tab")
+	owing, _ := payoutEnv("cafepayoutnocrowing", ledgerActorKey, acctKey, payoutPayload(acctKey, 100), "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, owing,
+		"NoCreditToPayOut: this account holds no credit to pay out")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 900 {
+		t.Fatalf("balance after two refused payouts = %v, want the untouched 900", got)
+	}
+}
+
+// TestPayoutCafeCredit_PayoutExceedsCredit: a payout is capped at the credit
+// the account holds, so Σdebit−Σcredit returns to at most zero and never past
+// it — paying out more would post a debit for coffee nobody drank. The exact
+// amount runs after the refusal: the cap is `>`, not `>=`, and the refusal
+// spells both amounts as money because it is toasted verbatim at the desk.
+func TestPayoutCafeCredit_PayoutExceedsCredit(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutexceeds")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEPAYXCDLEASEHJK")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "cafepayoutxcd", leaseKey, 1425)
+
+	over, _ := payoutEnv("cafepayoutxcdover", ledgerActorKey, acctKey, payoutPayload(acctKey, 5000), "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, over,
+		"PayoutExceedsCredit: a payout of $50.00 exceeds the credit balance of $14.25")
+	if got := balanceCents(t, ctx, conn, acctKey); got != -1425 {
+		t.Fatalf("balance after the refused payout = %v, want the untouched -1425", got)
+	}
+
+	// A partial payout is fine, and the remainder exactly.
+	payoutAs(t, ctx, conn, cp, cons, "cafepayoutxcdpart", ledgerActorKey, acctKey, 425, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -1000 {
+		t.Fatalf("balance after a partial payout of 425 = %v, want -1000", got)
+	}
+	payoutAs(t, ctx, conn, cp, cons, "cafepayoutxcdrest", ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying out the rest = %v, want 0", got)
+	}
+}
+
+// TestPayoutCafeCredit_SelfScopedSubmitRefused: a payout is a till act and is
+// never self-scoped. The operator's own payout of the same credit proves the
+// vector is otherwise well-formed, and the refusal is read from the reply — a
+// step-3 denial would mean the script was never asked.
+func TestPayoutCafeCredit_SelfScopedSubmitRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutselfscoped")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEPAYSLFLEASEHJK")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "cafepayoutslf", leaseKey, 900)
+
+	payoutAs(t, ctx, conn, cp, cons, "cafepayoutslfoperator", ledgerActorKey, acctKey, 100, processor.OutcomeAccepted)
+	targeted, _ := payoutEnv("cafepayoutslftargeted", ledgerActorKey, acctKey, payoutPayload(acctKey, 100), ledgerActorKey)
+	assertRejectedBecause(t, ctx, conn, cp, cons, targeted,
+		"AuthDenied: PayoutCafeCredit is a front-desk act, never self-scoped")
+	if got := balanceCents(t, ctx, conn, acctKey); got != -800 {
+		t.Fatalf("balance after the refused payout = %v, want the untouched -800", got)
+	}
+}
+
+// TestPayoutCafeCredit_TabRefAndReversesRefRefused: the two fields other entry
+// ops own are refused on a payout rather than dropped — a caller sending
+// tabRef means "charge this tab" and reversesRef means "refund that charge",
+// and neither is cash leaving the till.
+func TestPayoutCafeCredit_TabRefAndReversesRefRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutfields")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEPAYFLDLEASEHJK")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "cafepayoutfld", leaseKey, 900)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafepayoutfldcharge", acctKey, 100, "Settled tab")
+	tabKey := "vtx.tab.BBCAFEPAYTABHJKMNPQR"
+	seedVertex(t, ctx, conn, tabKey, "tab", nil)
+
+	withTab, _ := payoutEnv("cafepayoutfldtab", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":100,"tabRef":"`+tabKey+`"}`, "")
+	withTab.ContextHint.Reads = append(withTab.ContextHint.Reads, tabKey)
+	assertRejectedBecause(t, ctx, conn, cp, cons, withTab,
+		"InvalidArgument: tabRef: only valid on DebitAccount, not PayoutCafeCredit")
+
+	withReverses, _ := payoutEnv("cafepayoutfldrev", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":100,"reversesRef":"`+chargeKey+`"}`, "")
+	withReverses.ContextHint.Reads = append(withReverses.ContextHint.Reads, chargeKey, chargeKey+".entry")
+	assertRejectedBecause(t, ctx, conn, cp, cons, withReverses,
+		"InvalidArgument: reversesRef: only valid on RefundCafeCharge, not PayoutCafeCredit")
+}
+
+// TestPayoutCafeCredit_LegacyAccountBackfillsOnPayout mirrors the payment's
+// self-heal for the payout leg: an account minted under cafe-ledger < 0.4.0
+// carries no .balance, and a payout's cap needs the number just as a payment's
+// does, so it replays the postedTo history once and mints the total. The
+// seeded history nets to a credit (charge 3000, paid 3000, refunded 3000 as a
+// plain credit, then a further refund of 500), so a replay that summed only
+// one sign would land on the wrong side of zero and refuse.
+func TestPayoutCafeCredit_LegacyAccountBackfillsOnPayout(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutlegacy")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEPAYLEGLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEPAYLEGACCTHJKM", leaseKey)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEPAYLEGTXAHJKMN", "debit", 3000)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEPAYLEGTXBHJKMN", "credit", 3000)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFEPAYLEGTXCHJKMN", "credit", 500)
+
+	// The cap already measures against the replayed number before any
+	// .balance exists: 500 of credit, so 501 is not payable — and a refused
+	// payout commits nothing, so the account is still legacy afterwards.
+	over, _ := payoutEnv("cafepayoutlegover", ledgerActorKey, acctKey, payoutPayload(acctKey, 501), "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, over,
+		"PayoutExceedsCredit: a payout of $5.01 exceeds the credit balance of $5.00")
+	if keyExists(t, ctx, conn, acctKey+".balance") {
+		t.Fatalf("a REFUSED payout seeded .balance — nothing about a rejected op may commit")
+	}
+
+	// The first accepted payout mints the aspect from the replayed total.
+	payoutAs(t, ctx, conn, cp, cons, "cafepayoutlegpart", ledgerActorKey, acctKey, 200, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -300 {
+		t.Fatalf("backfilled balance = %v, want -300 (3000 charged − 3500 credited + this 200 payout)", got)
+	}
+
+	// And every touch after that is the O(1) path off the aspect itself.
+	payoutAs(t, ctx, conn, cp, cons, "cafepayoutlegrest", ledgerActorKey, acctKey, 300, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying out the backfilled credit = %v, want 0", got)
+	}
+}
+
+// TestPayoutCafeCredit_UndeclaredSubmitterStillConditioned is the payout's
+// half of the OCC guarantee: the .balance a payout's cap reads is hydrated —
+// and its update revision-conditioned — because the script's own derive_reads
+// declares it, never because the submitter did. Two payouts of the whole
+// credit race with the account alone declared; under a hydrated, conditioned
+// read the loser re-hydrates, re-executes against the winner's zero and is
+// refused, so the credit is paid out exactly once. An unconditioned pair would
+// each pass the cap against the same −900 and both post, paying out 1800
+// against 900 of credit.
+func TestPayoutCafeCredit_UndeclaredSubmitterStillConditioned(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutundeclared")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEPAYUNDLEASEHJK")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "cafepayoutund", leaseKey, 900)
+
+	undeclaredPayout := func(label string) *processor.OperationEnvelope {
+		env, _ := payoutEnv(label, ledgerActorKey, acctKey, payoutPayload(acctKey, 900), "")
+		// The account alone, plus the two walks (only a read can be derived
+		// server-side). No optionalReads, no .balance, no .arrears — the shape
+		// a client that never read the descriptor sends.
+		env.ContextHint.OptionalReads = nil
+		return env
+	}
+	testutil.PublishOp(t, conn, undeclaredPayout("cafepayoutundfirst"))
+	testutil.PublishOp(t, conn, undeclaredPayout("cafepayoutundsecond"))
+
+	outcomes := driveConcurrently(t, ctx, cp, cons, 2)
+	accepted := 0
+	for _, o := range outcomes {
+		if o == processor.OutcomeAccepted {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("outcomes = %v, want exactly one accepted — a submitter that declares nothing must not be able to turn the OCC condition off", outcomes)
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after two racing undeclared payouts = %v, want 0 (the credit paid out once, never twice)", got)
+	}
+}
+
+// --- the cash invariant: credit never exceeds cash paid in -------------------
+
+// balanceFields reads the account's .balance data back whole, so a test can
+// assert cashCents is PRESENT with a value, or ABSENT — two different facts.
+func balanceFields(t *testing.T, ctx context.Context, conn *substrate.Conn, acctKey string) map[string]any {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, acctKey+".balance")
+	data, _ := doc["data"].(map[string]any)
+	if data == nil {
+		t.Fatalf("%s.balance carries no data", acctKey)
+	}
+	return data
+}
+
+func cashCents(t *testing.T, ctx context.Context, conn *substrate.Conn, acctKey string) float64 {
+	t.Helper()
+	data := balanceFields(t, ctx, conn, acctKey)
+	got, ok := data["cashCents"].(float64)
+	if !ok {
+		t.Fatalf("%s.balance carries no cashCents, got %v", acctKey, data)
+	}
+	return got
+}
+
+// TestCreateAccount_MintsBothBalanceFields pins the aspect's shape at birth:
+// {balanceCents: 0, cashCents: 0}. A document minted without cashCents would
+// read as pre-field on every later leg and pay a replay it never needed.
+func TestCreateAccount_MintsBothBalanceFields(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "createcash")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECASHMNTLEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecashmintacct", leaseKey)
+	data := balanceFields(t, ctx, conn, acctKey)
+	if got, _ := data["balanceCents"].(float64); got != 0 {
+		t.Fatalf("balanceCents at birth = %v, want 0", got)
+	}
+	if got, ok := data["cashCents"].(float64); !ok || got != 0 {
+		t.Fatalf("cashCents at birth = %v (present=%v), want 0", got, ok)
+	}
+}
+
+// TestRefundCafeCharge_PayoutCannotBeRefunded closes the cash loop at its
+// second turn. A payout is a debit, and one carrying no refundedCents tally,
+// so a refund that could name it would hand the paid-out credit straight back:
+// charge, pay, refund, pay out, refund the payout, pay out again — without end,
+// every entry legitimate-looking. The refund of the CHARGE that ran first
+// proves the vector is well-formed; the refund of the payout is refused on the
+// reason it carries, and the balance is untouched.
+func TestRefundCafeCharge_PayoutCannotBeRefunded(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundpayout")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFERFPQTLEASEHJKM")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "caferfpqt", leaseKey, 1000)
+	payoutKey := payoutAs(t, ctx, conn, cp, cons, "caferfpqtpayout", ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after the payout = %v, want 0", got)
+	}
+
+	env, _ := refundEnv("caferfpqtrefundpayout", ledgerActorKey, acctKey, payoutKey, 1000, "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"InvalidArgument: reversesRef: only a posted charge (a debit with no reason) can be refunded; "+payoutKey+" is a payout")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after the refused refund-of-a-payout = %v, want the untouched 0", got)
+	}
+	if got := entryReason(t, ctx, conn, payoutKey); got != "payout" {
+		t.Fatalf("the payout's own entry was disturbed: reason = %q", got)
+	}
+}
+
+// TestRefundCafeCharge_WrittenOffChargeCannotBeRefunded is the sequence the
+// invariant exists for, end to end: a charge the café wrote off is refunded —
+// still offered, since a waiver leaves the charge's refundedCents untouched —
+// and the account would land $18 in credit having paid nothing, credit the
+// desk then hands over in cash. RefundExceedsPaid stops it at the mint, and
+// the balance stays at zero.
+func TestRefundCafeCharge_WrittenOffChargeCannotBeRefunded(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "refundwaived")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFERFWVDLEASEHJKM")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "caferfwvdacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "caferfwvddebit", acctKey, 1800, "Settled tab")
+	waive, _ := creditEnvWithPayload("caferfwvdwaive", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":1800,"reason":"waiver","memo":"Lease never approved"}`)
+	testutil.PublishOp(t, conn, waive)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after the write-off = %v, want 0", got)
+	}
+	if got := cashCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("cash after the write-off = %v, want 0 — forgiven debt is not cash paid in", got)
+	}
+
+	env, _ := refundEnv("caferfwvdrefund", ledgerActorKey, acctKey, chargeKey, 1800, "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"RefundExceedsPaid: a refund of $18.00 would leave this account $18.00 in credit, more than the $0.00 it has paid in")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after the refused refund = %v, want the untouched 0", got)
+	}
+
+	// And with nothing in credit there is nothing to pay out either.
+	none, _ := payoutEnv("caferfwvdpayout", ledgerActorKey, acctKey, payoutPayload(acctKey, 1800), "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, none,
+		"NoCreditToPayOut: this account holds no credit to pay out")
+}
+
+// TestCashInvariant_PaidChargeRefundedAndPaidOut is the legitimate loop the
+// invariant must leave open: the resident paid $10 in cash, the charge is
+// given back, the desk hands the $10 back. cash tracks it — 10 in, 10 out —
+// and both numbers return to zero.
+func TestCashInvariant_PaidChargeRefundedAndPaidOut(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "cashloopok")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECASHQKLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecashqkacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafecashqkdebit", acctKey, 1000, "Settled tab")
+	if got := cashCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("cash after a charge = %v, want 0 — a charge is not cash", got)
+	}
+	creditAmount(t, ctx, conn, cp, cons, "cafecashqkpay", ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+	if got := cashCents(t, ctx, conn, acctKey); got != 1000 {
+		t.Fatalf("cash after paying $10 = %v, want 1000", got)
+	}
+	refundAs(t, ctx, conn, cp, cons, "cafecashqkrefund", ledgerActorKey, acctKey, chargeKey, 1000, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -1000 {
+		t.Fatalf("balance after refunding the paid charge = %v, want -1000", got)
+	}
+	if got := cashCents(t, ctx, conn, acctKey); got != 1000 {
+		t.Fatalf("cash after the refund = %v, want the untouched 1000 — a refund mints credit, it moves no cash", got)
+	}
+	payoutAs(t, ctx, conn, cp, cons, "cafecashqkpayout", ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after the payout = %v, want 0", got)
+	}
+	if got := cashCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("cash after the payout = %v, want 0 — the $10 went back out", got)
+	}
+}
+
+// TestCashInvariant_PartiallyPaidChargeRefundBoundedByCash: $18 charged, $10
+// paid, the remaining $8 written off. Refunding the whole charge would leave
+// $18 of credit against $10 of cash and is refused; refunding what was actually
+// paid lands exactly on the cash floor and passes. The cap is `>`, not `>=`.
+func TestCashInvariant_PartiallyPaidChargeRefundBoundedByCash(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "cashpartial")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECASHPRTLEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecashprtacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafecashprtdebit", acctKey, 1800, "Settled tab")
+	creditAmount(t, ctx, conn, cp, cons, "cafecashprtpay", ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+	waive, _ := creditEnvWithPayload("cafecashprtwaive", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":800,"reason":"waiver"}`)
+	testutil.PublishOp(t, conn, waive)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := cashCents(t, ctx, conn, acctKey); got != 1000 {
+		t.Fatalf("cash after $10 paid and $8 waived = %v, want 1000", got)
+	}
+
+	whole, _ := refundEnv("cafecashprtrefundall", ledgerActorKey, acctKey, chargeKey, 1800, "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, whole,
+		"RefundExceedsPaid: a refund of $18.00 would leave this account $18.00 in credit, more than the $10.00 it has paid in")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after the refused refund = %v, want the untouched 0", got)
+	}
+
+	refundAs(t, ctx, conn, cp, cons, "cafecashprtrefundpd", ledgerActorKey, acctKey, chargeKey, 1000, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -1000 {
+		t.Fatalf("balance after refunding what was paid = %v, want -1000", got)
+	}
+}
+
+// TestCashInvariant_UnpaidChargeRefundPasses: a refund of a charge nobody paid
+// nets the balance to zero and moves no cash — it must pass, or a wrongly
+// posted charge could never be corrected before the resident paid it.
+func TestCashInvariant_UnpaidChargeRefundPasses(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "cashunpaid")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECASHNPDLEASEHJ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecashnpdacct", leaseKey)
+	chargeKey := postDebit(t, ctx, conn, cp, cons, "cafecashnpddebit", acctKey, 1800, "Settled tab")
+	refundAs(t, ctx, conn, cp, cons, "cafecashnpdrefund", ledgerActorKey, acctKey, chargeKey, 1800, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after refunding an unpaid charge = %v, want 0", got)
+	}
+	if got := cashCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("cash = %v, want 0", got)
+	}
+}
+
+// seedPreFieldBalance plants a live .balance document in the shape one written
+// before cashCents existed sits in today: balanceCents alone. No op produces
+// it any more, so it has to be planted — and its absent field is the case the
+// script must read as "not yet computed", never as zero.
+func seedPreFieldBalance(t *testing.T, ctx context.Context, conn *substrate.Conn, acctKey string, balance int) {
+	t.Helper()
+	seedAspect(t, ctx, conn, acctKey, "balance", "cafeAccountBalance", map[string]any{"balanceCents": balance})
+}
+
+// seedLegacyRefund seeds an already-posted credit that reverses chargeTxID —
+// a refund written before entries carried a reason, distinguishable from a
+// payment ONLY by the reverses link it carries.
+func seedLegacyRefund(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	acctKey, txID, chargeTxID string, amountCents int) {
+	t.Helper()
+	seedLegacyEntry(t, ctx, conn, acctKey, txID, "credit", amountCents)
+	seedLink(t, ctx, conn,
+		"lnk.cafetransaction."+txID+".reverses.cafetransaction."+chargeTxID,
+		"vtx.cafetransaction."+txID, "vtx.cafetransaction."+chargeTxID, "reverses", "reverses")
+}
+
+// TestCashInvariant_PreFieldBalanceDocComputesCashOnGuardedLegs covers the documents
+// that already exist: a live .balance carrying balanceCents alone. Its history
+// holds one old payment (a credit with no reason and no reverses link) and one
+// old refund (a credit with no reason and a reverses link) — the two shapes
+// only the link tells apart, and a replay that counted both as cash would
+// write 5000 where 3000 is the truth. A charge against the document leaves
+// the field absent; the refund that needs the number computes it, is bounded
+// by it, and writes it, and every touch afterwards is O(1) off the aspect.
+func TestCashInvariant_PreFieldBalanceDocComputesCashOnGuardedLegs(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "cashprefield")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECASHPFLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFECASHPFACCTHJKM", leaseKey)
+	const chargeA = "BBCAFECASHPFTXAHJKMN"
+	const chargeB = "BBCAFECASHPFTXBHJKMN"
+	seedLegacyEntry(t, ctx, conn, acctKey, chargeA, "debit", 3000)
+	seedLegacyEntry(t, ctx, conn, acctKey, "BBCAFECASHPFTXPHJKMN", "credit", 3000) // the old payment
+	seedLegacyEntry(t, ctx, conn, acctKey, chargeB, "debit", 2000)
+	seedLegacyRefund(t, ctx, conn, acctKey, "BBCAFECASHPFTXRHJKMN", chargeB, 2000) // the old refund
+	seedPreFieldBalance(t, ctx, conn, acctKey, 0)
+
+	// A charge reads no number: it moves balanceCents and leaves cashCents
+	// absent rather than seed it from a view it never computed.
+	postDebit(t, ctx, conn, cp, cons, "cafecashpfdebit", acctKey, 500, "Settled tab")
+	data := balanceFields(t, ctx, conn, acctKey)
+	if got, _ := data["balanceCents"].(float64); got != 500 {
+		t.Fatalf("balanceCents after the charge = %v, want 500", got)
+	}
+	if _, present := data["cashCents"]; present {
+		t.Fatalf("a charge against a pre-field document wrote cashCents: %v — only a leg that computed it may", data)
+	}
+
+	// The refund needs the number: cash is the old payment alone (3000), so a
+	// refund of charge A leaving $25 in credit passes, and the field is written.
+	refundAs(t, ctx, conn, cp, cons, "cafecashpfrefund", ledgerActorKey, acctKey,
+		"vtx.cafetransaction."+chargeA, 3000, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -2500 {
+		t.Fatalf("balance after the refund = %v, want -2500", got)
+	}
+	if got := cashCents(t, ctx, conn, acctKey); got != 3000 {
+		t.Fatalf("cashCents computed from the pre-field history = %v, want 3000 (the old payment alone — the old refund carries a reverses link and is not cash)", got)
+	}
+
+	// From here the aspect carries both numbers and a payout is O(1) off it,
+	// bounded by the cash: $30 in, $25 of credit, so $25 goes back out.
+	payoutAs(t, ctx, conn, cp, cons, "cafecashpfpayout", ledgerActorKey, acctKey, 2500, processor.OutcomeAccepted)
+	if got := cashCents(t, ctx, conn, acctKey); got != 500 {
+		t.Fatalf("cash after paying $25 back out = %v, want 500", got)
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after the payout = %v, want 0", got)
+	}
+}
+
+// TestPayoutCafeCredit_PayoutExceedsCash is the defence-in-depth conjunct. It
+// cannot be reached through the ops — the refund invariant never mints credit
+// past the cash — so the vector plants the inconsistent document directly:
+// $10 of credit against $0 of cash. The payout is refused at the till.
+func TestPayoutCafeCredit_PayoutExceedsCash(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "payoutcash")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEPAYCSHLEASEHJK")
+	acctKey := seedLegacyAccount(t, ctx, conn, "BBCAFEPAYCSHACCTHJKM", leaseKey)
+	seedAspect(t, ctx, conn, acctKey, "balance", "cafeAccountBalance",
+		map[string]any{"balanceCents": -1000, "cashCents": 0})
+
+	env, _ := payoutEnv("cafepaycshpayout", ledgerActorKey, acctKey, payoutPayload(acctKey, 500), "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"PayoutExceedsCash: a payout of $5.00 exceeds the $0.00 this account has paid in")
+	if got := balanceCents(t, ctx, conn, acctKey); got != -1000 {
+		t.Fatalf("balance after the refused payout = %v, want the untouched -1000", got)
+	}
 }

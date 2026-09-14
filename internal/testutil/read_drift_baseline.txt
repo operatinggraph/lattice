@@ -110,6 +110,13 @@ read	MergeIdentity	vtx.credentialindex.<id>
 read	OpenTab	lnk.identity.<id>.worksAt.building.<id>
 read	OpenTab	lnk.identity.<id>.worksAt.unit.<id>
 read	PauseVisitSeries	lnk.identity.<id>.worksAt.building.<id>
+# PayoutCafeCredit runs CreditCafeAccount's workplace confinement verbatim (the
+# same post_entry require_workplace site RefundCafeCharge shares), so it
+# inherits the same two undeclarable follow-ups: each worksAt key is built from
+# a location the walk itself discovered off the account's own heldFor /
+# appliesToUnit / containedIn chain, so no dispatcher can name it up front.
+read	PayoutCafeCredit	lnk.identity.<id>.worksAt.building.<id>
+read	PayoutCafeCredit	lnk.identity.<id>.worksAt.unit.<id>
 # internal/refractor's own E2E fixture (real-op multiactor race) under-declares
 # the same shape identity-domain's fixtures already fix; internal/refractor is
 # off-limits for this sweep.
@@ -267,6 +274,14 @@ walk	CreditAccount	vtx.account.<id> postedTo in
 walk	CreditCafeAccount	vtx.building.<id> containedIn out
 walk	CreditCafeAccount	vtx.cafeaccount.<id> heldFor out
 walk	CreditCafeAccount	vtx.cafeaccount.<id> postedTo in
+# backfill_balance (packages/cafe-ledger/scripts.go) probes reverses off each
+# reason-less CREDIT its bounded postedTo replay discovers, to tell a
+# pre-0.6.0 payment (cash paid in) from a pre-0.6.0 refund (not cash) when it
+# computes .balance.cashCents. The transaction key only exists once that
+# postedTo walk resolves it, so no dispatcher can name it up front — the same
+# shape EvaluateCafeArrears' arrears_entries carries below. All three legs
+# that run the replay (payment, refund, payout) inherit it.
+walk	CreditCafeAccount	vtx.cafetransaction.<id> reverses out
 walk	CreditCafeAccount	vtx.floor.<id> containedIn out
 walk	CreditCafeAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	CreditCafeAccount	vtx.unit.<id> containedIn out
@@ -293,6 +308,17 @@ walk	OpenTab	vtx.building.<id> containedIn out
 walk	OpenTab	vtx.leaseapp.<id> appliesToUnit out
 walk	OpenTab	vtx.unit.<id> containedIn out
 walk	PauseVisitSeries	vtx.building.<id> containedIn out
+# PayoutCafeCredit's share of CreditCafeAccount's confinement walk (see the read
+# rows above), on RefundCafeCharge's terms: the heldFor and appliesToUnit hubs
+# are payload-reachable and the descriptor could name them, but the containedIn
+# hubs are link-discovered — a unit's own containedIn target is not known until
+# the walk that produced it has run — so the chain is left undeclared as one
+# piece rather than split across two postures.
+walk	PayoutCafeCredit	vtx.building.<id> containedIn out
+walk	PayoutCafeCredit	vtx.cafeaccount.<id> heldFor out
+walk	PayoutCafeCredit	vtx.cafetransaction.<id> reverses out
+walk	PayoutCafeCredit	vtx.leaseapp.<id> appliesToUnit out
+walk	PayoutCafeCredit	vtx.unit.<id> containedIn out
 walk	PauseVisitSeries	vtx.provider.<id> practicesAt out
 walk	PauseVisitSeries	vtx.visitseries.<id> withProvider out
 walk	ReassignSession	vtx.session.<id> atStudio out
@@ -324,6 +350,7 @@ walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> reverses in
 # two postures.
 walk	RefundCafeCharge	vtx.building.<id> containedIn out
 walk	RefundCafeCharge	vtx.cafeaccount.<id> heldFor out
+walk	RefundCafeCharge	vtx.cafetransaction.<id> reverses out
 walk	RefundCafeCharge	vtx.leaseapp.<id> appliesToUnit out
 walk	RefundCafeCharge	vtx.unit.<id> containedIn out
 walk	ReportIssue	vtx.building.<id> containedIn out
