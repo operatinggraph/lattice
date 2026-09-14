@@ -282,11 +282,25 @@ Source package: `internal/loom/`
 
 **`<instance>`** follows the convention `loom-<NanoID>` (`cmd/loom/main.go`; overridable via `LOOM_INSTANCE`).
 
-The heartbeat `metrics` carry: `consumers` (map of consumer name → state) and `runningInstances` (count of
+The heartbeat `metrics` carry: `consumers` (map of consumer name → state), `runningInstances` (count of
 loom-state `instance.<id>.pattern` pin keys — the pin is written with the instance and deleted only in its
 terminal batch, so the pin-key count IS the running-instance count, with no per-instance body read — under a
-per-heartbeat-tick deadline). `issues[]` carry
+per-heartbeat-tick deadline), and `inconclusiveDeadlines`. `issues[]` carry
 a `ConsumerPaused` warning for each `pausedStructural` consumer.
+
+**`inconclusiveDeadlines`** is the number of step-deadline verdicts this Loom process has **refused** since it
+started (`Engine.inconclusiveVerdicts`, incremented by `probeRejectedOrLost`'s inconclusive arm). A refusal
+means the deadline probe found no op tracker and no outbox record, but the pending step was older than
+`opstatus.TrackerTTL` — so those absences no longer distinguish a rejected op from a committed one whose
+receipt aged out. The instance is left **running**, carrying a `deadlineProbe` note, and only an operator
+redrive resumes it (`lattice loom list` marks such instances `!probe`).
+
+It is a **monotonic per-process counter, not a gauge of currently-parked instances**: the gauge's source is the
+`deadlineProbe` field on each instance record, and reading it every tick would mean fetching every running
+instance's body — the fetch `runningInstanceCounter`'s narrow interface exists to prevent on the heartbeat
+path. So it does not fall back to zero when an operator redrives, and it resets on restart. Read it as "this
+engine has refused verdicts, go look", not as a count of what is parked right now. Nonzero warrants a
+`lattice loom list`; the per-refusal detail is in the engine's `WARN loom: deadline verdict inconclusive` line.
 
 ### Bridge
 
@@ -1311,7 +1325,8 @@ sample, so §5.3's issues-empty-iff-healthy invariant holds against the full set
   "uptime": "<ISO-8601-duration>",
   "metrics": {
     "consumers": {"<consumerName>": "running | pausedManual | pausedStructural | pausedInfra"},
-    "runningInstances": <int>
+    "runningInstances": <int>,
+    "inconclusiveDeadlines": <int>
   },
   "issues": [{"severity": "warning | error", "code": "<code>", "message": "<string>"}]
 }
