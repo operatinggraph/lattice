@@ -59,6 +59,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-14 · `52212ced` · A thrown irreversible submit says the write may have landed — the six hand-built catches the 2026-09-13 census left (`setStatus`/`endSeries`/`submitRemoveProviderSite`, `unlinkCredential`/`withdrawApplication`/`decideApplication`) stage `sent`/`confirmed`; the same-instant-two-zones class censused 0/39 live, LoftSpace date pins now run under a pinned LA zone with a positive vector.
 - 2026-09-14 · `71912135` · A lost application is a recorded fact — `RecordApplicationLoss` writes `.decision = lost` off `missing_lossRecorded`; every liveness gate, `SignLease` and every landlord surface read it; 52/52 live rivals recorded.
 - 2026-09-14 · `4fe3ecef` · A losing applicant is told the unit went to someone else — both application read lenses project `lost_to_rival`; banner + landlord row read it; expired and lost-application tasks read-only; all 52 live rivals read it.
 - 2026-09-14 · `4fe3ecef` · A rent charge names its billing period and due date — `DebitAccount` stamps `periodStart`/`periodEnd`/`dueAt` on the `.entry` from the clause grid; both lenses project them; both statements say "covers … · due …".
