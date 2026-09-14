@@ -478,3 +478,108 @@ run, none filed. Classified:
 **Dossier — one class routed.** `docs/components/pkgmgr.md`: *a fixture that hardcodes a value the
 descriptor also declares is not a proof of the declaration — it agrees by coincidence, and the declaration
 can be deleted with every test still green. Resolve it from the descriptor so the fixture is a revert-proof.*
+
+## 9. `{actor}` enumeration-hub token — fire brief (build note, 2026-09-14)
+
+The §8.8 residue's build. Contract #10 (`10-orchestration-weaver.md` §"A gap action's `enumerations[].hub`")
+ratified the token on 2026-08-31 ahead of its build, under a transitional note; the engine substitutes
+nothing, so a `{actor}` hub dispatches today as a plain literal.
+
+### 9.1 Scope sentence (from the board row, verbatim)
+
+> Fire: engine substitutes it at plan time; refused outside a hub at install + load; declare
+> `ReleaseOrphanedBooking`'s confinement walk + retire its baseline row; strike the note.
+
+**Green bar.** `go build ./...` · `make vet` · `golangci-lint run ./...` · `STRICT=1 go run
+./scripts/lint-conventions.go` · `go test ./internal/weaver/... ./internal/pkgmgr/... ./internal/testutil/...
+./packages/wellness-domain/...` · the `{actor}` substitution proven by a dispatch-level pin that the
+submitted envelope's `actor` and its resolved hub are the same string, and by reverting the substitution
+line and watching `ReleaseOrphanedBooking`'s walk fail the read-drift guard with its baseline row retired.
+
+### 9.2 Verified touch-list (`file:line`, checked live 2026-09-14)
+
+| file:line | what changes |
+|---|---|
+| `internal/weaver/strategist.go:902` `resolveStringParam` | refuses the token on every string-typed field, mirroring the `json:` refusal one line above |
+| `internal/weaver/strategist.go:181` `buildPlan` | gains the dispatching actor; its `:369` enumerations loop substitutes the token before `resolveReadKey` |
+| `internal/weaver/strategist.go:397` → `augur_dispatch.go:50,109` | the proposed-op path threads the same actor into its inner `buildPlan` |
+| `internal/weaver/evaluator.go:945` | passes the actuator's own actor — the value `actuator.submit` stamps as `opEnvelope.Actor` (`actuator.go:96`) |
+| `internal/weaver/registry.go:832` `dispatchStringValues` / `:859` `validateGapStringFields` | the hub entries become distinguishable, and the token is refused on every field that is not one — at load, for all three surfaces (gaps `:741`, candidates `:980`, catalog `:1068`) |
+| `internal/pkgmgr/orchestrationguard.go:391,206` | the same refusal at install, mirroring the same `json:` shape |
+| `packages/wellness-domain/targets.go:72-77` | `missing_release` declares `{Hub: "{actor}", Relation: "holdsRole", Direction: "out"}` |
+| `internal/testutil/` (new, beside `declared_enumerations.go`) | resolves a `GapActionSpec`'s enumerations for a fixture, as `DeclaredEnumerations` does for an `OpDispatchSpec` |
+| `packages/wellness-domain/refund_marker_test.go:32` `wdReleaseEnumerations` | resolves from the spec instead of restating it |
+| `internal/testutil/read_drift_baseline.txt:308` | `walk ReleaseOrphanedBooking vtx.identity.<id> holdsRole out` retires |
+| `packages/wellness-domain/package.go:149` + `manifest.yaml:2` | version bump (package content changed) |
+| `docs/contracts/10-orchestration-weaver.md:229-231` | the transitional note is struck — its own text says "Struck when substitution + refusal ship" |
+
+Rotted citation: none. `ReleaseOrphanedBooking`'s `OpDispatchSpec` is at `opmetas.go:154-159`, not `:136-139`
+as §8.5 cites, and the op carries no dispatch surface at all — which is §8.8's point, not a drift.
+
+### 9.3 Precedents to mirror
+
+- **The refusal, at all three points:** the `json:` token's own. Dispatch `strategist.go:906-911`; load
+  `registry.go:859-866`; install `orchestrationguard.go:206-210`. Its tests are the test shapes:
+  `typedparam_internal_test.go:272` (dispatch) and `:583` (load), each with a `row.<column>` positive control.
+- **The substitution:** `internal/testutil/declared_enumerations.go:78` `resolveHubTemplate` — already the
+  token's meaning on the descriptor surface (`{actor}` → the actor key), which is why the contract says it
+  spells and means the same on both. `packages/loftspace-domain/opmetas.go:189` is the shipped declaration.
+- **The fixture:** `testutil.DeclaredEnumerations` (`declared_enumerations.go:32`) and its callers, e.g.
+  `packages/wellness-domain/integration_test.go:1679`.
+- **The baseline retirement:** the rows and comments already in `read_drift_baseline.txt`; the guard that
+  adjudicates them is `read_drift_guard.go:120-143`.
+
+### 9.4 Increment order
+
+1. **Substitution + dispatch-side refusal** (posture-changing: a new value grammar at a shared resolver).
+   Green: `go test ./internal/weaver/ -run 'Actor|TypedLiteral|Enumeration' -count=1`, then the package.
+2. **Install + load refusal** on every non-hub field, all three surfaces. Green:
+   `go test ./internal/weaver/ ./internal/pkgmgr/ -count=1`.
+3. **Declare the walk, resolve the fixture from the spec, retire the baseline row, bump the version.**
+   Green: `go test ./internal/testutil/ ./packages/wellness-domain/ -count=1`, plus
+   `DIFF_BASE=<base> go run ./scripts/lint-package-version.go`.
+4. **Strike the contract's transitional note.** Green: `STRICT=1 go run ./scripts/lint-conventions.go`.
+
+### 9.5 In-scope gotchas
+
+- **The token must not be admitted where the hub grammar does not reach.** `buildPlan:369` is the single
+  substitution point for all three authored surfaces (a candidate's enumerations are copied into the
+  resolved `GapAction` at `strategist.go:532`, a catalog entry's at `resolvePlannedAction`), so the
+  refusal must be written at the field list, not at the surface.
+- **An empty actor must be a config error, not an empty hub.** A substituted `""` is a hub the drift guard's
+  `VertexRoot` treats as "no root", which admits reads it should not.
+- **Package-content lockstep** — `Package.Version` and `manifest.yaml` bump together; a test re-installing a
+  modified `Definition` derives its version from `Package.Version`, never a literal.
+- **Dossier — `docs/components/weaver.md`, the entry this fire is squarely inside:** *a value grammar
+  extended at a shared resolver reaches EVERY field that resolver serves — enumerate the callers, not the
+  bag you had in mind*, minted by the `json:` token itself, which went live on `subject`/`pattern`/
+  `operation`/`assignee`/`target` and every `reads`/`optionalReads`/`enumerations[].hub` entry, all ungated.
+  Check: for every resolver you extend, list its callers and classify each as value-typed or string-typed;
+  the string-typed ones refuse the new form, and the refusal is asserted at dispatch, at load and at install.
+  Ask separately which upstream gate compares that field raw.
+- **Dossier — `docs/components/weaver.md`:** *prove each changed line by reverting THAT LINE, not the
+  feature* — and anchor every mutation to its own function.
+- **Dossier — `docs/components/pkgmgr.md` (third sighting):** *a fixture that HARDCODES a value the
+  descriptor also declares is not a proof of the declaration — it agrees by coincidence.* The mandated test
+  shape: resolve the value from the declaration, never restate it; and a fallback for a surface with no
+  declaration is keyed on THAT surface by name, never on "the resolve came back empty".
+- Standing checklist: #2 (every citation is a premise — the touch-list above was re-verified, and §8.5's
+  `opmetas.go` line cite had rotted), #3 (a negative test needs its positive vector proven first), #6
+  (precedent may carry debt — `wdReleaseEnumerations` is the debt, not the pattern).
+
+### 9.6 Adjacent finds
+
+- `ReleaseOrphanedBooking`'s second baseline row — `vtx.wellnesstransaction.<id> postedTo out`
+  (`read_drift_baseline.txt:309`) — stays: its hub is link-discovered (the charge key is only known once
+  the `settles`/`settlesClassPrice` walk has run), which is the already-filed
+  `📐 needs designer pass · no-pattern: chained/link-discovered enumeration hub declaration`. Not this
+  fire's, and not a new row.
+- `read_drift_baseline.txt:156` (`read ReleaseOrphanedBooking vtx.session.<id>.schedule`) is already
+  covered by the gap's `OptionalReads`; whether the row is now dead is a question for the read rows, which
+  §8.7 fenced out of this item.
+
+### 9.7 Non-goals (drift fence)
+
+`{payload.<field>}` or any other new hub token; the op-descriptor dispatch surface (it already resolves
+`{actor}`); Loom's systemOp step enumerations; the 98 non-actor-role walk rows; hydration — an enumeration
+stays metadata on the envelope; any change to what `ReleaseOrphanedBooking` reads or does.
