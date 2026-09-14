@@ -718,6 +718,12 @@ sibling groups, label set, grouping key, walk scope, hop index) fail by lens nam
   `OtherType` comes from the KEY as live. Check: a package test pins the literal link-key string each `make_link`
   writes against the target's `vtx.<type>` (`TestClauseSatisfaction_GovernsLinkKeyNamesTheLeaseappType` is the
   shape), and a lens fixture never derives a link's endpoint type from anything but the key.
+- **A new refusal on an existing op is a claim about EVERY dispatcher, not only the FE forms** — the `scripts/`
+  seeds and verify tools submit ops too, and a seed helper that fatals on a rejected reply turns a designed refusal into
+  an aborted seed. Minted: wellness `TombstoneSession`'s `SessionStarted` (2026-09-14) — `seed-classic-demo`'s litter
+  reaper tombstoned every litter session, past ones included; caught by the lead's grep, not cold. Check: on any new
+  `fail(` in a script, `grep -rn "<Op>" scripts/ cmd/ packages/` and walk each dispatcher's outcome handling — a
+  `mustAccepted` caller needs the same skip the op now applies.
 
 ## Related contracts
 
