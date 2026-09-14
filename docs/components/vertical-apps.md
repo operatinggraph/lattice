@@ -60,11 +60,12 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   non-OK response, including a 5xx after the Processor committed, so a cancel / end-series / ledger-entry toast that
   says "could not" may be wrong and the desk retries a write that landed (a double charge, a double waive). Minted:
   LoftSpace RotateClaimKey (2026-09-06). Every ceremony catch and every generic descriptor-form dispatcher (the
-  `revealCeremonySecret` callers) is gated (`lint-ceremony-throw-path`); the hand-built irreversible submits remain:
-  clinic `setStatus` / `endSeries` / `submitRemoveProviderSite`, LoftSpace `UnlinkCredential` /
-  `WithdrawLeaseApplication` / `DecideLeaseApplication` (2026-09-13 census). Check: the throw path of an
-  irreversible op says the write may have landed and what to check, in the `withheld` vocabulary; a money-moving
-  op's catch never invites a bare retry.
+  `revealCeremonySecret` callers) is gated (`lint-ceremony-throw-path`); the hand-built irreversible submits the
+  2026-09-13 census left (clinic `setStatus` / `endSeries` / `submitRemoveProviderSite`, LoftSpace
+  `unlinkCredential` / `withdrawApplication` / `decideApplication`) carry the `sent` / `confirmed` staging since
+  2026-09-14, and the gate still does not reach a hand-built submit. Check: the throw path of any NEW hand-built
+  irreversible submit stages `sent` / `confirmed` (the `submitCorrectStatus` shape) and says the write may have
+  landed and what to check, in the `withheld` vocabulary; a money-moving op's catch never invites a bare retry.
 - **A released uniqueness guard invalidates every FE set that assumed it — "one live row per (a, b)" is a claim about
   the guard, not the data.** When an op stops tombstoning a row but still releases the guard that made the pair unique,
   the member can hold the kept row AND a fresh one; every `Map`/`Set` keyed on the pair (an own-status-by-session map,
@@ -105,8 +106,13 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   `TenancyEnded` (2026-09-14), caught cold. Check: when an FE label and a script `fail(` text name the same recorded
   stamp, render both from the same slice of it, and say which zone it is. Second sighting (LoftSpace lease terms, 2026-09-14,
   caught cold): the recorded lease rendered by its UTC date beside a pre-approval ask rendered through
-  `toLocaleDateString` — the same instant, a day apart. **Mechanize on the next sighting:** a goja pin per app that
-  renders every date-bearing card from a midnight-UTC fixture under `TZ=America/Los_Angeles` and asserts the day.
+  `toLocaleDateString` — the same instant, a day apart. Censused 2026-09-14 across all four FEs (39 locale-rendering
+  sites, each traced to its producer): every date-only fact — LoftSpace's lease / listing / period stamps, café's
+  `leaseEnd` — renders by its UTC slice, and every local-rendered value is a real instant; clinic and wellness
+  project no date-only column. Mechanized as the mandated pin shape, not a gate (no producer-side type marks a
+  column date-only, so the set is not derivable): `cmd/loftspace-app/lease_term_ui_test.go` evaluates the shipped
+  helpers under a pinned `time.Local = America/Los_Angeles` with a positive vector proving the zone reaches goja's
+  Date; an app that gains a date-only column adds its helper to that shape.
 - **A new terminal state on a row is a census of every status switch and render gate in the app, not of the banner
   that named it** — `ended` reached the applicant banner and the terms panel, and missed `applicationStatus` (the
   by-unit console read an ended tenant as "Approved — leasing" and dealt it a ledger panel), the decide gate

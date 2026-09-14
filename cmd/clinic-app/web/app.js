@@ -1662,7 +1662,12 @@ async function submitAssignProviderSite() {
 
 // submitRemoveProviderSite tombstones an existing practicesAt assignment.
 async function submitRemoveProviderSite(provider, site) {
+  // Where the flow was when it threw — see setStatus. The tombstone is
+  // idempotent, so a retry is safe; the throw path still says what happened.
+  let sent = false;
+  let confirmed = false;
   try {
+    sent = true;
     const reply = await submitOp("RemoveProviderSite", "clinicSiteAssignment", { provider, building: site }, undefined,
       { optionalReads: [practicesAtLinkKey(provider, site)] });
     const msg = rejectionMessage(reply);
@@ -1670,10 +1675,17 @@ async function submitRemoveProviderSite(provider, site) {
       toast("Could not remove assignment — " + msg, "err");
       return;
     }
+    confirmed = true;
     toast("Assignment removed.", "ok");
     setTimeout(loadSites, 700);
   } catch (e) {
-    toast("Could not remove assignment: " + e.message, "err");
+    if (!sent) {
+      toast("Could not remove assignment: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Assignment removed, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the removal reached the server — it may have landed; check the provider's sites before trying again. " + e.message, "err");
+    }
   }
 }
 
@@ -4253,17 +4265,29 @@ async function toggleSeries(s) {
 // upsert), so the caller has to name it (Contract #2 §2.5's declared read
 // posture — the op cannot see keys the submitter did not list).
 async function endSeries(s) {
+  // Where the flow was when it threw — see setStatus: an end date is
+  // write-once, so the throw path says the write may have landed.
+  let sent = false;
+  let confirmed = false;
   try {
+    sent = true;
     const reply = await submitOp("EndVisitSeries", "", { seriesKey: s.entityKey }, [s.entityKey, s.entityKey + ".series"]);
     const msg = rejectionMessage(reply);
     if (msg) {
       toast(msg, "err");
       return;
     }
+    confirmed = true;
     toast("Series ended.", "ok");
     loadSeries();
   } catch (e) {
-    toast("Could not end series: " + e.message, "err");
+    if (!sent) {
+      toast("Could not end series: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Series ended, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the end of the series reached the server — it may have landed; check the series before trying again. " + e.message, "err");
+    }
   }
 }
 
@@ -5179,7 +5203,14 @@ async function setStatus(a, status, onDone, opts) {
     const trimmed = note.trim();
     if (trimmed) payload.note = trimmed;
   }
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // write may have committed), or after the reply confirmed it. A status is
+  // terminal once recorded, so the throw path never invites a blind retry.
+  let sent = false;
+  let confirmed = false;
   try {
+    sent = true;
     const reply = await submitOp(
       "SetAppointmentStatus",
       "appointment",
@@ -5201,10 +5232,17 @@ async function setStatus(a, status, onDone, opts) {
         : msg), "err");
       return;
     }
+    confirmed = true;
     toast("Appointment " + (STATUS_PAST[status] || status) + ".", "ok");
     if (onDone) onDone();
   } catch (e) {
-    toast("Could not update status: " + e.message, "err");
+    if (!sent) {
+      toast("Could not update status: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Status updated, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the status change reached the server — it may have landed; check the visit before trying again. " + e.message, "err");
+    }
   }
 }
 

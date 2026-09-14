@@ -3,19 +3,21 @@ package main
 import (
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/dop251/goja"
 )
 
-// leaseTermUIDecls lifts the shipped fmtUTCDate/applicationBannerFor/
+// leaseTermUIDecls lifts the shipped fmtDate/fmtUTCDate/applicationBannerFor/
 // relistOffered/decisionOffered/entryPeriodLabel declarations (plus fmtUTCDate's
 // UTC_MONTH_ABBR dependency) out of the embedded app.js — the
 // rotate_offer_test.go / renewal_ready_test.go pattern: the REAL shipped
 // source runs here, not a copy, so these pins are a statement about what
-// ships. All five are self-contained (no DOM/state), so goja can evaluate
+// ships. All six are self-contained (no DOM/state), so goja can evaluate
 // them directly.
 var leaseTermUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nconst UTC_MONTH_ABBR = \[.*?\];\n`),
+	regexp.MustCompile(`(?s)\nfunction fmtDate\(s\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction fmtUTCDate\(s\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction applicationBannerFor\(row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction decisionOffered\(a, unit\) \{\n.*?\n\}\n`),
@@ -23,8 +25,21 @@ var leaseTermUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction entryPeriodLabel\(e\) \{\n.*?\n\}\n`),
 }
 
+// leaseTermUIVM evaluates the declarations WEST OF GREENWICH: goja's Date
+// reads Go's time.Local, so the process zone is pinned to America/Los_Angeles
+// for the test's lifetime. Every pin below therefore runs where a midnight-UTC
+// stamp parsed as a local Date reads the day before — the defect the UTC-slice
+// helpers exist to avoid — and TestFmtUTCDate_DoesNotShiftWestOfGreenwich
+// proves the zone actually bites in this harness.
 func leaseTermUIVM(t *testing.T) *goja.Runtime {
 	t.Helper()
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("load America/Los_Angeles: %v", err)
+	}
+	prev := time.Local
+	time.Local = la
+	t.Cleanup(func() { time.Local = prev })
 	src, err := webFS.ReadFile("web/app.js")
 	if err != nil {
 		t.Fatalf("read embedded app.js: %v", err)
@@ -46,9 +61,9 @@ func leaseTermUIVM(t *testing.T) *goja.Runtime {
 // design's own worked example ("2026-09-15T00:00:00Z" -> "Sep 15, 2026") — the
 // midnight-UTC stamp EndTenancy's own NotYetEnded refusal names by the same
 // YYYY-MM-DD slice. It must never go through a timezone-sensitive Date parse
-// (a west-of-Greenwich reader would otherwise see Sep 14), so this test is run
-// under TZ=America/Los_Angeles too (see the package's TestMain / the CI
-// invocation) to prove process-local time.Local never leaks into it.
+// (a west-of-Greenwich reader would otherwise see Sep 14), and leaseTermUIVM
+// runs it under America/Los_Angeles so process-local time.Local is proven
+// not to leak into it.
 func TestFmtUTCDate_ReadsTheUTCCalendarDateSlice(t *testing.T) {
 	vm := leaseTermUIVM(t)
 	fn, ok := goja.AssertFunction(vm.Get("fmtUTCDate"))
@@ -293,5 +308,42 @@ func TestEntryPeriodLabel_NamesThePeriodAndDueDate(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestFmtUTCDate_DoesNotShiftWestOfGreenwich is the positive vector for the
+// harness's zone: under America/Los_Angeles the local-parse helper (fmtDate,
+// the right rendering for a real instant such as postedAt or expiresAt) reads
+// a midnight-UTC stamp as the DAY BEFORE, while fmtUTCDate and every label
+// built on it name the recorded day. The first assertion is what proves the
+// pinned zone reaches goja's Date at all — were the swap ever lost, the two
+// helpers would agree and the UTC pins would pass for the wrong reason. A
+// date-only fact (leaseStart / leaseEnd / endedAt / termStart / availableFrom /
+// moveInDate / periodStart / periodEnd / dueAt) renders through fmtUTCDate;
+// this is the mandated pin shape for any card that gains one.
+func TestFmtUTCDate_DoesNotShiftWestOfGreenwich(t *testing.T) {
+	vm := leaseTermUIVM(t)
+	const midnightUTC = "2026-09-15T00:00:00Z"
+	call := func(t *testing.T, name string, arg interface{}) string {
+		t.Helper()
+		fn, ok := goja.AssertFunction(vm.Get(name))
+		if !ok {
+			t.Fatalf("%s is not a function after evaluating its declaration", name)
+		}
+		res, err := fn(goja.Undefined(), vm.ToValue(arg))
+		if err != nil {
+			t.Fatalf("%s(%v) threw: %v", name, arg, err)
+		}
+		return res.String()
+	}
+	if got := call(t, "fmtDate", midnightUTC); got != "09/14/2026" {
+		t.Fatalf("fmtDate(%s) under America/Los_Angeles = %q, want the local day before (09/14/2026) — the harness zone is not reaching goja's Date, so every UTC pin in this file passes vacuously", midnightUTC, got)
+	}
+	if got := call(t, "fmtUTCDate", midnightUTC); got != "Sep 15, 2026" {
+		t.Errorf("fmtUTCDate(%s) under America/Los_Angeles = %q, want the recorded day (Sep 15, 2026)", midnightUTC, got)
+	}
+	entry := map[string]interface{}{"periodStart": "2026-09-06T00:00:00Z", "periodEnd": "2026-10-06T00:00:00Z", "dueAt": "2026-09-06T00:00:00Z"}
+	if got, want := call(t, "entryPeriodLabel", entry), " · covers Sep 6, 2026 – Oct 6, 2026 · due Sep 6, 2026"; got != want {
+		t.Errorf("entryPeriodLabel under America/Los_Angeles = %q, want %q", got, want)
 	}
 }

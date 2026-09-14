@@ -654,7 +654,14 @@ function renderCredentialCard(c, totalCount, currentDevice) {
 async function unlinkCredential(c) {
   if (!confirm("Remove this sign-in method? It will no longer be able to sign in to this identity.")) return;
   const uKey = state.applicant;
+  // Where the flow was when it threw: before the envelope left (nothing was
+  // sent), after ("sent" — the transport threw with no reply read, so the
+  // write may have committed), or after the reply confirmed it. An unlink
+  // is not undone by the reply failing, so the throw path never asserts it.
+  let sent = false;
+  let confirmed = false;
   try {
+    sent = true;
     const reply = await submitOp(
       {
         operationType: "UnlinkCredential",
@@ -675,10 +682,17 @@ async function unlinkCredential(c) {
       toast("Could not remove — " + msg, "err");
       return;
     }
+    confirmed = true;
     toast("Sign-in method removed.", "ok");
     setTimeout(loadAccount, 600);
   } catch (e) {
-    toast("Could not remove: " + e.message, "err");
+    if (!sent) {
+      toast("Could not remove: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Sign-in method removed, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the removal reached the server — it may have landed; check your sign-in methods before trying again. " + e.message, "err");
+    }
   }
 }
 
@@ -2299,7 +2313,12 @@ async function withdrawApplication(row) {
   const appId = shortKey(row.entityKey);
   const unitId = shortKey(row.unitKey);
   const applicantId = shortKey(state.applicant);
+  // Where the flow was when it threw — see unlinkCredential: a withdrawal
+  // stands once recorded, so the throw path says the write may have landed.
+  let sent = false;
+  let confirmed = false;
   try {
+    sent = true;
     // WithdrawLeaseApplication carries the real consumer scope=self grant
     // (persona-worlds §7.2): the applicant withdraws their OWN application AS
     // THEMSELVES, with authContext.target == the applicant, so the scope=self
@@ -2327,10 +2346,17 @@ async function withdrawApplication(row) {
       toast("Could not withdraw — " + msg, "err");
       return;
     }
+    confirmed = true;
     toast("Application withdrawn.", "ok");
     loadApplications();
   } catch (e) {
-    toast("Could not withdraw: " + e.message, "err");
+    if (!sent) {
+      toast("Could not withdraw: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Application withdrawn, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the withdrawal reached the server — it may have landed; check the application before trying again. " + e.message, "err");
+    }
   }
 }
 
@@ -4736,7 +4762,13 @@ async function decideApplication(a, decision) {
   if (decision === "approved") {
     optionalReads.push(a.leaseAppKey + ".signature", a.leaseAppKey + ".tenancy", a.leaseAppKey + ".terms");
   }
+  // Where the flow was when it threw — see unlinkCredential: a recorded
+  // decision is terminal (DecisionFinal), so the throw path says the write
+  // may have landed rather than inviting the other decision.
+  let sent = false;
+  let confirmed = false;
   try {
+    sent = true;
     const reply = await submitOp({
       operationType: "DecideLeaseApplication",
       class: "leaseapp",
@@ -4749,10 +4781,17 @@ async function decideApplication(a, decision) {
       toast("Decision rejected — " + msg, "err");
       return;
     }
+    confirmed = true;
     toast(decision === "approved" ? "Application approved." : "Application declined.", "ok");
     setTimeout(loadLandlord, 800);
   } catch (e) {
-    toast("Could not record decision: " + e.message, "err");
+    if (!sent) {
+      toast("Could not record decision: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Decision recorded, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the decision reached the server — it may have landed; check the application before trying again. " + e.message, "err");
+    }
   }
 }
 
