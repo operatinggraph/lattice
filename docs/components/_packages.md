@@ -541,6 +541,10 @@ mechanizes it (name the gate, strike the entry).
 Retired: *a lens MATCH edit is a corpus edit* — `internal/refractor/*_corpus_census_test.go` (branch decomposition,
 sibling groups, label set, grouping key, walk scope, hop index) fail by lens name on any `Spec` edit; run
 `go test ./internal/refractor/ -run 'Corpus|Census' -count=1` before merge and re-pin deliberately.
+Retired: *a new refusal on an existing op is a claim about EVERY dispatcher* — `lint-seed-declared-reads` pins every
+`scripts/` seed / verify envelope's `OptionalReads` to the op's descriptor (twice-seen: wellness `SessionStarted`,
+café `TenancyEnded`, both 2026-09-14); the outcome half stays a walk — a `mustAccepted` caller needs the same skip
+the op now applies (`ensureApprovedTenancy` now skips an ended term), found at the same `grep -rn "<Op>" scripts/`.
 
 - **A live `kv.Read` of a sensitive aspect FAILS, it does not degrade, when its holder is shredded** — the vault
   returns `ErrKeyShredded` and the script dies `ScriptFailed`, so an op that "reads a sibling name if present" is
@@ -718,13 +722,6 @@ sibling groups, label set, grouping key, walk scope, hop index) fail by lens nam
   `OtherType` comes from the KEY as live. Check: a package test pins the literal link-key string each `make_link`
   writes against the target's `vtx.<type>` (`TestClauseSatisfaction_GovernsLinkKeyNamesTheLeaseappType` is the
   shape), and a lens fixture never derives a link's endpoint type from anything but the key.
-- **A new refusal on an existing op is a claim about EVERY dispatcher, not only the FE forms** — the `scripts/`
-  seeds and verify tools submit ops too, and a seed helper that fatals on a rejected reply turns a designed refusal into
-  an aborted seed. Minted: wellness `TombstoneSession`'s `SessionStarted` (2026-09-14) — `seed-classic-demo`'s litter
-  reaper tombstoned every litter session, past ones included; caught by the lead's grep, not cold. Check: on any new
-  `fail(` in a script, `grep -rn "<Op>" scripts/ cmd/ packages/` and walk each dispatcher's outcome handling — a
-  `mustAccepted` caller needs the same skip the op now applies.
-
 ## Related contracts
 
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.

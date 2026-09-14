@@ -94,3 +94,13 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   refused-signature (2026-09-13), both caught cold. Check: for every route a comment or hint names, open that
   surface's `if (…) card.append(…)` gate with the row's live state; for every timing promise, name the leg order or
   lease that bounds it, or cut the number.
+- **A local calendar-day window built as midnight + 24 h is wrong twice a year** — the fall-back day is 25 hours, so
+  a tab settled in its last hour falls into neither day's panel; the spring day is 23, so the window borrows the next
+  day's first hour. Minted: café Today panel (2026-09-14), caught cold. Check: a day window ends at
+  `new Date(y, m, d + 1)`, never `start + 86400000`, and the goja pin runs under a DST zone (`time.Local` swapped for
+  the test) with a 23:30 fixture on the change day.
+- **Two courtesy surfaces for one refusal name the same instant in different zones** — the picker rendered a
+  midnight-UTC term end with `toLocaleDateString()` (the day before, west of Greenwich) while the script's refusal
+  sliced the UTC stamp, so the desk read "ended 6/30" and was then told "ended on 2026-07-01". Minted: café
+  `TenancyEnded` (2026-09-14), caught cold. Check: when an FE label and a script `fail(` text name the same recorded
+  stamp, render both from the same slice of it, and say which zone it is.
