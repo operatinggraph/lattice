@@ -1079,7 +1079,7 @@ def execute(state, op):
         tenancy = kv.Read(lease_key + ".tenancy")
         if tenancy != None and not tenancy.isDeleted:
             lease_end = tenancy.data.get("leaseEnd")
-            if lease_end != None and time.rfc3339_utc(op.submittedAt) >= time.rfc3339_utc(lease_end):
+            if type(lease_end) == "string" and time.rfc3339_utc(op.submittedAt) >= time.rfc3339_utc(lease_end):
                 fail("TenancyEnded: this lease's tenancy ended on " + lease_end[:10] + "; a house tab can no longer be opened against it")
 
         # One open tab per lease, guarded by a deterministic aspect on the

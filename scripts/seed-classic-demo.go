@@ -390,9 +390,11 @@ func main() {
 // the same name (each seed script is a standalone `go run` file, so the
 // helper is not shared).
 // ensureApprovedTenancy finds a live, signed, landlord-approved application
-// on unitKey and returns its applicant and key, or ("", "") when the unit
-// carries none and a fresh one must be minted. Keys are scanned in order so
-// a rerun lands on the same tenancy.
+// on unitKey whose term has not ended and returns its applicant and key, or
+// ("", "") when the unit carries none and a fresh one must be minted. Keys
+// are scanned in order so a rerun lands on the same tenancy. A lease past its
+// .tenancy leaseEnd is skipped: OpenTab refuses TenancyEnded against it, so
+// reusing it would turn a rerun a year after the first seed into a hard stop.
 func ensureApprovedTenancy(ctx context.Context, conn *substrate.Conn, adminKey, unitKey string) (string, string) {
 	unitID := strings.TrimPrefix(unitKey, "vtx.unit.")
 	links, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "lnk.leaseapp.")
@@ -408,6 +410,9 @@ func ensureApprovedTenancy(ctx context.Context, conn *substrate.Conn, adminKey, 
 			continue
 		}
 		if aspectString(ctx, conn, leaseAppKey+".decision", "value") != "approved" {
+			continue
+		}
+		if end := aspectString(ctx, conn, leaseAppKey+".tenancy", "leaseEnd"); end != "" && end <= time.Now().UTC().Format(time.RFC3339) {
 			continue
 		}
 		applicantPrefix := "lnk.leaseapp." + appID + ".applicationFor.identity."

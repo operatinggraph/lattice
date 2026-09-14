@@ -709,7 +709,10 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, 
       opt.textContent = who + unit + " (awaiting landlord approval)";
     } else if (gateOnApproval && tenancyEnded(detail, new Date())) {
       opt.disabled = true;
-      opt.textContent = who + unit + " (lease ended " + new Date(detail.leaseEnd).toLocaleDateString() + ")";
+      // The calendar date of the UTC stamp, the same slice the refusal
+      // toasts — a local rendering of a midnight-UTC term end names the
+      // day before in every zone west of Greenwich.
+      opt.textContent = who + unit + " (lease ended " + detail.leaseEnd.slice(0, 10) + ")";
     } else {
       opt.textContent = who + unit + (l.accountKey ? "" : " (no café account yet)");
     }
@@ -746,6 +749,14 @@ async function renderPos() {
   summary.textContent = "";
   if (!leaseAppKey) {
     body.innerHTML = '<div class="empty">Pick a lease to open or manage its tab.</div>';
+    return;
+  }
+  // A selection restored onto an option the picker disabled (awaiting
+  // approval, lease ended) shows why instead of an Open Tab form the server
+  // would refuse.
+  const picked = document.getElementById("pos-lease").selectedOptions[0];
+  if (picked && picked.disabled) {
+    body.innerHTML = '<div class="empty">' + escapeHtml(picked.textContent) + "</div>";
     return;
   }
   let tabs, menu;
@@ -1103,7 +1114,7 @@ function renderFrontDeskToday(summary) {
     const q = document.createElement("span");
     q.className = "qty";
     q.textContent = qty;
-    li.append(q, " " + money(cents));
+    li.append(q, " " + (cents < 0 ? "\u2212" : "") + money(Math.abs(cents)));
     list.append(li);
   };
   for (const it of summary.items) itemRow(it.description, "×" + it.count, it.cents);
@@ -1119,6 +1130,9 @@ async function loadFrontDesk() {
   const summary = document.getElementById("frontdesk-summary");
   grid.innerHTML = "";
   summary.textContent = "";
+  // A failed refresh must not leave the previous load's sales painted
+  // beside the error, so the Today panel resets with the grid.
+  renderFrontDeskToday(summarizeToday([], new Date()));
   let tabs;
   try {
     const r = await appGet("/api/tabs");
