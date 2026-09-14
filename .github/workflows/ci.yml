@@ -387,6 +387,23 @@ jobs:
         # and refuses an all-clear over zero calls.
         run: STRICT=1 go run ./scripts/lint-weaver-classify-by-shape.go
 
+      - name: Weaver retire-above-guard gate (a release stands above every "cannot act" gate)
+        # A leg's arms are a lattice, not a list: a release is a RETIRE and is
+        # owed to every caller, so it belongs ABOVE every "cannot act" gate; an
+        # advance is an ACT — a real op fired at a real entity — and belongs
+        # BELOW them. A released leg advancing on a row that no longer
+        # violates, or with a call already in flight, dispatches where lane 1
+        # never would; minted four times (docs/components/weaver.md § Review
+        # keeps catching). This gate parses internal/weaver with go/ast and
+        # fails: fireEpisode called from any function outside its declared
+        # dispatch-seam allowlist; advanceReleasedLeg's own violating/
+        # gapSuppressedWithCount gates missing, or present only below its
+        # first act; and any call to advanceReleasedLeg not lexically inside a
+        # releaseCompletedLeg/releaseAdvancedProposalLeg `if`. Self-tests on
+        # every run and refuses an all-clear over zero calls to either
+        # fireEpisode or advanceReleasedLeg.
+        run: STRICT=1 go run ./scripts/lint-weaver-retire-above-guard.go
+
       - name: Flag consumer census (a flag's new reader re-reads its bound)
         # A process-wide flag's comment prices being briefly wrong FOR THE
         # CONSUMER it was written for, and every later reader inherits both the
