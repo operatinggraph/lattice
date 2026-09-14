@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-06 · `ac80bf74` · A name-only patient can be connected to a login — `BindPatientIdentity` (unclaimed identity only, name moved onto the identity's `.name`), `UnbindPatientIdentity` as the operator repair, FE Connect-a-login ceremony.
+- 2026-09-06 · `82e26df5` · Staff can re-issue an unclaimed applicant's claim secret — Applicants & tenants panel offers `RotateClaimKey` via the shared ceremony; New-applicant button follows its grant (staff, not landlord).
 - 2026-09-06 · `beb0fc12` · The desk reaches a retired studio's classes — `wellnessSessions` falls back to the session's `atLocation` snapshot, `ReassignSession` re-snapshots on a move, repair form operator-only.
 - 2026-09-06 · `beb0fc12` · The class card quotes the price the seat will charge — `cardPriceCents` applies CreateBooking's own rate rule (approved lease ⇔ `.tenancy`), "· resident rate" only when it differs.
 - 2026-09-06 · `beb0fc12` · The desk's class picker leads with what is still to run, past classes behind an optgroup, nothing dropped.

@@ -106,7 +106,7 @@ reversal is its observer · reset by nothing else (`MarkPastDueNoShow` only writ
 | A `lateCancelled` status value (the wellness `forfeited` token) | Every `cancelled` consumer above (four lenses, the FE filters, the reminders fragment) would need the new token; wellness needed a new token only because its cancel *deleted* the vertex. Clinic's cancel already keeps it — the fact that changes is the fee, so record the fee |
 | Widen the lens to `status IN ('noShow','cancelled')` + keep the fee conjunct | Bills a status again; rule 4's fee-presence predicate is one clause and true for every writer in the grounding's ledger, including the fee-less `MarkPastDueNoShow` |
 | A self reschedule inside the window allowed with the fee | The fee lives on `.status`, a reschedule writes `.schedule`; billing a move needs a second fee carrier and a second lens gap. Refuse the move, keep one carrier |
-| Project `lateCancel` onto the appointment read models for a card badge | A new column on a live protected Postgres table: `provision-readpath` is `CREATE TABLE IF NOT EXISTS` and cannot add it, so the running lens would fault on insert until a hand migration. The money surface is the ledger, which already ties the line to the visit |
+| Project `lateCancel` onto the appointment read models for a card badge | The money surface is the ledger, which already ties the fee line to the visit (`appointmentKey`, `visitStartsAt`) for the patient and the desk alike; a badge would be a second rendering of one fact across three read models and their Go structs. (The build's `make refresh-clinic` showed `provision-readpath` does `ALTER TABLE … ADD COLUMN IF NOT EXISTS` for every lens column, so a column add is a plain refresh — the earlier "cannot add a column" ground for this row was false and is withdrawn; the row stands on the surface argument alone) |
 
 **Contract surface:** none. **Test strategy:** clinic-domain pipeline tests for the self path — `VisitStarted`
 on cancel and reschedule at `startsAt`, `LateReschedule` at `startsAt − 24h`, a late cancel accepted with
@@ -169,3 +169,22 @@ goja pin of the three-state self predicate. Live: a seeded patient late-cancels 
 6. **Adjacent finds:** the correction descriptor's false "does not reverse" sentence — fixed in this fire.
 7. **Non-goals:** no staff-path fee on `SetAppointmentStatus(cancelled)`; no new read-model column; no
    `cancelledAt`; no change to `MarkPastDueNoShow`; no amount-drift convergence; no wellness/café/LoftSpace edit.
+
+**Close (2026-09-13).** Shipped `bd07bed1` (merge `78f3a086`; clinic-domain 0.35.0 + clinic-ledger 0.4.0 + the clinic
+FE), CI green. Live on the dev stack after `make refresh-clinic`: the desk booked Riley Chen 6.4 h out; Riley's own
+reschedule was refused `LateReschedule`, Riley's own cancel landed as `{cancelled, lateCancel: true, noShowFeeCents:
+2500, note}`, `clinicNoShowSettlement` posted the `Late-cancellation fee` debit within seconds and the patient's ledger
+shows it against the 10:00Z visit; the desk's same-value `CorrectAppointmentStatus(cancelled, "fee waived")` dropped
+the fee and the `Fee reversal (corrected)` credit posted a minute later. Rules 1–4 built as written. Deviations,
+decided at review: the reversal memo is generic (`Fee reversal (corrected)`), since the credit reverses either fee
+kind and `reversesRef` ties it to the charge; the `SetAppointmentStatus` descriptor now declares the `.schedule`
+read its script's terminal branch always made (pre-existing debt, the correction and reschedule descriptors already
+declared it). Cold review: no BLOCKING. Findings classified: implementation-gap ×1 (the ledger pins all passed under
+the old `status <> 'noShow'` reversal clause — the test strategy had named the discriminating shape, a charged
+fee-less `noShow`, and the build skipped it; added, revert-proven), brief-gap ×1 (the correction copy did not say a
+same-value `cancelled → cancelled` correction waives — that IS rule 2's stated waiver path, and the desk's only
+route to add a reason on a cancelled row), convention ×3 (the descriptor read; two prose sites still saying
+"cancel carries no clock"). No new dossier class: the standing checklist's #3 already names the lens finding, and
+the FE label class already exists. **Stated posture, not a gap:** after a waiver reversal, a later correction back
+onto `noShow` never re-bills (`txCount = 1` — the charge exists, reversed); identical under the old lens, and the
+desk's route is a plain `ClinicDebitAccount`. A PO may file "un-waive" if the desk ever needs it.

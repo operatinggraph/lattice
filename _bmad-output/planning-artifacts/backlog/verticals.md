@@ -17,7 +17,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 
 | Item | What it is (PO view) | Vertical | Owner | Imp | Size | State |
 |---|---|---|---|---|---|---|
-| **A patient who cancels after the visit started owes nothing, and the desk can't bill it after** | Self-cancel/reschedule read no cutoff ([ddls.go:3513](../../../packages/clinic-domain/ddls.go:3513)); `CorrectAppointmentStatus`→`noShow` writes no `noShowFeeCents` ([ddls.go:3651](../../../packages/clinic-domain/ddls.go:3651)), so the settlement lens never charges it. Wellness's `forfeited` late cancel (`ae197820`) is the precedent. | Clinic | pkg + FE | ★★ | M | 🏗️ building · [design](../../../docs/reviews/clinic-late-cancel-fee-2026-09-13.md) · next: Inc 1 script |
 | **Edge showcase app (Facet)** | Discovery-driven personal client on the Edge foundation: hardcodes only IdP login + connect; services, ops, forms, tasks, panes arrive as data via `edge-manifest` personal lenses + a descriptor vocabulary (#52/#54/#55). PWA-first. | Cross-vertical | Sally + FE Engineer + pkg | ★★★ | XL | 🗄️ shelved (revive: new PO/Andrew demand — Fires 0–5 + satellites re-grounded 2026-08-30, nothing unbuilt) · [design §7](../../implementation-artifacts/edge-showcase-app-design.md) |
 | **Facet on a literal iOS device** | The SwiftUI renderer builds + runs as a macOS proxy only. A real iOS/simulator build proves platform packaging (App Store viability), which FORK-1's freeze no longer waits on. Also unblocks real `swift test` in place of the hand-mirrored `swift run` harness. | Cross-vertical | Sally + FE Engineer | ★ | M | 🗄️ shelved (revive: a machine with full Xcode — this host has CommandLineTools only) · [design §7.10](../../implementation-artifacts/edge-showcase-app-design.md) |
 | **A just-minted applicant with no application is on no staffer's roster** | `applicantRosterRead` anchors an identity on its own key + the landlord/buildings of units it has a live application against ([lenses.go:250](../../../packages/loftspace-domain/lenses.go:250)); a claim secret lost before the first application has no roster row to re-issue from. Live: 0. | LoftSpace | pkg | ★ | S | 🗄️ shelved (revive: a PO-observed instance or a second lens needing a mint-site anchor; re-mint → merge recovers it) · [triage §4](../../../docs/reviews/verticals-designer-triage-2026-09-10.md) |
@@ -60,6 +59,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-13 · `bd07bed1` · A patient's late cancel owes the no-show fee and the desk's correction bills it — a 24h self-path clock, the correction carries the fee, the ledger bills the fee's presence; proven live incl. the waiver reversal.
 - 2026-09-13 · `a2724692` · A recurring visit is credited by a booked visit, never by the clock — the gap opens only on a qualifying visit, the advance re-anchors on it (`StaleRow`+OCC), the Book calendar carries the due floor; proven live.
 - 2026-09-13 · `8a046814` · The renewal chain asks the tenant for a profile before a signature — a `submitProfile` leg gates `signRenewal`'s `pre`, three `staleUserTasks` arms, the inbox opens the profile form; the refused task signed live.
 - 2026-09-13 · `8a046814` · `SetApplicantProfile`'s descriptor declares `references` as the DDL's string array, not an integer count the script dropped to zero.
@@ -84,7 +84,5 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-09-10 · `5495fdc` · A submitted application is visible to applicant AND landlord within a second — `landlordLeaseApplicationsRead` seeds on its own leaseapp's events; live-verified after cycling the Refractor.
 - 2026-09-10 · `2a8d135e` · A new target's first dispatches before its grant projects are a bounded, self-healing install lag (≤ one mark lease; `Revoke`→`Enable` clears it at once) — documented in `_packages.md`; no mechanism.
 - 2026-09-06 · `b5c8e7a8` + `bdfb344d` · A resident who owes the café is told so — `cafeArrearsReminders` sends one reminder per arrears episode off a recorded `.arrears` due fact; live: 5 sent, 2 timers armed, grid + statement show it.
-- 2026-09-06 · `ac80bf74` · A name-only patient can be connected to a login — `BindPatientIdentity` (unclaimed identity only, name moved onto the identity's `.name`), `UnbindPatientIdentity` as the operator repair, FE Connect-a-login ceremony.
-- 2026-09-06 · `82e26df5` · Staff can re-issue an unclaimed applicant's claim secret — Applicants & tenants panel offers `RotateClaimKey` via the shared ceremony; New-applicant button follows its grant (staff, not landlord).
 
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*
