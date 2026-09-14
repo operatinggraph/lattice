@@ -439,7 +439,7 @@ func TestProbeRejectedOrLost_RedeliveredMarkerRenotesAndFailsNothing(t *testing.
 	e.clock = pastTheHorizon()
 	startNotCommittedResponder(t, s.conn)
 
-	const instanceID = "instRedeliveredNote1"
+	const instanceID = "instRenotedMarker1"
 	const reason = "step 0 CreateTask rejected"
 	token := seedExpiredUserTaskArm(ctx, t, s, instanceID)
 
