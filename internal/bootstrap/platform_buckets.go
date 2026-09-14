@@ -22,10 +22,12 @@ const (
 	//
 	// It is bounded above by the evidence the deadline probe reads. The probe
 	// judges rejected-or-lost from the ABSENCE of the op tracker, which lives
-	// processor.TrackerTTL (24h) from op submit, so a marker consumed after
-	// the tracker has aged out would fail a healthy instance. The invariant is
+	// opstatus.TrackerTTL (24h) from op submit; a marker consumed after the
+	// tracker has aged out reaches absences that decide nothing, and the probe
+	// refuses the verdict there rather than deciding it — so this bound is what
+	// keeps the backstop able to answer at all. The invariant is
 	//
-	//	maxDeadlineArm + LoomStateMarkerTTL < processor.TrackerTTL
+	//	maxDeadlineArm + LoomStateMarkerTTL < opstatus.TrackerTTL
 	//
 	// where maxDeadlineArm is the longer of Loom's StepTimeout and
 	// CreateTaskTimeout (60s by default, internal/loom/engine.go:168-181).
