@@ -1909,8 +1909,14 @@ func TestDeriveReads_BalanceKey(t *testing.T) {
 			t.Fatalf("derive_reads does not mention %q — that op's .balance update would be unconditioned whenever its submitter omits the declaration", want)
 		}
 	}
-	if !strings.Contains(derive, `{"optionalReads": [acct_key + ".balance", acct_key + ".arrears"]}`) {
-		t.Fatalf("derive_reads no longer returns the account's .balance AND .arrears under optionalReads:\n%s", derive)
+	if !strings.Contains(derive, `keys = [acct_key, acct_key + ".balance", acct_key + ".arrears"]`) {
+		t.Fatalf("derive_reads no longer returns the account root, its .balance AND its .arrears under optionalReads:\n%s", derive)
+	}
+	if !strings.Contains(derive, `keys.append(reverses_key)`) || !strings.Contains(derive, `keys.append(reverses_key + ".entry")`) {
+		t.Fatalf("derive_reads no longer derives reversesRef and its .entry for RefundCafeCharge:\n%s", derive)
+	}
+	if !strings.Contains(derive, `return {"optionalReads": keys}`) {
+		t.Fatalf("derive_reads no longer returns keys under optionalReads:\n%s", derive)
 	}
 	// optionalReads, never reads: a legacy account carries no .balance, and a
 	// required read's absence is a HydrationMiss on the very branch the replay

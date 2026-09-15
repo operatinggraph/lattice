@@ -2598,6 +2598,16 @@ def session_atlocation_links(sess_key):
             break
     return out
 
+def valid_vertex_key(key, want_type):
+    # Lenient key-shape check for a pre-pass that must never fault (objects-base's
+    # derive_reads sets this precedent): a malformed/wrong-type key derives
+    # nothing rather than raising, leaving execute()'s own parts_of to fault the
+    # real InvalidArgument.
+    if key == None or type(key) != type(""):
+        return False
+    parts = key.split(".")
+    return len(parts) == 3 and parts[0] == "vtx" and parts[1] == want_type and parts[2] != ""
+
 def derive_reads(op):
     # Contract #2 §2.5 class (g). CreateSession/CreateSessionSeries's
     # studioSlotClaim/instructorSlotClaim cells are entirely a function of the
@@ -2606,6 +2616,12 @@ def derive_reads(op):
     # occurrenceCellKeys are deleted in the same change). Mirrors this script's
     # own slot_cells/slot_cellcode exactly, so a derived key always matches
     # what claim_cell actually reads.
+    #
+    # The studio/instructor ROOTS ride the same declaration: require_live_typed
+    # (state, key, ...) below decides UnknownEndpoint by testing key not in
+    # state, which cannot tell "genuinely absent" from "never declared or
+    # derived" apart, so an undeclared submitter would see a live endpoint
+    # refused as unknown.
     #
     # ReassignSession is deliberately NOT covered here: its "edit only what's
     # supplied, carry the rest forward unchanged" semantics mean the cells a
@@ -2636,14 +2652,27 @@ def derive_reads(op):
     # (objects-base's derive_reads sets this precedent). Raw getattr would see
     # "" as a truthy-looking key fragment where optional_string sees None.
     studio = optional_string(p, "studio")
+    instructor = optional_string(p, "instructor")
     starts_at_raw = optional_string(p, "startsAt")
     ends_at_raw = optional_string(p, "endsAt")
+
+    # The endpoint roots are derived independently of the time-span checks
+    # below -- they are require_live_typed's own subject, unrelated to
+    # slot-cell arithmetic, so a payload with a malformed span still gets its
+    # endpoints hydrated (execute()'s own required_string/rfc3339_utc raises
+    # the real rejection on the span).
+    keys = []
+    if valid_vertex_key(studio, "studio"):
+        keys.append(studio)
+    if valid_vertex_key(instructor, "instructor"):
+        keys.append(instructor)
+
     if studio == None or starts_at_raw == None or ends_at_raw == None:
-        return {}
+        return {} if len(keys) == 0 else {"optionalReads": keys}
     starts_at = time.rfc3339_utc(starts_at_raw)
     ends_at = time.rfc3339_utc(ends_at_raw)
     if not (starts_at < ends_at):
-        return {}
+        return {} if len(keys) == 0 else {"optionalReads": keys}
     # slot_cells fails (SessionTooLong) past MAX_SLOT_CELLS -- a real rejection,
     # but a worse one to raise HERE: derive_reads runs before enforce_grid/
     # execute()'s own checks, so a too-long span would fault as an opaque
@@ -2651,12 +2680,11 @@ def derive_reads(op):
     # SlotGridViolation. Bounding by the identical 24h ceiling slot_cells
     # enforces (MAX_SLOT_CELLS * GRID_STEP) and returning {} defers to that.
     if ends_at > time.rfc3339_add(starts_at, "24h"):
-        return {}
-    instructor = optional_string(p, "instructor")
+        return {} if len(keys) == 0 else {"optionalReads": keys}
 
     if ot == "CreateSession":
         cells = slot_cells(starts_at, ends_at)
-        keys = [studio + ".slot" + slot_cellcode(c) for c in cells]
+        keys += [studio + ".slot" + slot_cellcode(c) for c in cells]
         if instructor != None:
             keys += [instructor + ".slot" + slot_cellcode(c) for c in cells]
         if len(keys) == 0:
@@ -2669,19 +2697,18 @@ def derive_reads(op):
     interval_days = getattr(p, "intervalDays", None)
     occurrence_count = getattr(p, "occurrenceCount", None)
     if interval_days == None or occurrence_count == None:
-        return {}
+        return {} if len(keys) == 0 else {"optionalReads": keys}
     # Mirror execute()'s own required_int(p, "occurrenceCount", 2, 52) bound:
     # this loop runs before that validation, so an out-of-range value here
     # would otherwise cost real Starlark budget before execute() ever gets to
     # reject it the normal way.
     if type(occurrence_count) != type(0) or occurrence_count < 2 or occurrence_count > 52:
-        return {}
+        return {} if len(keys) == 0 else {"optionalReads": keys}
     if type(interval_days) != type(0) or interval_days < 1 or interval_days > 365:
-        return {}
+        return {} if len(keys) == 0 else {"optionalReads": keys}
     offset_hours_step = interval_days * 24
     occ_starts = starts_at
     occ_ends = ends_at
-    keys = []
     for i in range(occurrence_count):
         if i > 0:
             occ_starts = time.rfc3339_add(occ_starts, str(offset_hours_step) + "h")

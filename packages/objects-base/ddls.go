@@ -523,6 +523,11 @@ def derive_reads(op):
     # the reason DetachObject's OpMetaSpec.Dispatch declares neither key
     # (staff-descriptor-rendering-design.md sec 22 Inc-C).
     #
+    # AttachObject also derives its own TARGET root, unconditionally: a pure
+    # function of payload.targetKey, needed because alive(state, target_key)/
+    # is_protected(state, target_key) cannot otherwise tell "genuinely absent"
+    # from "never declared" apart.
+    #
     # AttachObject's replace leg is the same class: the prior object's link and
     # vertex are a function of payload.replaceObjectId/targetKey/linkName under
     # this DDL's key grammar, and both are absence-tolerant -- a replace naming
@@ -561,22 +566,36 @@ def derive_reads(op):
     return {"reads": [link_key], "optionalReads": [obj_key]}
 
 def derive_attach_replace_reads(p):
-    replace_oid = optional_string(p, "replaceObjectId")
+    # The TARGET root rides this same declaration, independent of a replace
+    # leg: attach_object's alive(state, target_key)/is_protected(state,
+    # target_key) decide UnknownTarget/ProtectedTarget by testing target_key
+    # not in state, which cannot tell "genuinely absent" from "never declared
+    # or derived" apart, so an undeclared submitter would see a live target
+    # refused as unknown. It is a pure function of payload.targetKey, derived
+    # on every AttachObject regardless of replaceObjectId.
     target_key = optional_string(p, "targetKey")
+    keys = []
+    tparts = None
+    if target_key != None:
+        tp = target_key.split(".")
+        if len(tp) == 3 and tp[0] == "vtx" and tp[1] != "" and tp[2] != "":
+            tparts = tp
+            keys.append(target_key)
+
+    replace_oid = optional_string(p, "replaceObjectId")
     link_name = optional_string(p, "linkName")
-    if replace_oid == None or target_key == None or link_name == None:
-        return {}
+    if replace_oid == None or tparts == None or link_name == None:
+        return {} if len(keys) == 0 else {"optionalReads": keys}
     if not valid_link_name(link_name):
-        return {}
+        return {} if len(keys) == 0 else {"optionalReads": keys}
     for bad in [".", "*", ">", " ", "\t", "\n", "/"]:
         if bad in replace_oid:
-            return {}
-    tparts = target_key.split(".")
-    if len(tparts) != 3 or tparts[0] != "vtx" or tparts[1] == "" or tparts[2] == "":
-        return {}
+            return {} if len(keys) == 0 else {"optionalReads": keys}
     old_obj_key = "vtx.object." + replace_oid
     old_link = "lnk.object." + replace_oid + "." + link_name + "." + tparts[1] + "." + tparts[2]
-    return {"optionalReads": [old_link, old_obj_key]}
+    keys.append(old_link)
+    keys.append(old_obj_key)
+    return {"optionalReads": keys}
 
 def execute(state, op):
     ot = op.operationType

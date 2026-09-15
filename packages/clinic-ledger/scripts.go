@@ -793,7 +793,12 @@ def derive_reads(op):
     acct_key = optional_string(op.payload, "accountKey")
     if not is_clinicaccount_key(acct_key):
         return {}
-    optional_reads = [acct_key + ".balance"]
+    # The account ROOT rides the same declaration: post_entry's
+    # vertex_alive(state, acct_key) decides UnknownAccount by testing acct_key
+    # not in state, which cannot tell "genuinely absent" from "never declared
+    # or derived" apart, so an undeclared submitter would see a live account
+    # refused as unknown.
+    optional_reads = [acct_key, acct_key + ".balance"]
     if ot == "ClinicDebitAccount":
         appt_key = optional_string(op.payload, "appointmentRef")
         if is_appointment_key(appt_key):

@@ -330,19 +330,26 @@ def derive_reads(op):
     # and merges the result into the declared read set, so the erasure gate's
     # keys are hydrated without every submitter having to name them.
     #
-    # Only the erasure gate's keys derive here -- the marker and the piiKey
-    # envelope, per side. Everything else this script reads is already declared
-    # by the dispatcher (the doc block above lists it), and moving any of it
-    # would split one contract across two places. These four
-    # are different in kind: they belong to a guard that must hold no matter
-    # what the caller declared, and a gate a submitter can forget to enable is
-    # not a gate. (The script reads them through kv.Read, so a missed
-    # derivation still refuses -- it just costs a live GET instead of a
-    # snapshot lookup.)
+    # The erasure gate's keys derive here -- the marker and the piiKey
+    # envelope, per side. They are different in kind from everything else this
+    # script reads: they belong to a guard that must hold no matter what the
+    # caller declared, and a gate a submitter can forget to enable is not a
+    # gate. (The script reads them through kv.Read, so a missed derivation
+    # still refuses -- it just costs a live GET instead of a snapshot lookup.)
+    #
+    # Both identity ROOTS, their .state and their .credentialBinding, and both
+    # directions of the duplicateOf pair-link probe ride the same declaration,
+    # for a distinct reason: execute()'s own pvtx/svtx/read_state/
+    # read_credential_binding/dup_probe_keys checks all read through
+    # state[key] / key in state, which cannot tell "genuinely absent" from
+    # "never declared or derived" apart -- an undeclared submitter would see a
+    # live identity refused MergeIdentityMissing, or a live credential/
+    # duplicateOf fact silently treated as absent.
     #
     # optionalReads, never reads: absent for every identity that was never
-    # sealed for erasure and never took a sensitive write, which is nearly all
-    # of them, and a required read's absence is a HydrationMiss that would
+    # sealed for erasure, never took a sensitive write, was never claimed, or
+    # was never marked a duplicate -- which is nearly all of them on any given
+    # field -- and a required read's absence is a HydrationMiss that would
     # block every ordinary merge.
     #
     # The op argument is a struct -- op.operationType, op.actor, op.payload
@@ -352,13 +359,22 @@ def derive_reads(op):
         return {}
     p = op.payload
     keys = []
-    for field in ["primary", "secondary"]:
-        v = getattr(p, field, None)
-        if is_identity_vertex_key(v):
-            for suffix in [".erasureRequested", ".piiKey"]:
-                gate_key = v + suffix
-                if gate_key not in keys:
-                    keys.append(gate_key)
+    primary = getattr(p, "primary", None)
+    secondary = getattr(p, "secondary", None)
+    primary_ok = is_identity_vertex_key(primary)
+    secondary_ok = is_identity_vertex_key(secondary)
+    for v, ok in [(primary, primary_ok), (secondary, secondary_ok)]:
+        if not ok:
+            continue
+        for suffix in ["", ".erasureRequested", ".piiKey", ".state", ".credentialBinding"]:
+            gate_key = v + suffix
+            if gate_key not in keys:
+                keys.append(gate_key)
+    if primary_ok and secondary_ok and primary != secondary:
+        primary_id = primary[len("vtx.identity."):]
+        secondary_id = secondary[len("vtx.identity."):]
+        keys.append("lnk.identity." + secondary_id + ".duplicateOf.identity." + primary_id)
+        keys.append("lnk.identity." + primary_id + ".duplicateOf.identity." + secondary_id)
     if len(keys) == 0:
         return {}
     return {"optionalReads": keys}
