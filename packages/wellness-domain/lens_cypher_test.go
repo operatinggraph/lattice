@@ -437,6 +437,32 @@ func TestWellnessBookings_ProjectsReminderSentAt(t *testing.T) {
 	require.Nil(t, byKey[unremindedKey].Values["reminderSentAt"])
 }
 
+// TestWellnessBookings_ProjectsPromotedAt proves promotedAt reads the
+// booking's own .status stamp (written only by the two promotion paths,
+// ddls.go) and is null on a seat booked directly — the column My Classes and
+// the desk roster badge the seating with, and the member's app reads for the
+// late-cancel exemption.
+func TestWellnessBookings_ProjectsPromotedAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	promotedKey := f.vtx(t, "promoted1", "booking")
+	f.aspect(t, "promoted1", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0, "promotedAt": "2026-07-08T07:57:00Z"})
+
+	directKey := f.vtx(t, "direct1", "booking")
+	f.aspect(t, "direct1", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "standard", "seat": 2.0})
+
+	rows := f.project(t, wellnessBookingsSpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]ruleengine.ProjectionResult{}
+	for _, r := range rows {
+		byKey[r.Values["key"].(string)] = r
+	}
+	require.Equal(t, "2026-07-08T07:57:00Z", byKey[promotedKey].Values["promotedAt"])
+	require.Nil(t, byKey[directKey].Values["promotedAt"])
+}
+
 // TestWellnessSessions_JoinsInstructor proves the ledBy hop the instructor
 // hat rests on: a session led by a bound instructor projects that
 // instructor's key (which scopes their own-roster read) and display name

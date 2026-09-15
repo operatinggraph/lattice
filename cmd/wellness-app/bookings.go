@@ -41,6 +41,10 @@ type bookingProjection struct {
 	// timestamp, projected off the booking's .reminder aspect — nil until that
 	// op runs.
 	ReminderSentAt *string `json:"reminderSentAt,omitempty"`
+	// PromotedAt is the instant a waitlisted booking was handed its seat
+	// (.status.promotedAt, written by either promotion path in
+	// wellness-domain) — nil on a seat booked directly.
+	PromotedAt *string `json:"promotedAt,omitempty"`
 }
 
 // bookingRow is the roster / my-classes row a view renders. Status carries
@@ -63,9 +67,13 @@ type bookingRow struct {
 	MissingStudio bool     `json:"missingStudio"`
 	BookerKey     string   `json:"bookerKey"`
 	// ReminderSentAt shows a member or front-desk staffer that a class
-	// reminder already went out for this booking (24h-class-reminder gap:
-	// the send previously left no trace anywhere a person could see it).
+	// reminder already went out for this booking.
 	ReminderSentAt *string `json:"reminderSentAt,omitempty"`
+	// PromotedAt lets My Classes and the roster badge a seat that came from
+	// the waitlist, and lets the member's cancel predicate mirror
+	// CancelBooking's late-cancel exemption (a seat promoted inside the
+	// two-hour window cancels free until the class begins).
+	PromotedAt *string `json:"promotedAt,omitempty"`
 }
 
 // computeBookings decodes every wellnessBookings row, optionally filtered to
@@ -117,6 +125,7 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 			MissingStudio:  p.MissingStudio,
 			BookerKey:      p.BookerKey,
 			ReminderSentAt: p.ReminderSentAt,
+			PromotedAt:     p.PromotedAt,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

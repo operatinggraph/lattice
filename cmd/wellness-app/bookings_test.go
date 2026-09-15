@@ -134,3 +134,40 @@ func TestComputeBookings_NoReminderSentAtIsNil(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Nil(t, rows[0].ReminderSentAt)
 }
+
+// TestComputeBookings_PromotedAtThreadsThroughUnchanged proves the row's
+// PromotedAt is exactly the wellnessBookings projection's own promotedAt
+// column, and nil (omitted from JSON) on a seat booked directly — the FE's
+// seating badge and its late-cancel exemption both key on it.
+func TestComputeBookings_PromotedAtThreadsThroughUnchanged(t *testing.T) {
+	get := mapGetter(map[string]any{
+		"vtx.booking.b6": map[string]any{
+			"bookingKey":  "vtx.booking.b6",
+			"status":      "booked",
+			"rate":        "standard",
+			"sessionKey":  "vtx.session.s1",
+			"sessionName": "Vinyasa Flow",
+			"priceCents":  1500.0,
+			"bookerKey":   "vtx.identity.fay",
+			"promotedAt":  "2026-09-05T07:57:00Z",
+		},
+		"vtx.booking.b7": map[string]any{
+			"bookingKey":  "vtx.booking.b7",
+			"status":      "booked",
+			"rate":        "standard",
+			"sessionKey":  "vtx.session.s1",
+			"sessionName": "Vinyasa Flow",
+			"priceCents":  1500.0,
+			"bookerKey":   "vtx.identity.gus",
+		},
+	})
+	rows := computeBookings([]string{"vtx.booking.b6", "vtx.booking.b7"}, get, "", "")
+	require.Len(t, rows, 2)
+	byKey := map[string]bookingRow{}
+	for _, r := range rows {
+		byKey[r.BookingKey] = r
+	}
+	require.NotNil(t, byKey["vtx.booking.b6"].PromotedAt)
+	require.Equal(t, "2026-09-05T07:57:00Z", *byKey["vtx.booking.b6"].PromotedAt)
+	require.Nil(t, byKey["vtx.booking.b7"].PromotedAt)
+}

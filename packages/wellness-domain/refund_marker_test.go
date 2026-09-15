@@ -1136,6 +1136,12 @@ func TestCancelBooking_LateCancelPromotesWaitlisterAndKeepsForfeitedBooking(t *t
 	if _, hasSlot := promoted["waitlistSlot"]; hasSlot {
 		t.Fatalf("promoted booking status.waitlistSlot = %v, want absent", promoted["waitlistSlot"])
 	}
+	if got, _ := promoted["promotedAt"].(string); got != "2026-07-08T08:59:00Z" {
+		t.Fatalf("promoted booking status.promotedAt = %q, want the cancelling op's submittedAt 2026-07-08T08:59:00Z", got)
+	}
+	if _, hasStamp := forfeited["promotedAt"]; hasStamp {
+		t.Fatalf("cancelled booking status.promotedAt = %v, want absent — a direct CreateBooking seat was never promoted", forfeited["promotedAt"])
+	}
 	if keyExists(t, ctx, conn, sessionKey+".wl1") {
 		t.Fatalf("wl1 must be released once the waitlisted booking is promoted")
 	}
@@ -1386,4 +1392,259 @@ func TestCancelBooking_LateCancelKeepsAChargedBookingOnAClassSinceRepricedFree(t
 	}
 	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
 	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+}
+
+// stampPromotedAt rewrites a live booking's .status with a promotedAt stamp,
+// leaving every other field as the op that wrote it left them — the at-rest
+// shape a booking promoted by CancelBooking or PromoteWaitlistedBookings
+// carries (ddls.go), seeded directly so the cancel-side tests below can aim
+// the stamp at either side of the cutoff without staging a whole promotion.
+// TestCancelBooking_PromotedInsideWindowThroughRealPromotionRefunds is the
+// vector that earns the stamp through the live path instead.
+func stampPromotedAt(t *testing.T, ctx context.Context, conn *substrate.Conn, bookingKey, promotedAt string) {
+	t.Helper()
+	doc := readDoc(t, ctx, conn, bookingKey+".status")
+	data, _ := doc["data"].(map[string]any)
+	data["promotedAt"] = promotedAt
+	doc["data"] = data
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, bookingKey+".status", b); err != nil {
+		t.Fatalf("stamp promotedAt on %s: %v", bookingKey, err)
+	}
+}
+
+// assertRefundedNotForfeited is the refund-side shape a cancellation leaves
+// when the late-cancel rule does NOT bite: the booking is tombstoned, a
+// wellnessrefund marker mints with its reverses link onto the posted charge,
+// the refund event is emitted and the forfeit event is not.
+func assertRefundedNotForfeited(t *testing.T, ctx context.Context, conn *substrate.Conn, cancelReqID, bookingKey, txKey string) {
+	t.Helper()
+	if keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("a refunded booking owes nothing and is tombstoned — %s must not stay live", bookingKey)
+	}
+	refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(cancelReqID)
+	if !keyExists(t, ctx, conn, refundKey) {
+		t.Fatalf("wellnessrefund marker must exist: %s", refundKey)
+	}
+	detail, _ := readDoc(t, ctx, conn, refundKey+".detail")["data"].(map[string]any)
+	if detail["bookingKey"] != bookingKey {
+		t.Fatalf("refund detail bookingKey = %v, want %v", detail["bookingKey"], bookingKey)
+	}
+	_, refundID, _ := substrate.ParseVertexKey(refundKey)
+	_, txID, _ := substrate.ParseVertexKey(txKey)
+	reversesLnk := "lnk.wellnessrefund." + refundID + ".reverses.wellnesstransaction." + txID
+	if !keyExists(t, ctx, conn, reversesLnk) {
+		t.Fatalf("reverses link must exist: %s", reversesLnk)
+	}
+	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+}
+
+// TestCancelBooking_PromotedInsideWindowRefunds is the late-cancel
+// exemption's own proof: the window is a rule about notice, and a seat handed
+// from the waitlist at or after the two-hour cutoff never had the two hours to
+// give, so cancelling it inside the window refunds like an early cancel —
+// tombstoned, marker minted, charge reversed — right up to the class start.
+// Pinned on both sides of the stamp's own boundary: a promotion exactly on
+// the cutoff is exempt (the script's >=, mirroring the cutoff's own
+// inclusive inequality), as is one well inside it.
+func TestCancelBooking_PromotedInsideWindowRefunds(t *testing.T) {
+	cases := []struct {
+		name       string
+		suffix     string
+		bookerID   string
+		acctID     string
+		txID       string
+		promotedAt string
+	}{
+		{
+			name: "promoted well inside the window", suffix: "A",
+			bookerID: "BBWELLPRMWNABKRHJKMN", acctID: "BBWELLPRMWNAACTHJKMN", txID: "BBWELLPRMWNATXNHJKMN",
+			promotedAt: "2026-07-08T07:57:00Z",
+		},
+		{
+			name: "promoted exactly on the two-hour mark", suffix: "B",
+			bookerID: "BBWELLPRMWNBBKRHJKMN", acctID: "BBWELLPRMWNBACTHJKMN", txID: "BBWELLPRMWNBTXNHJKMN",
+			promotedAt: "2026-07-08T07:00:00Z",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn := setupDomainEnv(t)
+			cp, cons := newDomainPipeline(t, ctx, conn, "promowindow"+tc.suffix)
+
+			studioKey := createStudio(t, ctx, conn, cp, cons, "wdprmwnstudio"+tc.suffix, "Promo Window Studio")
+			sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdprmwnsession"+tc.suffix, studioKey, "Promo Window Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+			if outcome != processor.OutcomeAccepted {
+				t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+			}
+
+			bookerKey := seedIdentity(t, ctx, conn, tc.bookerID)
+			bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdprmwnbooking"+tc.suffix, sessionKey, bookerKey, "")
+			if outcome != processor.OutcomeAccepted {
+				t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+			}
+			stampPromotedAt(t, ctx, conn, bookingKey, tc.promotedAt)
+			_, txKey := seedPostedClassPriceCharge(t, ctx, conn, bookingKey, tc.acctID, tc.txID, 1500.0)
+
+			// One minute before the 09:00 start — the deepest point of the
+			// window, where a direct seat forfeits.
+			cancelReqID := testutil.GenReqID("wdprmwncancel" + tc.suffix)
+			submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, bookingKey, sessionKey, "2026-07-08T08:59:00Z")
+
+			assertRefundedNotForfeited(t, ctx, conn, cancelReqID, bookingKey, txKey)
+			if keyExists(t, ctx, conn, sessionKey+".seat1") {
+				t.Fatalf("the seat is released like any early cancel — seat1 must be free")
+			}
+		})
+	}
+}
+
+// TestCancelBooking_PromotedBeforeWindowForfeits is the exemption's other
+// edge: a promotion that landed BEFORE the cutoff is an ordinary seat — the
+// member had the window to cancel free — so cancelling it inside the window
+// forfeits exactly as a direct seat does, and the forfeit upsert carries the
+// promotedAt stamp forward (the record keeps saying how the seat was
+// obtained for as long as the booking lives).
+func TestCancelBooking_PromotedBeforeWindowForfeits(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "promobeforewindow")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdprmbfstudio000001", "Promo Before Studio")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdprmbfsession00001", studioKey, "Promo Before Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLPRMBFBKR1HJKMN")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdprmbfbooking00001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+	// One minute before the 07:00 cutoff.
+	stampPromotedAt(t, ctx, conn, bookingKey, "2026-07-08T06:59:00Z")
+	_, txKey := seedPostedClassPriceCharge(t, ctx, conn, bookingKey, "BBWELLPRMBFACT1HJKMN", "BBWELLPRMBFTXN1HJKMN", 1500.0)
+
+	cancelReqID := testutil.GenReqID("wdprmbfcancel000001")
+	submitCancelBookingAt(t, ctx, conn, cp, cons, cancelReqID, bookingKey, sessionKey, "2026-07-08T08:59:00Z")
+
+	if !keyExists(t, ctx, conn, bookingKey) {
+		t.Fatalf("a booking promoted before the cutoff forfeits like any other and stays live")
+	}
+	forfeited := attendanceStatus(t, ctx, conn, bookingKey)
+	if got, _ := forfeited["value"].(string); got != "forfeited" {
+		t.Fatalf("status.value = %q, want forfeited", got)
+	}
+	if got, _ := forfeited["promotedAt"].(string); got != "2026-07-08T06:59:00Z" {
+		t.Fatalf("status.promotedAt = %q after the forfeit upsert, want 2026-07-08T06:59:00Z carried forward", got)
+	}
+	if _, hasSeat := forfeited["seat"]; hasSeat {
+		t.Fatalf("status.seat = %v, want absent", forfeited["seat"])
+	}
+	if !keyExists(t, ctx, conn, txKey) {
+		t.Fatalf("the forfeited class-price charge must stand: %s", txKey)
+	}
+	refundKey := "vtx.wellnessrefund." + nanoIDFromRequestID(cancelReqID)
+	if keyExists(t, ctx, conn, refundKey) {
+		t.Fatalf("no wellnessrefund marker may mint for a late cancel of a seat promoted before the cutoff: %s", refundKey)
+	}
+	assertTrackerEvent(t, ctx, conn, cancelReqID, "wellness.lateCancelForfeited")
+	assertNoTrackerEvent(t, ctx, conn, cancelReqID, "wellness.classPriceRefundQueued")
+}
+
+// TestCancelBooking_PromotedInsideWindowThroughRealPromotionRefunds earns the
+// stamp through the live path: A holds the one seat, B waits, and A cancels
+// inside the window — A forfeits, B is seated with promotedAt = that
+// cancellation's submittedAt. B, charged for the seat it was just handed,
+// then cancels inside the window too: refunded and tombstoned, not
+// forfeited, because the stamp CancelBooking's own promotion wrote is what its
+// late-cancel rule reads back.
+func TestCancelBooking_PromotedInsideWindowThroughRealPromotionRefunds(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "promochainrefund")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdprmchstudio000001", "Promo Chain Studio")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdprmchsession00001", studioKey, "Promo Chain Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+
+	seatedBookerKey := seedIdentity(t, ctx, conn, "BBWELLPRMCHSEATHJKMN")
+	seatedBookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdprmchbooking00001", sessionKey, seatedBookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+	waitingBookerKey := seedIdentity(t, ctx, conn, "BBWELLPRMCHWTNGHJKMN")
+	waitingBookingKey, outcome := joinWaitlist(t, ctx, conn, cp, cons, "wdprmchjoin0000001", sessionKey, waitingBookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("joinWaitlist outcome = %v, want Accepted", outcome)
+	}
+	_, seatedTxKey := seedPostedClassPriceCharge(t, ctx, conn, seatedBookingKey, "BBWELLPRMCHACT1HJKMN", "BBWELLPRMCHTXN1HJKMN", 1500.0)
+
+	// A cancels 45 minutes out: inside the window on a direct seat, so A
+	// forfeits — and B is seated by the same commit.
+	firstCancelReqID := testutil.GenReqID("wdprmchcancel000001")
+	submitCancelBookingAt(t, ctx, conn, cp, cons, firstCancelReqID, seatedBookingKey, sessionKey, "2026-07-08T08:15:00Z")
+	if got, _ := attendanceStatus(t, ctx, conn, seatedBookingKey)["value"].(string); got != "forfeited" {
+		t.Fatalf("the direct seat's late cancel status.value = %q, want forfeited", got)
+	}
+	if !keyExists(t, ctx, conn, seatedTxKey) {
+		t.Fatalf("the direct seat's forfeited charge must stand: %s", seatedTxKey)
+	}
+	promoted := attendanceStatus(t, ctx, conn, waitingBookingKey)
+	if got, _ := promoted["value"].(string); got != "booked" {
+		t.Fatalf("waitlisted booking status.value = %q, want booked (promoted)", got)
+	}
+	if got, _ := promoted["promotedAt"].(string); got != "2026-07-08T08:15:00Z" {
+		t.Fatalf("promoted booking status.promotedAt = %q, want the cancelling op's submittedAt 2026-07-08T08:15:00Z", got)
+	}
+
+	// The ledger charges B for the seat it now holds (seeded raw, as above);
+	// B cancels 15 minutes before the start — inside the window, on a seat
+	// it was handed inside the window.
+	_, promotedTxKey := seedPostedClassPriceCharge(t, ctx, conn, waitingBookingKey, "BBWELLPRMCHACT2HJKMN", "BBWELLPRMCHTXN2HJKMN", 1500.0)
+	secondCancelReqID := testutil.GenReqID("wdprmchcancel000002")
+	submitCancelBookingAt(t, ctx, conn, cp, cons, secondCancelReqID, waitingBookingKey, sessionKey, "2026-07-08T08:45:00Z")
+
+	assertRefundedNotForfeited(t, ctx, conn, secondCancelReqID, waitingBookingKey, promotedTxKey)
+	if keyExists(t, ctx, conn, sessionKey+".seat1") {
+		t.Fatalf("nobody else is waiting, so seat1 must be released back open")
+	}
+	// A's own forfeit is untouched by B's refund.
+	if got, _ := attendanceStatus(t, ctx, conn, seatedBookingKey)["value"].(string); got != "forfeited" {
+		t.Fatalf("the direct seat's status.value = %q after B's refund, want forfeited (unchanged)", got)
+	}
+}
+
+// TestSetBookingAttendance_CarriesPromotedAtForward pins the stamp's lifetime
+// through the attendance mark: a booking seated from the waitlist keeps
+// promotedAt on its record once it is marked attended (and, by the same
+// carry-forward loop, noShow) — the record says how the seat was obtained for
+// as long as the booking lives.
+func TestSetBookingAttendance_CarriesPromotedAtForward(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "attendpromoted")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdatprmstudio000001", "Attend Promo Studio")
+	sessionKey, outcome := createSessionPriced(t, ctx, conn, cp, cons, "wdatprmsession00001", studioKey, "Attend Promo Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5, 1500)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSessionPriced outcome = %v, want Accepted", outcome)
+	}
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLATPRMBKR1HJKMN")
+	bookingKey, outcome := createBooking(t, ctx, conn, cp, cons, "wdatprmbooking00001", sessionKey, bookerKey, "")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createBooking outcome = %v, want Accepted", outcome)
+	}
+	stampPromotedAt(t, ctx, conn, bookingKey, "2026-07-08T07:57:00Z")
+
+	testutil.PublishOp(t, conn, attendanceEnv(t, "wdatprmmark00000001", bookingKey, sessionKey, "attended", "", domainActorKey, "2026-07-08T09:05:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	after := attendanceStatus(t, ctx, conn, bookingKey)
+	if got, _ := after["value"].(string); got != "attended" {
+		t.Fatalf("status.value = %q, want attended", got)
+	}
+	if got, _ := after["promotedAt"].(string); got != "2026-07-08T07:57:00Z" {
+		t.Fatalf("status.promotedAt = %q after marking, want 2026-07-08T07:57:00Z carried forward", got)
+	}
 }

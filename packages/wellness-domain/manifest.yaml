@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.27.9
+version: 0.27.10
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -91,7 +91,11 @@ description: |
   reach the guest who owes the standing charge (wellnessBookers covers a
   booker through any live booking). The
   window turns on timing alone — member and front-desk callers alike —
-  and forfeits the class price only, adding no separate no-show fee.
+  and forfeits the class price only, adding no separate no-show fee. A
+  seat handed from the waitlist inside the window is exempt: both
+  promotion paths stamp .status.promotedAt, and a booking promoted at or
+  after the two-hour cutoff refunds like an early cancel until the class
+  begins.
 depends:
   - lease-signing
   - orchestration-base

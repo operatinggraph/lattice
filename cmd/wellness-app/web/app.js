@@ -1106,17 +1106,37 @@ function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease) {
 // clicking Cancel will cost before it costs it.
 const LATE_CANCEL_WINDOW_MS = 2 * 60 * 60 * 1000;
 
+// promotedInsideWindow answers whether THIS booking's seat was handed to it
+// from the waitlist inside the late-cancel window — b.promotedAt (the
+// wellnessBookings lens's projection of .status.promotedAt, stamped by both
+// promotion paths) at or after startsAt − 2h. CancelBooking's own rule
+// exempts such a seat from the forfeit: the window is about notice, and a
+// member seated inside it never had the two hours to give. The inequality
+// mirrors the script's `promotedAt >= late_cancel_cutoff` — a promotion
+// exactly on the mark is exempt. A seat booked directly carries no
+// promotedAt and reads false.
+function promotedInsideWindow(b) {
+  if (!b.promotedAt || !b.startsAt) return false;
+  const startsAtMs = new Date(b.startsAt).getTime();
+  const promotedAtMs = new Date(b.promotedAt).getTime();
+  if (!isFinite(startsAtMs) || !isFinite(promotedAtMs)) return false;
+  return startsAtMs - promotedAtMs <= LATE_CANCEL_WINDOW_MS;
+}
+
 // isLateCancel answers whether cancelling THIS booking right now would
 // forfeit its class price. Waitlisted bookings and free classes are excluded
 // for the same reason a late cancel never reaches them: neither carries a
 // posted class-price charge to lose. An already-forfeited booking cannot be
 // cancelled again (CancelBooking refuses it, and cancelDisabled never offers
 // the button once ATTENDANCE_MARKS carries its status) — excluded here too
-// so the predicate is honest on its own terms.
+// so the predicate is honest on its own terms. A seat promoted inside the
+// window is excluded last, for the reason promotedInsideWindow gives: the
+// op refunds it, so the confirm must not say it forfeits.
 function isLateCancel(b) {
   if (b.status === "waitlisted" || b.status === "forfeited" || !(b.priceCents > 0) || !b.startsAt) return false;
   const startsAtMs = new Date(b.startsAt).getTime();
   if (!isFinite(startsAtMs)) return false;
+  if (promotedInsideWindow(b)) return false;
   return startsAtMs - Date.now() <= LATE_CANCEL_WINDOW_MS;
 }
 
@@ -1341,14 +1361,41 @@ async function renderMyClasses() {
 // never got promoted into has begun.
 
 // reminderBadge shows the wellness-reminders package's own SendReminder
-// marker (wellnessBookings' reminderSentAt column) — before this, a 24h
-// class reminder went out with nothing anywhere saying so, on My Classes or
-// the front-desk Roster alike. Absent until that op fires.
+// marker (wellnessBookings' reminderSentAt column), so a 24h class reminder
+// that went out is visible on My Classes and the front-desk Roster alike.
+// Absent until that op fires.
 function reminderBadge(b) {
   if (!b.reminderSentAt) return "";
   const d = new Date(b.reminderSentAt);
   const label = "🔔 Reminder sent" + (isNaN(d.getTime()) ? "" : " · " + d.toLocaleDateString());
   return '<span class="badge reminder-sent">' + esc(label) + "</span>";
+}
+
+// promotedBadge says a seat came from the waitlist, and when — the
+// wellnessBookings lens's promotedAt column, rendered as a local instant the
+// same way fmtRange renders the class itself — so a card that reads Booked on
+// My Classes or the front-desk Roster also says how the member got there.
+// Absent on a seat booked directly.
+function promotedBadge(b) {
+  if (!b.promotedAt) return "";
+  const d = new Date(b.promotedAt);
+  const label = "Seated from the waitlist" + (isNaN(d.getTime()) ? "" : " · " + fmtDay(b.promotedAt) + " " + fmtTime(b.promotedAt));
+  return '<span class="badge promoted">' + esc(label) + "</span>";
+}
+
+// promotedCancelNote is the member-facing half of CancelBooking's late-cancel
+// exemption: a still-booked seat that was handed over inside the window, on
+// a class that has not begun, cancels free until it does — said on the card
+// so the member is not left assuming the two-hour rule they were shown at
+// booking time still bites. Nothing to say on a free class (no price, no
+// forfeit rule to be exempt from — the same exclusion isLateCancel makes),
+// once the class has started (Cancel is disabled) or once the row is a
+// settled record.
+function promotedCancelNote(b) {
+  if (b.status !== "booked" || !(b.priceCents > 0) || !promotedInsideWindow(b)) return "";
+  const startsAtMs = new Date(b.startsAt).getTime();
+  if (!isFinite(startsAtMs) || startsAtMs <= Date.now()) return "";
+  return '<div class="meta">Seated under 2 h before start — cancelling is free until the class begins.</div>';
 }
 
 function myClassCard(b) {
@@ -1366,12 +1413,14 @@ function myClassCard(b) {
     '<span class="badge ' + (b.rate === "resident" ? "posted" : "open") + '">' + esc(b.rate || "standard") + "</span>" +
     waitlistBadge +
     (mark ? '<span class="badge ' + esc(mark.badge) + '">' + esc(mark.label) + "</span>" : "") +
+    promotedBadge(b) +
     reminderBadge(b) +
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(b.missingStudio ? "Studio needs reassignment" : b.studioName || shortKey(b.studioKey)) + "</div>") +
     '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(priceLabel(b.priceCents)) + "</div>") +
     (!cancelled && b.status === "forfeited" ? '<div class="meta">Cancelled inside the late window — class price forfeited.</div>' : "") +
+    (cancelled ? "" : promotedCancelNote(b)) +
     '<div class="card-actions"><button id="mycancel-' + id + '" class="danger"' + (cancelDisabled ? " disabled" : "") + ">" + (waitlisted ? "Leave waitlist" : "Cancel") + "</button></div>" +
     "</div>"
   );
@@ -2870,6 +2919,7 @@ function rosterCard(b, markable, cancellable) {
     waitlistBadge +
     (mark ? '<span class="badge ' + esc(mark.badge) + '">' + esc(mark.label) + "</span>" : "") +
     arrearsBadge +
+    promotedBadge(b) +
     reminderBadge(b) +
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     // A forfeited booking gets neither action: SetBookingAttendance refuses

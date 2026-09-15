@@ -309,7 +309,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): InvalidState: none — a missing .status/.schedule aspect on a booking already offered by the lens is a read-model correctness fault.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Cancel booking",
-				Description: "Cancel this booking and release your seat. Only available before the class begins and before attendance is recorded; inside the two-hour late window of a priced class the seat is released but the class price is forfeited and the booking stays on your record as forfeited.",
+				Description: "Cancel this booking and release your seat. Only available before the class begins and before attendance is recorded; inside the two-hour late window of a priced class the seat is released but the class price is forfeited and the booking stays on your record as forfeited — unless your seat was handed to you from the waitlist inside that window, in which case cancelling is free until the class begins.",
 				Icon:        "cancel",
 				Tone:        "destructive",
 				SubmitLabel: "Cancel booking",

@@ -492,6 +492,13 @@ RETURN
 // (not a lookup error) until that op writes it, the same cross-package
 // aspect-read pattern wellness-reminders' own wellnessBookingRemindersSpec
 // uses in the other direction against this package's booking status/schedule.
+//
+// promotedAt is .status's own optional stamp — the instant a waitlisted
+// booking was handed its seat (CancelBooking's promotion upsert or
+// PromoteWaitlistedBookings, ddls.go) — null on a seat booked directly. My
+// Classes and the desk roster badge the seating with it, and the member's app
+// mirrors CancelBooking's late-cancel exemption off it (a seat promoted at or
+// after the two-hour cutoff cancels free until the class begins).
 const wellnessBookingsSpec = `MATCH (b:booking)
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
@@ -512,7 +519,8 @@ RETURN
   s.profile.data.name AS studioName,
   ((se.key <> null) AND (s.key = null)) AS missingStudio,
   id.key AS bookerKey,
-  b.reminder.data.sentAt AS reminderSentAt`
+  b.reminder.data.sentAt AS reminderSentAt,
+  b.status.data.promotedAt AS promotedAt`
 
 // orphanedBookingSettlementSpec is the one-row-per-booking convergence
 // cypher: TombstoneSession deliberately does not cascade (package.go), so a

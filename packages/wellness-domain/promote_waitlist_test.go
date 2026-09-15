@@ -61,9 +61,11 @@ func bookingStatusData(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 }
 
 // requirePromoted asserts a booking's .status now reads as a seated booking:
-// value booked, the given seat, and NO waitlistSlot left behind (the two are
-// mutually exclusive by construction, ddls.go).
-func requirePromoted(t *testing.T, ctx context.Context, conn *substrate.Conn, bookingKey string, wantSeat int) {
+// value booked, the given seat, NO waitlistSlot left behind (the two are
+// mutually exclusive by construction, ddls.go), and promotedAt stamped with
+// the promoting dispatch's own submittedAt — the instant CancelBooking's
+// late-cancel rule measures the window against for this booking.
+func requirePromoted(t *testing.T, ctx context.Context, conn *substrate.Conn, bookingKey string, wantSeat int, wantPromotedAt string) {
 	t.Helper()
 	data := bookingStatusData(t, ctx, conn, bookingKey)
 	if got, _ := data["value"].(string); got != "booked" {
@@ -74,6 +76,9 @@ func requirePromoted(t *testing.T, ctx context.Context, conn *substrate.Conn, bo
 	}
 	if _, has := data["waitlistSlot"]; has {
 		t.Fatalf("%s must not keep a waitlistSlot once promoted: %v", bookingKey, data)
+	}
+	if got, _ := data["promotedAt"].(string); got != wantPromotedAt {
+		t.Fatalf("%s .status.promotedAt = %q, want %q (the promoting op's submittedAt)", bookingKey, got, wantPromotedAt)
 	}
 }
 
@@ -129,8 +134,8 @@ func TestPromoteWaitlistedBookings_SeatsLowestSlotsUpToCapacity(t *testing.T) {
 
 	// Two seats were free (capacity 3, one held), so the two EARLIEST
 	// candidates are seated and the third stays waiting.
-	requirePromoted(t, ctx, conn, waitOneKey, 2)
-	requirePromoted(t, ctx, conn, waitTwoKey, 3)
+	requirePromoted(t, ctx, conn, waitOneKey, 2, "2026-07-08T08:05:00Z")
+	requirePromoted(t, ctx, conn, waitTwoKey, 3, "2026-07-08T08:05:00Z")
 	if got, _ := bookingStatusData(t, ctx, conn, waitThreeKey)["value"].(string); got != "waitlisted" {
 		t.Fatalf("the third candidate must stay waitlisted (capacity ran out), got %q", got)
 	}
@@ -221,7 +226,7 @@ func TestPromoteWaitlistedBookings_ReusesFreedSeatHole(t *testing.T) {
 		t.Fatalf("PromoteWaitlistedBookings outcome = %v, reply = %+v, want Accepted", promote, reply)
 	}
 
-	requirePromoted(t, ctx, conn, waitKey, 2)
+	requirePromoted(t, ctx, conn, waitKey, 2, "2026-07-08T08:05:00Z")
 	if !keyExists(t, ctx, conn, sessionKey+".seat2") {
 		t.Fatalf("the freed seat cell must be re-claimed, not skipped")
 	}
