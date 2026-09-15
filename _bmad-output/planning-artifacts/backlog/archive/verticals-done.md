@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-13 · `8a046814` · `SetApplicantProfile`'s descriptor declares `references` as the DDL's string array, not an integer count the script dropped to zero.
+- 2026-09-13 · `b1ad58ae` · A visit is completed or missed only once it has started — `SetAppointmentStatus` + `CorrectAppointmentStatus` refuse `completed`/`noShow` `NotYetStarted` before `startsAt`; the desk's buttons wait; proven live.
 - 2026-09-13 · `b1ad58ae` · A final visit is never moved — `RescheduleAppointment` reads `.status` and refuses `TerminalStatus` before the cell diff; proven live on a cancelled appointment.
 - 2026-09-13 · `0ec264a5` · An executed lease is never withdrawn — `WithdrawLeaseApplication` refuses `AlreadyApproved` on an approved `.decision` (an optionalRead at every dispatcher); a declined one stays withdrawable; proven live.
 - 2026-09-13 · `67799a7d` · Rent bills from leaseStart to leaseEnd — the clause carries its term, dues walk the anniversary grid; six live clauses termed by `BackfillClauseTerm`, four pre-/post-term charges reversed.

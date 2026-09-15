@@ -21,10 +21,13 @@ Retired block with the half of each class that stays a walk stated.
 
 **Scope sentence.** Promote the two twice-plus-seen OCC classes of the `_packages.md` dossier to CI gates:
 (A) `lint-live-read-pinned-mutation` — in every shipped package script, a `kv.Read(K)` whose read posture is
-`(e)`, `(c)` or unannotated (the three shapes step 4 does not hydrate) followed in the same function by an
+`(e)`, `(c)` or unannotated (the three shapes step 4 does not hydrate) — obtained directly, through a read helper
+such as `vertex_live`, or as a `kv.Links` page entry's `.key` (widened at build, 2026-09-14: the first cold pass
+showed the engine hands a script a live key three ways, not one) — followed reachably in the same function by an
 `update` or `tombstone` mutation on K that carries no `expectedRevision` is a finding; (B)
 `lint-derive-reads-bare-vector` — every op a DDL script's `derive_reads` dispatches on has, in its package's
-`_test.go`, at least one `OperationEnvelope{…}` submission with no `ContextHint` (nil or absent). Land every
+`_test.go`, at least one `OperationEnvelope{…}` submission with no `ContextHint` (nil or absent — refined at build
+to: no `Reads`/`OptionalReads`/`EgressReads`, inside a `Test*UndeclaredSubmitter*` function). Land every
 vector (B) requires, fix every site (A) reports, wire both into `lint-static`, the Makefile and
 `docs/components/lint-gates.md`, and retire the two dossier entries.
 
@@ -117,4 +120,31 @@ against the fixed tree to go clean; a gate that finds nothing on `main` is prove
 
 ## Findings
 
-*(filled at close)*
+Shipped at `284ffc66` (gate B + the derive_reads fixes, merged `4a371f24`), `aa48d51f` (gate A + the pins) and
+`09bbfb08` (a substrate marker-TTL flake the first CI run surfaced in a package this fire never touched).
+
+| Class | Population examined | Live instances | Disposition |
+|---|---|---|---|
+| A · live read then bare `update`/`tombstone` on its key | 83 scripts / 31 packages · 893 functions · 236 live reads (direct `kv.Read`, read helpers, `kv.Links` page entries) · 313 mutations | 7 — wellness `TombstoneSessionSeries`'s per-occurrence tombstone (`vertex_live` one hop away), its `ledBy` and `atLocation` link tombstones; `unbind_identity_credentials` two sweeps; `purge_identity_dedup_footprint` two; semantic-contracts' legacy-link tombstone | pinned to the read's / page entry's `revision` (`make_tombstone_occ`, inline `expectedRevision`); identity-hygiene's old-link retire declared `# occ: live-unpinned` (the edge retires whoever owns the vertex now — deliberate); **gate** `lint-live-read-pinned-mutation`; entry retired |
+| B · a `derive_reads` op with no bare-envelope vector | 21 governed ops / 8 packages (cafe-ledger 5, clinic-domain 2, clinic-ledger 2, identity-domain 6, identity-hygiene 1, lease-signing 1, objects-base 2, wellness-domain 2) | 18 without a `Test*UndeclaredSubmitter*` vector; landing them surfaced 7 `derive_reads` that never derived the vertex ROOT (an undeclared submitter's live target read as unknown), one OCC hole (`RescheduleAppointment`'s bare `.schedule` update unconditioned for an undeclared caller), one collision (`CompleteCredentialLink` created `.credentialBinding` over a live one), one permanent refusal (`RefundCafeCharge` demanded `reversesRef` be declared) | derived (root · `.schedule` + links · `.credentialBinding` in the CompleteCredentialLink arm only · `reversesRef` + `.entry`); 18 vectors assert the op's effect or its named refusal; **gate** `lint-derive-reads-bare-vector`; entry retired |
+
+Both gates were proven the way the brief demanded — against `main` (gate A: one finding on its first honest run, seven
+once page entries were read; gate B: 18) and clean on the fixed tree — with 65 and 20 self-test vectors including the
+drop-the-pin / drop-the-derivation mutations.
+
+**What the reviews caught, classified.** Gate A, two cold passes: the first cut's population was narrower than the
+class (read helpers and page entries invisible — a *brief-gap*: the brief said `kv.Read`; the engine hands a script
+live keys three ways) and the control-flow rule that produced the zero had no vector (*implementation-bug*); the second
+pass found `exprString` collapsing unhandled nodes to equal strings, the loop-key rule not implemented as documented,
+a hatch on a `def` waiving a whole block, and `None`-defaulted pins judged pinned — all *implementation-bugs*, fixed.
+Gate B, one cold pass with the security lens: CompleteCredentialLink half-derived with the failing vector re-pointed
+to the population where it trivially holds (*review-over-reach* on the builder's part, the class already in memory);
+a rejection test satisfying the shape gate (*design-gap* in the gate's rule, closed by the author-declares name);
+`EgressReads` hydrate (*implementation-bug*). Both minted one `lint-gates.md` dossier entry (a zero-verdict gate:
+derive the population from the engine, vector the narrowing rule, count only author-declared vectors). ClaimIdentity
+and UnlinkCredential widenings were judged safe on the NFR-S6 plane — every derived key sits inside the descriptor's
+closed set, and the timing probe (an env-gated instrument, both arms run) shows no gap.
+
+## Residual (stated in the Retired entries, not filed)
+
+The dossier holds 19 live entries against its cap of 12. The walk halves of both classes are in their Retired text.

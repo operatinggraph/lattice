@@ -555,6 +555,28 @@ repoints — `ListLinks` returns tombstoned links in the page and keys sort by t
 (`atStudio`, `ledBy`, `appliesToUnit`, `assignedTo`) pages with the bounded first-live cursor loop; grep the
 relation's `make_link_tombstone` writers before choosing, and price a per-candidate walk as
 `candidates × (1 + limit)` against `DefaultLiveReadBudget`.
+Retired: *a shared-vertex repoint needs a content-and-revision gate against every other writer* —
+`lint-live-read-pinned-mutation` fails a class (e)/(c)/unannotated `kv.Read` (directly, through a read helper such as
+`vertex_live`, or a `kv.Links` page entry's `.key`) followed reachably in the same def by an `update`/`tombstone` on
+that key with no `expectedRevision` (six sightings 2026-08-15 → 2026-09-13; the 2026-09-14 census pinned seven more
+sites, `# occ: live-unpinned <why>` declares a deliberate bare retire). The half that stays a walk: the SUBJECT
+re-derived on the OCC re-execute (wellness `ReassignSessionSeries` — pin the caller's `anchorKey` + stamp and refuse
+`AnchorMoved`), an enumeration-shaped CAP (café `RefundCafeCharge` — keep the tally as a field on the declared read),
+a directOp rewriting a maintained aspect off the Weaver row alone (clinic `AdvanceVisitSeries` — declare
+`row.entityKey.<aspect>`, refuse `StaleRow`), a read whose result reaches the mutation through a candidate list or an
+`.extend`-returned batch, and a `(a)`/`(d)`/`(f)` annotation, which the gate trusts as declared rather than verifies
+against the dispatcher (that half is `lint-derive-reads-bare-vector`'s).
+Retired: *a guard's OCC rests on whoever writes its read declaration* — `lint-derive-reads-bare-vector` requires,
+for every op a script's `derive_reads` dispatches on, a `Test*UndeclaredSubmitter*` vector whose envelope declares no
+`Reads`/`OptionalReads`/`EgressReads`; the read-drift guard armed on every `CapabilityPipeline` then fails any lazy
+read, and a key the derivation cannot return (a `ddl[…].metaKey`-shaped ownership link) is read from `state` and
+refused absent, the vector asserting that refusal (lease-signing, the second sighting). The 2026-09-14 census found
+the same false-refusal shape in seven `derive_reads` — the vertex ROOT was never derived, so `vertex_alive(state, k)`
+read a live undeclared target as unknown — and one real OCC hole (`RescheduleAppointment`'s bare `.schedule` update).
+The walk that remains: which keys an op DELIBERATELY withholds from derivation, and why — ClaimIdentity's
+`.credentialBinding` (a claimed target would pay an envelope decrypt an unclaimed one does not) and
+RevokeIdentityClaim's three required Reads (an undeclared submitter is refused, never served) — each stated at the
+arm, so a widening mirrors the reason and not the shape.
 
 - **A live `kv.Read` of a sensitive aspect FAILS, it does not degrade, when its holder is shredded** — the vault
   returns `ErrKeyShredded` and the script dies `ScriptFailed`, so an op that "reads a sibling name if present" is
@@ -574,35 +596,6 @@ relation's `make_link_tombstone` writers before choosing, and price a per-candid
   Minted: café `cafeArrearsReminders` (2026-09-06), live — the one account with no `heldFor` lease was never
   evaluated. Check: every `Params` value names a column the anchor itself projects (`entityKey` or an aspect on it);
   anything reached by a walk is resolved by the op from state, and one lens pin seeds the anchor with the walk missing.
-- **A shared-vertex repoint needs a content-and-revision gate against EVERY other writer of that vertex, not
-  just atomicity within its own batch.** A script's own mutation batch being atomic (CAS-guarded) proves
-  nothing about a DIFFERENT op racing the same key between that op's own live read and its commit — the
-  gap is closed only by (a) checking the read's *content* still matches what justified the mutation and
-  (b) pinning the write to *that same read's revision*, not a later step-8 fallback re-read. Minted:
-  identity-domain's `CreateUnclaimedIdentity` identityindex repoint (2026-08-15) — two independent cold
-  reviews found `PurgeIdentityDedupFootprint`'s sweep and `MergeIdentity`'s repoint could each destroy or
-  steal a vertex the repoint had just legitimately claimed. Check: for any script that reads a vertex live
-  (`kv.Read`, read-posture (e)) then conditionally mutates it, grep for `expectedRevision` on that exact
-  mutation — its absence, or a bare content check without the revision pin, is the defect.
-  **Second sighting (2026-08-23), and the precedent was the carrier:** `unbind_identity_credentials.go`'s
-  `owner_binding_rewrite` was the shape a new op was told to mirror, and it had no pin — so the mirror
-  would have inherited the defect had it copied instead of checking. `applyHydratedRevisions` supplies a
-  revision only for keys a DISPATCHER declared, and step 8's own prior-document read happens *after* the
-  script filtered the array, so it closes the window it measures rather than the one that matters. Both
-  ops now pin, each proven by dropping the pin and watching the racing write be accepted instead of
-  conflicting. **Mechanize on the next sighting.** Third sighting (café `RefundCafeCharge`, 2026-09-05):
-  a refund ceiling computed from a paged `reverses` enumeration let two concurrent refunds jointly exceed the
-  charge — closed by keeping the tally as a field on the reversed charge's own declared `.entry` read and
-  pinning the upsert to that read's revision; the enumeration-shaped cap is the tell. Fourth sighting (clinic `BindPatientIdentity`,
-  2026-09-06): the `.demographics` rewrite used the unconditioned upsert while its own comment claimed a pin —
-  caught in the fix round; `make_aspect_update_occ` now carries `demo.revision`. Fifth sighting (wellness `ReassignSessionSeries`, 2026-09-13), on the SUBJECT axis: an op that derives WHICH vertex it
-  acts on from a walk at execution time (the earliest still-upcoming occurrence) re-derives it on the OCC re-execute —
-  the revision pin on the aspect held, the premise did not, and a stale roster or a concurrent single-class move flipped
-  the whole run's shift; caught cold as BLOCKING. Pin the subject the caller saw in the payload (`anchorKey` +
-  `anchorStartsAt`) and refuse on mismatch (`AnchorMoved`). Sixth sighting (clinic `AdvanceVisitSeries`, 2026-09-13, caught cold): a directOp
-  rewrote a maintained aspect (`.progress`) off the Weaver row alone, hydrating only the vertex root — a redelivered older
-  row rolled the series back. The playbook declares `row.entityKey.<aspect>`, the op refuses `StaleRow` unless the recorded
-  value matches the row's, and writes `_occ` on the hydrated revision.
 - **A declared sensitive read is decrypted BEFORE the script runs, so declaring it unconditionally can
   break the very population the op exists for** — step 4 hydrates every declared aspect, and a sensitive
   one decrypts under its owner's DEK. An op whose whole purpose is cleaning up after an erased owner
@@ -662,18 +655,6 @@ relation's `make_link_tombstone` writers before choosing, and price a per-candid
   (2026-09-13, caught cold). Check: for every link a refund/settlement mint walks, list every op that can reach that
   walk and the states each leaves the anchor in; a probe that exists on one of them exists on all, or the exclusion is
   stated per pair (CancelBooking is exempt only because it tombstones the anchor).
-- **A guard's OCC rests on whoever writes its read declaration.** `contextHint` is submitter-supplied and never
-  enforced, so a cap that reads a maintained aspect declared only in a descriptor's `optionalReads` is hydrated —
-  and its bare update revision-conditioned — only for callers who repeat the declaration; a caller that omits it
-  gets a live read and a last-write-wins update under concurrency. Minted: café `CreditCafeAccount`'s `.balance`
-  cap (2026-09-05), caught cold; clinic-ledger carried the identical shape from the precedent it mirrored. Check:
-  any key a script's correctness depends on being HYDRATED (an OCC-conditioned update, a read-before-create) is
-  returned by the script's own `derive_reads`, and one test submits with an empty `contextHint`. **Second sighting
-  (lease-signing `TombstoneSupersededLeaseServiceInstance`, 2026-09-13), from the other side:** moving six of seven
-  reads into `derive_reads` left the one key it cannot compute (the `ddl[…].metaKey`-shaped ownership link) as the
-  sole undeclared read, and a bare payload ran to a committed tombstone off a lazy `kv.Read` where it had failed
-  loudly before — caught cold. A key `derive_reads` cannot return is read from `state` and refused when absent,
-  never `kv.Read`; the empty-`contextHint` test is what proves it (the harness's read-drift log names the leak).
 - **An amount cap written for the self-service leg leaves the staff leg unbounded, and a bounded replay hoisted
   above the ownership proof is an amplification primitive.** The trust argument ("no rail verifies the payment")
   is a property of the op, not of who submitted it; and a history replay that runs before the walk proving the

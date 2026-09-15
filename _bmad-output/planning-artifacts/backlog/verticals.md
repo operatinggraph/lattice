@@ -63,6 +63,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-14 · `aa48d51f` · A live read decides no bare mutation on its key — `lint-live-read-pinned-mutation`; 7 sites pinned; dossier class retired ([census](../../../docs/reviews/verticals-packages-occ-gates-2026-09-14.md)).
+- 2026-09-14 · `284ffc66` · Every `derive_reads` op has a bare-envelope vector — `lint-derive-reads-bare-vector` (21 ops); seven derive_reads now derive the vertex root; dossier class retired; live.
 - 2026-09-14 · `cfbc2fa0` · `_packages.md` dossier censused over the vertical packages — 33 unlimited `kv.Links` walks fixed; `lint-links-page-limit` gates it ([census](../../../docs/reviews/verticals-packages-dossier-census-2026-09-14.md)).
 - 2026-09-14 · `0771d77e` · The desk sees a debtor and a charge names its visit — `visitRef`→`forVisit`, a fee-less `settles` refused, `reversesRef` confined, the statement aged per charge, arrears on the picker; live.
 - 2026-09-14 · `7a2809b8` · A follow-up is addressed only by a later visit with its own provider — `followUpReminders` folds `addressedAt` over the patient's visits and gates on it; `hasLaterVisit` carries the same conjuncts, goja-pinned; live.
@@ -86,7 +88,5 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-09-13 · `bd07bed1` · A patient's late cancel owes the no-show fee and the desk's correction bills it — a 24h self-path clock, the correction carries the fee, the ledger bills the fee's presence; proven live incl. the waiver reversal.
 - 2026-09-13 · `a2724692` · A recurring visit is credited by a booked visit, never by the clock — the gap opens only on a qualifying visit, the advance re-anchors on it (`StaleRow`+OCC), the Book calendar carries the due floor; proven live.
 - 2026-09-13 · `8a046814` · The renewal chain asks the tenant for a profile before a signature — a `submitProfile` leg gates `signRenewal`'s `pre`, three `staleUserTasks` arms, the inbox opens the profile form; the refused task signed live.
-- 2026-09-13 · `8a046814` · `SetApplicantProfile`'s descriptor declares `references` as the DDL's string array, not an integer count the script dropped to zero.
-- 2026-09-13 · `b1ad58ae` · A visit is completed or missed only once it has started — `SetAppointmentStatus` + `CorrectAppointmentStatus` refuse `completed`/`noShow` `NotYetStarted` before `startsAt`; the desk's buttons wait; proven live.
 
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*

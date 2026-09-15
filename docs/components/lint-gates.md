@@ -107,3 +107,17 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   when a rule's reader cannot parse a candidate it EMITS ("cannot read the argument list — write it in a shape the gate
   can read"); enumerate every spelling the language allows for the hazard value (`nil`, `T(nil)`, a never-assigned
   declaration, an alias) and give each a denied fixture beside its allowed twin.
+- **A gate whose corpus verdict is ZERO is only as good as the rule that produced the zero and the read surface it
+  was derived from — two shapes in one item (the OCC gates, 2026-09-14, both caught cold).** (a) `lint-live-read-pinned-
+  mutation`'s first cut read only `x = kv.Read(K)`: the corpus's canonical live read is one helper hop away
+  (`vertex_live(key)`, 19 sites) and a `kv.Links` page entry's `.key` is just as live (eight bare tombstones), so the
+  gate's "clean" covered a narrower population than the class it retired — and the control-flow rule that turned two
+  would-be findings into the zero had no self-test vector, so an engine regression would have kept the zero. Check:
+  derive the population from the ENGINE (every builtin and helper shape that hands a script a live key — `starlark_kv.go`,
+  the page-entry fields, the corpus's read helpers), reconcile its count against `lint-conventions`' own read census,
+  and give every rule that NARROWS the population a vector where it must still fire. (b) `lint-derive-reads-bare-vector`
+  checked test SHAPE (an envelope literal with no declaration), and a rejection test whose derivation short-circuits
+  to `{}` satisfied it for the very op that motivated the gate; the fix round then re-pointed a failing vector to the
+  population where the property holds trivially. Check: a shape gate over tests counts only author-declared vectors
+  (`Test*UndeclaredSubmitter*`), and a vector that fails on the production population is a finding about the
+  mechanism, never a reason to move the vector.
