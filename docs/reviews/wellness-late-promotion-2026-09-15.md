@@ -46,7 +46,10 @@ Winston-adjudicated (implementation-level; no contract surface, no fork).
    `submitted >= cutoff AND NOT (promotedAt != None AND promotedAt >= cutoff)`. A promotion that landed *before* the
    cutoff is an ordinary seat (the member had the window to cancel free); a direct `CreateBooking` inside the window
    is unchanged (the member chose the seat with the window disclosed). The exemption turns on the recorded stamp, not
-   on who submits — the same posture as the window itself. `SessionStarted` still binds.
+   on who submits — the same posture as the window itself. `SessionStarted` still binds. The cutoff is measured
+   against the session's *current* `startsAt`, so an operator's `ReassignSession` time move re-evaluates the
+   exemption (a class postponed a day makes a 63-min-out promotion an ordinary seat; one brought forward can make a
+   pre-cutoff promotion exempt) — consistent with the notice rationale, and operator-only.
 3. **The seating is badged.** `wellnessBookings` projects `promotedAt`; `/api/bookings` carries it; My Classes and the
    desk roster badge *Seated from the waitlist · <time>*; when the seating landed inside the window the member's card
    says cancelling is free until the class starts, and `isLateCancel` returns false for it (no forfeit confirm). The
@@ -97,3 +100,22 @@ Winston-adjudicated (implementation-level; no contract surface, no fork).
    a gap; no row.)
 7. **Non-goals:** the promotion gap's `freshUntil`; a promotion notification (the reminder already fires on promotion
    when the class is < 24 h out); the desk's booking-time window warning; the three sibling Wellness rows.
+
+### Build note (2026-09-15)
+
+Shipped `3dfd1b38` (CI green); brief `03c457d9`. Live on the shared stack (wellness-domain 0.27.10 diff-applied,
+`bin/wellness-app` cycled): a 1-seat priced class 86 min out, member A booked, B waitlisted; `ReassignSession`
+capacity 2 → Weaver's `PromoteWaitlistedBookings` seated B in ~1 s with `promotedAt 13:34:47Z`, projected by
+`wellnessBookings` and served by `/api/bookings` as B; the $10 class-price charge posted; B's `CancelBooking` at
+13:35:19Z (85 min out) tombstoned the booking and minted a `wellnessrefund` `reverses` marker — refunded, not
+forfeited. A second free class proved CancelBooking's own promotion path stamps `promotedAt` too. Both probe classes
+called off; the orphan release drained every booking and reversed A's charge — no debt left.
+
+Deviations from the brief: none in scope. Three test names in the brief were wrong (the scout's report named
+tests that do not exist); the builder used the real ones (`LateCancelForfeitsClassPrice`,
+`LateCancelPromotesWaitlisterAndKeepsForfeitedBooking`, `RefundWindowBoundary`) — a brief-gap, caught by the
+builder. Review classification: one implementation nit (the member's cancel-free note rendered on a free class the
+forfeit rule never reached — the vertical-apps dossier's *courtesy predicate vs the op's predicate* class, a
+sighting, fixed before merge); one design observation (the time-move re-evaluation, recorded above); no design gap,
+no convention finding. Adjacent finds fixed in the same commit: two history-narrating comments (`reminderBadge`,
+`bookingRow.ReminderSentAt`).
