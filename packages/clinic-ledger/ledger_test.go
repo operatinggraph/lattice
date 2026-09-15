@@ -1835,8 +1835,8 @@ func TestDeriveReads_BalanceKey(t *testing.T) {
 			t.Fatalf("derive_reads does not mention %q — that op's .balance update would be unconditioned whenever its submitter omits the declaration", want)
 		}
 	}
-	if !strings.Contains(derive, `optional_reads = [acct_key + ".balance"]`) || !strings.Contains(derive, `{"optionalReads": optional_reads}`) {
-		t.Fatalf("derive_reads no longer returns the account's .balance under optionalReads:\n%s", derive)
+	if !strings.Contains(derive, `optional_reads = [acct_key, acct_key + ".balance"]`) || !strings.Contains(derive, `{"optionalReads": optional_reads}`) {
+		t.Fatalf("derive_reads no longer returns the account root and its .balance under optionalReads:\n%s", derive)
 	}
 	if !strings.Contains(derive, `optional_reads.append(appt_key + ".status")`) {
 		t.Fatalf("derive_reads no longer returns the appointmentRef's .status — the NoFeeToSettle guard would read a key the submitter never conditioned:\n%s", derive)
@@ -1928,16 +1928,16 @@ func TestDeriveReads_AppointmentStatus(t *testing.T) {
 		payload map[string]any
 		want    []string
 	}{
-		{"debit with appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey + ".balance", apptKey + ".status"}},
-		{"debit with visitRef derives no status", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "visitRef": apptKey}, []string{acctKey + ".balance"}},
-		{"debit with malformed appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.appointment.short"}, []string{acctKey + ".balance"}},
-		{"debit with wrong-type appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.patient.CLDRAPPTHJKMNPQRSTUV"}, []string{acctKey + ".balance"}},
-		{"plain debit", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500}, []string{acctKey + ".balance"}},
-		{"credit with appointmentRef never derives status", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey + ".balance"}},
+		{"debit with appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey, acctKey + ".balance", apptKey + ".status"}},
+		{"debit with visitRef derives no status", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "visitRef": apptKey}, []string{acctKey, acctKey + ".balance"}},
+		{"debit with malformed appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.appointment.short"}, []string{acctKey, acctKey + ".balance"}},
+		{"debit with wrong-type appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.patient.CLDRAPPTHJKMNPQRSTUV"}, []string{acctKey, acctKey + ".balance"}},
+		{"plain debit", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500}, []string{acctKey, acctKey + ".balance"}},
+		{"credit with appointmentRef never derives status", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey, acctKey + ".balance"}},
 		{"malformed accountKey derives nothing", "ClinicDebitAccount", map[string]any{"accountKey": "nope", "amountCents": 2500, "appointmentRef": apptKey}, nil},
-		{"credit with reversesRef derives the postedTo link", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey + ".balance", "lnk.clinictransaction.CLDRTXNHJKMNPQRSTUVW.postedTo.clinicaccount.CLDRACCTHJKMNPQRSTUV"}},
-		{"credit with malformed reversesRef", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": "vtx.clinictransaction.short"}, []string{acctKey + ".balance"}},
-		{"debit with reversesRef derives no link", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey + ".balance"}},
+		{"credit with reversesRef derives the postedTo link", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey, acctKey + ".balance", "lnk.clinictransaction.CLDRTXNHJKMNPQRSTUVW.postedTo.clinicaccount.CLDRACCTHJKMNPQRSTUV"}},
+		{"credit with malformed reversesRef", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": "vtx.clinictransaction.short"}, []string{acctKey, acctKey + ".balance"}},
+		{"debit with reversesRef derives no link", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey, acctKey + ".balance"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

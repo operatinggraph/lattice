@@ -173,7 +173,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-opmeta-required-fields lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-derive-reads-bare-vector lint-opmeta-required-fields lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2411,6 +2411,33 @@ lint-link-target-count:
 lint-links-page-limit:
 	@echo "==> Linting kv.Links calls for an explicit page limit..."
 	go run ./scripts/lint-links-page-limit.go
+
+## lint-derive-reads-bare-vector — every op a DDL script's derive_reads
+## dispatches on has, in a top-level test function named
+## Test*UndeclaredSubmitter*, at least one OperationEnvelope{…} submission
+## declaring NO Reads, NO OptionalReads AND NO EgressReads (an
+## Enumerations-only ContextHint still counts: a live kv.Links walk is a
+## caller-declared class (e) channel derive_reads never populates; EgressReads
+## DOES hydrate like a declared read, step4_hydrate.go:459-500, so a non-empty
+## one is NOT bare). Step 4's descriptor floor only DEMOTES a required read to
+## optional, never adds one, so a key a DDL's own derive_reads does not return
+## is hydrated only if the submitter's contextHint names it — a submitter that
+## skips the declaration silently loses the Contract #3 §3.2 auto-conditioning
+## a bare update needs (café CreditCafeAccount, 2026-09-05; lease-signing
+## TombstoneSupersededLeaseServiceInstance, 2026-09-13, second sighting).
+## Parses every shipped package script (the compiled pkgregistry corpus) for a
+## top-level derive_reads (matched by name alone, any arity) and the op names
+## its comparisons resolve to (literals or module-level string/list constants;
+## an unresolved comparison, or none at all, governs every op the DDL permits
+## rather than silently under-approving), then checks the named test functions
+## for the bare vector — a bare literal outside that name shape is invisible,
+## closing a phantom-vector hole a cold review found (2026-09-14): a
+## malformed-payload test whose derive_reads short-circuits to {} no longer
+## counts. Self-tests on every run and refuses an all-clear over zero governed
+## ops. Advisory by default; STRICT=1 exits non-zero.
+lint-derive-reads-bare-vector:
+	@echo "==> Linting derive_reads ops for a bare-submitter test vector..."
+	go run ./scripts/lint-derive-reads-bare-vector.go
 
 ## lint-opmeta-required-fields — a payload field a package script refuses
 ## without is declared `required` by the op's InputSchema (or filled by the

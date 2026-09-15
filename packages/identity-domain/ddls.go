@@ -1173,6 +1173,56 @@ def derive_reads(op):
         # payload.
         keys = [credential_index_key(op.actor)]
         target = getattr(p, "targetIdentityKey", None)
+        # The TARGET root, its .state, and the secret aspect the branch
+        # compares against (.claimKey for ClaimIdentity, .linkKey for
+        # CompleteCredentialLink) ride the same declaration: execute()'s own
+        # vertex_alive(state, lookup_key) / read_state / state[...] checks
+        # decide no-target/wrong-state by testing the key not in state, which
+        # cannot tell "genuinely absent" from "never declared" apart. An
+        # undeclared submitter would see a live, unclaimed target refused
+        # no-target and its claim-attempts counter misattributed — exactly
+        # the Health-KV attribution NFR-S6's own accumulate-then-fail-once
+        # shape exists to keep precise. Deriving them makes every submitter's
+        # hydration profile the SAME snapshot lookup regardless of whether it
+        # remembered to declare — closing a timing gap in the same NFR-S6
+        # direction the erasure gate keys below already derive in, not
+        # against it.
+        if is_identity_vertex_key(target):
+            keys.append(target)
+            keys.append(target + ".state")
+            if ot == "ClaimIdentity":
+                keys.append(target + ".claimKey")
+                # .credentialBinding stays UNDECLARED for ClaimIdentity only:
+                # ClaimIdentity's target is, by the state machine, never yet
+                # claimed at this point (current_state must be "unclaimed" a
+                # few lines below in execute()), so hydrating it costs an
+                # envelope KVGet plus a decrypt on a claimed target and
+                # nothing on an unclaimed one — the exact claimed-vs-unclaimed
+                # timing separation NFR-S6 forbids (claim_timing_probe_test.go).
+                # It would also fault a claimed-then-shredded target at
+                # hydration instead of letting the erasure gate count it.
+                # ClaimIdentity writes the binding with an unconditioned
+                # update instead (see the branch).
+            else:
+                keys.append(target + ".linkKey")
+                # CompleteCredentialLink DOES derive .credentialBinding,
+                # unlike ClaimIdentity: this op's whole population is a
+                # target already in state "claimed" (execute() refuses
+                # target_state != "claimed" below), so every real dispatch
+                # decrypts it regardless of who declares what — there is no
+                # claimed-vs-unclaimed timing SEPARATION left to leak here,
+                # only a claimed-vs-claimed constant. It is also already
+                # inside the NFR-S6 closed declared-read set for this op
+                # (opmetas.go's Dispatch.OptionalReads, mirrored by both
+                # shipped dispatchers, identityceremony.
+                # CompleteCredentialLinkContextHint), so deriving it adds no
+                # key beyond what a well-behaved caller already sends — it
+                # only removes the one chance a caller has to forget it and
+                # turn an ordinary second-credential bind into a
+                # RevisionConflict (execute()'s credential_binding_first_write
+                # otherwise misreads a live aspect as absent and attempts a
+                # CREATE against it).
+                keys.append(target + ".credentialBinding")
         # The two keys the §6 gate reads -- the erasure marker and the piiKey
         # envelope -- for BOTH ends of the boundTo this op emits, since
         # UnbindIdentityCredentials erases that link in both directions on
@@ -1220,17 +1270,9 @@ def derive_reads(op):
                 # deterministic link key built from the payload target and the
                 # package's own pinned role literal -- derivable here for
                 # exactly the reason it was left underived before: no browser
-                # client can compute it, but the package can.
+                # client can compute it, but the package can. (.credentialBinding's
+                # own per-arm treatment is above, beside .claimKey/.linkKey.)
                 keys.append(consumer_grant_key(target))
-                # The target's .credentialBinding is deliberately NOT derived
-                # here. It is sensitive: on a claimed target hydrating it costs
-                # an envelope KVGet plus a decrypt, on an unclaimed one nothing,
-                # and that difference is measurable on the wire -- the exact
-                # claimed-vs-unclaimed timing separation NFR-S6 forbids
-                # (claim_timing_probe_test.go). It would also fault a
-                # claimed-then-shredded target at hydration instead of letting
-                # the erasure gate count it. ClaimIdentity writes the binding
-                # with an unconditioned update instead (see the branch).
         return {"optionalReads": keys}
 
     if ot == "RevokeIdentityClaim":
@@ -1243,6 +1285,22 @@ def derive_reads(op):
         # if live, and most identities carry no armed link secret; the erasure
         # gate keys are absent on every identity nobody is erasing.
         #
+        # The vertex/.state/.credentialBinding are DELIBERATELY not derived
+        # here, unlike the account/identity roots this file derives elsewhere.
+        # RevokeIdentityClaim is operator-only (permissions.go) — the verb a
+        # registrar who kept a claim secret is undone by — and its descriptor
+        # (opmetas.go) lists those three as REQUIRED Reads, not optional: an
+        # undeclared submitter therefore hydrates none of them, execute()'s
+        # own identity_key-not-in-state / read_state / binding checks read
+        # each as absent, and the op is refused no-target — fail-closed, no
+        # mutation reaches the commit batch — rather than proceeding on a
+        # partial view of an identity this verb is about to unwind. A
+        # submitter that DOES declare them gets the ordinary Contract #3 §3.2
+        # auto-conditioning on the hydrated revision. Deriving them here would
+        # let an under-declaring caller succeed anyway, which is the opposite
+        # of what this verb's standing (operator, not the person being
+        # revoked) requires of it.
+        #
         # Guarded by the same grammar predicate the branch's own no-target check
         # uses, so a malformed key is refused with that word rather than
         # surfacing as DeriveReadsInvalid before the script runs.
@@ -1254,16 +1312,29 @@ def derive_reads(op):
         return {"optionalReads": keys}
 
     if ot == "UnlinkCredential":
-        # The index and the link this op tombstones. Both derive from the
+        # U (op.actor) is the target of this self-scoped op -- it removes an
+        # entry from its OWN credentials array -- so U's own root, .state,
+        # .mergedInto and .credentialBinding ride this declaration
+        # unconditionally: op.actor is always known (the authenticated
+        # caller), never payload-supplied, and execute()'s own
+        # state[u_key]/read_state/read_merged_into checks decide
+        # no-target/wrong-state by testing the key not in state, which cannot
+        # tell "genuinely absent" from "never declared" apart.
+        #
+        # The index and the bound-to link this op tombstones derive from the
         # payload's credentialActorKey under package semantics, and both are
         # optional: a caller naming a credential that is not bound takes the
         # not-found branch, which must not fault on a hydration miss.
-        credential_actor_key = getattr(p, "credentialActorKey", None)
-        if not is_identity_vertex_key(credential_actor_key):
-            return {}
-        keys = [credential_index_key(credential_actor_key)]
+        keys = []
         if is_identity_vertex_key(op.actor):
-            keys.append(credential_bound_to_key(credential_actor_key, op.actor))
+            keys += [op.actor, op.actor + ".state", op.actor + ".mergedInto", op.actor + ".credentialBinding"]
+        credential_actor_key = getattr(p, "credentialActorKey", None)
+        if is_identity_vertex_key(credential_actor_key):
+            keys.append(credential_index_key(credential_actor_key))
+            if is_identity_vertex_key(op.actor):
+                keys.append(credential_bound_to_key(credential_actor_key, op.actor))
+        if len(keys) == 0:
+            return {}
         return {"optionalReads": keys}
 
     if ot == "ReconcileCredentialBinding":

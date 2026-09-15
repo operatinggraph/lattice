@@ -323,3 +323,255 @@ func TestClaimIdentity_RebindsAfterUnlink(t *testing.T) {
 		t.Fatalf("credentialindex points at %q, want the newly claimed %q", got, targetKey)
 	}
 }
+
+// TestClaimIdentity_UndeclaredSubmitter_Claims: a ClaimIdentity declaring NO
+// ContextHint at all claims the identity. derive_reads' own optionalReads
+// carries the target root, its .state and its .claimKey, so
+// vertex_alive(state, lookup_key) / read_state / state[...] see the live,
+// unclaimed target and its claim-key hash rather than misreading each
+// undeclared key as absent (which would misattribute the claim-attempts
+// Health-KV counter to no-target instead of the genuine accept).
+func TestClaimIdentity_UndeclaredSubmitter_Claims(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newCreatePipeline(t, ctx, conn, "claim-nodecl")
+
+	createReqID := testutil.GenReqID("ClaimNoDeclCreate")
+	identityKey, claimKeyPlaintext := createIdentityAndGetKeys(t, ctx, conn, cp, cons, createReqID)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("ClaimNoDeclDo000"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClaimIdentity",
+		Actor:         consumerActorKey,
+		SubmittedAt:   "2026-05-22T10:01:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"claimKey":"` + claimKeyPlaintext + `","targetIdentityKey":"` + identityKey + `"}`),
+		AuthContext:   &processor.AuthContext{Target: consumerActorKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	stateAspect := readAspectData(t, ctx, conn, identityKey+".state")
+	if got, _ := stateAspect["value"].(string); got != "claimed" {
+		t.Fatalf("state = %q, want claimed — the derivation must hydrate the target root/.state/.claimKey for the claim to run at all", got)
+	}
+}
+
+// TestCompleteCredentialLink_UndeclaredSubmitter_BindsCredential_ClaimedTarget:
+// a CompleteCredentialLink declaring NO ContextHint at all binds a SECOND
+// credential to a target already claimed via ClaimIdentity — the population
+// this op exists for (target_state must be "claimed", execute()'s own guard).
+// derive_reads' own optionalReads carries the target root, its .state, its
+// .linkKey AND its .credentialBinding (this DDL's own derive_reads comment:
+// CompleteCredentialLink derives .credentialBinding, unlike ClaimIdentity,
+// because every real dispatch of this op is against an already-claimed
+// target, so there is no claimed-vs-unclaimed NFR-S6 timing separation left
+// to leak — only a claimed-vs-claimed constant), so
+// credential_binding_first_write sees the LIVE aspect and appends to it
+// rather than misreading an undeclared key as absent and attempting a CREATE
+// against a document that already exists (RevisionConflict).
+func TestCompleteCredentialLink_UndeclaredSubmitter_BindsCredential_ClaimedTarget(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-nodecl-claimed")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "CmplNoDeclClmd")
+	seedIdentityCapDoc(t, ctx, conn, uKey, "InitiateCredentialLink")
+
+	const secret = "link-secret-nodecl-claimed"
+	testutil.PublishOp(t, conn, initiateLinkEnv(testutil.GenReqID("CmplNdClArm"), uKey, sha256HexOf(secret)))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("CmplNdClDo0000"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CompleteCredentialLink",
+		Actor:         secondCredActorKey,
+		SubmittedAt:   "2026-07-11T10:01:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"targetIdentityKey":"` + uKey + `","linkKey":"` + secret + `"}`),
+		AuthContext:   &processor.AuthContext{Target: secondCredActorKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, credentialIndexKey(secondCredActorKey)); err != nil {
+		t.Fatalf("no credentialindex vertex for the bound credential — the derivation must hydrate the target root/.state/.linkKey for the bind to run at all: %v", err)
+	}
+	bindData := readDecryptedAspectData(t, ctx, conn, uKey, "credentialBinding")
+	creds, _ := bindData["credentials"].([]interface{})
+	found := false
+	for _, c := range creds {
+		m, _ := c.(map[string]interface{})
+		if got, _ := m["actorKey"].(string); got == secondCredActorKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("credentialBinding.credentials = %+v, want an entry for %q — the derivation must hydrate the LIVE .credentialBinding for the second bind to append rather than collide", creds, secondCredActorKey)
+	}
+}
+
+// TestCompleteCredentialLink_UndeclaredSubmitter_BindsCredential_ScenarioB: the
+// same bare envelope against a Scenario-B target (ProvisionConsumerIdentity,
+// never claimed via ClaimIdentity) — the other population CompleteCredentialLink
+// serves. Its .credentialBinding is genuinely absent on the server too, so
+// credential_binding_first_write's binding_absent branch creates the aspect
+// fresh, exercising the derivation's OTHER branch from the claimed-target
+// vector above.
+func TestCompleteCredentialLink_UndeclaredSubmitter_BindsCredential_ScenarioB(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "cmpl-nodecl-scenb")
+
+	scenarioBKey := "vtx.identity.SCNBUNDCLHJKMNPQRST1"
+	roleKey := consumerRoleKey(t)
+	testutil.PublishOp(t, conn, provisionEnvelope(t, testutil.GenReqID("CmplNoDeclProv"), scenarioBKey, roleKey, "2026-07-11T09:00:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	seedIdentityCapDoc(t, ctx, conn, scenarioBKey, "InitiateCredentialLink")
+	const secret = "link-secret-nodecl-bare"
+	testutil.PublishOp(t, conn, initiateLinkEnv(testutil.GenReqID("CmplNoDeclArm"), scenarioBKey, sha256HexOf(secret)))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("CmplNoDeclDo000"),
+		Lane:          processor.LaneDefault,
+		OperationType: "CompleteCredentialLink",
+		Actor:         secondCredActorKey,
+		SubmittedAt:   "2026-07-11T10:01:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"targetIdentityKey":"` + scenarioBKey + `","linkKey":"` + secret + `"}`),
+		AuthContext:   &processor.AuthContext{Target: secondCredActorKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, credentialIndexKey(secondCredActorKey)); err != nil {
+		t.Fatalf("no credentialindex vertex for the bound credential — the derivation must hydrate the target root/.state/.linkKey for the bind to run at all: %v", err)
+	}
+}
+
+// TestUnlinkCredential_UndeclaredSubmitter_Unlinks: an UnlinkCredential
+// declaring NO ContextHint at all unlinks the second credential. derive_reads'
+// own optionalReads carries U's own root/.state/.mergedInto/.credentialBinding
+// (op.actor is always known — it is the authenticated caller, never
+// payload-supplied), so state[u_key] / read_state / read_merged_into see U's
+// live identity rather than misreading an undeclared key as absent (which
+// would fail no-target/wrong-state on a legitimate self-unlink).
+func TestUnlinkCredential_UndeclaredSubmitter_Unlinks(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "unlnk-nodecl")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "UnlnkNoDecl")
+	linkSecondCredential(t, ctx, conn, cp, cons, uKey, secondCredActorKey, "UnlnkNoDeclLink", "link-secret-unlnk-nodecl")
+	seedIdentityCapDoc(t, ctx, conn, uKey, "UnlinkCredential")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("UnlnkNoDeclDo00"),
+		Lane:          processor.LaneDefault,
+		OperationType: "UnlinkCredential",
+		Actor:         uKey,
+		SubmittedAt:   "2026-07-12T10:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"credentialActorKey":"` + secondCredActorKey + `"}`),
+		AuthContext:   &processor.AuthContext{Target: uKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	// The derivation must hydrate U's own root/.state/.mergedInto/
+	// .credentialBinding for the unlink to run at all: absent that, the
+	// bare submission above would have failed no-target/wrong-state instead
+	// of reaching this tombstone.
+	assertTombstonedBoundTo(t, ctx, conn, secondCredActorKey, uKey)
+}
+
+// TestRevokeIdentityClaim_UndeclaredSubmitter_RefusedLiteral: a bare
+// RevokeIdentityClaim (ContextHint: nil) against a live, claimed identity is
+// refused no-target, and nothing commits. RevokeIdentityClaim's own
+// derive_reads arm does not derive the vertex/.state/.credentialBinding its
+// descriptor lists as REQUIRED Reads (ddls.go), so an undeclared submitter
+// hydrates none of them and execute()'s own `identity_key not in state` check
+// reads the live identity as absent — the operator-only standing this verb
+// requires makes an under-declaring caller's refusal the correct outcome, not
+// a derivation gap to close. (revoke_identity_claim_test.go's own
+// TestRevokeIdentityClaim_UndeclaredSubmitter_Refused pins the same property
+// through the package's revokeEnv helper, whose composite literal sits inside
+// that helper's body and so is invisible to a literal-only static scan; this
+// vector restates it as a literal envelope for the census to see.)
+func TestRevokeIdentityClaim_UndeclaredSubmitter_RefusedLiteral(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "rvk-nodecl-lit")
+
+	identityKey := claimFreshIdentity(t, ctx, conn, cp, cons, "RvkNoDeclLit")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("RvkNoDeclLitDo0"),
+		Lane:          processor.LaneDefault,
+		OperationType: "RevokeIdentityClaim",
+		Actor:         staffActorKey,
+		SubmittedAt:   "2026-07-13T10:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"identityKey":"` + identityKey + `","newClaimKeyHash":"` + sha256HexOf("whatever") + `"}`),
+		ContextHint:   nil,
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %v, want Rejected (reply=%+v)", outcome, reply)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "no-target") {
+		t.Fatalf("want a refusal naming no-target, got %+v", reply.Error)
+	}
+	stateAspect := readAspectData(t, ctx, conn, identityKey+".state")
+	if got, _ := stateAspect["value"].(string); got != "claimed" {
+		t.Fatalf("state = %q, want claimed — an undeclared submit must change nothing", got)
+	}
+}
+
+// TestReconcileCredentialBinding_UndeclaredSubmitter_RestoresLink: a
+// ReconcileCredentialBinding declaring NO ContextHint at all restores a
+// boundTo link the link plane dropped. derive_reads' own optionalReads
+// carries credentialIndexKey(credentialActorKey), the credentialActorKey
+// root, the boundTo link, and both ends' erasure-gate keys — the op's only
+// dispatcher declares no contextHint at all (this DDL's own derive_reads
+// comment), so class (g) is the sole source of every key it reads. The
+// package's own reconcileEnv helper (credential_reconcile_test.go) builds the
+// identical literal shape, but the composite sits inside that helper's body
+// and so is invisible to a literal-only static scan; this vector restates it
+// directly so the census can see it.
+func TestReconcileCredentialBinding_UndeclaredSubmitter_RestoresLink(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupTestEnv(t)
+	cp, cons := newLinkPipeline(t, ctx, conn, "icr-nodecl-lit")
+
+	uKey := claimFreshIdentity(t, ctx, conn, cp, cons, "ReconNoDeclLit")
+	wantBoundAt := credentialIndexBoundAt(t, ctx, conn, consumerActorKey)
+	dropBoundToLink(t, ctx, conn, consumerActorKey, uKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("ReconNoDeclLitDo"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ReconcileCredentialBinding",
+		Actor:         staffActorKey,
+		SubmittedAt:   "2026-08-03T12:00:00Z",
+		Class:         "identity",
+		Payload:       json.RawMessage(`{"credentialActorKey":"` + consumerActorKey + `","identityKey":"` + uKey + `"}`),
+		AuthContext:   &processor.AuthContext{Target: uKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	data := assertLiveBoundTo(t, ctx, conn, consumerActorKey, uKey)
+	if got, _ := data["boundAt"].(string); got != wantBoundAt {
+		t.Fatalf("reconciled boundAt = %q, want the index's %q — the derivation must hydrate the index for the repair to carry the original binding instant", got, wantBoundAt)
+	}
+}

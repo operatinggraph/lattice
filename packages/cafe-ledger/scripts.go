@@ -359,12 +359,20 @@ def derive_reads(op):
     # optionalReads, never reads: every account alive today carries no .arrears
     # at all, and a required read's absence is a HydrationMiss that would block
     # the very first evaluation of each one.
+    #
+    # The account ROOT itself rides the same declaration, for a distinct
+    # reason: vertex_alive(state, acct_key) below decides UnknownAccount by
+    # testing acct_key not in state, which cannot tell "genuinely absent" from
+    # "never declared or derived" apart. Any dispatcher that omits the root
+    # from its own contextHint (Weaver's cafeArrearsReminders target and every
+    # OpMetaSpec descriptor both declare it too, but neither is enforced) would
+    # otherwise see a live account rejected as unknown.
     if op.operationType != "EvaluateCafeArrears":
         return {}
     acct_key = optional_string(op.payload, "accountKey")
     if not is_cafeaccount_key(acct_key):
         return {}
-    return {"optionalReads": [acct_key + ".arrears"]}
+    return {"optionalReads": [acct_key, acct_key + ".arrears"]}
 
 def execute(state, op):
     ot = op.operationType
@@ -1779,6 +1787,21 @@ def is_cafeaccount_key(key):
             return False
     return True
 
+def is_cafetransaction_key(key):
+    # Same Contract #1 grammar check as is_cafeaccount_key, for the
+    # cafetransaction type reversesRef names.
+    if key == None or type(key) != type(""):
+        return False
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "cafetransaction":
+        return False
+    if len(parts[2]) != 20:
+        return False
+    for ch in parts[2].elems():
+        if ch not in NANOID_ALPHABET:
+            return False
+    return True
+
 def derive_reads(op):
     # Contract #2 §2.5 class (g). The Processor runs this at the head of step 4
     # and merges the result into the declared read set, so the account's
@@ -1808,6 +1831,30 @@ def derive_reads(op):
     # the key is declared, and the aspect is absent on every account until
     # something opens an episode on it.
     #
+    # The account ROOT itself rides the same declaration too, for a distinct
+    # reason: post_entry's vertex_alive(state, acct_key) decides UnknownAccount
+    # by testing acct_key not in state, which cannot tell "genuinely absent"
+    # from "never declared or derived" apart. Every dispatcher's own static
+    # declaration (opmetas.go's OpDispatchSpec.Reads, cafe-domain's
+    # targets.go) already names the root too, but that is a hint a caller may
+    # ignore, not an enforcement.
+    #
+    # reversesRef and its .entry (RefundCafeCharge only) ride the same
+    # declaration too: both are pure functions of payload.reversesRef under
+    # this DDL's own grammar, exactly like the account root. Undeclared, they
+    # left reversed_charge's reverses_key-not-in-state check refusing a
+    # LEGITIMATE refund with "caller must declare X" -- a submitter that never
+    # learned the platform's Starlark grammar has no way to satisfy that short
+    # of reading this script, so it was a live-account-refused-as-absent bug
+    # of the same shape the root fix above closes, not a load-bearing guard:
+    # the entry's refundedCents CAS still pins on the hydrated revision for
+    # every submitter, derived or declared. A malformed reversesRef derives
+    # neither key, so post_entry's own parts_of still raises the real
+    # InvalidArgument for that case; the "caller must declare" message stays
+    # in execute() as the defensive fallback for a well-formed key nothing
+    # derived it for (a payload shape mismatched against this pre-pass), never
+    # reached in the ordinary case.
+    #
     # The op argument is a struct -- op.operationType, op.actor, op.payload
     # (also a struct). No kv, no nanoid: both are fail-closed stubs in this
     # pass, and a derivation that reads state is a read, not a derivation.
@@ -1820,7 +1867,13 @@ def derive_reads(op):
     acct_key = optional_string(op.payload, "accountKey")
     if not is_cafeaccount_key(acct_key):
         return {}
-    return {"optionalReads": [acct_key + ".balance", acct_key + ".arrears"]}
+    keys = [acct_key, acct_key + ".balance", acct_key + ".arrears"]
+    if ot == "RefundCafeCharge":
+        reverses_key = optional_string(op.payload, "reversesRef")
+        if is_cafetransaction_key(reverses_key):
+            keys.append(reverses_key)
+            keys.append(reverses_key + ".entry")
+    return {"optionalReads": keys}
 
 def execute(state, op):
     ot = op.operationType

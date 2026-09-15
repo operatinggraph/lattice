@@ -452,6 +452,32 @@ jobs:
         # all-clear over zero examined scripts.
         run: STRICT=1 go run ./scripts/lint-links-page-limit.go
 
+      - name: Derive-reads bare-vector lint (a script's derive_reads is proven by a submitter declaring nothing)
+        # contextHint is submitter-supplied and step 4's descriptor floor only
+        # DEMOTES a required read to optional, never adds one, so a key a
+        # DDL's own derive_reads does not return is hydrated only if the
+        # submitter's contextHint names it (café CreditCafeAccount,
+        # 2026-09-05; lease-signing TombstoneSupersededLeaseServiceInstance,
+        # 2026-09-13, second sighting). This gate parses every shipped
+        # package script for a top-level derive_reads (matched by name
+        # alone, any arity) and the op names its comparisons resolve to
+        # (literals or module-level string/list constants; an unresolved
+        # comparison, or none at all, governs every op the DDL permits
+        # rather than silently under-approving), then checks a top-level
+        # test function named Test*UndeclaredSubmitter* for at least one
+        # OperationEnvelope{…} literal declaring NO Reads, OptionalReads OR
+        # EgressReads (Enumerations may still be present — a live kv.Links
+        # walk is a caller-declared class (e) channel derive_reads never
+        # populates; EgressReads DOES hydrate like a declared read,
+        # step4_hydrate.go:459-500, so a non-empty one is NOT bare) — proof
+        # the derivation, not the caller, carries the op. The function-name
+        # restriction closes a phantom-vector hole: a bare literal inside a
+        # test asserting something unrelated (a malformed-payload refusal
+        # whose derive_reads short-circuits to {}) no longer counts.
+        # Self-tests on every run and refuses an all-clear over zero
+        # governed ops.
+        run: STRICT=1 go run ./scripts/lint-derive-reads-bare-vector.go
+
       - name: Op-meta required-fields lint (a field the script refuses without is declared required)
         # A DDL script and its OpMetaSpec are two declarations of one op: the
         # script refuses at commit, the descriptor is what every

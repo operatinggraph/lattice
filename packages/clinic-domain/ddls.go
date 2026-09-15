@@ -3190,6 +3190,18 @@ def release_cells_mutations(provider, patient, sched):
         out.append(make_tombstone(patient + ".slot" + cc))
     return out
 
+def valid_vertex_key(key, want_type):
+    # Lenient key-shape check for a pre-pass that must never fault (objects-base's
+    # derive_reads sets this precedent): a malformed/wrong-type key derives
+    # nothing rather than raising, leaving execute()'s own parts_of to fault the
+    # real InvalidArgument. Returns (True, id) or (False, None).
+    if key == None or type(key) != type(""):
+        return False, None
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != want_type or parts[2] == "":
+        return False, None
+    return True, parts[2]
+
 def derive_reads(op):
     # Contract #2 §2.5 class (g). CreateAppointment/RescheduleAppointment's
     # providerSlotClaim/patientSlotClaim cells are entirely a function of the
@@ -3202,12 +3214,24 @@ def derive_reads(op):
     # by the unrelated cross-app CreateBooking submit). Mirrors this script's
     # own slot_cells/slot_cellcode exactly.
     #
+    # The patient/provider ROOTS ride the same declaration on CreateAppointment:
+    # require_live_typed(state, key, ...) below decides UnknownEndpoint by
+    # testing key not in state, which cannot tell "genuinely absent" from "never
+    # declared or derived" apart, so an undeclared submitter would see a live
+    # endpoint refused as unknown.
+    #
     # RescheduleAppointment's OLD cells need no declaration at all: the script
     # releases them via an unconditioned tombstone (release_cells_mutations
-    # above), never a kv.Read, and its required .schedule read (already
-    # declared statically) is what lets execute() recompute them server-side.
-    # Only the NEW span's cells ever reach claim_cell's kv.Read, so declaring
-    # the full new-span set (a superset of to_claim) is exact, not merely safe.
+    # above), never a kv.Read. Its appointment root, .status, .schedule and the
+    # withProvider/forPatient links it re-validates ride this declaration too —
+    # each is a pure function of payload.appointmentKey/provider/patient, and
+    # .schedule's own upsert (execute(), below) is a bare update auto-
+    # conditioned on the step-4 hydrated revision only for a key the operation
+    # declared (Contract #3 §3.2): an undeclared submitter would get a live read
+    # and an unconditioned write, so two concurrent reschedules could each
+    # commit against the same prior schedule. Only the NEW span's cells ever
+    # reach claim_cell's kv.Read, so declaring the full new-span set (a superset
+    # of to_claim) is exact, not merely safe.
     ot = op.operationType
     if ot != "CreateAppointment" and ot != "RescheduleAppointment":
         return {}
@@ -3220,19 +3244,45 @@ def derive_reads(op):
     patient = optional_string(p, "patient")
     starts_at_raw = optional_string(p, "startsAt")
     ends_at_raw = optional_string(p, "endsAt")
+
+    keys = []
+    provider_ok, provider_id = valid_vertex_key(provider, "provider")
+    if provider_ok:
+        keys.append(provider)
+    patient_ok, patient_id = valid_vertex_key(patient, "patient")
+    if patient_ok:
+        keys.append(patient)
+
+    if ot == "RescheduleAppointment":
+        appt_key = optional_string(p, "appointmentKey")
+        appt_ok, appt_id = valid_vertex_key(appt_key, "appointment")
+        if appt_ok:
+            keys.append(appt_key)
+            keys.append(appt_key + ".status")
+            keys.append(appt_key + ".schedule")
+            if provider_ok:
+                keys.append("lnk.appointment." + appt_id + ".withProvider.provider." + provider_id)
+            if patient_ok:
+                keys.append("lnk.appointment." + appt_id + ".forPatient.patient." + patient_id)
+
     if provider == None or patient == None or starts_at_raw == None or ends_at_raw == None:
-        return {}
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
     starts_at = time.rfc3339_utc(starts_at_raw)
     ends_at = time.rfc3339_utc(ends_at_raw)
     if not (starts_at < ends_at):
-        return {}
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
     # slot_cells fails (AppointmentTooLong) past MAX_SLOT_CELLS -- bounding by
     # the identical 24h ceiling and returning {} defers that rejection to
     # execute()'s own clean error, mirroring wellness-domain's derive_reads.
     if ends_at > time.rfc3339_add(starts_at, "24h"):
-        return {}
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
     cells = slot_cells(starts_at, ends_at)
-    keys = []
     for c in cells:
         cc = slot_cellcode(c)
         keys.append(provider + ".slot" + cc)
