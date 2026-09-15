@@ -60,7 +60,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-09-15 · `c6b25579` · Every dispatch site declares its courtesy per state refusal — `lint-refusal-courtesy` (52 ops · 203 pairs, Facet included); six siblings fixed, ledger caps recoded; dossier class retired ([census](../../../docs/reviews/verticals-refusal-courtesy-gate-2026-09-15.md)).
+- 2026-09-15 · `c6b25579` · `lint-refusal-courtesy` — every dispatch site declares its courtesy per state refusal (52 ops, Facet incl.); six siblings fixed; [census](../../../docs/reviews/verticals-refusal-courtesy-gate-2026-09-15.md).
 - 2026-09-15 · `fd9cd157` · The desk takes an item off the menu for the day — `SetMenuItemAvailability` sets `.price.available`, both lenses project it, all three pickers grey it, `Charge` refuses `ItemUnavailable`; refused live.
 - 2026-09-15 · `fd9cd157` · A posted charge opens to its receipt — `receiptLines` joins a ledger row to its settled tab by `tabKey`; the statement renders the lines (price, who ordered, voids) collapsed, resident and desk alike; live.
 - 2026-09-15 · `a0ba03a2` · A reminded debtor opens no new tab — `OpenTab` refuses `CreditHold` off `.arrears.sentAt` (heldFor in-walk, both legs); picker badge "owes $X · N days overdue · credit hold", hold panel, confirm; refused live.
