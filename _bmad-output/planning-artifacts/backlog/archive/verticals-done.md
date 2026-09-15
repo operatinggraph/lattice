@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-13 · `a2724692` · A recurring visit is credited by a booked visit, never by the clock — the gap opens only on a qualifying visit, the advance re-anchors on it (`StaleRow`+OCC), the Book calendar carries the due floor; proven live.
+- 2026-09-13 · `8a046814` · The renewal chain asks the tenant for a profile before a signature — a `submitProfile` leg gates `signRenewal`'s `pre`, three `staleUserTasks` arms, the inbox opens the profile form; the refused task signed live.
 - 2026-09-13 · `8a046814` · `SetApplicantProfile`'s descriptor declares `references` as the DDL's string array, not an integer count the script dropped to zero.
 - 2026-09-13 · `b1ad58ae` · A visit is completed or missed only once it has started — `SetAppointmentStatus` + `CorrectAppointmentStatus` refuse `completed`/`noShow` `NotYetStarted` before `startsAt`; the desk's buttons wait; proven live.
 - 2026-09-13 · `b1ad58ae` · A final visit is never moved — `RescheduleAppointment` reads `.status` and refuses `TerminalStatus` before the cell diff; proven live on a cancelled appointment.

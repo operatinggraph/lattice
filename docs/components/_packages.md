@@ -702,7 +702,10 @@ arm, so a widening mirrors the reason and not the shape.
   closed, and the negative vector submits the envelope WITHOUT the declaration. Third sighting (loftspace-ledger
   `dueAt`, 2026-09-14, caught cold): the untermed charge's due date was written as the posting instant while the
   clause's recorded lapse — the fact the lens opened the gap at — sat hydrated beside it; a stamp that names a
-  date reads the recorded one when it exists and derives only in its absence.
+  date reads the recorded one when it exists and derives only in its absence. Fourth sighting (café `CreditHold`,
+  2026-09-15, caught cold): `.arrears.sentAt` records the reminder's SEND INTENT (stamped with the outbox event; the
+  adapter's outcome lands on `.arrearsNotification`), and the hold's prose promised "a reminder went out" — state
+  the recorded event's exact meaning at the reader, and name the aspect that would carry the delivery fact.
 - **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from — a segment that names
   the wrong vertex type binds nothing from that side while binding fine from the other.** `mint_clause` wrote
   `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires: the lease-anchored inbound
