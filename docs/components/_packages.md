@@ -757,6 +757,15 @@ the op now applies (`ensureApprovedTenancy` now skips an ended term), found at t
   ScriptError at approval. Minted: lease-signing (2026-09-14), caught cold by both reviewers. Check: when a script
   starts reading an aspect another op writes, open that writer's validation and refuse the malformed shapes THERE
   (`InvalidTerms`), storing the normalized value; the reader keeps a named refusal for rows that predate the check.
+- **A mirrored optional back-reference keeps the precedent's LIVENESS check and drops its OWNERSHIP check — and a
+  field added for the staff form reaches the self leg unless the self branch names it.** clinic-ledger's `reversesRef`
+  was mirrored from café's, which refuses a charge "on another account"; the mirror validated alive only, so a
+  front-desk waiver could disarm another patient's `missing_reversal`, and once the descriptor carried the field a
+  self-paying patient could reverse their own fee. Minted: clinic-ledger `visitRef`/`reversesRef` (2026-09-14), caught
+  cold. Check: for every `<x>Ref` a script validates, name the relation that ties it to the op's target
+  (`postedTo`, `forPatient`) and read that link — deterministic keys through `derive_reads`, walk-resolved ones as the
+  `(e)` follow-up with a `read_drift_baseline` row; and grep the `authContextTarget` branch for every optional field
+  the descriptor exposes.
 ## Related contracts
 
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.

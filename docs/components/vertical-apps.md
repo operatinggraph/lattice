@@ -55,7 +55,10 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   predicate and dropped the lower bound the FE carried (`g.startsAt > f.startsAt`), so a `followUpDate` set before
   the visit read as addressed in the graph and outstanding on the card — caught cold. When one rule lives in two
   languages, pin BOTH copies over one fixture set that includes every boundary either copy carries (the
-  `followup_addressed_test.go` goja pin + the lens's cypher pins). Mechanize on the next sighting.
+  `followup_addressed_test.go` goja pin + the lens's cypher pins). **Third sighting (clinic visit picker,
+  2026-09-14, caught cold), narrowing the other way:** a courtesy filter (`startsAt <= now`) tighter than the op's
+  predicate excluded the primary flow — a checked-in visit carries no clock. Not gate-able generically; the mandated
+  shape is the goja pin over a fixture holding every non-terminal status the op admits (`ledger_ui_test.go`).
 - **An op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`** — a
   rationale comment naming an exemption-less op (the instructor identity bind) reddened `lint-static` after
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats

@@ -1,6 +1,6 @@
 # Clinic — the desk sees a debtor, and a charge names its visit
 
-**Status:** ✅ **Winston-ratified — build-ready** (Vertical Steward, 2026-09-14). No frozen-contract change, no
+**Status:** ✅ **SHIPPED** `0771d77e` (2026-09-14; ratified + built by the Vertical Steward the same day, build note §6). No frozen-contract change, no
 architectural fork: every mechanism is package-owned (`packages/clinic-ledger`, `cmd/clinic-app`) and mirrors a
 shipped pattern in a sibling vertical — wellness's `frontdesk-arrears` desk badge (`cmd/wellness-app/ledger.go:479`,
 `web/app.js:2915`) and café's `reversesKey`-before-FIFO statement aging (`cmd/cafe-app/ledger.go:234`, `5e6e08a0`).
@@ -29,7 +29,9 @@ One PO row (`fad66d4c`, ★★ M, pkg + FE) builds as one fire.
 ### 2.1 A charge names its visit through its own relation — `visitRef` → `forVisit`
 
 `ClinicDebitAccount` gains an optional `visitRef` (`vtx.appointment.<NanoID>`, validated alive from `state` →
-`UnknownAppointment`, the same `vertex_alive` check `appointmentRef` runs) and writes
+`UnknownAppointment`, the same `vertex_alive` check `appointmentRef` runs, and validated as **this account's
+patient's** visit → `WrongPatient`, through the account's `heldFor` walk and the `forPatient` link as its `(e)`
+follow-up — the descriptor declares the enumeration) and writes
 `lnk.clinictransaction.<t>.forVisit.appointment.<a>` — the transaction is the later-arriving vertex, so it is the
 source (Contract #1 §1.1); the sentence is "this transaction is for this visit". `visitRef` and `appointmentRef`
 are mutually exclusive (`InvalidArgument`): one line either *is* the fee an appointment's status carries or is
@@ -66,7 +68,10 @@ deliberately.
 
 ### 2.4 The waiver names the charge it forgives — `reversesRef` reaches the desk
 
-`ClinicCreditAccount` already accepts `reversesRef` and writes `reverses`. The desk's Waive button gains a
+`ClinicCreditAccount` already accepts `reversesRef` and writes `reverses`; the build confines it — the named debit
+must be posted to **this account** (`WrongAccount`, the deterministic `postedTo` link derived by `derive_reads`) and
+the **self-pay leg refuses it** (`AuthDenied` — a patient reversing their own fee would disarm `missing_reversal`), and
+a credit carrying `appointmentRef` is `InvalidArgument`. The desk's Waive button gains a
 "Charge to waive" picker over the statement's still-open debits (2.5's `openCents > 0`), prefilling the amount with
 the open remainder and capping it there (`max` — the sibling-form courtesy). `reversesRef` is optional on the wire
 (a waiver of a general balance stays expressible). A hand waiver that names a no-show fee now carries the `reverses`
@@ -99,8 +104,9 @@ goja-pinned) appended to `populatePatientSelect`'s option text (`:828`), `render
 the ledger balance header; `submitBook` (`:3059`) confirms first when the selected patient is overdue (wellness
 `bookSelectedGuest`, `app.js:1673`). The ledger list renders each debit's `openCents`/`dueAt`/overdue state and a
 credit's "reverses <the charge's memo · date>"; the Charge form gains a "For visit" picker over the patient's
-non-cancelled, non-no-show appointments already in `state.appts`, sending `visitRef` through the descriptor's
-`prefill`.
+non-cancelled, non-no-show appointments already in `state.appts` (a courtesy narrowing — the op accepts any alive
+visit of the patient; no clock, since a checked-in visit carries none), sending `visitRef` through the descriptor's
+`prefill`; the Waive picker pre-selects the charge when exactly one is open.
 
 ## 3. Not changed
 
@@ -201,3 +207,23 @@ lens (café's `cafeArrearsReminders` is a separate item, not filed here), no cha
 **Scope-diff gate:** every touch above traces to one of the row's four clauses (roster balance → 2.6; per-charge state
 → 2.5; waiver names its charge → 2.3/2.4; copay names its visit / `appointmentRef` trap → 2.1/2.2). Nothing widened;
 2.2 is the write-path half of the fourth clause, not an adjacent mechanism.
+
+## 6. Build note (2026-09-14, `0771d77e`)
+
+Built as briefed, three increments + one cold review + one fix round. Live on :7799 with clinic-ledger 0.5.0
+diff-applied (`make refresh-clinic`): `/api/staff/arrears` names Riley Chen `2500 · 21 days overdue`; the picker
+reads "Riley Chen — owes $25.00 · 21 days overdue"; the 09-14 "Fee reversal (corrected)" line reads "reverses
+Late-cancellation fee of Sep 13"; a 1¢ copay posted with `visitRef` against the completed 09-15 visit projects
+`appointmentKey` + `visitStartsAt` with `settlesFee` false and was waived back naming it (`reversesKey` projected,
+both lines "settled"); `appointmentRef` against that same fee-less visit was refused `NoFeeToSettle`.
+
+**Deviations from §2 (amended above where they stand):** the review added three op refusals the design had left at
+alive-validation — `WrongPatient` (visitRef), `WrongAccount` + the self-leg `AuthDenied` (reversesRef) — and
+`InvalidArgument` for `appointmentRef` on a credit; the visit picker dropped its start-time clock; the Waive picker
+pre-selects a lone open charge. `internal/testutil/read_drift_baseline.txt` records the `forPatient` follow-up as a
+walk-resolved `(e)` read no dispatcher can name.
+
+**Review classification (one cold pass, 5 SHOULD + 3 NIT, all fixed):** S3/S4 — design-gap, `_packages.md` (a
+mirrored optional ref kept the precedent's liveness check and dropped its ownership check; the self leg reached a
+field added for the staff form); S2 — design-gap, `vertical-apps.md` (an FE courtesy filter narrower than the op's
+predicate excluded the primary flow); S5 — design-gap, FE default; S1/N1/N2 — convention / implementation.
