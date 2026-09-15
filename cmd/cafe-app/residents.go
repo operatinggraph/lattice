@@ -34,11 +34,15 @@ type leaseApplicationProjection struct {
 // staff-only Front Desk render — the "who" dimension the POS/Front Desk
 // lease picker (leases.go) has no notion of, since cafeLeaseAccounts is keyed
 // by lease, not identity, and only carries a row once a tab has ever
-// settled.
+// settled. LeaseEnd carries no `omitempty`: the resident's own self-service
+// Open Tab (cmd/cafe-app/web/app.js's residentOpenTabAllowed) gates on it,
+// and an omitted key would read identically to a lease with no projected
+// term.
 type residentRow struct {
 	LeaseAppKey string `json:"leaseAppKey"`
 	BookerKey   string `json:"bookerKey"`
 	Approved    bool   `json:"approved"`
+	LeaseEnd    string `json:"leaseEnd"`
 }
 
 // computeResidents decodes every leaseApplicationComplete row, sorted by
@@ -71,6 +75,25 @@ func computeResidents(keys []string, get kvGetter) []residentRow {
 	return rows
 }
 
+// leaseTenancyEnds resolves every leaseAppKey's own tenancy end off the
+// cafe-domain cafeLeaseWorkplaces lens (leaseWorkplaceRows, readauth.go) — a
+// row with no projected term (or one this pass never read at all) is simply
+// absent from the map, which callers read as "" (no term), never as an
+// error condition of its own.
+func (s *server) leaseTenancyEnds(ctx context.Context) (map[string]string, error) {
+	rows, err := s.leaseWorkplaceRows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ends := make(map[string]string, len(rows))
+	for _, p := range rows {
+		if p.LeaseEnd != "" {
+			ends[p.LeaseAppKey] = p.LeaseEnd
+		}
+	}
+	return ends, nil
+}
+
 // handleResidents implements GET /api/residents — the lease-applicant
 // roster, served from the shared leaseApplicationComplete convergence lens
 // (P5). A `worksAt` staffer sees the applicants of the leases their workplace
@@ -79,6 +102,12 @@ func computeResidents(keys []string, get kvGetter) []residentRow {
 // answers the resident case exactly: a resident's own leases are precisely the
 // rows whose applicant is them, so both hats ask visibleLeases the same
 // question and this roster needs no second rule of its own.
+//
+// Each row also carries leaseEnd, joined from cafe-domain's
+// cafeLeaseWorkplaces lens by leaseAppKey (leaseTenancyEnds) — the
+// resident-readable half of the TenancyEnded fact OpenTab refuses on. The
+// resident's own self-service Open Tab reads THIS endpoint; the staff-only
+// /api/frontdesk-lease-details carries the same fact for the POS picker.
 func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -104,11 +133,18 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	leaseEnds, err := s.leaseTenancyEnds(ctx)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
 	filtered := make([]residentRow, 0, len(rows))
 	for _, row := range rows {
-		if visible.admits(row.LeaseAppKey) {
-			filtered = append(filtered, row)
+		if !visible.admits(row.LeaseAppKey) {
+			continue
 		}
+		row.LeaseEnd = leaseEnds[row.LeaseAppKey]
+		filtered = append(filtered, row)
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"residents": filtered})
 }

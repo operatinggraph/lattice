@@ -373,6 +373,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},
+			// refusal-courtesy(facet): BadDecision: unreachable — decision is schema.enum ["approved","declined"], rendered by the generic form as a select over the enum (cmd/facet/web/app.js renderField), so no other value can be submitted.
+			// refusal-courtesy(facet): DecisionFinal, NotReadyToApprove, NoListing, InvalidTerms: none — no VisibleWhen or entity lens column carries decision/signature/listing state; Facet offers Decide on every leaseapp row.
 		},
 		// The applicant's own three legs. Each is granted to consumer at
 		// scope=self, so each is a form a real person fills in.
@@ -391,8 +393,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant — your own identity."},` +
 				`"unit":{"type":"string","description":"vtx.unit.<NanoID> of the unit being applied for."},` +
 				`"moveInDate":{"type":"string","format":"date","title":"Move-in date","description":"Requested move-in date. Optional; supplying it requires leaseTermMonths."},` +
-				`"leaseTermMonths":{"type":"integer","title":"Lease term (months)","description":"Requested lease term in months. Required when moveInDate is supplied."},` +
-				`"requestedRent":{"type":"number","title":"Monthly rent","description":"Optional rent the applicant is offering."}},` +
+				`"leaseTermMonths":{"type":"integer","minimum":1,"title":"Lease term (months)","description":"Requested lease term in months. Required when moveInDate is supplied."},` +
+				`"requestedRent":{"type":"number","minimum":1,"title":"Monthly rent","description":"Optional rent the applicant is offering."}},` +
 				`"required":["applicant","unit"]}`,
 			FieldDescriptions: map[string]string{
 				"applicant":       "Your own identity — filled from the session, never typed. The scope=self grant requires it to equal the acting identity.",
@@ -425,6 +427,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.unit}.listing",
 				},
 			},
+			// refusal-courtesy(facet): DuplicateApplication: none — no entity lens column projects the caller's own existing applications against a unit; the guard-link race is invisible to the picker.
+			// refusal-courtesy(facet): InvalidTerms: cap — leaseTermMonths/requestedRent above declare "minimum":1, and the generic form renders min= from it (cmd/facet/web/app.js renderField) with step="1" for the integer.
 		},
 		{
 			OperationType: "WithdrawLeaseApplication",
@@ -475,6 +479,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.leaseAppKey}.decision",
 				},
 			},
+			// refusal-courtesy(facet): ApplicantMismatch: unreachable — ContextParams sets applicant:"{actor}" (substituteTemplate's `actor` case, cmd/facet/web/app.js), overriding any typed value at submit.
+			// refusal-courtesy(facet): UnitMismatch: none — InputSchema's "unit" is a plain string with no x-entityRef/contextParam, so Facet renders it as free text a caller can type.
+			// refusal-courtesy(facet): AlreadyApproved: none — no VisibleWhen or entity lens column distinguishes an approved (executed-lease) application from an undecided one; Facet offers Withdraw on every leaseapp row.
 		},
 		{
 			OperationType: "ReassignLeaseUnit",
@@ -672,6 +679,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// income-to-rent signal rather than failing the submission.
 				OptionalReads: []string{"{payload.unit}.listing"},
 			},
+			// refusal-courtesy(facet): UnitMismatch: none — InputSchema's "unit" is a plain string with no x-entityRef/contextParam, so Facet renders it as free text a caller can type.
 		},
 		// The landlord's three renewal legs. Each is consumer scope=self,
 		// bound in-script by the acting identity's manages link.
@@ -721,6 +729,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// the terms, so absence is the normal case.
 				OptionalReads: []string{"{payload.renewalKey}.renewalSignature"},
 			},
+			// refusal-courtesy(facet): TermsLocked: none — no VisibleWhen or entity lens column distinguishes an open, unsigned renewal from one already signed/cancelled/complete; Facet offers Set terms on every row.
+			// refusal-courtesy(facet): InvalidTermMonths: cap — the script raises it only for a non-integer term (a too-low integer is InvalidArgument), and schema type "integer" makes the generic form render step="1" (cmd/facet/web/app.js renderField), so the control admits integers only.
 		},
 		{
 			OperationType: "VerifyGuarantor",
@@ -787,6 +797,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// absent signals means UNKNOWN, not "no guarantor").
 				OptionalReads: []string{"{payload.leaseApp}.applicationSignals"},
 			},
+			// refusal-courtesy(facet): ApplicantMismatch, LeaseAppMismatch: hide — the `{context.*}` contextParams above are the staff app's row vocabulary; Facet's opButton refuses to offer an op whose contextParam head it has no case for (unrecognisedContextTemplate).
+			// refusal-courtesy(facet): NoGuarantorToVerify, ApplicationSignalsMissing: none — no entity lens column projects hasGuarantor or whether .applicationSignals exists; Facet offers Verify guarantor on every renewal row.
 		},
 		{
 			OperationType: "CancelRenewal",
@@ -817,6 +829,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// case, so this can never be a required read.
 				OptionalReads: []string{"{payload.renewalKey}.renewalSignature"},
 			},
+			// refusal-courtesy(facet): TermsLocked: none — no VisibleWhen or entity lens column distinguishes an already-signed renewal from an open one; Facet offers Decline on every renewal row.
 		},
 		// SignRenewal is the tenant's completion leg — the write-path mirror of
 		// VerifyGuarantor/SetRenewalTerms above, but a DIFFERENT voice: the
@@ -906,6 +919,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.renewalKey}.guarantorVerification",
 				},
 			},
+			// refusal-courtesy(facet): ApplicantMismatch, LeaseAppMismatch: hide — as VerifyGuarantor above: the `{context.*}` contextParams are the staff app's row vocabulary, and Facet's opButton does not offer an op whose contextParam head it cannot resolve (unrecognisedContextTemplate).
+			// refusal-courtesy(facet): RenewalNotOpen, NotReadyToSign, ApplicationSignalsMissing, GuarantorNotVerified, NoTenancy, TenancyEnded: none — no VisibleWhen or entity lens column projects a renewal's status, terms, guarantor state, or its leaseapp's tenancy.
 		},
 		// SignLease is the applicant's own leg of the convergence: the
 		// assignTask target that closes missing_signature (targets.go). It is a
@@ -929,6 +944,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		// rejects a second sign without it.
 		{
 			OperationType: "SignLease",
+			// refusal-courtesy(facet): AlreadySigned, UnitNoLongerAvailable: none — no VisibleWhen or entity lens column projects a leaseapp's signature or decision/unit-status state; Facet offers Sign lease on every task for this op regardless.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Sign your lease",
 				ShortLabel:  "Sign lease",

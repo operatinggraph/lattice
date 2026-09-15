@@ -1510,12 +1510,12 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
     if is_payment:
         owed_cents = balance_cents
         if owed_cents <= 0:
-            fail("AuthDenied: this account has no outstanding balance to pay")
+            fail("NoBalanceToPay: this account has no outstanding balance to pay")
         if amount_cents > owed_cents:
             if reason == "waiver":
-                fail("AuthDenied: a write-off of " + dollars(amount_cents) +
+                fail("WriteOffExceedsBalance: a write-off of " + dollars(amount_cents) +
                      " exceeds the outstanding balance of " + dollars(owed_cents))
-            fail("AuthDenied: a payment of " + dollars(amount_cents) +
+            fail("PaymentExceedsBalance: a payment of " + dollars(amount_cents) +
                  " exceeds the outstanding balance of " + dollars(owed_cents))
 
     # The payout cap is the payment cap's mirror image on the debit side. A

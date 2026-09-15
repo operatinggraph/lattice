@@ -37,7 +37,13 @@ type renewalRow struct {
 	// LeaseEnd is the renewed leaseapp's CURRENT .tenancy.leaseEnd — the new term's
 	// end once a renewal has signed, distinct from CycleEnd (the cycle being
 	// renewed, i.e. the OLD end).
-	LeaseEnd            *string  `json:"leaseEnd"`
+	LeaseEnd *string `json:"leaseEnd"`
+	// TenancyEndedAt is set once EndTenancy has recorded the term's end — the
+	// same fact the applications read lenses project (applications.go,
+	// landlord_applications.go). SignRenewal refuses TenancyEnded once this is
+	// set (renewal_scripts.go); renderRenewalCard gates the Sign action on it,
+	// never omitted so that gate has something to read.
+	TenancyEndedAt      *string  `json:"tenancyEndedAt"`
 	RentAmount          *float64 `json:"rentAmount"`
 	TermMonths          *float64 `json:"termMonths"`
 	TermsSetAt          *string  `json:"termsSetAt"`
@@ -55,7 +61,7 @@ type renewalRow struct {
 // open cycle needing action surfaces before a completed/cancelled one.
 const selectRenewalsSQL = `
 SELECT entity_key, lease_app, tenant, tenant_name, landlord, status, cycle_end,
-       unit_address, lease_end, rent_amount, term_months, terms_set_at,
+       unit_address, lease_end, tenancy_ended_at, rent_amount, term_months, terms_set_at,
        has_guarantor, guarantor_verified_at, guarantor_method,
        signed_at, cancel_reason
 FROM read_renewals
@@ -90,7 +96,7 @@ func queryRenewals(ctx context.Context, pool pgxBeginner, actorID string) ([]ren
 		var row renewalRow
 		if err := rows.Scan(
 			&row.EntityKey, &row.LeaseApp, &row.Tenant, &row.TenantName, &row.Landlord, &row.Status, &row.CycleEnd,
-			&row.UnitAddress, &row.LeaseEnd, &row.RentAmount, &row.TermMonths, &row.TermsSetAt,
+			&row.UnitAddress, &row.LeaseEnd, &row.TenancyEndedAt, &row.RentAmount, &row.TermMonths, &row.TermsSetAt,
 			&row.HasGuarantor, &row.GuarantorVerifiedAt, &row.GuarantorMethod,
 			&row.SignedAt, &row.CancelReason,
 		); err != nil {

@@ -508,6 +508,7 @@ function ledgerBalanceLine(balanceCents) {
 // or network error is swallowed — surfacing it would turn a successful
 // booking into a confusing error toast about a ledger the booker never asked
 // to see.
+// refusal-courtesy: WellnessCreateAccount/AccountAlreadyExists: none — the catch below discards every rejection, this one included; the booking that triggered the call already succeeded and nothing here renders an outcome.
 async function ensureLedgerAccount(memberIdentityKey, selfScoped) {
   try {
     await opOrThrow(
@@ -834,6 +835,20 @@ async function loadSchedule() {
   await renderSchedule();
 }
 
+// refusal-courtesy: CreateBooking/SessionInPast: hide — renderSchedule filters already-started sessions out of the grid before rendering, and scheduleCard disables the button as a second gate for a session that started between load and click.
+// refusal-courtesy: JoinWaitlist/SessionInPast: hide — same already-started filter and disable as CreateBooking's SessionInPast above; renderSchedule serves both ops from one card.
+// refusal-courtesy: CreateBooking/SessionFull: hide — scheduleCard swaps the button's action to "waitlist" once full (se.bookedCount >= se.capacity), so it never dispatches CreateBooking; only JoinWaitlist is offered, labeled "Join waitlist".
+// refusal-courtesy: JoinWaitlist/WaitlistFull: none — the full-class button always offers "Join waitlist" with no check of the waitlist's own capacity (MAX_WAITLIST_SIZE); a full waitlist surfaces as a toast.
+// refusal-courtesy: CreateBooking/DoubleBooked: disable — scheduleCard disables the button once myStatusBySession already shows this session booked or waitlisted (alreadyBooked / alreadyWaitlisted).
+// refusal-courtesy: JoinWaitlist/DoubleBooked: disable — same myStatusBySession disable as CreateBooking's DoubleBooked above.
+// refusal-courtesy: CreateBooking/BookerConflict: none — the grid only excludes a session THIS booker already holds a claim on (DoubleBooked, above); it never cross-checks a booker's OTHER sessions for a time overlap.
+// refusal-courtesy: JoinWaitlist/BookerConflict: none — same gap as CreateBooking's BookerConflict above.
+// refusal-courtesy: CreateBooking/ProtectedBooker: none — booker is always the signed-in identity (identityKey()); nothing here checks whether that identity is a protected kernel identity before submitting.
+// refusal-courtesy: JoinWaitlist/ProtectedBooker: none — same gap as CreateBooking's ProtectedBooker above.
+// refusal-courtesy: CreateBooking/SessionTooLong: none — the class's span is fixed at CreateSession/CreateSessionSeries mint time (SessionTooLong is enforced there); this form supplies no span, only the session being viewed.
+// refusal-courtesy: JoinWaitlist/SessionTooLong: none — same gap as CreateBooking's SessionTooLong above.
+// refusal-courtesy: CreateBooking/InvalidState: none — a missing schedule aspect on the session being viewed is a read-model correctness fault, not a choice this form's controls could gate.
+// refusal-courtesy: JoinWaitlist/InvalidState: none — same gap as CreateBooking's InvalidState above.
 async function renderSchedule() {
   const grid = document.getElementById("schedule-grid");
   const summary = document.getElementById("schedule-summary");
@@ -1140,6 +1155,20 @@ async function renderMyBalance() {
     // an over-balance amount server-side (scripts.go); hiding the form at
     // $0 keeps the FE from offering a submit the op would only reject.
     payForm.hidden = !(data.balanceCents > 0);
+    // The amount field is bounded to the balance just shown, the same
+    // courtesy loftspace-app's own tenant self-pay form gives
+    // (refreshTenantLedgerBody) — the server re-verifies this exactly
+    // (packages/wellness-ledger/scripts.go), so the cap is a courtesy on the
+    // typing, never the enforcement.
+    const payAmount = document.getElementById("myclasses-pay-amount");
+    if (payAmount) {
+      if (data.balanceCents > 0) {
+        payAmount.max = (data.balanceCents / 100).toFixed(2);
+        payAmount.value = (data.balanceCents / 100).toFixed(2);
+      } else {
+        payAmount.removeAttribute("max");
+      }
+    }
     const txs = data.transactions || [];
     if (!txs.length) {
       empty.hidden = false;
@@ -1178,6 +1207,8 @@ let myBalanceCache = null;
 // balance cap are proven server-side (packages/wellness-ledger/scripts.go's
 // post_entry authContextTarget branch), mirroring clinic-app's patient
 // self-pay (submitLedgerEntry, asSelf).
+// refusal-courtesy: WellnessCreditAccount/NoBalanceToPay: hide — renderMyBalance hides #myclasses-pay-form (payForm.hidden) whenever data.balanceCents is not > 0
+// refusal-courtesy: WellnessCreditAccount/PaymentExceedsBalance: cap — renderMyBalance sets #myclasses-pay-amount's max/value to the balance just shown
 async function submitMyPayment() {
   const amountInput = document.getElementById("myclasses-pay-amount");
   const btn = document.getElementById("myclasses-pay-submit");
@@ -1216,6 +1247,11 @@ async function submitMyPayment() {
   }
 }
 
+// refusal-courtesy: CancelBooking/SessionStarted: disable — myClassCard computes `started` (b.startsAt <= now) into cancelDisabled, disabling the Cancel/Leave-waitlist button once the class has begun.
+// refusal-courtesy: CancelBooking/AttendanceRecorded: disable — myClassCard folds `mark` (ATTENDANCE_MARKS[b.status], covering attended/noShow/forfeited — exactly the statuses AttendanceRecorded rejects) into cancelDisabled.
+// refusal-courtesy: CancelBooking/WrongSession: unreachable — the payload's session is always b.sessionKey, the same value the booking row itself carries; there is no field here a caller could mismatch.
+// refusal-courtesy: CancelBooking/SessionTooLong: none — this site sends no span; the booker-cell release replays the session's own already-validated schedule (SessionTooLong is enforced once, at CreateSession/CreateSessionSeries mint time).
+// refusal-courtesy: CancelBooking/InvalidState: none — a missing .status/.schedule aspect on a booking already rendered here is a read-model correctness fault, not a choice the Cancel button's own state could gate.
 async function renderMyClasses() {
   const body = document.getElementById("myclasses-body");
   const summary = document.getElementById("myclasses-summary");
@@ -1958,6 +1994,13 @@ async function bookSelectedMember() {
 // an absent leaseAppKey (a guest with no residency) is the designed
 // standard-rate branch, not a narrower case to reject — CreateBooking itself
 // never requires one.
+// refusal-courtesy: CreateBooking/SessionInPast: hide — renderBookMember hides the whole roster-book form (form.hidden = true) once the selected class has started, before this function is ever reachable.
+// refusal-courtesy: CreateBooking/SessionFull: hide — renderBookMember hides the whole roster-book form once the selected class is full, before this function is ever reachable.
+// refusal-courtesy: CreateBooking/DoubleBooked: drop — renderBookMember drops already-seated members from the picker (`free = members.filter(m => !seated.has(m.bookerKey))`); the guest search (searchGuests) additionally disables, rather than drops, an already-seated match, labeling it "already on this class".
+// refusal-courtesy: CreateBooking/ProtectedBooker: none — the member picker (loadMembers, wellnessMembersSpec) is lease-anchored so a kernel identity never appears there, but the guest search (/api/identities?q=) carries no such filter; this site does not uniformly gate it.
+// refusal-courtesy: CreateBooking/BookerConflict: none — neither picker cross-checks a booker's OTHER sessions for a time overlap; only the same-session DoubleBooked case above is excluded.
+// refusal-courtesy: CreateBooking/SessionTooLong: none — the class's span is fixed at CreateSession/CreateSessionSeries mint time; this call supplies no span, only the session being booked into.
+// refusal-courtesy: CreateBooking/InvalidState: none — a missing schedule aspect on the session is a read-model correctness fault, not a choice either picker's own state could gate.
 async function bookMemberIn(se, bookerKey, leaseAppKey) {
   const optionalReads = seatKeys(se.sessionKey, se.capacity);
   optionalReads.push(se.sessionKey + ".bkr" + idOf(bookerKey));
@@ -2014,6 +2057,11 @@ function bindSeatCancels(sessionKey, se) {
 // `se` is the roster's own session object (startsAt/endsAt) — undefined only
 // if the roster's own lookup missed it, in which case the booker cells are
 // simply not declared (optionalReads, never a correctness requirement).
+// refusal-courtesy: CancelBooking/SessionStarted: hide — bindSeatCancels is only wired when isStaff() && !started (renderRoster); the release-seat button never appears once the class has begun.
+// refusal-courtesy: CancelBooking/AttendanceRecorded: hide — seatCancelAction is only rendered when `cancellable && !forfeited` (rosterCard), and cancellable already excludes a started class where attendance could have been recorded (SessionStarted above); a live booked/waitlisted row is the only shape this button ever offers.
+// refusal-courtesy: CancelBooking/WrongSession: unreachable — bindSeatCancels is wired with the sessionKey renderRoster fetched bookings for (/api/bookings?sessionKey=); every rendered row already belongs to that session, so no control lets a mismatched one reach the payload.
+// refusal-courtesy: CancelBooking/SessionTooLong: none — this site sends no span; the booker-cell release replays the session's own already-validated schedule (SessionTooLong is enforced once, at CreateSession/CreateSessionSeries mint time).
+// refusal-courtesy: CancelBooking/InvalidState: none — a missing .status/.schedule aspect on a booking already rendered on the roster is a read-model correctness fault, not a choice this button's own state could gate.
 async function cancelSeat(bookingKey, bookerKey, sessionKey, se) {
   const optionalReads = [
     "lnk.booking." + idOf(bookingKey) + ".forSession.session." + idOf(sessionKey),
@@ -2125,6 +2173,9 @@ async function awaitProjectedBooking(query, sessionKey, bookerKey) {
 // or, when `mine` is falsy, as front-of-house staff (the script's workplace
 // walk binds that path instead, packages/wellness-domain/ddls.go). It carries
 // NO authContext.target either way — the grant is scope=any.
+// refusal-courtesy: SetBookingAttendance/SessionNotStarted: hide — bindAttendance is only wired when canMark (renderRoster: (isLeader || isStaff()) && started); the Attended/No-show buttons never appear before the class begins.
+// refusal-courtesy: SetBookingAttendance/InvalidState: hide — attendanceActions is rendered only when `markable && !forfeited && !waitlisted` (rosterCard), covering the two state-derived InvalidState causes — a forfeited booking's seat is already gone, a waitlisted booking never held one; the remaining causes are missing .status/.schedule aspects, a correctness fault no control here could gate.
+// refusal-courtesy: SetBookingAttendance/WrongSession: unreachable — sessionKey is renderRoster's own selection, and bookings are fetched scoped to it (/api/bookings?sessionKey=); every rendered row already belongs to that session, so no control lets a mismatched one reach the payload.
 async function markAttendance(bookingKey, sessionKey, value, mine) {
   const bookId = idOf(bookingKey);
   const sessId = idOf(sessionKey);
@@ -2351,6 +2402,10 @@ function renderMoveSeries(se, upcoming) {
 // — packages/wellness-domain/ddls.go's TombstoneSession. It carries NO
 // authContext.target either way: the grant is scope=any and the script
 // confines it in-script, not by a caller-supplied target.
+// refusal-courtesy: TombstoneSession/SessionStarted: hide — renderCancelClass renders the "Call off this class" button only when !started; a started class never gets one.
+// refusal-courtesy: TombstoneSession/WrongStudio: unreachable — studio is always se.studioKey, the session's own known studio (payload.studio); the form offers no way to pick a different one.
+// refusal-courtesy: TombstoneSession/SessionTooLong: none — this call sends no span; the released studio/instructor cells replay the session's own already-validated schedule (SessionTooLong is enforced once, at CreateSession/CreateSessionSeries mint time).
+// refusal-courtesy: TombstoneSession/InvalidState: none — a missing .schedule aspect on a session already rendered on the roster is a read-model correctness fault, not a choice the button's own state could gate.
 async function cancelClass(se, leaderInstructorKey) {
   const sessId = idOf(se.sessionKey);
   // The atStudio link proves the named studio is genuinely this session's —
@@ -2393,6 +2448,10 @@ async function cancelClass(se, leaderInstructorKey) {
 // enumerates the occurrences. Like cancelClass it carries NO
 // authContext.target: the grant is scope=any and the script confines it
 // in-script off the series' own studio.
+// refusal-courtesy: TombstoneSessionSeries/NoUpcomingOccurrences: hide — renderCancelClass only renders the series control when `offerSeries` (upcoming > 1, upcomingSeriesCounts); with none (or exactly one) still-upcoming occurrence, cancelSeries is never reachable.
+// refusal-courtesy: TombstoneSessionSeries/WrongStudio: unreachable — studio is always se.studioKey, the series' own known studio (payload.studio); the form offers no way to pick a different one.
+// refusal-courtesy: TombstoneSessionSeries/SeriesWalkBound: none — a data-scale limit on the partOf walk, unrelated to any field this form submits.
+// refusal-courtesy: TombstoneSessionSeries/SessionTooLong: none — this call sends no span; each occurrence's own already-validated schedule is what release_cells_mutations reads (SessionTooLong is enforced once, at CreateSession/CreateSessionSeries mint time).
 async function cancelSeries(se) {
   await opOrThrow(
     {
@@ -2436,6 +2495,14 @@ async function cancelSeries(se) {
 // nobody chose. Like cancelSeries it carries NO authContext.target: the grant
 // is scope=any and the script confines it in-script off the series' own
 // studio.
+// refusal-courtesy: ReassignSessionSeries/NoUpcomingOccurrences: hide — renderMoveSeries returns before creating any control when earliestUpcomingInSeries finds no still-upcoming occurrence at this studio.
+// refusal-courtesy: ReassignSessionSeries/AnchorMoved: none — the anchor pin (anchorKey/anchorStartsAt) IS the designed race guard (see the doc comment above); no client-side check can prevent a concurrent change between load and submit.
+// refusal-courtesy: ReassignSessionSeries/WrongStudio: unreachable — studio is always se.studioKey, the series' own known studio; the form offers no way to pick a different one.
+// refusal-courtesy: ReassignSessionSeries/SlotGridViolation: cap — the "Next class starts"/"Next class ends" inputs carry step="900" (mkField in renderMoveSeries), 15-minute increments.
+// refusal-courtesy: ReassignSessionSeries/SessionInPast: none — the submit handler checks only that both fields are filled before confirming; it does not check the new start is in the future.
+// refusal-courtesy: ReassignSessionSeries/InstructorConflict, StudioConflict: none — the form has no preview of the studio's or any occurrence's instructor's existing schedule; a collision surfaces as a toast (the catch block passes e.message through verbatim).
+// refusal-courtesy: ReassignSessionSeries/SeriesTooLarge, SeriesWalkBound: none — data-scale limits on the series' own occurrence count / partOf walk, unrelated to any field this form submits.
+// refusal-courtesy: ReassignSessionSeries/SessionTooLong: none — the form caps only the 15-minute grid (SlotGridViolation above); it enforces no maximum span before submit.
 async function moveSeries(se, anchor, startsAt, endsAt) {
   await opOrThrow(
     {
@@ -2611,6 +2678,11 @@ async function renderReassignControl(se, generation) {
 // workplace walk instead (enforce_workplace, mirroring CreateSession's staff
 // path in this same file). `newInstructor`/`clearInstructor` name the swap
 // itself, which is orthogonal to that standing check.
+// refusal-courtesy: ReassignSession/WrongStudio: unreachable — studio is always se.studioKey when supplied (or omitted entirely on the missingStudio repair path, where require_matching_studio never runs); the form never lets a caller submit a mismatched studio.
+// refusal-courtesy: ReassignSession/SlotGridViolation: cap — the "New start"/"New end" inputs carry step="900" (renderReassignControl), 15-minute increments.
+// refusal-courtesy: ReassignSession/InstructorConflict, StudioConflict: none — the form has no preview of the studio's or instructor's existing schedule; a collision surfaces as a toast (the catch block passes e.message through verbatim).
+// refusal-courtesy: ReassignSession/SessionTooLong: none — the form caps only the 15-minute grid (SlotGridViolation above); it enforces no maximum span before submit.
+// refusal-courtesy: ReassignSession/InvalidState: none — the "session carries no atStudio link to replace" fault only reaches the operator repair branch, which this form always supplies a chosen studio for (it throws client-side when none is picked); a correctness fault, not a choice this form's controls could gate.
 async function reassignSession(se) {
   const sessId = idOf(se.sessionKey);
   const select = document.getElementById("reassign-instructor");
@@ -2802,8 +2874,11 @@ function rosterCard(b, markable, cancellable) {
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     // A forfeited booking gets neither action: SetBookingAttendance refuses
     // it (nothing to attend or miss — the seat is already gone), and there is
-    // no seat left to release. The badge above is the whole story.
-    (markable && !forfeited ? attendanceActions(b) : "") +
+    // no seat left to release. The badge above is the whole story. A
+    // waitlisted booking gets no attendance action either — it never held a
+    // seat, so SetBookingAttendance refuses it too (InvalidState) — but it
+    // does keep the release action, releasing its waitlist slot.
+    (markable && !forfeited && !waitlisted ? attendanceActions(b) : "") +
     (cancellable && !forfeited ? seatCancelAction(b) : "") +
     "</div>"
   );
@@ -3038,6 +3113,9 @@ function renderBillingBody(data) {
 // buttons) it defaults server-side to "payment". The billing panel is
 // already staff-only at the panel level (loadRosterBilling above), so no
 // per-button hat-gating is needed for the waive button.
+// refusal-courtesy-dispatches: WellnessDebitAccount, WellnessCreditAccount
+// refusal-courtesy: WellnessDebitAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — both ops are AuthContext "standing" here (no context.me/selfVoice, per the doc comment above), so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, packages/wellness-ledger/scripts.go) only runs when a target is present
+// refusal-courtesy: WellnessCreditAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — same as WellnessDebitAccount above: this front-desk site never attaches a target, so is_self_pay is always false regardless of entry_type
 async function submitBillingEntry(opType, what, reason) {
   const memberKey = document.getElementById("billing-member").value;
   if (!memberKey) {
@@ -3564,6 +3642,14 @@ async function wireInstructorCard(i) {
   });
 }
 
+// refusal-courtesy: CreateSession/SlotGridViolation: cap — the studio card's Starts/Ends inputs carry step="900" (studioCard), 15-minute increments.
+// refusal-courtesy: CreateSessionSeries/SlotGridViolation: cap — same step="900" grid cap as CreateSession's above; one form serves both.
+// refusal-courtesy: CreateSession/InstructorConflict: none — the form has no preview of the picked instructor's existing schedule; a collision surfaces as a toast.
+// refusal-courtesy: CreateSessionSeries/InstructorConflict: none — same gap as CreateSession's InstructorConflict above.
+// refusal-courtesy: CreateSession/StudioConflict: none — the form has no preview of the studio's existing schedule; a collision surfaces as a toast.
+// refusal-courtesy: CreateSessionSeries/StudioConflict: none — same gap as CreateSession's StudioConflict above.
+// refusal-courtesy: CreateSession/SessionTooLong: none — the form validates only that endsAt is after startsAt; it enforces no maximum span before submit.
+// refusal-courtesy: CreateSessionSeries/SessionTooLong: none — same gap as CreateSession's SessionTooLong above.
 async function createSession(studioKey, els) {
   const name = els.name.value.trim();
   const startsAt = toUtcInstant(els.starts.value);
@@ -3657,6 +3743,9 @@ async function createSession(studioKey, els) {
 
 // ---- init --------------------------------------------------------
 
+// refusal-courtesy: WellnessCreditAccount/NoBalanceToPay, PaymentExceedsBalance: see submitMyPayment
+// refusal-courtesy: WellnessDebitAccount/NoBalanceToPay, PaymentExceedsBalance: see submitBillingEntry
+// init wires billing-payment/billing-waive to submitBillingEntry("WellnessCreditAccount", ...) too — that leg's own courtesy (or lack of it) is submitBillingEntry's declaration, not repeated here since both legs' codes are unreachable there regardless of which button dispatched them.
 function init() {
   document.querySelectorAll(".tab").forEach((b) => {
     b.addEventListener("click", () => showView(b.dataset.view));

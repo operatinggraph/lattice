@@ -524,9 +524,9 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
         if budget_exhausted:
             fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
         if owed_cents <= 0:
-            fail("AuthDenied: account " + acct_key + " has no outstanding balance to pay")
+            fail("NoBalanceToPay: account " + acct_key + " has no outstanding balance to pay")
         if amount_cents > owed_cents:
-            fail("AuthDenied: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
+            fail("PaymentExceedsBalance: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
 
     # clauseRef (DebitAccount only — the semantic-contracts Executable Paper
     # consumer, Contract #10 §10.8): the clause this charge is authorized by.

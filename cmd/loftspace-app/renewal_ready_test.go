@@ -44,11 +44,14 @@ func renewalReadyVM(t *testing.T) (*goja.Runtime, goja.Callable) {
 // against every refusal SignRenewal's own script raises before it writes:
 // ApplicationSignalsMissing (no profile — renewalsRead projects hasGuarantor
 // null), NotReadyToSign (no terms), GuarantorNotVerified (a guarantor on file,
-// unverified). A card that offered the button on any of these would only ever
-// earn that refusal.
+// unverified), and TenancyEnded (the renewed application's .tenancy.endedAt
+// recorded — renewalsRead's own tenancy_ended_at column, lease-signing
+// renewal_lenses.go). A card that offered the button on any of these would
+// only ever earn that refusal.
 func TestRenewalReady_MirrorsSignRenewalsWriteGuard(t *testing.T) {
 	const termsAt = "2026-09-05T22:57:14Z"
 	const verifiedAt = "2026-09-06T00:00:00Z"
+	const endedAt = "2026-09-10T00:00:00Z"
 	for _, tc := range []struct {
 		name string
 		row  map[string]interface{}
@@ -60,6 +63,8 @@ func TestRenewalReady_MirrorsSignRenewalsWriteGuard(t *testing.T) {
 		{"profile without guarantor, no terms", map[string]interface{}{"hasGuarantor": false, "termsSetAt": nil}, false},
 		{"guarantor on file, unverified", map[string]interface{}{"hasGuarantor": true, "termsSetAt": termsAt, "guarantorVerifiedAt": nil}, false},
 		{"guarantor on file, verified", map[string]interface{}{"hasGuarantor": true, "termsSetAt": termsAt, "guarantorVerifiedAt": verifiedAt}, true},
+		{"otherwise ready but tenancy ended", map[string]interface{}{"hasGuarantor": false, "termsSetAt": termsAt, "tenancyEndedAt": endedAt}, false},
+		{"otherwise ready, no tenancyEndedAt", map[string]interface{}{"hasGuarantor": false, "termsSetAt": termsAt, "tenancyEndedAt": nil}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vm, fn := renewalReadyVM(t)

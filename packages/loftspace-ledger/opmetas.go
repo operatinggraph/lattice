@@ -69,6 +69,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},
+			// refusal-courtesy(facet): AccountAlreadyExists: none — no VisibleWhen or entity lens column reports whether a lease already has a ledger account; Facet offers Open ledger account on every leaseapp row.
 		},
 		{
 			OperationType: "CreditAccount",
@@ -96,6 +97,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetType:  "account",
 				Reads:       []string{"{payload.accountKey}"},
 			},
+			// refusal-courtesy(facet): AmountMismatch, InvalidState, TermExhausted: unreachable — CreditAccount's post_entry call hardcodes allow_clause_ref=False (scripts.go), so the clauseRef branch that raises these never runs for any CreditAccount dispatch.
+			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: none — AuthContext "self" means every Facet submit of this op is self-scoped, so the self-credit balance-verification block (post_entry's authContextTarget branch, scripts.go) always runs, but amountCents carries no maximum tied to the account's own live balance (InputSchema above), and no edge-manifest entity lens projects that balance as a column Facet could bound against
 		},
 		{
 			OperationType: "DebitAccount",
@@ -126,6 +129,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetType:  "account",
 				Reads:       []string{"{payload.accountKey}"},
 			},
+			// refusal-courtesy(facet): AmountMismatch, InvalidState, TermExhausted: unreachable — this op's InputSchema excludes clauseRef/period entirely (the package doc comment above), so Facet has no field to submit one through.
+			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — AuthContext "standing" means Facet never attaches a target to this dispatch, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, scripts.go) only runs when a target is present
 		},
 	}
 }

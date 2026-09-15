@@ -32,25 +32,25 @@ The recurring review-finding classes for the vertical FEs — fire briefs copy t
 part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones (`agents/steward/SKILL.md`
 §4). **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate mechanizes it.
 
+Retired: *a server-side refusal added to one form leaves its sibling form a dead end* — `lint-refusal-courtesy`
+(three sightings: café house-tab payment cap 2026-09-05; wellness guest picker vs member picker 2026-09-13; café
+`ItemUnavailable` reaching Facet through edge-manifest's entity-ref picker 2026-09-15 — the third form was in
+ANOTHER client, so a grep of the app's own dispatch sites missed it). The gate derives each op's state refusals
+from the describing package's scripts and every dispatch site across the clients (an FE function naming the op +
+Facet's descriptor form for any described op), and fails a site with no `// refusal-courtesy: Op/Code: verb — why`
+(opmetas.go carries the `(facet)` line) the moment a script gains a code or a client gains a site; the 2026-09-15
+census (49 ops · 180 pairs · 111 sites, [census](../reviews/verticals-refusal-courtesy-gate-2026-09-15.md)) found
+four siblings without their sibling's courtesy and fixed them. The half that stays a walk: the gate proves a
+declaration EXISTS and is not stale, never that the named `hide`/`drop`/`cap` fires in the state — a reviewer
+opens the mechanism the clause names; and a `none — the state is not projected` is the pointer to the lens
+column the next fire adds (the third sighting's fix), not a settled verdict.
+
 - **A staff-leg descriptor context that passes no `me` silently drops every `{actor}` enumeration the
   descriptor declares** — `substituteEnumerations` discards an entry whose hub substitutes to empty, so
   the envelope reaches the Processor with the walk undeclared while the test harness (which declares it)
   stays green. Minted: café `CreditCafeAccount` + `RefundCafeCharge` front-desk legs (2026-09-05). Check:
   every `renderOpForm` context whose descriptor carries a `{actor}` enumeration passes `me`, and the
   comment beside it names the enumeration, not only `buildAuthContext`.
-- **A server-side refusal added to one form leaves its sibling form a dead end** — the resident self-pay form
-  hides at zero balance and carries `max`; the front-desk form beside it rendered whenever an account existed, so
-  the new cap turned a mis-key into a raw `AuthDenied` toast where the sibling form never lets one be typed.
-  Minted: café house-tab payment cap (2026-09-05); second sighting: wellness's guest picker offered a booker the
-  member picker beside it already dropped as seated, dead-ending in `DoubleBooked` (2026-09-13 census). Check: when
-  an op gains a server refusal, walk every form that dispatches it and give each the courtesy its sibling already has
-  (hide / `max` / prefill / disable); the census shape is "ops dispatched from 2+ sites × the script's `fail(`s".
-  **Third sighting (café `ItemUnavailable`, 2026-09-15, caught cold):** the third form was in ANOTHER client — Facet's
-  descriptor-driven self-order, whose entity-ref picker is fed by edge-manifest's `edgeEntityMenuItems`, not by the
-  café app's `/api/menu` — so a grep of the app's own dispatch sites found two forms and missed it. The census spans
-  every client that dispatches the op: `grep -rn 'x-entityRef: *"<type>"'` for the picker and
-  `packages/edge-manifest/lenses.go`'s `edgeEntity<Type>Tail` for the column the refusal keys on; the fix is the lens
-  projecting the flag and the picker dropping the row (`entityRefCandidates`), column-driven like `*Cents`.
 - **A count the FE promises for an op's effect must apply the op's own predicate, not a coarser key** — the
   roster's "Call off the remaining N classes" tallied upcoming occurrences per series while the op cancels
   only those still held at the confirmed studio, so one occurrence moved elsewhere made the button promise N

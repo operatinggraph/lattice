@@ -183,7 +183,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"providerIdentityReadGrants":        {"p", 0},
 	"providerSites":                     {"p", 0},
 	"renewalComplete":                   {"key(entityKey guarantorVerifiedAt hasGuarantor leaseAppKey leaseappAlive signalsSubmittedAt signedAt status tenancyEndedAt tenant termsSetAt termsTermMonths) p!leaseAppKey", 0},
-	"renewalsRead":                      {"key(cancelReason cycleEnd entityKey guarantorMethod guarantorVerifiedAt hasGuarantor leaseAppKey rentAmount signedAt status tenancyLeaseEnd tenantKey tenantNameEnv termMonths termsSetAt unitAddress) p!cancelReason", 0},
+	"renewalsRead":                      {"key(cancelReason cycleEnd entityKey guarantorMethod guarantorVerifiedAt hasGuarantor leaseAppKey rentAmount signedAt status tenancyEndedAt tenancyLeaseEnd tenantKey tenantNameEnv termMonths termsSetAt unitAddress) p!cancelReason", 0},
 	"retentionClassKeyEnvelope":         {"p", 0},
 	"retentionKeyStatus":                {"p", 0},
 	"shredStatus":                       {"p", 0},

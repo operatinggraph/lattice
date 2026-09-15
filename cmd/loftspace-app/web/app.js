@@ -651,6 +651,8 @@ function renderCredentialCard(c, totalCount, currentDevice) {
 // array. The platform itself refuses removing the last remaining credential
 // (CredentialUnlinkRejected: last-credential); the button above is disabled for
 // that case too, but the server check is the real backstop.
+// refusal-courtesy: UnlinkCredential/CredentialUnlinkRejected: disable — renderCredentialCard sets removeBtn.disabled = totalCount <= 1, the last-credential outcome of fail_unlink; its other outcomes (no target, wrong state, not found) are on a row this card read from the lens, so a raw refusal here means the row went stale under the click.
+// refusal-courtesy: UnlinkCredential/IdentityMerged: none — no render checks whether the signed-in identity's own state has been merged before offering Remove.
 async function unlinkCredential(c) {
   if (!confirm("Remove this sign-in method? It will no longer be able to sign in to this identity.")) return;
   const uKey = state.applicant;
@@ -922,6 +924,7 @@ const rotatingIdentities = new Set();
 // rotateOfferable allows. Hidden entirely for a non-staff session — the same
 // isStaff() gate applyHatGating already applies to the Report-an-issue panel
 // beside it.
+// refusal-courtesy: RotateClaimKey/InvalidStateTransition: hide — renderIdentityRow renders "Re-issue secret" only when rotateOfferable returns true (identity.state === "unclaimed"), the op-meta's own VisibleWhen{unclaimed:true} mirrored client-side.
 function renderApplicantsTenants() {
   const panel = $("#applicants-tenants");
   if (!panel) return;
@@ -998,6 +1001,7 @@ function renderIdentityRow(identity, rotateWorks) {
 // context: RotateClaimKey's declared reads are payload-keyed only (the
 // target and its own aspects), so nothing here needs the signed-in staffer's
 // own key.
+// refusal-courtesy: RotateClaimKey/InvalidStateTransition: see renderApplicantsTenants
 async function openRotateClaimKey(identity, btn) {
   const desc = descriptorFor("RotateClaimKey");
   if (!desc) {
@@ -1644,6 +1648,8 @@ function syncTermRequirement() {
   $("#term-opt").textContent = hasDate ? "(required)" : "(optional)";
 }
 
+// refusal-courtesy: CreateLeaseApplication/DuplicateApplication: none — the Apply button (renderListingCard) only checks row.status==="available" and state.applicant; it never cross-references state.applications against row.unitKey.
+// refusal-courtesy: CreateLeaseApplication/InvalidTerms: cap — index.html's #leaseTermMonths carries min="1" step="1" and #requestedRent carries min="0" step="1" (requestedRent's floor is looser than the script's ">0", so a typed 0 still round-trips a refusal).
 async function submitApply(ev) {
   ev.preventDefault();
   const row = state.current;
@@ -2222,6 +2228,7 @@ function wireProfileSubFields(root) {
 // + its appliesToUnit link, and reads the unit's listing rent on demand. Resolves
 // true only when the Processor accepted the profile — the inbox's task path
 // retires its task on that answer and on nothing weaker.
+// refusal-courtesy: SetApplicantProfile/UnitMismatch: unreachable — payload.unit is always row.unitKey, the application's own row field, never typed.
 async function submitProfile(ev, row) {
   ev.preventDefault();
   const f = ev.target;
@@ -2308,6 +2315,9 @@ async function submitProfile(ev, row) {
 // withdrawn application drops from the tracker and the unit frees for re-apply.
 // The op verifies applicant against the application's applicationFor link, so the
 // current applicant (whose My Applications view this is) is passed through.
+// refusal-courtesy: WithdrawLeaseApplication/AlreadyApproved: hide — renderApplicationCard renders Withdraw only when !row.landlordApproved (line ~1983).
+// refusal-courtesy: WithdrawLeaseApplication/ApplicantMismatch: unreachable — payload.applicant is always state.applicant, never typed; /api/applications is RLS-scoped to that identity's own applications.
+// refusal-courtesy: WithdrawLeaseApplication/UnitMismatch: unreachable — payload.unit is row.unitKey, read from the application's own row, never typed.
 async function withdrawApplication(row) {
   if (!confirm("Withdraw this application? You'll be able to apply to this unit again.")) return;
   const appId = shortKey(row.entityKey);
@@ -2460,14 +2470,48 @@ function taskLostToRival(t, applications) {
   return !!(app && app.lostToRival);
 }
 
+// refusal-courtesy: SetRenewalTerms/TermsLocked, InvalidTermMonths: see openComplete
+// refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NoGuarantorToVerify: see openComplete
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded: see openComplete
+// renewalCardTaskOps names the renewal-chain ops (renewal_targets.go) whose
+// task the inbox completes through the generic openCatalogComplete path
+// (openComplete → openCatalogComplete) rather than this app's own form —
+// the set taskDisposition resolves against a loaded renewal row below.
+const renewalCardTaskOps = ["SetRenewalTerms", "VerifyGuarantor", "SignRenewal"];
+
+// refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NoGuarantorToVerify: see openComplete
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded: see openComplete
+// renewalTaskStale answers whether row (the renewal cycle t.scopedTo names)
+// has moved past what t's op can still act on — the inbox's own version of
+// renderRenewalCard's own gating (renewalRow/renewalReady), which a task
+// card cannot otherwise see: a task dispatched while the cycle was live stays
+// assigned until it expires even after the cycle closes underneath it.
+// TenancyEnded (SignRenewal's own refusal, renewal_scripts.go) can arrive on
+// an otherwise-still-open, unsigned cycle at any point, so it is checked
+// first, ahead of the open/unsigned check — mirrors renderRenewalCard's own
+// precedence exactly. SetRenewalTerms shares the open/unsigned check
+// (TermsLocked fires on the identical condition); VerifyGuarantor checks
+// neither (its own script never reads the renewal's status or tenancyEndedAt),
+// so it is left alone here.
+function renewalTaskStale(operationName, row) {
+  if (!row) return false;
+  const unsigned = row.status === "open" && !row.signedAt;
+  if (operationName === "SignRenewal" && unsigned && row.tenancyEndedAt) return "ended";
+  if (operationName !== "VerifyGuarantor" && !unsigned) return "closed";
+  return false;
+}
+
 // taskDisposition decides an assigned task's badge + Complete control as a
-// pure function of the task, the clock, the loaded applications and what
-// this app can complete — DOM-free so it is goja-testable. Expired wins over
-// everything, then a task for a lost application: the button is disabled and
-// says why, whatever the op. A profile task completes through the app's own
-// form (its application must be loaded); any other op needs the catalog +
-// module to have marked it completable here.
-function taskDisposition(t, nowMs, canComplete, profileTask, applications) {
+// pure function of the task, the clock, the loaded applications/renewals and
+// what this app can complete — DOM-free so it is goja-testable. Expired wins
+// over everything, then a task for a lost application: the button is
+// disabled and says why, whatever the op. Next, a renewal-chain task whose
+// own cycle has moved past it (renewalTaskStale) — TenancyEnded/RenewalNotOpen
+// raised by the SAME package that opens the renewal card, never offered a
+// courtesy on this path before. A profile task completes through the app's
+// own form (its application must be loaded); any other op needs the catalog
+// + module to have marked it completable here.
+function taskDisposition(t, nowMs, canComplete, profileTask, applications, renewals) {
   if (taskExpired(t, nowMs)) {
     return {
       badge: "expired",
@@ -2483,6 +2527,26 @@ function taskDisposition(t, nowMs, canComplete, profileTask, applications) {
       disabled: true,
       title: "This unit went to another applicant, so this task can no longer be completed.",
     };
+  }
+  if (renewalCardTaskOps.indexOf(t.operationName) !== -1) {
+    const row = (renewals || []).find((rr) => rr && rr.entityKey === t.scopedTo);
+    const stale = renewalTaskStale(t.operationName, row);
+    if (stale === "ended") {
+      return {
+        badge: "closed",
+        label: "Lease ended",
+        disabled: true,
+        title: "Lease ended " + fmtDate(row.tenancyEndedAt) + " — this renewal can no longer be completed.",
+      };
+    }
+    if (stale === "closed") {
+      return {
+        badge: "closed",
+        label: "Renewal no longer open",
+        disabled: true,
+        title: "This renewal has already been signed, completed, or cancelled.",
+      };
+    }
   }
   if (canComplete) return { badge: "open", label: "Complete", disabled: false, title: "" };
   if (profileTask) {
@@ -2535,7 +2599,7 @@ function renderTaskCard(t) {
     btn.addEventListener("click", () => claimTask(t.taskKey));
   } else {
     const canComplete = isProfileTask(t) ? !!profileTaskApplication(t) : canCompleteOp(t.operationName);
-    const disp = taskDisposition(t, Date.now(), canComplete, isProfileTask(t), state.applications);
+    const disp = taskDisposition(t, Date.now(), canComplete, isProfileTask(t), state.applications, state.renewals);
     badge.textContent = disp.badge;
     if (disp.badge !== "open") badge.className = "badge expired";
     btn.textContent = disp.label;
@@ -2560,6 +2624,8 @@ function renderTaskCard(t) {
 // standing role grant (ClaimTask → operator/frontOfHouse/backOfHouse), and
 // the script takes the claimant from the trusted envelope actor, not a
 // payload field.
+// refusal-courtesy: ClaimTask/NotAuthorizedToClaim: unreachable — myTasksSpec (orchestration-base/lenses.go:388) only projects a role-queued task into an identity's row when that identity already holdsRole the queuing role.
+// refusal-courtesy: ClaimTask/TaskAlreadyClaimed, TaskNotOpen: none — the task list is a loaded snapshot; another role-holder can claim the same task, or it can be rerouted, between load and click, with no live re-check.
 async function claimTask(taskKey) {
   const actorId = bareId(state.applicant);
   const taskId = bareId(taskKey);
@@ -2646,6 +2712,17 @@ async function reportIssue(ev) {
 // exact fallback is the filed defect (vertical-package-standard.md §8) that
 // wrote a walk-in's SSN onto the operator's own vertex, create-only. No target,
 // no form.
+// refusal-courtesy-dispatches: SetRenewalTerms, VerifyGuarantor, SignRenewal, SignLease
+// refusal-courtesy: SetRenewalTerms/TermsLocked: hide — openCatalogComplete's renewalTaskStale check refuses (toast, no form mounted) before rendering when the renewal row is no longer open or already signed
+// refusal-courtesy: SetRenewalTerms/InvalidTermMonths: cap — this op's form renders through the shared internal/descriptorform module; schema type "integer" sets the control's step to "1" for termMonths (form.mjs:217)
+// refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch: unreachable — leaseApp/applicant are ContextParams filled from the renewal row (openCatalogComplete's row = renewalRow(task.scopedTo)), never rendered as fields to type
+// refusal-courtesy: VerifyGuarantor/ApplicationSignalsMissing, NoGuarantorToVerify: none — the inbox's Complete is gated only by task assignment + renewalTaskStale (open/unsigned/tenancy-ended); it never re-checks profileOnFile/hasGuarantor before opening the form, so a task assigned before the tenant's profile is submitted can still meet one of these here
+// refusal-courtesy: SignRenewal/RenewalNotOpen, TenancyEnded: hide — openCatalogComplete's renewalTaskStale check refuses (toast, no form mounted) before rendering when the renewal row is no longer open, already signed, or its tenancy has ended
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch: unreachable — same ContextParams mechanism as VerifyGuarantor above
+// refusal-courtesy: SignRenewal/ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified: none — renewalTaskStale checks only open/unsigned/tenancy-ended, not the fuller renewalReady(row) renderRenewalCard checks before ever offering its own Sign button; a task assigned before terms/profile/guarantor are complete can still meet one of these here
+// refusal-courtesy: SignRenewal/NoTenancy: none — a wiring-fault-only case (OpenRenewal's own precondition already requires .tenancy to exist before a cycle can open); no render here checks it either, mirroring renderRenewalCard's own declaration
+// refusal-courtesy: SignLease/UnitNoLongerAvailable: disable — taskDisposition's taskLostToRival branch (badge "closed", "Unit no longer available") already disables Complete when the task's application row is lostToRival, before openComplete is ever reached
+// refusal-courtesy: SignLease/AlreadySigned: none — a live task implies missing_signature held at dispatch time; a completion race between two sign attempts (e.g. two devices) is not guarded client-side
 function openComplete(task) {
   if (isProfileTask(task)) {
     openProfileTask(task);
@@ -2675,6 +2752,7 @@ function openComplete(task) {
 // submits it under the tenant's consumer scope=self grant with the unit key
 // the op verifies filled from the application row, where the catalog form
 // would ask the tenant to type a unit key.
+// refusal-courtesy: SetApplicantProfile/UnitMismatch: unreachable — not a dispatch: compares task.operationName.
 function isProfileTask(task) {
   return !!task && task.operationName === "SetApplicantProfile";
 }
@@ -2781,6 +2859,20 @@ async function openCatalogComplete(task, desc) {
       toast("Could not find this renewal's details — reload Renewals and try again.", "err");
       return;
     }
+    // A freshly-refetched row — never the taskDisposition/renderTaskCard
+    // snapshot, which can be stale or absent (renewals not yet loaded) — so
+    // this is the authoritative version of taskDisposition's own
+    // renewalTaskStale check: read-only, never a live Complete on a cycle
+    // that moved past this task's op after it was assigned.
+    const stale = renewalTaskStale(task.operationName, row);
+    if (stale === "ended") {
+      toast("Lease ended " + fmtDate(row.tenancyEndedAt) + " — this renewal can no longer be completed.", "err");
+      return;
+    }
+    if (stale === "closed") {
+      toast("This renewal is no longer open — it has already been signed, completed, or cancelled.", "err");
+      return;
+    }
   }
 
   // The open task may have changed (closed, or a different one opened) while
@@ -2821,6 +2913,11 @@ function closeComplete() {
   state.formHandle = null;
 }
 
+// refusal-courtesy-dispatches: SetRenewalTerms, VerifyGuarantor, SignRenewal, SignLease
+// refusal-courtesy: SetRenewalTerms/TermsLocked, InvalidTermMonths: see openComplete
+// refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NoGuarantorToVerify: see openComplete
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded: see openComplete
+// refusal-courtesy: SignLease/UnitNoLongerAvailable, AlreadySigned: see openComplete
 async function submitComplete(ev) {
   const task = state.currentTask;
   if (!task) {
@@ -3038,15 +3135,18 @@ function profileOnFile(row) {
 // renewalReady reports whether row has everything SignRenewal's own write
 // guard requires (a profile on file — the op fails closed
 // ApplicationSignalsMissing without one; terms set; guarantor verified if one
-// is on file) — mirrors the planner's signRenewal `pre`, the terminal-leg rule
-// (design §4.3/§5). Readiness is what makes the Sign button APPEAR; what makes
-// it CLICKABLE is the grant, which for a task-voice op is the tenant's own
-// assigned task (assignedTaskKey) — the Processor authorizes SignRenewal on
-// {task, target}, never on the write guard alone, so a ready-but-unassigned
-// cycle is shown as waiting rather than as a button whose submit can only be
-// denied.
+// is on file; the renewed application's tenancy not already ended — the op
+// fails closed TenancyEnded off the same app.tenancy.data.endedAt fact the
+// applications read lenses project, renewalsRead's own tenancy_ended_at
+// column, lease-signing renewal_lenses.go) — mirrors the planner's
+// signRenewal `pre`, the terminal-leg rule (design §4.3/§5). Readiness is
+// what makes the Sign button APPEAR; what makes it CLICKABLE is the grant,
+// which for a task-voice op is the tenant's own assigned task
+// (assignedTaskKey) — the Processor authorizes SignRenewal on {task, target},
+// never on the write guard alone, so a ready-but-unassigned cycle is shown as
+// waiting rather than as a button whose submit can only be denied.
 function renewalReady(row) {
-  return profileOnFile(row) && !!row.termsSetAt && (row.hasGuarantor !== true || !!row.guarantorVerifiedAt);
+  return profileOnFile(row) && !!row.termsSetAt && (row.hasGuarantor !== true || !!row.guarantorVerifiedAt) && !row.tenancyEndedAt;
 }
 
 // assignedTaskKey answers the caller's own open task for operationName on
@@ -3064,6 +3164,19 @@ function renewalStatusLabel(row) {
   return "Open";
 }
 
+// refusal-courtesy: CancelRenewal/TermsLocked: hide — declineBtn renders only when unsigned (row.status==="open" && !row.signedAt), matching the TermsLocked guard exactly.
+// refusal-courtesy: SetRenewalTerms/TermsLocked: hide — setTermsBtn renders only when unsigned, the same guard as CancelRenewal above.
+// refusal-courtesy: SetRenewalTerms/InvalidTermMonths: cap — this op's form renders through the shared internal/descriptorform module; schema type "integer" sets the control's step to "1" for termMonths (form.mjs:217).
+// refusal-courtesy: VerifyGuarantor/NoGuarantorToVerify: hide — verifyBtn renders only when row.hasGuarantor === true, the same signal the script checks.
+// refusal-courtesy: VerifyGuarantor/ApplicationSignalsMissing: hide — verifyBtn requires row.hasGuarantor === true, never true when no .applicationSignals aspect exists (profileOnFile's own null-vs-boolean distinction).
+// refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch: unreachable — leaseApp/applicant are ContextParams filled from the renewal row (openCatalogComplete's row = renewalRow(task.scopedTo)), never rendered as fields to type.
+// refusal-courtesy: SignRenewal/RenewalNotOpen: hide — signBtn renders only when unsigned (row.status==="open" && !row.signedAt).
+// refusal-courtesy: SignRenewal/NotReadyToSign: hide — renewalReady(row) requires row.termsSetAt.
+// refusal-courtesy: SignRenewal/ApplicationSignalsMissing: hide — renewalReady(row) requires profileOnFile(row), false when no .applicationSignals aspect exists.
+// refusal-courtesy: SignRenewal/GuarantorNotVerified: hide — renewalReady(row) requires row.hasGuarantor !== true || row.guarantorVerifiedAt.
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch: unreachable — same as VerifyGuarantor above: ContextParams fill both from the renewal row, never typed.
+// refusal-courtesy: SignRenewal/NoTenancy: none — a wiring-fault-only case (OpenRenewal's own precondition already requires .tenancy to exist before a cycle can open, per that op's own comment); no render checks it.
+// refusal-courtesy: SignRenewal/TenancyEnded: hide — renderRenewalCard hides Sign once tenancyEndedAt is set.
 function renderRenewalCard(row, landlord) {
   const card = document.createElement("div");
   card.className = "card task-card";
@@ -3121,6 +3234,17 @@ function renderRenewalCard(row, landlord) {
       declineBtn.addEventListener("click", () => openRenewalAction(row, "CancelRenewal"));
       actions.append(declineBtn);
     }
+  } else if (unsigned && row.tenancyEndedAt) {
+    // SignRenewal refuses TenancyEnded once EndTenancy has recorded the
+    // term's end (renewal_scripts.go) — a state that can arrive on an
+    // otherwise-ready cycle at any point, so this check runs ahead of the
+    // profile/readiness branches below rather than only inside renewalReady:
+    // once the term is over there is nothing for either of those to offer.
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "Lease ended " + fmtUTCDate(row.tenancyEndedAt) + " — this renewal cannot be signed.";
+    card.append(title, sub, actions, hint);
+    return card;
   } else if (unsigned && !profileOnFile(row)) {
     // The renewal chain asks the tenant for a profile through its own
     // submitProfile leg (renewal_targets.go) — on a fresh cycle only after the
@@ -3179,6 +3303,11 @@ function renderRenewalCard(row, landlord) {
 // resolves the caller's OWN open task for this op and subject and submits
 // under that; if none has been assigned yet, it declines rather than opening a
 // form that can only be denied.
+// refusal-courtesy-dispatches: SetRenewalTerms, VerifyGuarantor, SignRenewal, CancelRenewal
+// refusal-courtesy: SetRenewalTerms/TermsLocked, InvalidTermMonths: see renderRenewalCard
+// refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NoGuarantorToVerify: see renderRenewalCard
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded: see renderRenewalCard
+// refusal-courtesy: CancelRenewal/TermsLocked: see renderRenewalCard
 async function openRenewalAction(row, operationName) {
   try {
     const desc = descriptorFor(operationName);
@@ -3233,6 +3362,7 @@ async function openTaskKeyFor(operationName, scopedTo) {
 // doesn't exist yet on this (first-ever) call, and the Processor hard-rejects
 // a contextHint.reads key that doesn't exist (HydrationMiss), so declaring it
 // here would make account-opening impossible rather than idempotent.
+// refusal-courtesy: LoftspaceCreateAccount/AccountAlreadyExists: none — a concurrent first-open race is recovered by re-fetching the ledger (below) rather than a preemptive courtesy.
 async function openLedgerAccount(leaseAppKey) {
   const reply = await submitOp({
     operationType: "LoftspaceCreateAccount",
@@ -3477,6 +3607,10 @@ async function refreshStatementBody(body, leaseAppKey) {
 // account first (openLedgerAccount) if this is its first-ever charge or
 // payment (accountKey empty) so a landlord never has to take a separate
 // "set up the ledger" step.
+// refusal-courtesy: CreditAccount/AmountMismatch, InvalidState, TermExhausted: unreachable — CreditAccount's post_entry call hardcodes allow_clause_ref=False (loftspace-ledger/scripts.go), so the clauseRef branch never runs for any CreditAccount dispatch.
+// refusal-courtesy: DebitAccount/AmountMismatch, InvalidState, TermExhausted: unreachable — this form's payload never sets clauseRef; the clause branch only runs for a clauseRef-carrying dispatch (Weaver's clauseSatisfaction playbook), never a landlord's manual charge.
+// refusal-courtesy: CreditAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — submit() posts CreditAccount/DebitAccount via opOrThrow with no authContext at all, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, loftspace-ledger/scripts.go) only runs when a target is present
+// refusal-courtesy: DebitAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — same as CreditAccount above: no authContext is ever attached here, and a debit with a target would fail AuthDenied before reaching these codes' block regardless
 function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
   const form = document.createElement("div");
   form.className = "ledger-record-form";
@@ -3565,6 +3699,9 @@ function renderTenantLedgerPanel(leaseAppKey) {
 // P5) and, when there is a live account with something owed, a "Pay" form
 // pre-filled with the full balance. No account yet or a $0 balance renders
 // the balance line with no form — nothing to pay.
+// refusal-courtesy: CreditAccount/AmountMismatch, InvalidState, TermExhausted: see renderLedgerRecordForm
+// refusal-courtesy: CreditAccount/NoBalanceToPay: hide — the form is only appended when owed > 0 && data.accountKey; a $0 or missing-account balance returns before it is built
+// refusal-courtesy: CreditAccount/PaymentExceedsBalance: cap — amount.max is set to (owed/100).toFixed(2) and prefilled with the same value
 async function refreshTenantLedgerBody(body, leaseAppKey) {
   body.textContent = "Loading…";
   let data;
@@ -4711,6 +4848,10 @@ function renderQualification(a) {
 // decideApplication records the landlord's approve/decline (DecideLeaseApplication)
 // for a qualified application, then reloads after a beat so the new disposition (and
 // any unit-leased flip the convergence lens drives) shows once reprojected.
+// refusal-courtesy: DecideLeaseApplication/BadDecision: unreachable — decision is a literal "approved"/"declined" passed by the Approve/Decline button handlers, never typed or user-editable.
+// refusal-courtesy: DecideLeaseApplication/DecisionFinal: hide — decisionOffered excludes a.landlordApproved / a.landlordDeclined rows.
+// refusal-courtesy: DecideLeaseApplication/NotReadyToApprove: hide — decisionOffered requires a.qualified, the lens's readiness clone that already includes the applicant's signature.
+// refusal-courtesy: DecideLeaseApplication/NoListing, InvalidTerms: none — decisionOffered does not check whether the unit still carries a valid .listing; an approve after a listing gap relies entirely on the server refusal.
 async function decideApplication(a, decision) {
   const who = a.applicantName || shortKey(a.applicant);
   // A decline prompts for an optional reason (applicant feedback + a fair-housing
@@ -4852,6 +4993,7 @@ function closePostListing() {
 // setListingStatus flips a unit's listing status (SetListingStatus, status-only —
 // the economics are preserved) for the landlord Unpublish / Relist actions, then
 // reloads after a beat so the new disposition shows once reprojected.
+// refusal-courtesy: SetListingStatus/NoListing: hide — renderUnitCard only renders Unpublish/Relist when status matches a known listing status; a unit with no .listing aspect yields no matching status and offers neither button.
 async function setListingStatus(u, status) {
   try {
     const reply = await submitOp({

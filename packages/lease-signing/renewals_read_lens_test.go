@@ -133,6 +133,49 @@ func TestRenewalsRead_ProjectsLeaseEnd(t *testing.T) {
 	require.Equal(t, "2028-01-01T00:00:00Z", v["lease_end"], "lease_end reads the leaseapp's current tenancy, past the cycle that opened this renewal")
 }
 
+// TestRenewalsRead_ProjectsTenancyEndedAt — tenancy_ended_at reads the SAME
+// app.tenancy.data.endedAt the applications read lenses already project
+// (lenses.go); SignRenewal itself refuses TenancyEnded off this exact field
+// (renewal_scripts.go), and the FE's renewalReady gate reads this column to
+// hide the Sign action before that refusal is ever earned. A cycle whose
+// application has not ended projects null, not a dropped row or a false.
+func TestRenewalsRead_ProjectsTenancyEndedAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-09-15T00:00:00Z",
+		"leaseEnd":   "2026-10-01T00:00:00Z",
+		"endedAt":    "2026-10-01T00:00:00Z",
+	})
+
+	rows := f.projectRenewalsRead(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, "2026-10-01T00:00:00Z", rows[0].Values["tenancy_ended_at"])
+}
+
+// TestRenewalsRead_NoTenancyEndProjectsNull — the common case: a live tenancy
+// (no .tenancy.endedAt recorded) projects tenancy_ended_at null, not a
+// dropped row — the same "display column, never a row gate" convention every
+// other tenancy fact on this lens follows.
+func TestRenewalsRead_NoTenancyEndProjectsNull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-09-15T00:00:00Z",
+		"leaseEnd":   "2028-01-01T00:00:00Z",
+	})
+
+	rows := f.projectRenewalsRead(t)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["tenancy_ended_at"], "a live tenancy projects null, not a dropped row")
+}
+
 // TestRenewalsRead_ProjectsTenantNameEnvelopeWhole — the Secure-Lens contract
 // (Contract #3 §3.10), same shape as
 // TestLandlordLeaseApplicationsRead_ProjectsContactEnvelopesWhole:

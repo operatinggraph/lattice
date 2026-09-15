@@ -504,9 +504,9 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     if is_self_pay:
         owed_cents = balance_cents
         if owed_cents <= 0:
-            fail("AuthDenied: this account has no outstanding balance to pay")
+            fail("NoBalanceToPay: this account has no outstanding balance to pay")
         if amount_cents > owed_cents:
-            fail("AuthDenied: a payment of " + dollars(amount_cents) +
+            fail("PaymentExceedsBalance: a payment of " + dollars(amount_cents) +
                  " exceeds the outstanding balance of " + dollars(owed_cents))
 
     # Two ways a charge names an appointment, never both (ClinicDebitAccount

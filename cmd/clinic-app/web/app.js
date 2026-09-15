@@ -949,6 +949,7 @@ function mintClaimSecret() {
 }
 
 async function submitNewPatient(ev) {
+  // refusal-courtesy: CreatePatient/IdentityAlreadyClaimed: none — identityKey, when present, names the identity this same submit mints via CreateUnclaimedIdentity moments earlier; only a race could still claim it, and no control here can watch for that.
   ev.preventDefault();
   const name = $("#np-name").value.trim();
   if (!name) {
@@ -1119,6 +1120,10 @@ function closeConnectLogin() {
 }
 
 async function submitConnectLogin(ev) {
+  // refusal-courtesy: BindPatientIdentity/MissingDemographics, NothingToBind: hide — renderConnectLogin hides #connect-login unless m.name is truthy, which requires .demographics (and a non-empty fullName) to exist; this function's own name check is the authoritative backstop.
+  // refusal-courtesy: BindPatientIdentity/PatientAlreadyIdentified: hide — renderConnectLogin hides #connect-login once m.identityKey is already set.
+  // refusal-courtesy: BindPatientIdentity/IdentityAlreadyClaimed, IdentityNotUnclaimed: none — identityKey names the identity this same ceremony mints via CreateUnclaimedIdentity moments earlier; only a race between the mint and this bind could still claim/unclaim it, and no control here can watch for that.
+  // refusal-courtesy: BindPatientIdentity/MissingRegistration: unreachable — clinicPatientsRead's roster lens (packages/clinic-domain) excludes any patient lacking .demographics.registeredAt, so state.patients (and selectedPatientRow()) can never resolve to one.
   ev.preventDefault();
   const m = selectedPatientRow();
   if (!m) {
@@ -1323,6 +1328,7 @@ function renderResetLogin() {
 // secret, showing it once) and the ClaimRevokeRejected vocabulary stay the
 // descriptor's, not a re-derivation here.
 async function openResetLogin(btn) {
+  // refusal-courtesy: RevokeIdentityClaim/ClaimRevokeRejected: none — resetLoginOfferable gates on isOperator + row.identityKey only; claim state is not projected on the staff roster row (identity-domain/opmetas.go carries no VisibleWhen for it, per this function's own comment above), so the script's wrong-state guard is the only check.
   const m = selectedPatientRow();
   if (!m || !m.identityKey) return;
   const identityKey = m.identityKey;
@@ -3085,6 +3091,11 @@ function durationMinutes(startsAt, endsAt) {
 }
 
 async function submitBook(ev) {
+  // refusal-courtesy: CreateAppointment/ScheduleInPast: cap — startsAtMinValue/applyStartsAtMin bounds #startsAt's min to now (and the active series' booking floor).
+  // refusal-courtesy: CreateAppointment/SlotGridViolation: cap — applyGridSnapToField snaps #startsAt to the 15-minute grid on change and again here as the authoritative backstop.
+  // refusal-courtesy: CreateAppointment/AppointmentTooLong: cap — #duration is a fixed select (15/30/45/60 min), always well under the 24h/96-cell cap.
+  // refusal-courtesy: CreateAppointment/ProviderNotAtSite: drop — populateProviderSelect(opts.site) narrows #provider to state.providerSites members of the chosen #book-site.
+  // refusal-courtesy: CreateAppointment/OutsideHours, ProviderUnavailable, SlotConflict, PatientDoubleBook: drop — computeOpenSlots (refreshSlots' picker) skips any start outside the provider's .hours windows, any start overlapping a .timeOff range, and any start overlapping a live appointment on the provider's or the patient's own book.
   ev.preventDefault();
   if (!state.patient) {
     toast("Select a patient first.", "err");
@@ -4124,6 +4135,20 @@ function onWaiveTargetChange() {
   amountInput.max = dollars;
 }
 
+// selfPayCapMessage answers why a patient's own payment cannot be posted
+// against the balance the panel shows, or "" when it can: the script's
+// self-scope leg refuses a payment when nothing is owed (NoBalanceToPay) or
+// when the amount exceeds what is owed (PaymentExceedsBalance), so the same
+// two tests run here before anything is sent. owedCents is the panel's
+// balanceCents (positive = owed); an unknown balance never blocks.
+function selfPayCapMessage(owedCents, cents) {
+  if (owedCents === undefined || owedCents === null) return "";
+  const owed = Number(owedCents);
+  if (!(owed > 0)) return "Nothing is owed on this account right now.";
+  if (cents > owed) return "That payment exceeds the balance owed (" + moneyAmount(owed) + ").";
+  return "";
+}
+
 function renderLedger(data) {
   const balanceEl = $("#ledger-balance");
   const list = $("#ledger-list");
@@ -4173,6 +4198,7 @@ function renderLedger(data) {
 // a contextHint.reads key that doesn't exist (HydrationMiss), so declaring it
 // here would make account-opening impossible rather than idempotent.
 async function openLedgerAccount(patientKey) {
+  // refusal-courtesy: ClinicCreateAccount/AccountAlreadyExists: none — no button opens the account explicitly; this only submits when state.ledger.accountKey is unset, so a raw AccountAlreadyExists reachable here is a genuine concurrent-race outcome, which this function recovers from (re-fetching /api/ledger) rather than preventing ex-ante.
   const reply = await submitOp("ClinicCreateAccount", "clinicaccount", { patientKey }, [patientKey]);
   if (reply && reply.status === "accepted" && reply.primaryKey) {
     return reply.primaryKey;
@@ -4226,6 +4252,15 @@ async function openLedgerAccount(patientKey) {
 // stale selection left over from switching buttons can never leak into the
 // wrong op's payload.
 async function submitLedgerEntry(opType, what, reason) {
+  // refusal-courtesy: ClinicDebitAccount/NoFeeToSettle: unreachable — this function never sets payload.appointmentRef (only visitRef, via #ledger-visit); NoFeeToSettle only fires on the appointmentRef branch (packages/clinic-ledger/scripts.go post_entry).
+  // refusal-courtesy: ClinicDebitAccount/WrongPatient: drop — populateVisitPicker/visitPickerOptions builds #ledger-visit from state.appts, already scoped to state.patient (forPatient) — the same patient this ledger account belongs to.
+  // refusal-courtesy: ClinicDebitAccount/WrongAccount: unreachable — reversesRef/WrongAccount only fires when entry_type=='credit' (post_entry); ClinicDebitAccount dispatches post_entry with entry_type='debit'.
+  // refusal-courtesy: ClinicCreditAccount/WrongAccount: drop — populateWaiveTargetPicker/openChargeOptions builds #ledger-waive-target from state.ledger.transactions, already scoped to the account on screen.
+  // refusal-courtesy: ClinicCreditAccount/NoFeeToSettle, WrongPatient: unreachable — appointmentRef/visitRef and their NoFeeToSettle/WrongPatient checks only run when allow_appointment_ref is True (post_entry); ClinicCreditAccount dispatches post_entry with allow_appointment_ref=False.
+  // refusal-courtesy: ClinicDebitAccount/InvalidState: none — no read-model field flags a corrupted .balance aspect class; the account's derived balance is trusted as /api/ledger returns it.
+  // refusal-courtesy: ClinicCreditAccount/InvalidState: none — no read-model field flags a corrupted .balance aspect class; the account's derived balance is trusted as /api/ledger returns it.
+  // refusal-courtesy: ClinicDebitAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — ClinicDebitAccount dispatches post_entry with entry_type="debit" (scripts.go); is_self_pay requires entry_type=="credit" on the authContextTarget branch (a debit with a target fails AuthDenied before is_self_pay is ever set), so the block these codes live in never runs for a debit
+  // refusal-courtesy: ClinicCreditAccount/NoBalanceToPay, PaymentExceedsBalance: cap — a patient paying their own account (actingAsSelf) is stopped before dispatch by selfPayCapMessage against the balance the ledger panel already read (state.ledger.balanceCents), the same pre-dispatch shape the waiver leg runs against a charge's open remainder; the front-desk credit is never capped, matching the script
   if (!state.patient) {
     toast("Select a patient first.", "err");
     return;
@@ -4250,6 +4285,13 @@ async function submitLedgerEntry(opType, what, reason) {
     const target = ((state.ledger && state.ledger.transactions) || []).find((t) => t.transactionKey === reversesRef);
     if (target && cents > target.openCents) {
       toast("That waiver exceeds the picked charge's open remainder (" + moneyAmount(target.openCents) + ").", "err");
+      return;
+    }
+  }
+  if (opType === "ClinicCreditAccount" && actingAsSelf() && state.ledger) {
+    const capMsg = selfPayCapMessage(state.ledger.balanceCents, cents);
+    if (capMsg) {
+      toast(capMsg, "err");
       return;
     }
   }
@@ -4593,6 +4635,7 @@ async function toggleSeries(s) {
 // upsert), so the caller has to name it (Contract #2 §2.5's declared read
 // posture — the op cannot see keys the submitter did not list).
 async function endSeries(s) {
+  // refusal-courtesy: EndVisitSeries/VisitSeriesAlreadyEnded: hide — renderMySeriesCard offers no End button once seriesStatus==='ended' (`if (s.seriesStatus !== "ended")`).
   // Where the flow was when it threw — see setStatus: an end date is
   // write-once, so the throw path says the write may have landed.
   let sent = false;
@@ -4628,6 +4671,7 @@ async function endSeries(s) {
 // providerKey from context.row at submit time, so this form never asks
 // anyone to type a raw provider key.
 async function renderStartSeriesForm() {
+  // refusal-courtesy: StartVisitSeries/ActiveVisitSeriesExists: none — #series-provider (populateProviderSelect) lists the full provider roster with no filter; state.series carries patientKey/providerKey/seriesStatus but nothing here cross-checks it against the patient in context.
   if (state.patient === state.startSeriesPatient) return;
   state.startSeriesPatient = state.patient;
   const mount = $("#start-series-fields");
@@ -5498,6 +5542,12 @@ function selfVisitClock(startsAt, nowMs) {
 const TERMINAL_STATUS_VALUES = ["completed", "cancelled", "noShow"];
 
 async function setStatus(a, status, onDone, opts) {
+  // refusal-courtesy: SetAppointmentStatus/TerminalStatus: hide — renderApptCard's whole button block (lifecycleButtons + Cancel) renders only for ACTIVE_STATUSES.includes(a.status).
+  // refusal-courtesy: SetAppointmentStatus/NotYetStarted: hide — lifecycleTransitions drops completed/noShow from the options whenever started===false (isPast(a.startsAt) supplies it), so those transitions never render before the visit starts.
+  // refusal-courtesy: SetAppointmentStatus/VisitStarted: hide — renderApptCard hides the self-service Cancel button once selfVisitClock(a.startsAt)==='started'; staff cards' clock is always "open", matching the script's own self-only gate (SetAppointmentStatus only reads self_visit_clock when op.authContextTarget is set, packages/clinic-domain/ddls.go).
+  // refusal-courtesy: SetAppointmentStatus/WrongPatient, WrongProvider: unreachable — payload.provider/payload.patient are read straight off the SAME appointment row (a.providerKey/a.patientKey), never user-selected, so require_matching_provider/patient's check against that appointment's own links always matches.
+  // refusal-courtesy: SetAppointmentStatus/AppointmentTooLong: unreachable — the terminal branch's release_cells_mutations recomputes cells from the appointment's own persisted .schedule, which CreateAppointment/RescheduleAppointment already validated ≤96 cells before it could be written.
+  // refusal-courtesy: SetAppointmentStatus/InvalidState: none — no read-model field signals a corrupted/missing .schedule; CreateAppointment always writes one and nothing removes it.
   const asSelf = !!(opts && opts.asSelf);
   const payload = { appointmentKey: a.appointmentKey, status };
   // read-posture: appt.status is (d) — absence is the legit first-set case
@@ -5612,6 +5662,9 @@ function isTerminal(status) {
 }
 
 async function openCorrectStatus(a, onDone) {
+  // refusal-courtesy: CorrectAppointmentStatus/NotTerminal: hide — "Correct status" renders only `else if (isTerminal(a.status))` (both the staff-schedule terminal block and the appointment card's own correction block).
+  // refusal-courtesy: CorrectAppointmentStatus/NotYetStarted: none — the descriptor form's status enum is static (completed/cancelled/noShow); a.startsAt is read on this row but nothing narrows the enum by it.
+  // refusal-courtesy: CorrectAppointmentStatus/InvalidState: none — no read-model field signals a corrupted/missing .schedule; CreateAppointment always writes one and nothing removes it.
   state.correcting = a;
   state.correctingOnDone = onDone || loadAppts;
   state.correctingHandle = null;
@@ -5745,6 +5798,14 @@ function closeReschedule() {
 }
 
 async function submitReschedule(ev) {
+  // refusal-courtesy: RescheduleAppointment/ScheduleInPast: cap — openReschedule sets #rs-startsAt's min to nowLocalInputValue().
+  // refusal-courtesy: RescheduleAppointment/SlotGridViolation: cap — applyGridSnapToField snaps #rs-startsAt to the 15-minute grid on change and again here as the authoritative backstop.
+  // refusal-courtesy: RescheduleAppointment/AppointmentTooLong: cap — #rs-duration is a fixed select (15/30/45/60 min), always well under the 24h/96-cell cap.
+  // refusal-courtesy: RescheduleAppointment/TerminalStatus: hide — renderApptCard's whole button block (Reschedule + Cancel) renders only for ACTIVE_STATUSES.includes(a.status).
+  // refusal-courtesy: RescheduleAppointment/VisitStarted: hide — renderApptCard hides the whole self-service button block (Reschedule + Cancel) once selfVisitClock(a.startsAt)==='started'; staff cards read clock as always "open", matching the script's own self-only gate (RescheduleAppointment only reads self_visit_clock when op.authContextTarget is set — "staff move freely", packages/clinic-domain/ddls.go).
+  // refusal-courtesy: RescheduleAppointment/LateReschedule: hide — renderApptCard shows the self-service Reschedule button only when selfVisitClock(a.startsAt)==='open' (hidden once 'late', inside the 24h window, same as once 'started'); staff cards' clock is always "open", matching the script's self-only gate.
+  // refusal-courtesy: RescheduleAppointment/WrongPatient, WrongProvider: unreachable — payload.provider/payload.patient are read straight off the SAME appointment row being rescheduled (a.providerKey/a.patientKey), never user-selected, so require_matching_provider/patient's check against that appointment's own links always matches.
+  // refusal-courtesy: RescheduleAppointment/OutsideHours, ProviderUnavailable, SlotConflict, PatientDoubleBook, InvalidState: none — the reschedule modal has no slot picker (unlike submitBook's computeOpenSlots); #rs-startsAt is free-text bounded only by the min/grid-snap caps above.
   ev.preventDefault();
   const a = state.rescheduling;
   if (!a) {
@@ -5864,6 +5925,9 @@ function closeSetSite() {
 }
 
 async function submitSetSite(ev) {
+  // refusal-courtesy: SetAppointmentSite/ProviderNotAtSite: drop — openSetSiteFor populates #ss-site only from state.providerSites filtered to entity.providerKey, and disables #set-site-submit when that list is empty.
+  // refusal-courtesy: SetVisitSeriesSite/ProviderNotAtSite: drop — openSetSiteFor populates #ss-site only from state.providerSites filtered to entity.providerKey, and disables #set-site-submit when that list is empty.
+  // refusal-courtesy: SetAppointmentSite/MissingBinding: unreachable — CreateAppointment always writes the appointment's withProvider link (required, never optional) and no op tombstones it, so appointment_provider(appt_id) (packages/clinic-domain/ddls.go) never returns None for an appointment #ss-site's provider-scoped picker can reach.
   ev.preventDefault();
   const entity = state.settingSite;
   const kind = state.settingSiteKind;
@@ -5985,6 +6049,11 @@ function seatKeysFor(sessionKey, capacity) {
 }
 
 async function submitWellnessBooking(ev) {
+  // refusal-courtesy: CreateBooking/SessionFull: drop — openWellnessBooking filters sessions to `se.capacity <= 0 || se.bookedCount < se.capacity`.
+  // refusal-courtesy: CreateBooking/SessionInPast: drop — computeWellnessSessions (cmd/clinic-app/wellness.go, GET /api/wellness/sessions) filters `nowUTC < p.StartsAt` server-side before openWellnessBooking's picker ever sees the session.
+  // refusal-courtesy: CreateBooking/SessionTooLong: unreachable — slot_cells recomputes cells from the session's own persisted .schedule (packages/wellness-domain/ddls.go), which CreateSession/CreateSessionSeries already validated ≤96 cells before it could exist.
+  // refusal-courtesy: CreateBooking/ProtectedBooker: unreachable — ctx.identityKey comes from identityKeyForPatient(a.patientKey), always a real patient's own linked identity (the clinicPatientsRead roster's identifiedBy walk), never a kernel identity.
+  // refusal-courtesy: CreateBooking/BookerConflict, DoubleBooked, InvalidState: none — the referral picker (openWellnessBooking) reads no cross-check against the booker's other wellness bookings or this session's own booker guard.
   ev.preventDefault();
   const ctx = state.wellnessBooking;
   if (!ctx) {
@@ -6081,6 +6150,9 @@ function toggleFollowupDate() {
 }
 
 async function submitEncounter(ev) {
+  // refusal-courtesy: RecordEncounter/VisitNotHeld, NotYetStarted: hide — "Document visit" renders only for status==='completed' (renderApptCard / the staff schedule terminal block), never cancelled/noShow/scheduled/confirmed/checkedIn; setFollowupDate's own re-open of openEncounter only fires for an already-documented visit.
+  // refusal-courtesy: RecordEncounter/MissingFollowUpDate: disable — toggleFollowupDate marks #enc-followup-date required whenever #enc-followup is checked, so the browser blocks submit until a date is entered; this function's own check below is the backstop.
+  // refusal-courtesy: RecordEncounter/InvalidState: none — no read-model field signals a corrupted/missing .schedule; CreateAppointment always writes one and nothing removes it.
   ev.preventDefault();
   const ctx = state.documenting;
   if (!ctx) {
@@ -6349,6 +6421,10 @@ function showView(view) {
 // ---- wire up ----
 
 function init() {
+  // refusal-courtesy: ClinicCreditAccount/InvalidState, NoFeeToSettle, WrongAccount, WrongPatient: see submitLedgerEntry
+  // refusal-courtesy: ClinicDebitAccount/InvalidState, NoFeeToSettle, WrongAccount, WrongPatient: see submitLedgerEntry
+  // refusal-courtesy: ClinicCreditAccount/NoBalanceToPay, PaymentExceedsBalance: see submitLedgerEntry
+  // refusal-courtesy: ClinicDebitAccount/NoBalanceToPay, PaymentExceedsBalance: see submitLedgerEntry
   restorePatient();
   // Who signed in decides every derived affordance (a patient acting on their
   // own record vs the front desk acting on someone's behalf), so it has to be

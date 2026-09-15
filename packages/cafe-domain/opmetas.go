@@ -87,6 +87,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
 			OperationType: "OpenTab",
+			// refusal-courtesy(facet): CreditHold, InvalidState, LeaseNotApproved, OpenTabAlreadyExists, TenancyEnded: none — leaseAppKey is dispatch.contextParams-resolved ({me.leaseapp}); OpenTab declares no dispatch.targetType and renders no field, so Facet offers no lease picker to hide or drop any of these against
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Open a house tab",
 				Description: "Start a café tab billed to your lease.",
@@ -125,6 +126,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "Charge",
+			// refusal-courtesy(facet): ItemUnavailable: drop — entityRefCandidates (cmd/facet/web/app.js) drops menuitem rows edgeEntityMenuItemsTail (packages/edge-manifest/lenses.go) projects available:false
+			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a Charge target
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Order an item",
 				Description: "Add a menu item to your open tab.",
@@ -166,6 +169,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "VoidCharge",
+			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a VoidCharge target
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Void a charge",
 				Description: "Correct a mis-tapped charge by taking it back off an open tab.",
@@ -196,6 +200,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "Settle",
+			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a Settle target
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Close & settle tab",
 				Description: "Close your tab and post the total to your account.",
@@ -334,6 +339,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "SetMenuItemLocation",
+			// refusal-courtesy(facet): InvalidState: none — the already-live servedAt link race (make_link_create_or_revive, ddls.go) is a same-item/same-location double-submit fault, not state any entity lens column projects for entityRefCandidates to filter on
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Relocate a catalog item",
 				Description: "Move a catalog item to a new place — the repair for one whose place was retired.",

@@ -191,6 +191,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.identityKey}.claimKey",
 				},
 			},
+			// refusal-courtesy(facet): InvalidStateTransition: hide — Dispatch.VisibleWhen{Field:"unclaimed",Equals:true} above withholds the op from any row that does not answer unclaimed.
 		},
 		{
 			OperationType: "RevokeIdentityClaim",
@@ -280,6 +281,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					{Hub: "{payload.identityKey}", Relation: "boundTo", Direction: "in"},
 				},
 			},
+			// refusal-courtesy(facet): ClaimRevokeRejected: none — VisibleWhen above gates only row_kind=="identity" (excluding a credentialBinding row), not claim state; per this literal's own comment, nothing projects claim state (claimed/merged/erased) for a staff row today.
 		},
 		{
 			OperationType: "ClaimIdentity",
@@ -528,6 +530,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{actor}.credentialBinding",
 				},
 			},
+			// refusal-courtesy(facet): CredentialUnlinkRejected, IdentityMerged: none — VisibleWhen above narrows only to a row_kind=="credentialBinding" row; no column carries the identity's remaining-credential count or its merged state.
 		},
 		{
 			// DISPATCH-ONLY, and every omission below is deliberate.

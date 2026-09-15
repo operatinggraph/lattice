@@ -89,6 +89,45 @@ test("unresolvableSelfAnchor names the missing type, or passes a resolvable op",
   assert.equal(app.unresolvableSelfAnchor({}), undefined);
 });
 
+test("unrecognisedContextTemplate names a placeholder outside this renderer's vocabulary", () => {
+  const app = loadApp({ selfAnchors: [{ type: "leaseapp", key: LEASE_A }] });
+  // Every head substituteTemplate resolves passes; `:id` and `?` modifiers
+  // are rendering instructions, not part of the head.
+  const known = {
+    dispatchContextParams: JSON.stringify({
+      a: "{actor}", s: "{service}", t: "{scopedTo}", m: "{me.leaseapp:id}", e: "{entity.unit}", p: "{payload.unit}", o: "{me.leaseapp?}",
+    }),
+  };
+  assert.equal(app.unrecognisedContextTemplate(known), undefined);
+  assert.equal(app.unrecognisedContextTemplate({}), undefined);
+  // A head is matched whole: `{actorKey}` is not `{actor}`.
+  assert.equal(app.unrecognisedContextTemplate({ dispatchContextParams: JSON.stringify({ a: "{actorKey}" }) }), "{actorKey}");
+  // The optional marker does not soften a foreign head — the literal would
+  // be submitted as a non-empty value, never omitted.
+  assert.equal(app.unrecognisedContextTemplate({ dispatchContextParams: JSON.stringify({ o: "{context.tenant?}" }) }), "{context.tenant}");
+  // A staff app's `{context.<column>}` is another client's row shape: the
+  // placeholder is named, so opButton can refuse to offer the op.
+  const foreign = { dispatchContextParams: JSON.stringify({ leaseApp: "{context.leaseApp}", applicant: "{context.tenant}" }) };
+  assert.equal(app.unrecognisedContextTemplate(foreign), "{context.leaseApp}");
+  // A link-key template with a known head inside is not foreign.
+  const linkKey = { dispatchContextParams: JSON.stringify({ k: "lnk.renewal.{payload.renewalKey:id}.renews.leaseapp.{me.leaseapp:id}" }) };
+  assert.equal(app.unrecognisedContextTemplate(linkKey), undefined);
+});
+
+test("opButton degrades an op whose contextParam is another client's vocabulary", () => {
+  const app = loadApp({ selfAnchors: [{ type: "leaseapp", key: LEASE_A }] });
+  const html = app.opButton({
+    key: "vtx.meta.FFFFFFFFFFFFFFFFFFFF",
+    data: {
+      operationType: "SignRenewal", title: "Sign renewal", dispatchClass: "renewal",
+      dispatchContextParams: JSON.stringify({ leaseApp: "{context.leaseApp}", applicant: "{context.tenant}" }),
+    },
+  }, {});
+  assert.match(html, /degraded-card/);
+  assert.match(html, /started from another app/);
+  assert.doesNotMatch(html, /data-open-op/);
+});
+
 test("opButton degrades an op whose {me.<type>} the identity cannot answer", () => {
   const app = loadApp({ selfAnchors: [] });
   const html = app.opButton({

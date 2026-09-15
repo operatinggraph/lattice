@@ -28,6 +28,7 @@ var ledgerUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction visitPickerOptions\(appts\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction openChargeOptions\(transactions\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction defaultWaiveTarget\(options\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction selfPayCapMessage\(owedCents, cents\) \{\n.*?\n\}\n`),
 }
 
 // ledgerUITestHarness is test scaffolding only (never extracted from app.js):
@@ -409,4 +410,43 @@ func TestOpenChargeOptions(t *testing.T) {
 func dateAtDay(t *testing.T, year, month, day int) string {
 	t.Helper()
 	return time.Date(year, time.Month(month), day, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+}
+
+// TestSelfPayCapMessage pins the patient's own-payment courtesy to the two
+// refusals ClinicCreditAccount's self-scope leg raises: nothing owed
+// (NoBalanceToPay) and more than owed (PaymentExceedsBalance). An unknown
+// balance never blocks — the script is the authority when the panel has no
+// figure to compare against.
+func TestSelfPayCapMessage(t *testing.T) {
+	vm := ledgerUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("selfPayCapMessage"))
+	if !ok {
+		t.Fatal("selfPayCapMessage is not a function after evaluating its declaration")
+	}
+	run := func(owed, cents interface{}) string {
+		t.Helper()
+		v, err := fn(goja.Undefined(), vm.ToValue(owed), vm.ToValue(cents))
+		if err != nil {
+			t.Fatalf("selfPayCapMessage(%v, %v): %v", owed, cents, err)
+		}
+		return v.String()
+	}
+	if got := run(5000, 2500); got != "" {
+		t.Fatalf("within the balance must pass, got %q", got)
+	}
+	if got := run(5000, 5000); got != "" {
+		t.Fatalf("exactly the balance must pass, got %q", got)
+	}
+	if got := run(5000, 5001); got == "" {
+		t.Fatal("one cent over the balance must be refused")
+	}
+	if got := run(0, 100); got == "" {
+		t.Fatal("a payment against nothing owed must be refused")
+	}
+	if got := run(-1500, 100); got == "" {
+		t.Fatal("a payment against a credit balance must be refused")
+	}
+	if got := run(nil, 100); got != "" {
+		t.Fatalf("an unknown balance never blocks, got %q", got)
+	}
 }

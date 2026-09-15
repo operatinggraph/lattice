@@ -1272,7 +1272,7 @@ func TestCreditCafeAccount_SelfLegCapped(t *testing.T) {
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	assertRejectedBecause(t, ctx, conn, cp, cons, env,
-		"AuthDenied: a payment of $18500.00 exceeds the outstanding balance of $18.50")
+		"PaymentExceedsBalance: a payment of $18500.00 exceeds the outstanding balance of $18.50")
 }
 
 // TestCreditCafeAccount_ConsumerSelfScope_RejectedNoBalance proves a
@@ -1300,7 +1300,7 @@ func TestCreditCafeAccount_ConsumerSelfScope_RejectedNoBalance(t *testing.T) {
 		AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
 	}
 	assertRejectedBecause(t, ctx, conn, cp, cons, env,
-		"AuthDenied: this account has no outstanding balance to pay")
+		"NoBalanceToPay: this account has no outstanding balance to pay")
 }
 
 // TestCreditCafeAccount_ConsumerSelfScope_RejectedForOthersAccount proves a
@@ -1515,7 +1515,7 @@ func TestCreditCafeAccount_StaffOverBalanceRefused(t *testing.T) {
 	// money, because it is toasted verbatim at the counter.
 	overEnv, _ := creditEnvFor("cafestaffoverpay0001", ledgerActorKey, acctKey, 5000)
 	assertRejectedBecause(t, ctx, conn, cp, cons, overEnv,
-		"AuthDenied: a payment of $50.00 exceeds the outstanding balance of $14.25")
+		"PaymentExceedsBalance: a payment of $50.00 exceeds the outstanding balance of $14.25")
 	if got := balanceCents(t, ctx, conn, acctKey); got != 1425 {
 		t.Fatalf("balance after the refused payment = %v, want the untouched 1425", got)
 	}
@@ -1542,7 +1542,7 @@ func TestCreditCafeAccount_StaffNoBalanceRefused(t *testing.T) {
 
 	noBalanceEnv, _ := creditEnvFor("cafestaffnobalpay001", ledgerActorKey, acctKey, 100)
 	assertRejectedBecause(t, ctx, conn, cp, cons, noBalanceEnv,
-		"AuthDenied: this account has no outstanding balance to pay")
+		"NoBalanceToPay: this account has no outstanding balance to pay")
 
 	postDebit(t, ctx, conn, cp, cons, "cafestaffnobaldebit1", acctKey, 100, "Settled tab")
 	creditAmount(t, ctx, conn, cp, cons, "cafestaffnobalpay002",
@@ -3250,7 +3250,7 @@ func TestEntryReason_WaiverOverBalanceRefused(t *testing.T) {
 	over, _ := creditEnvWithPayload("cafereasoncapover", ledgerActorKey, acctKey,
 		`{"accountKey":"`+acctKey+`","amountCents":5000,"reason":"waiver"}`)
 	assertRejectedBecause(t, ctx, conn, cp, cons, over,
-		"AuthDenied: a write-off of $50.00 exceeds the outstanding balance of $14.25")
+		"WriteOffExceedsBalance: a write-off of $50.00 exceeds the outstanding balance of $14.25")
 	if got := balanceCents(t, ctx, conn, acctKey); got != 1425 {
 		t.Fatalf("balance after the refused write-off = %v, want the untouched 1425", got)
 	}

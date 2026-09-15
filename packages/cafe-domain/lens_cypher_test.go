@@ -776,6 +776,42 @@ func TestCafeLeaseWorkplaces_OneRowPerLease(t *testing.T) {
 		"the south lease must not inherit the north building")
 }
 
+// TestCafeLeaseWorkplaces_LeaseEndProjectsFromTenancy proves the lens's own
+// leaseEnd column: the resident-readable half of the same .tenancy fact
+// front-desk's frontDeskLeaseDetails projects for staff
+// (packages/front-desk/lenses.go) — a lease carrying a tenancy end projects
+// it verbatim, same shape, same source aspect.
+func TestCafeLeaseWorkplaces_LeaseEndProjectsFromTenancy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+	f.aspect(t, "lease", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-01-01T00:00:00Z", "leaseEnd": "2026-12-31T00:00:00Z",
+	})
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, "2026-12-31T00:00:00Z", rows[0].Values["leaseEnd"])
+}
+
+// TestCafeLeaseWorkplaces_NoTenancyLeaseEndNull proves a lease with no
+// .tenancy aspect at all — approved before lease-signing minted terms —
+// still projects a row, with leaseEnd null rather than the row dropping,
+// mirroring frontDeskLeaseDetails' own TestFrontDeskLeaseDetails_NullsWhenNoUnit.
+func TestCafeLeaseWorkplaces_NoTenancyLeaseEndNull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.vtx(t, "lease", "leaseapp")
+
+	rows := f.project(t, leaseWorkplacesSpec)
+	require.Len(t, rows, 1, "a lease with no .tenancy at all must still project a row")
+	require.Nil(t, rows[0].Values["leaseEnd"])
+}
+
 // TestCafeLeaseWorkplaces_MultiParentUnitUnionsBothChains proves a unit with two
 // containment parents contributes BOTH to one row: a staffer at either parent is
 // equally entitled to the lease. This is the read half of one rule, and

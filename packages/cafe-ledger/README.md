@@ -120,18 +120,18 @@ budget. Every touch after the aspect exists is O(1). Nothing outside this packag
 
 ## The payment cap
 
-`CreditCafeAccount` refuses an `amountCents` larger than the account's outstanding balance, and
-refuses any payment against an account that owes nothing (`AuthDenied`). The cap binds the
-**operation**, not the caller: no payment rail on this platform witnesses the amount, and that is as
-true of a number a front-desk staffer keys under the `scope: any` grant as of one a resident types
-under `scope: self`. An uncapped payment writes off debt the café is owed, and a mis-keyed one hides
-the resident behind a balance that reads as paid ahead.
+`CreditCafeAccount` refuses an `amountCents` larger than the account's outstanding balance
+(`PaymentExceedsBalance`), and refuses any payment against an account that owes nothing
+(`NoBalanceToPay`). The cap binds the **operation**, not the caller: no payment rail on this platform
+witnesses the amount, and that is as true of a number a front-desk staffer keys under the `scope: any`
+grant as of one a resident types under `scope: self`. An uncapped payment writes off debt the café is
+owed, and a mis-keyed one hides the resident behind a balance that reads as paid ahead.
 
 A **write-off** (`reason: waiver`) is the same credit under the same cap — forgiving more than is owed
-would put the resident in credit the café then owes — and only its refusal reads differently ("a
-write-off of $X exceeds the outstanding balance of $Y"). It is staff-only: a resident's self-scoped
-submit carrying `reason: waiver` is refused `AuthDenied` before the ownership walk, because forgiving a
-debt is the café's call and never the debtor's.
+would put the resident in credit the café then owes — and only its refusal code and message read
+differently (`WriteOffExceedsBalance`, "a write-off of $X exceeds the outstanding balance of $Y"). It
+is staff-only: a resident's self-scoped submit carrying `reason: waiver` is refused `AuthDenied` before
+the ownership walk, because forgiving a debt is the café's call and never the debtor's.
 
 A payment may never exceed what is owed on **any** leg: there is no pay-ahead deposit on a house tab.
 A credit surplus arises only from a refund, and the resident statement's FIFO carry

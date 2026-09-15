@@ -1180,6 +1180,14 @@ function opButton(o, ctx) {
   if (missingColumn) {
     return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This record is missing its ${esc(missingColumn)}; it can't be completed here.</div>`;
   }
+  // A contextParam in a vocabulary this renderer does not speak (a staff
+  // app's `{context.<column>}`) is filled by that other client from its own
+  // row shape; here it would submit as the literal placeholder, so the op
+  // is not offered rather than offered and broken.
+  const foreign = unrecognisedContextTemplate(d);
+  if (foreign) {
+    return `<div class="degraded-card">${esc(d.title || prettifyOpType(d.operationType))} — This is started from another app; it can't be completed here.</div>`;
+  }
   const label = d.submitLabel || d.title || prettifyOpType(d.operationType);
   const attrs = [`data-open-op="${esc(o.key)}"`];
   if (ctx.serviceKey) attrs.push(`data-service-key="${esc(ctx.serviceKey)}"`);
@@ -2392,6 +2400,34 @@ function unresolvableEntityColumn(op, ctx) {
     for (const m of template.matchAll(/\{entity\.([^}]+)\}/g)) {
       const column = m[1].endsWith(":id") ? m[1].slice(0, -3) : m[1];
       if (!entityColumn(ctx, column)) return column;
+    }
+  }
+  return undefined;
+}
+
+// knownTemplateHeads is every placeholder head substituteTemplate resolves —
+// `{actor}`, `{service}`, `{scopedTo}`, `{me.<type>}`, `{entity.<column>}`,
+// `{payload.<field>}`. A head outside this set is another client's
+// vocabulary (a staff app's `{context.<row column>}`), which substituteTemplate
+// leaves as the literal placeholder text.
+const knownTemplateHeads = /^(actor|service|scopedTo)$|^(me|entity|payload)\./;
+
+// unrecognisedContextTemplate returns the first placeholder in an op's
+// dispatch.contextParams whose head this renderer has no case for, or
+// undefined when every one is in substituteTemplate's vocabulary. Same
+// fail-closed rationale as unresolvableSelfAnchor: a contextParam is filled
+// and never rendered, so an unrecognised one would reach the Processor as the
+// literal `{context.<column>}` — a key that fails the script's key parse
+// before the op's own checks run — and the visitor has no field to correct.
+// An optional marker does not soften it: the literal is a non-empty value,
+// so submitDescriptorForm would send it rather than omit the param.
+function unrecognisedContextTemplate(op) {
+  const params = maybeParseJSON(op.dispatchContextParams) || {};
+  for (const template of Object.values(params)) {
+    if (typeof template !== "string") continue;
+    for (const m of stripOptionalMarkers(template).matchAll(/\{([^}]+)\}/g)) {
+      const expr = m[1].endsWith(":id") ? m[1].slice(0, -3) : m[1];
+      if (!knownTemplateHeads.test(expr)) return m[0];
     }
   }
   return undefined;

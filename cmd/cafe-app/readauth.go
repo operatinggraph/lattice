@@ -311,14 +311,48 @@ func notYourLease(hats subjectHats) string {
 }
 
 // leaseWorkplaceProjection is one row of the cafe-domain `cafeLeaseWorkplaces`
-// lens — the locations that cover a lease. MissingLocation distinguishes an
-// empty CoveringLocations caused by a data gap (the appliesToUnit target is
-// gone or never wired) from the ordinary "no workplace reaches this lease"
-// answer — see leaseWorkplacesSpec (cafe-domain/lenses.go).
+// lens — the locations that cover a lease, plus the lease's own tenancy end.
+// MissingLocation distinguishes an empty CoveringLocations caused by a data
+// gap (the appliesToUnit target is gone or never wired) from the ordinary
+// "no workplace reaches this lease" answer — see leaseWorkplacesSpec
+// (cafe-domain/lenses.go). LeaseEnd carries no `omitempty`: residents.go
+// gates the resident's own Open Tab button on it, and an omitted key would
+// read identically to a lease with no projected term.
 type leaseWorkplaceProjection struct {
 	LeaseAppKey       string   `json:"leaseAppKey"`
 	MissingLocation   bool     `json:"missingLocation"`
 	CoveringLocations []string `json:"coveringLocations"`
+	LeaseEnd          string   `json:"leaseEnd"`
+}
+
+// leaseWorkplaceRows lists and decodes every row of the cafe-domain
+// `cafeLeaseWorkplaces` lens (LeaseWorkplacesBucket) — the one KV fetch
+// shared by staffCoveredLeases (workplace confinement, below) and
+// residents.go's own leaseEnd join (the resident-readable half of OpenTab's
+// TenancyEnded courtesy: the same lease-keyed bucket the staff picker's
+// frontDeskLeaseDetails join reads leaseEnd off, staff-only). A row that
+// fails to decode or carries no leaseAppKey is skipped, mirroring
+// computeFrontDeskBookings' own tombstoned-entry guard (frontdesk.go).
+func (s *server) leaseWorkplaceRows(ctx context.Context) ([]leaseWorkplaceProjection, error) {
+	bucket := cafedomain.LeaseWorkplacesBucket
+	keys, err := s.conn.KVListKeys(ctx, bucket)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w (is cafe-domain 0.15.0 installed and the Refractor projecting?)", bucket, err)
+	}
+	get := s.kvGetter(ctx, bucket)
+	rows := make([]leaseWorkplaceProjection, 0, len(keys))
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p leaseWorkplaceProjection
+		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey == "" {
+			continue
+		}
+		rows = append(rows, p)
+	}
+	return rows, nil
 }
 
 // staffCoveredLeases returns two sets from one pass over cafeLeaseWorkplaces:
@@ -350,21 +384,11 @@ func (s *server) staffCoveredLeases(ctx context.Context, hats subjectHats) (cove
 	if !hats.isFrontDesk() {
 		return covered, unattributable, nil
 	}
-	bucket := cafedomain.LeaseWorkplacesBucket
-	keys, err := s.conn.KVListKeys(ctx, bucket)
+	rows, err := s.leaseWorkplaceRows(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list %s: %w (is cafe-domain 0.11.30 installed and the Refractor projecting?)", bucket, err)
+		return nil, nil, err
 	}
-	get := s.kvGetter(ctx, bucket)
-	for _, k := range keys {
-		raw, ok := get(k)
-		if !ok {
-			continue
-		}
-		var p leaseWorkplaceProjection
-		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey == "" {
-			continue
-		}
+	for _, p := range rows {
 		if p.MissingLocation {
 			unattributable[p.LeaseAppKey] = true
 			continue

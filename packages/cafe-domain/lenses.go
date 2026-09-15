@@ -17,9 +17,13 @@ const StaleTabSettlementTarget = "cafeStaleTabSettlement"
 
 // LeaseWorkplacesBucket is the NATS-KV read model the cafeLeaseWorkplaces
 // lens projects into — one row per lease, carrying the set of locations that
-// COVER it. It is the P5 query surface for the one question every café staff
-// read has to answer before returning a row: "does this caller's workplace
-// reach this lease." The Refractor auto-creates the bucket on lens load.
+// COVER it, plus the lease's own tenancy end (leaseEnd). It is the P5 query
+// surface for the one question every café staff read has to answer before
+// returning a row: "does this caller's workplace reach this lease" — and,
+// via leaseEnd, the surface cmd/cafe-app's own resident-readable /api/residents
+// joins by leaseAppKey to give the resident's self-service Open Tab the same
+// TenancyEnded courtesy the staff picker already has. The Refractor
+// auto-creates the bucket on lens load.
 const LeaseWorkplacesBucket = "cafe-lease-workplaces"
 
 // MenuCatalogBucket is the NATS-KV read model the menuCatalog lens projects
@@ -182,6 +186,18 @@ func Lenses() []pkgmgr.LensSpec {
 // lease rather than only for the wired ones: an absent row and an empty set
 // have to deny alike.
 //
+// `leaseEnd` carries the lease's own tenancy end off the SAME `.tenancy`
+// aspect OpenTab's TenancyEnded guard reads (ddls.go) and front-desk's
+// frontDeskLeaseDetails projects for staff (packages/front-desk/lenses.go,
+// same source aspect, same shape — no coalesce, a lease approved before
+// terms were minted projects null rather than dropping the row) — the
+// resident-readable half of that fact: cmd/cafe-app's /api/residents
+// (residents.go) joins this bucket onto its own roster by leaseAppKey so the
+// resident's own self-service Open Tab can hide itself past the tenancy end
+// the same way fillLeaseSelect's tenancyEnded check already disables the
+// option on the staff POS/front-desk picker, with no extra protected lens
+// (the front-desk lens stays staff-only, gated at the HTTP handler).
+//
 // `missingLocation` (mirrors menuCatalogSpec's own flag below) distinguishes
 // WHY the set is empty: `u.key = null` means the appliesToUnit target is gone
 // (tombstoned out from under a still-live lease — the 2026-08-23 duplicate-
@@ -210,6 +226,7 @@ RETURN
   l.key AS key,
   l.key AS leaseAppKey,
   (u.key = null) AS missingLocation,
+  l.tenancy.data.leaseEnd AS leaseEnd,
   [(l)-[:appliesToUnit]->(wu)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
 
 // menuCatalogSpec projects one row per live menuItem — a tombstoned item

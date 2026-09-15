@@ -135,6 +135,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): AppointmentTooLong, OutsideHours, PatientDoubleBook, ProviderNotAtSite, ProviderUnavailable, ScheduleInPast, SlotConflict, SlotGridViolation: none — edgeEntityProvidersTail (packages/edge-manifest/lenses.go) is CreateAppointment's browse target (dispatch.targetType: provider) and projects no availability column; Facet offers every provider row regardless of hours, time-off, or existing bookings.
 			},
 		},
 		{
@@ -198,6 +199,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): AppointmentTooLong, InvalidState, LateReschedule, OutsideHours, PatientDoubleBook, ProviderUnavailable, ScheduleInPast, SlotConflict, SlotGridViolation, TerminalStatus, VisitStarted, WrongPatient, WrongProvider: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), RescheduleAppointment's browse target (dispatch.targetType: appointment), projects title/subtitle/startsAt/endsAt/providerKey only, no availability or status-droppable column; Facet offers every appointment row regardless.
 			},
 		},
 		{
@@ -279,6 +281,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): AppointmentTooLong, InvalidState, NotYetStarted, TerminalStatus, VisitStarted, WrongPatient, WrongProvider: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), SetAppointmentStatus's browse target (dispatch.targetType: appointment), projects no availability or status-droppable column; Facet offers every appointment row regardless of its current status or visit clock.
 			},
 		},
 		{
@@ -344,6 +347,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): InvalidState, NotTerminal, NotYetStarted: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), CorrectAppointmentStatus's browse target (dispatch.targetType: appointment), projects no availability or status-droppable column; Facet offers every appointment row regardless of its current status.
 			},
 		},
 		{
@@ -459,6 +463,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): InvalidState, MissingFollowUpDate, NotYetStarted, VisitNotHeld: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), RecordEncounter's browse target (dispatch.targetType: appointment), projects no availability or status-droppable column; Facet offers every appointment row regardless of its current status or visit clock.
 			},
 		},
 		{
@@ -495,6 +500,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): MissingBinding, ProviderNotAtSite: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), SetAppointmentSite's browse target (dispatch.targetType: appointment), projects no site-membership column; Facet offers every appointment row regardless of whether its provider practicesAt any site at all.
 			},
 		},
 		{
@@ -540,6 +546,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "worksAt", Direction: "out"},
 				},
+				// refusal-courtesy(facet): IdentityAlreadyClaimed: none — CreatePatient's Dispatch carries no TargetType/entity picker (edge-manifest projects no "patient" entityType lens at all), and identityKey names an identity the SAME submit mints moments earlier server-side, not a picker row Facet could drop.
 			},
 		},
 		{
@@ -589,6 +596,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.identityKey}.patientClaim",
 					"{payload.patientKey}.identityClaim",
 				},
+				// refusal-courtesy(facet): IdentityAlreadyClaimed, IdentityNotUnclaimed, MissingDemographics, MissingRegistration, NothingToBind, PatientAlreadyIdentified: none — TargetType "patient" and identityKey's x-entityRef "identity" both name entityTypes no edge-manifest lens projects (no "patient" or "identity" manifest.ent walk exists); Facet has no picker row to hide or drop for either field.
 			},
 		},
 		{

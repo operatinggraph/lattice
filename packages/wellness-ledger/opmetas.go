@@ -27,6 +27,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
 			OperationType: "WellnessCreateAccount",
+			// refusal-courtesy(facet): AccountAlreadyExists: none — no identity/member entity lens projects whether a wellnessaccount already exists for this identity; a re-submission returns AccountAlreadyExists cleanly (idempotent, the same steady state wellness-app's own ensureLedgerAccount swallows).
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Open ledger account",
 				Description: "Open the wellness ledger account for a member.",
@@ -74,6 +75,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetType:  "wellnessaccount",
 				Reads:       []string{"{payload.accountKey}"},
 			},
+			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — AuthContext "standing" means Facet never attaches a target to this dispatch, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, scripts.go) only runs when a target is present
 		},
 		{
 			OperationType: "WellnessCreditAccount",
@@ -101,6 +103,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetType:  "wellnessaccount",
 				Reads:       []string{"{payload.accountKey}"},
 			},
+			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — AuthContext "standing" means Facet never attaches a target to this dispatch, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, scripts.go) only runs when a target is present
 		},
 	}
 }

@@ -116,6 +116,7 @@ func RenewalLenses() []pkgmgr.LensSpec {
 				{Name: "cycle_end", Type: "text"},
 				{Name: "unit_address", Type: "text"},
 				{Name: "lease_end", Type: "text"},
+				{Name: "tenancy_ended_at", Type: "text"},
 				{Name: "rent_amount", Type: "double precision"},
 				{Name: "term_months", Type: "double precision"},
 				{Name: "terms_set_at", Type: "text"},
@@ -410,6 +411,12 @@ RETURN
 //     the new term SignRenewal stamps onto .tenancy once signed, so the card
 //     shows the tenant's actual current end rather than the cycle that opened
 //     the renewal.
+//   - tenancy_ended_at reads the SAME app.tenancy.data.endedAt the
+//     applications read lenses already project (leaseApplicationsRead /
+//     landlordLeaseApplicationsRead, lenses.go) — SignRenewal itself refuses
+//     TenancyEnded off this exact field once EndTenancy has recorded it
+//     (renewal_scripts.go), so the card's own gate on offering Sign
+//     (renewalReady) reads the same fact.
 const renewalsReadSpec = `
 MATCH (rn:renewal)
 MATCH (rn)-[:renews]->(app:leaseapp)
@@ -428,6 +435,7 @@ WITH
   collect(DISTINCT nanoIdFromKey(landlord.key)) AS landlordAnchors,
   u.address.data.line1                     AS unitAddress,
   app.tenancy.data.leaseEnd                AS tenancyLeaseEnd,
+  app.tenancy.data.endedAt                 AS tenancyEndedAt,
   app.applicationSignals.data.hasGuarantor AS hasGuarantor,
   rn.terms.data.rentAmount                 AS rentAmount,
   rn.terms.data.termMonths                 AS termMonths,
@@ -446,6 +454,7 @@ RETURN
   cycleEnd                                 AS cycle_end,
   unitAddress                              AS unit_address,
   tenancyLeaseEnd                          AS lease_end,
+  tenancyEndedAt                           AS tenancy_ended_at,
   rentAmount                               AS rent_amount,
   termMonths                               AS term_months,
   termsSetAt                               AS terms_set_at,

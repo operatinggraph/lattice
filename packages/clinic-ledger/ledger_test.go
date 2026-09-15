@@ -2195,14 +2195,14 @@ func TestCreditAccount_SelfPayCapNamesDollars(t *testing.T) {
 	// Nothing owed yet: the empty-balance refusal, which names no account.
 	assertRejectedBecause(t, ctx, conn, cp, cons,
 		selfPayEnv("captextnobalpay00001", acctKey, 100),
-		"AuthDenied: this account has no outstanding balance to pay")
+		"NoBalanceToPay: this account has no outstanding balance to pay")
 
 	staffDebit(t, ctx, conn, cp, cons, "captextdebit00000001", acctKey, 1425, processor.OutcomeAccepted)
 
 	// $14.25 owed; the patient types $50.00. Both amounts are spelled as money.
 	assertRejectedBecause(t, ctx, conn, cp, cons,
 		selfPayEnv("captextoverpay000001", acctKey, 5000),
-		"AuthDenied: a payment of $50.00 exceeds the outstanding balance of $14.25")
+		"PaymentExceedsBalance: a payment of $50.00 exceeds the outstanding balance of $14.25")
 	if got := balanceCents(t, ctx, conn, acctKey); got != 1425 {
 		t.Fatalf("balance after the refused self-pay = %v, want the untouched 1425", got)
 	}

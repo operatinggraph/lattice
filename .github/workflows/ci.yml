@@ -19,7 +19,7 @@ on:
 # the sum. Every gate that ran in the old single serial job still runs, each in
 # exactly one job:
 #   lint-build         — build, build-wasm, nats-confinement, vet, gofmt (no Docker)
-#   lint-static        — golangci + the 26 STRICT scripts/lint-*.go gates,
+#   lint-static        — golangci + every STRICT scripts/lint-*.go gate,
 #                         split off lint-build so the compile/vet half and the
 #                         static-analysis half run in parallel instead of
 #                         serially — lint-build's own wall-clock (Build+Vet+
@@ -583,6 +583,20 @@ jobs:
         # self-scope probes and probes on optional payload fields are not
         # required; a non-literal OptionalReads is listed, not judged.
         run: STRICT=1 go run ./scripts/lint-seed-declared-reads.go
+
+      - name: Refusal-courtesy lint (every form that dispatches an op declares its courtesy per state refusal)
+        # A refusal added to one form leaves its sibling form — or another
+        # client — a dead end (café payment cap 2026-09-05, wellness guest
+        # picker 2026-09-13, café ItemUnavailable in Facet 2026-09-15). For
+        # every op a script can refuse with a state code and that 2+ sites
+        # dispatch (the vertical FEs' app.js functions + Facet's descriptor
+        # form), each site declares `// refusal-courtesy: Op/Code: verb — why`
+        # (opmetas.go carries Facet's `(facet)` line); default-deny, and a
+        # declaration naming a code the op cannot raise is stale. Parses the
+        # scripts with go.starlark.net/syntax (codes reach through the helper
+        # call graph, parameter-carried codes included), the FEs with goja,
+        # the descriptors with go/ast.
+        run: STRICT=1 go run ./scripts/lint-refusal-courtesy.go
 
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,

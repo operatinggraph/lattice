@@ -26,7 +26,7 @@ confinement described below (facet-staff-worlds-design.md §3.5, §9).
 | **Aspect types** (3) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, itemsMemo, openedAt, leaseAppKey, settledAt?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents, available}` |
 | **Links** (3) | `chargedTo` (tab → leaseapp, permanent) · `openFor` (tab → leaseapp, released by `Settle`) · `servedAt` (menuitem → location, permanent — what makes an item reachable) |
 | **Operations** (9) | `OpenTab` · `Charge` · `VoidCharge` · `Settle` · `CreateMenuItem` · `RetireMenuItem` · `SetMenuItemAvailability` · `SetMenuItemLocation` · `UpdateMenuItem` |
-| **Lenses** (3) | `cafeTabSettlement` (convergence, one row per tab, `missing_account`/`missing_charge`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) · `menuCatalog` (plain projection, one row per live menuitem) → `cafe-menu-catalog` (`nats-kv`) · `cafeLeaseWorkplaces` (one row per lease, `coveringLocations`) → `cafe-lease-workplaces` (`nats-kv`) — the read-side half of workplace confinement |
+| **Lenses** (3) | `cafeTabSettlement` (convergence, one row per tab, `missing_account`/`missing_charge`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) · `menuCatalog` (plain projection, one row per live menuitem) → `cafe-menu-catalog` (`nats-kv`) · `cafeLeaseWorkplaces` (one row per lease, `coveringLocations` + `leaseEnd`) → `cafe-lease-workplaces` (`nats-kv`) — the read-side half of workplace confinement, plus the resident-readable tenancy-end column |
 | **Weaver playbook** (1) | `cafeTabSettlement` — `missing_account` → `directOp(CreateAccount)` · `missing_charge` → `directOp(DebitAccount)` (both cafe-ledger) |
 
 Grants (`permissions.go`): `OpenTab`/`Charge`/`Settle` grant `operator`+`frontOfHouse` at `scope: any` AND
@@ -106,7 +106,12 @@ same bounded breadth-first `containedIn` walk `clinic-domain` and `wellness-doma
 actor holding the primordial `operator` role and no-op on the resident-self path (bound instead by the
 `applicationFor` ownership probe). The `cafeLeaseWorkplaces` lens is the read-side mirror of that same
 walk (`facet-staff-worlds-design.md` §9): it projects `coveringLocations` per lease so a staff read
-boundary gets the identical answer from a set intersection, no Core-KV read needed (P5).
+boundary gets the identical answer from a set intersection, no Core-KV read needed (P5). It also carries
+`leaseEnd` off the same `.tenancy` aspect `OpenTab`'s `TenancyEnded` guard reads (mirroring front-desk's
+own `frontDeskLeaseDetails` projection, `packages/front-desk/lenses.go`) — `cmd/cafe-app`'s own
+`/api/residents` (residents.go) joins this bucket onto its roster by `leaseAppKey`, so the resident's own
+self-service Open Tab can give itself the courtesy the staff POS/front-desk picker already has
+(`fillLeaseSelect`'s `tenancyEnded` check) without a second protected lens.
 
 ## Front-desk identity roster
 

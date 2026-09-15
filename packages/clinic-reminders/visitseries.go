@@ -1551,6 +1551,7 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): ActiveVisitSeriesExists: hide — providerKey is supplied via the ContextParam "{context.providerKey}", the staff app's row vocabulary; Facet's opButton does not offer an op whose contextParam head it cannot resolve (unrecognisedContextTemplate).
 			},
 		},
 		{
@@ -1639,6 +1640,7 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): VisitSeriesAlreadyEnded: hide — VisibleWhen{series_endable==true} (visitSeriesReadSpec) offers "End series" only while series_status is not already "ended".
 			},
 		},
 		{
@@ -1676,6 +1678,7 @@ func visitSeriesOpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
+				// refusal-courtesy(facet): ProviderNotAtSite: none — edge-manifest projects no "building" entityType lens, so site's x-entityRef picker has no rows to scope by the series' own provider; Facet offers every site regardless.
 			},
 		},
 		{OperationType: advanceVisitSeriesOp},

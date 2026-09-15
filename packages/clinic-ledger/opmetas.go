@@ -57,6 +57,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "patientKey",
 				TargetType:  "patient",
 				Reads:       []string{"{payload.patientKey}"},
+				// refusal-courtesy(facet): AccountAlreadyExists: none — TargetType "patient" names an entityType no edge-manifest lens projects; Facet has no picker row to hide, and the race this code guards against has no ex-ante UI signal either way.
 			},
 		},
 		{
@@ -103,6 +104,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// op never runs the postedTo replay and declares no enumeration
 				// for it — only a self-scoped ClinicCreditAccount does.
 				OptionalReads: []string{"{payload.accountKey}.balance"},
+				// refusal-courtesy(facet): InvalidState, NoFeeToSettle, WrongAccount, WrongPatient: none — TargetType "clinicaccount" names an entityType no edge-manifest lens projects; Facet has no picker row for the account, and visitRef is a plain typed field, not an x-entityRef picker Facet could drop.
+				// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — ClinicDebitAccount dispatches post_entry with entry_type="debit" (scripts.go); is_self_pay requires entry_type=="credit" on the authContextTarget branch (a debit with a target fails AuthDenied before is_self_pay is ever set), so the block these codes live in never runs for a debit
 			},
 		},
 		{
@@ -145,6 +148,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// leg is the only one that replays, which is why this op declares
 				// the walk and ClinicDebitAccount does not.
 				Enumerations: []pkgmgr.EnumerationSpec{{Hub: "{payload.accountKey}", Relation: "postedTo", Direction: "in"}},
+				// refusal-courtesy(facet): InvalidState, NoFeeToSettle, WrongAccount, WrongPatient: none — TargetType "clinicaccount" names an entityType no edge-manifest lens projects; Facet has no picker row for the account, and reversesRef is a plain typed field, not an x-entityRef picker Facet could drop.
+				// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: none — AuthContext "self" means every Facet submit of this op is self-scoped, so is_self_pay is always true server-side, but amountCents carries no maximum tied to the account's own live balance (InputSchema above), and no edge-manifest entity lens projects that balance as a column Facet could bound against
 			},
 		},
 	}

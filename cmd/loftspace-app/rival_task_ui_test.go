@@ -8,15 +8,18 @@ import (
 )
 
 // rivalTaskUIDecls lifts the shipped taskExpired / taskLostToRival /
-// taskDisposition / tasksSummaryFor declarations out of the embedded app.js (the
-// lease_term_ui_test.go pattern: the REAL source runs here, not a copy).
-// fmtDate is stubbed to the identity — taskDisposition only reaches it in the
-// expired branch's title, and its locale formatting is not what these pins
-// are about.
+// renewalCardTaskOps / renewalTaskStale / taskDisposition / tasksSummaryFor
+// declarations out of the embedded app.js (the lease_term_ui_test.go
+// pattern: the REAL source runs here, not a copy). fmtDate is stubbed to the
+// identity — taskDisposition only reaches it in the expired/renewal-stale
+// branches' titles, and its locale formatting is not what these pins are
+// about.
 var rivalTaskUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction taskExpired\(t, nowMs\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction taskLostToRival\(t, applications\) \{\n.*?\n\}\n`),
-	regexp.MustCompile(`(?s)\nfunction taskDisposition\(t, nowMs, canComplete, profileTask, applications\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nconst renewalCardTaskOps = \[.*?\];\n`),
+	regexp.MustCompile(`(?s)\nfunction renewalTaskStale\(operationName, row\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction taskDisposition\(t, nowMs, canComplete, profileTask, applications, renewals\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction tasksSummaryFor\(tasks, nowMs\) \{\n.*?\n\}\n`),
 }
 
@@ -222,6 +225,80 @@ func TestTaskDisposition_LostApplicationTaskIsClosed(t *testing.T) {
 	})
 	t.Run("a task scoped to no loaded application is not judged", func(t *testing.T) {
 		badge, _, disabled := run(t, map[string]interface{}{"operationName": "RecordIdentityPII", "scopedTo": "vtx.identity.bob"})
+		if badge != "open" || disabled {
+			t.Errorf("badge=%q disabled=%v, want open", badge, disabled)
+		}
+	})
+}
+
+// TestTaskDisposition_RenewalTaskStaleIsClosed pins the inbox's degrade for a
+// renewal-chain task (SetRenewalTerms/VerifyGuarantor/SignRenewal) whose own
+// renewal cycle moved past it after the task was assigned — the
+// refusal-courtesy fix: before this, canCompleteOp + taskDisposition's
+// expired/lostToRival were the ONLY gates, so a SignRenewal task assigned
+// while a cycle was open still offered a live Complete after the operator
+// ended the tenancy (raw TenancyEnded) or after CancelRenewal closed the
+// cycle (raw RenewalNotOpen) — exactly what renderRenewalCard already hides
+// on its own Sign button. Positive: an ended tenancy is not offered.
+// Negative: an open, unsigned renewal keeps offering it.
+func TestTaskDisposition_RenewalTaskStaleIsClosed(t *testing.T) {
+	vm := rivalTaskUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("taskDisposition"))
+	if !ok {
+		t.Fatal("taskDisposition is not a function after evaluating its declaration")
+	}
+	renewals := []map[string]interface{}{
+		{"entityKey": "vtx.renewal.ended", "status": "open", "tenancyEndedAt": "2026-09-10T00:00:00Z"},
+		{"entityKey": "vtx.renewal.cancelled", "status": "cancelled"},
+		{"entityKey": "vtx.renewal.open", "status": "open"},
+	}
+	run := func(t *testing.T, task map[string]interface{}) (badge, label string, disabled bool) {
+		t.Helper()
+		res, err := fn(goja.Undefined(), vm.ToValue(task), vm.ToValue(rivalNowMs), vm.ToValue(true), vm.ToValue(false), vm.ToValue([]map[string]interface{}{}), vm.ToValue(renewals))
+		if err != nil {
+			t.Fatalf("taskDisposition threw: %v", err)
+		}
+		obj := res.ToObject(vm)
+		return obj.Get("badge").String(), obj.Get("label").String(), obj.Get("disabled").ToBoolean()
+	}
+	t.Run("SignRenewal on an ended tenancy is not offered", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SignRenewal", "scopedTo": "vtx.renewal.ended", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "closed" || label != "Lease ended" || !disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want closed/Lease ended/true", badge, label, disabled)
+		}
+	})
+	t.Run("SignRenewal on a cancelled renewal is not offered", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SignRenewal", "scopedTo": "vtx.renewal.cancelled", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "closed" || label != "Renewal no longer open" || !disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want closed/Renewal no longer open/true", badge, label, disabled)
+		}
+	})
+	t.Run("SetRenewalTerms on a cancelled renewal is not offered", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SetRenewalTerms", "scopedTo": "vtx.renewal.cancelled", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "closed" || label != "Renewal no longer open" || !disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want closed/Renewal no longer open/true", badge, label, disabled)
+		}
+	})
+	t.Run("expired still wins over a stale renewal", func(t *testing.T) {
+		badge, _, _ := run(t, map[string]interface{}{"operationName": "SignRenewal", "scopedTo": "vtx.renewal.ended", "expiresAt": "2026-08-31T00:00:00Z"})
+		if badge != "expired" {
+			t.Errorf("badge = %q, want expired", badge)
+		}
+	})
+	t.Run("SignRenewal on an open, unsigned renewal keeps offering Complete", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SignRenewal", "scopedTo": "vtx.renewal.open", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "open" || label != "Complete" || disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want open/Complete/false", badge, label, disabled)
+		}
+	})
+	t.Run("VerifyGuarantor is never judged against tenancyEndedAt/status", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "VerifyGuarantor", "scopedTo": "vtx.renewal.ended", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "open" || label != "Complete" || disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want open/Complete/false", badge, label, disabled)
+		}
+	})
+	t.Run("a task scoped to no loaded renewal is not judged", func(t *testing.T) {
+		badge, _, disabled := run(t, map[string]interface{}{"operationName": "SignRenewal", "scopedTo": "vtx.renewal.unloaded", "expiresAt": "2026-10-01T00:00:00Z"})
 		if badge != "open" || disabled {
 			t.Errorf("badge=%q disabled=%v, want open", badge, disabled)
 		}

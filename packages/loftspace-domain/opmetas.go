@@ -60,6 +60,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.identity.{actor:id}.manages.unit.{payload.unit:id}",
 				},
 			},
+			// refusal-courtesy(facet): NoListing: none — no VisibleWhen or unit entity lens column reports whether a unit carries a .listing aspect yet; Facet offers Change listing status on every unit row.
 		},
 		{
 			OperationType: "SetListing",

@@ -55,6 +55,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"lnk.task.{payload.taskKey:id}.assignedTo.identity.{actor:id}",
 				},
 			},
+			// refusal-courtesy(facet): NotAuthorizedToClaim: unreachable — edge-manifest's own task lens only surfaces a role-queued task to an actor holding that role (packages/edge-manifest/lenses.go:183, the same join orchestration-base's own myTasksSpec uses).
+			// refusal-courtesy(facet): TaskAlreadyClaimed, TaskNotOpen: none — the task feed is a snapshot; status can change between load and click with no live re-check before Claim.
 		},
 	}
 }

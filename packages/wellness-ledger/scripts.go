@@ -365,9 +365,9 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refu
         if budget_exhausted:
             fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
         if owed_cents <= 0:
-            fail("AuthDenied: account " + acct_key + " has no outstanding balance to pay")
+            fail("NoBalanceToPay: account " + acct_key + " has no outstanding balance to pay")
         if amount_cents > owed_cents:
-            fail("AuthDenied: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
+            fail("PaymentExceedsBalance: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
 
     tx_id = nanoid.new()
     tx_key = "vtx.wellnesstransaction." + tx_id

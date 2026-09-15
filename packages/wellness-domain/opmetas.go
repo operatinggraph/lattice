@@ -93,6 +93,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func reassignSessionOpMeta() pkgmgr.OpMetaSpec {
 	return pkgmgr.OpMetaSpec{
 		OperationType: "ReassignSession",
+		// refusal-courtesy(facet): WrongStudio: unreachable — ContextParams auto-fills studio from {entity.studioKey}; no field lets a Facet submitter supply a different one.
+		// refusal-courtesy(facet): InvalidState: unreachable — the op-meta's InputSchema requires "studio" (never omittable), so a Facet submission always takes the studio!=None branch; the InvalidState in the studio-omitted operator-repair else-branch is never reached.
+		// refusal-courtesy(facet): InstructorConflict, StudioConflict: none — the requested new time is not a property of any row Facet's entity lens offers; no `available` column could preview a collision before submit.
+		// refusal-courtesy(facet): SlotGridViolation: none — the descriptor's startsAt/endsAt fields carry format:"date-time" with no step constraint; Facet's generic renderer enforces no 15-minute grid.
+		// refusal-courtesy(facet): SessionTooLong: none — the descriptor enforces no maximum span before submit.
 		Presentation: &pkgmgr.OpPresentationSpec{
 			Title:       "Reschedule class",
 			Description: "Move this class to a new time.",
@@ -161,6 +166,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
 			OperationType: "CreateBooking",
+			// refusal-courtesy(facet): SessionInPast, SessionFull: none — edgeEntitySessions (edge-manifest/lenses.go's edgeSessionsTail) projects no `available` column reflecting a session's start time or seat count; Facet's generic form always offers the op.
+			// refusal-courtesy(facet): DoubleBooked: none — same lens, same gap: no column reflects whether the viewing actor already holds a claim on this session.
+			// refusal-courtesy(facet): ProtectedBooker, BookerConflict: none — both are properties of the ACTOR (a kernel identity, or a conflicting claim on another session), not of the session row being browsed; no entity lens column could express either.
+			// refusal-courtesy(facet): SessionTooLong: none — the session's span is fixed at CreateSession/CreateSessionSeries mint time (enforced there); Facet supplies no span here, only the session being viewed.
+			// refusal-courtesy(facet): InvalidState: none — a missing schedule aspect on the session is a read-model correctness fault, not a state Facet's generic form could gate.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Book a class",
 				Description: "Book yourself into this session.",
@@ -232,6 +242,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// presentation strings and title differ, since the offered
 			// affordance is "join the waitlist" not "book".
 			OperationType: "JoinWaitlist",
+			// refusal-courtesy(facet): SessionInPast, WaitlistFull: none — edgeEntitySessions projects no `available` column reflecting a session's start time or waitlist occupancy; Facet's generic form always offers the op.
+			// refusal-courtesy(facet): DoubleBooked: none — same lens, same gap: no column reflects whether the viewing actor already holds a claim on this session.
+			// refusal-courtesy(facet): ProtectedBooker, BookerConflict: none — both are properties of the ACTOR, not of the session row being browsed; no entity lens column could express either.
+			// refusal-courtesy(facet): SessionTooLong: none — the session's span is fixed at CreateSession/CreateSessionSeries mint time; Facet supplies no span here, only the session being viewed.
+			// refusal-courtesy(facet): InvalidState: none — a missing schedule aspect on the session is a read-model correctness fault, not a state Facet's generic form could gate.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Join the waitlist",
 				Description: "This class is full — join the waitlist and get the next open seat automatically.",
@@ -276,6 +291,10 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "CancelBooking",
+			// refusal-courtesy(facet): AttendanceRecorded, SessionStarted: none — edgeEntityBookingsTail (edge-manifest/lenses.go) excludes only a forfeited booking by its own WHERE clause; it projects no `available` column reflecting attendance or session-start state, so an attended/noShow/started booking is still offered.
+			// refusal-courtesy(facet): WrongSession: unreachable — the op-meta's ContextParams auto-fills session from {entity.sessionKey}, the exact value the script's forSession check compares against; no field lets a Facet submitter supply a different one.
+			// refusal-courtesy(facet): SessionTooLong: none — this op sends no span; the booker-cell release replays the session's own already-validated schedule.
+			// refusal-courtesy(facet): InvalidState: none — a missing .status/.schedule aspect on a booking already offered by the lens is a read-model correctness fault.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Cancel booking",
 				Description: "Cancel this booking and release your seat. Only available before the class begins and before attendance is recorded; inside the two-hour late window of a priced class the seat is released but the class price is forfeited and the booking stays on your record as forfeited.",
@@ -335,6 +354,10 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "TombstoneSession",
+			// refusal-courtesy(facet): SessionStarted: none — edgeEntitySessions (edge-manifest/lenses.go's edgeSessionsTail) projects no `available` column reflecting a session's start time, so a started class is still offered.
+			// refusal-courtesy(facet): WrongStudio: unreachable — the op-meta's ContextParams auto-fills studio from {entity.studioKey}, the exact value require_matching_studio compares against; no field lets a Facet submitter supply a different one.
+			// refusal-courtesy(facet): SessionTooLong: none — this op sends no span; the released studio/instructor cells replay the session's own already-validated schedule.
+			// refusal-courtesy(facet): InvalidState: none — a missing .schedule aspect on a session already offered by the lens is a read-model correctness fault.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Cancel class",
 				Description: "Cancel this class. Refused once the class has started (SessionStarted).",
@@ -401,6 +424,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		reassignSessionOpMeta(),
 		{
 			OperationType: "SetBookingAttendance",
+			// refusal-courtesy(facet): SessionNotStarted: none — edgeEntityBookingsTail (edge-manifest/lenses.go) projects no `available` column reflecting whether the session has started; a not-yet-started booking is still offered.
+			// refusal-courtesy(facet): WrongSession: unreachable — the op-meta's ContextParams auto-fills session from {entity.sessionKey}, the exact value the script's forSession check compares against; no field lets a Facet submitter supply a different one.
+			// refusal-courtesy(facet): InvalidState: none — a missing .status/.schedule aspect, or a waitlisted/forfeited booking, on a row already offered by the lens is a state no `available` column projects.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Record attendance",
 				Description: "Mark whether this member showed up for the class.",
@@ -460,6 +486,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "CreateSession",
+			// refusal-courtesy(facet): InstructorConflict, StudioConflict: none — the requested new time is not a property of the studio row Facet offers; no `available` column could preview a collision before submit.
+			// refusal-courtesy(facet): SlotGridViolation: none — the descriptor's startsAt/endsAt fields carry format:"date-time" with no step constraint; Facet's generic renderer enforces no 15-minute grid.
+			// refusal-courtesy(facet): SessionTooLong: none — the descriptor enforces no maximum span before submit.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Schedule a class",
 				Description: "Put a class on a studio's grid.",
@@ -515,6 +544,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "CreateSessionSeries",
+			// refusal-courtesy(facet): InstructorConflict, StudioConflict: none — the requested new time is not a property of the studio row Facet offers; no `available` column could preview a collision before submit.
+			// refusal-courtesy(facet): SlotGridViolation: none — the descriptor's startsAt/endsAt fields carry format:"date-time" with no step constraint; Facet's generic renderer enforces no 15-minute grid.
+			// refusal-courtesy(facet): SessionTooLong: none — the descriptor enforces no maximum span before submit.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Schedule a recurring class",
 				Description: "Put a whole run of the same class on a studio's grid at once — weekly, biweekly, whatever the cadence.",
@@ -567,6 +599,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "TombstoneSessionSeries",
+			// refusal-courtesy(facet): NoUpcomingOccurrences, SeriesWalkBound, SessionTooLong, WrongStudio: hide — no lens projects a sessionseries entity (TargetType sessionseries has no browsable row; edge-manifest's edgeEntitySessions carries only session occurrences, per this file's own doc comment above), so Facet never resolves a target and never offers this op.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Call off a recurring class",
 				Description: "Cancel every class still to come in this recurring run. Classes that have already happened are left alone.",
@@ -630,6 +663,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "ReassignSessionSeries",
+			// refusal-courtesy(facet): AnchorMoved, InstructorConflict, NoUpcomingOccurrences, SeriesTooLarge, SeriesWalkBound, SessionInPast, SessionTooLong, SlotGridViolation, StudioConflict, WrongStudio: hide — no lens projects a sessionseries entity (TargetType sessionseries has no browsable row; edge-manifest's edgeEntitySessions carries only session occurrences, per this file's own doc comment above), so Facet never resolves a target and never offers this op.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Move the remaining classes",
 				Description: "Shift every class still to come in this recurring run to a new day and time, keeping their bookings and instructors. Classes that have already happened are left alone.",

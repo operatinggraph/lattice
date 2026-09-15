@@ -867,6 +867,14 @@ async function loadPos() {
   await renderPos();
 }
 
+// refusal-courtesy: OpenTab/CreditHold: hide — renderCreditHoldPanel replaces the Open Tab button when openTabGate(balance) === "hold"
+// refusal-courtesy: OpenTab/InvalidState: none — the arrears aspect's wrong class is a data-integrity fault (require_no_credit_hold, packages/cafe-domain/ddls.go), not state loadBalances exposes
+// refusal-courtesy: OpenTab/LeaseNotApproved, TenancyEnded: disable — fillLeaseSelect (loadPos, gateOnApproval=true) disables the lease option when approvedByLease is false or tenancyEnded(detail, now) is true
+// refusal-courtesy: OpenTab/OpenTabAlreadyExists: hide — the Open Tab button only renders on the `!open` branch (tabs.find(t => t.status === "open") absent)
+// refusal-courtesy: Charge/ItemUnavailable: disable — menuOptions renders a sold-out item (available === false) inside a disabled "Sold out today" optgroup
+// refusal-courtesy: Charge/TabNotOpen: hide — the catalog/off-menu charge forms only render inside renderOpenTabCard, itself only rendered on the `open` branch
+// refusal-courtesy: Settle/TabNotOpen: hide — settle-btn only renders inside renderOpenTabCard, itself only rendered on the `open` branch
+// refusal-courtesy: VoidCharge/TabNotOpen: hide — the void buttons (chargeLinesBlock's data-void-line) only render inside renderOpenTabCard, itself only rendered on the `open` branch
 async function renderPos() {
   const body = document.getElementById("pos-body");
   const summary = document.getElementById("pos-summary");
@@ -1186,6 +1194,7 @@ function renderFrontDeskToday(summary) {
     : "No voids.";
 }
 
+// refusal-courtesy: Settle/TabNotOpen: hide — loadFrontDesk filters to tabs whose status === "open" (tabs = (r.tabs || []).filter(...)) before drawing a settle-<tabKey> button per one
 async function loadFrontDesk() {
   const grid = document.getElementById("frontdesk-grid");
   const summary = document.getElementById("frontdesk-summary");
@@ -1398,6 +1407,12 @@ function wireArrearsActions(list) {
 // collected), so it is confirmed before it dispatches, and its throw path
 // narrates the landed-ambiguity vocabulary (lint-ceremony-throw-path.go) —
 // a failed write here may already have forgiven the debt.
+// refusal-courtesy: CreditCafeAccount/InvalidState: none — the account's .balance aspect being a foreign class is a data-integrity fault (post_entry, packages/cafe-ledger/scripts.go), not state any read model exposes
+// refusal-courtesy: CreditCafeAccount/NoCreditToPayOut, PayoutExceedsCash, PayoutExceedsCredit: unreachable — CreditCafeAccount calls post_entry(entry_type="credit", ...) (packages/cafe-ledger/scripts.go); is_payout requires entry_type == "debit", so the payout branch never runs
+// refusal-courtesy: CreditCafeAccount/RefundExceedsCharge, RefundExceedsPaid: unreachable — CreditCafeAccount calls post_entry(..., allow_reverses_ref=False, ...) (packages/cafe-ledger/scripts.go); the reversesRef branch (reversed_charge / the cash-floor check) only runs when allow_reverses_ref is True
+// refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — renderFrontDeskArrears only lists non-zero-balance leases (frontdesk-balances) and only draws the writeoff-debt-btn on the debtor branch (row.balanceCents >= 0); a zero-balance lease never appears in the arrears list at all
+// refusal-courtesy: CreditCafeAccount/WriteOffExceedsBalance: cap — amountCents is prefilled to exactly row.balanceCents (the balance shown) into a detached, never-rendered descriptor mount (renderOpForm(row, context, document.createElement("div")))
+// refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: unreachable — this function always submits reason: "waiver" (post_entry, packages/cafe-ledger/scripts.go); the reason=="waiver" branch raises WriteOffExceedsBalance first, so the plain PaymentExceedsBalance fail below it is never reached from here
 async function handleWriteOffDebt(btn) {
   const accountKey = btn.getAttribute("data-account");
   const amountCents = parseInt(btn.getAttribute("data-amount"), 10);
@@ -1447,6 +1462,11 @@ async function handleWriteOffDebt(btn) {
 // op's own cap, CreditCafeAccount's waiver mirror on the debt side). Same
 // irreversibility posture as handleWriteOffDebt: confirmed before dispatch,
 // landed-ambiguity wording on the throw path.
+// refusal-courtesy: PayoutCafeCredit/InvalidState: none — the account's .balance aspect being a foreign class is a data-integrity fault (post_entry, packages/cafe-ledger/scripts.go), not state any read model exposes
+// refusal-courtesy: PayoutCafeCredit/NoCreditToPayOut: hide — renderFrontDeskArrears (wireArrearsActions) only draws the payout-credit-btn on a row with balanceCents < 0; a debtor/square row gets the Write off button instead
+// refusal-courtesy: PayoutCafeCredit/PayoutExceedsCredit, PayoutExceedsCash: cap — amountCents is prefilled to exactly -row.balanceCents (the credit shown) into a detached, never-rendered descriptor mount (renderOpForm(row, context, document.createElement("div"))), so the submitted amount never exceeds the credit; and the script holds credit <= cashCents (a credit is only ever posted from cash paid in), so an amount within the credit is within the cash too
+// refusal-courtesy: PayoutCafeCredit/RefundExceedsCharge, RefundExceedsPaid: unreachable — PayoutCafeCredit calls post_entry(..., allow_reverses_ref=False, ...) (packages/cafe-ledger/scripts.go); the reversesRef branch only runs when allow_reverses_ref is True
+// refusal-courtesy: PayoutCafeCredit/NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: unreachable — PayoutCafeCredit calls post_entry(state, op, "debit", ...) (packages/cafe-ledger/scripts.go); is_payment requires entry_type == "credit", so the whole is_payment block these codes live in never runs for a debit
 async function handlePayoutCredit(btn) {
   const accountKey = btn.getAttribute("data-account");
   const amountCents = parseInt(btn.getAttribute("data-amount"), 10);
@@ -1595,6 +1615,7 @@ function editMenuItemForm(currentName, currentPriceCents) {
   );
 }
 
+// refusal-courtesy: SetMenuItemLocation/InvalidState: none — the already-live servedAt link race (make_link_create_or_revive, packages/cafe-domain/ddls.go) is a same-item/same-location double-submit fault; no read-model row exposes it for the Relocate button to check
 async function loadManageMenu() {
   const summary = document.getElementById("menu-summary");
   const body = document.getElementById("menu-body");
@@ -1723,6 +1744,32 @@ async function loadManageMenu() {
 
 let residentOwnLeaseAppKey = "";
 
+// residentOwnLeaseRow mirrors, for the resident's own single lease, the
+// /api/residents row fillLeaseSelect's picker reads for every lease on the
+// POS/front-desk side — what fillLeaseSelect's gateOnApproval and
+// tenancyEnded checks disable an OPTION on there (LeaseNotApproved /
+// TenancyEnded — OpenTab itself refuses both): the self-service Open Tab
+// flow picks no lease from a list, so there is no option to disable, only
+// the one button to withhold. Resolved by loadResident before the first
+// render, off /api/residents (a resident-readable roster — unlike
+// /api/frontdesk-lease-details, which is staff-only). Stays null while
+// unresolved (or after a transient fetch failure), the same fail-open state
+// residentOpenTabAllowed(null, now) treats as allowed.
+let residentOwnLeaseRow = null;
+
+// residentOpenTabAllowed decides whether the resident's own Open Tab button
+// renders, from the /api/residents row for their lease (or none, if the
+// roster hasn't resolved) and the caller's current time. Blocks only on
+// POSITIVE evidence — row.approved === false (LeaseNotApproved, the posture
+// fillLeaseSelect's own `approved === false` check takes) or the row's own
+// leaseEnd column having been reached (TenancyEnded, the same inclusive
+// boundary tenancyEnded applies above) — so a roster a resident's session
+// cannot yet join, or a lease with no projected term, never wrongly
+// withholds their own tab.
+function residentOpenTabAllowed(row, now) {
+  return !row || (row.approved !== false && !tenancyEnded(row, now));
+}
+
 // pendingCafeCharges holds Charge ops this session just submitted whose
 // cafeTabs projection hasn't landed yet (measured live at up to ~40s) — a
 // naive re-fetch right after would show the tab's pre-charge totalCents
@@ -1745,10 +1792,29 @@ async function loadResident() {
     label.hidden = true;
     select.hidden = true;
     residentOwnLeaseAppKey = leases.length ? leases[0].leaseAppKey : "";
+    residentOwnLeaseRow = null;
+    if (residentOwnLeaseAppKey) {
+      try {
+        const rs = await appGet("/api/residents");
+        residentOwnLeaseRow = (rs.residents || []).find((r) => r.leaseAppKey === residentOwnLeaseAppKey) || null;
+      } catch (_) { /* roster unreachable — stays null, never wrongly withheld */ }
+    }
   }
   await renderResident();
 }
 
+// refusal-courtesy: OpenTab/CreditHold: hide — renderResident shows the "account is on hold" panel instead of the Open Tab button when openTabGate(ledger) === "hold"
+// refusal-courtesy: OpenTab/InvalidState: none — the arrears aspect's wrong class is a data-integrity fault (require_no_credit_hold, packages/cafe-domain/ddls.go), not state /api/ledger exposes
+// refusal-courtesy: OpenTab/LeaseNotApproved: hide — loadResident resolves residentOwnLeaseRow from /api/residents before the first render, and this function renders the "awaiting landlord approval" panel, no button, when its approved field is false
+// refusal-courtesy: OpenTab/OpenTabAlreadyExists: hide — the Open Tab button only renders on the `!open` branch (tabs.tabs.find(t => t.status === "open") absent)
+// refusal-courtesy: OpenTab/TenancyEnded: hide — residentOpenTabAllowed hides Open Tab once residentOwnLeaseRow's leaseEnd column (cafeLeaseWorkplaces, packages/cafe-domain/lenses.go, joined onto /api/residents by cmd/cafe-app/residents.go) is past, and this function renders the "your lease ended" panel, no button, in its place
+// refusal-courtesy: Charge/ItemUnavailable: disable — menuOptions renders a sold-out item (available === false) inside a disabled "Sold out today" optgroup on the self-order-form select
+// refusal-courtesy: Charge/TabNotOpen: hide — self-order-form only renders inside the `if (open)` branch
+// refusal-courtesy: Settle/TabNotOpen: hide — resident-settle-btn only renders inside the `if (open)` branch
+// refusal-courtesy: CreditCafeAccount/InvalidState, NoCreditToPayOut, PayoutExceedsCash, PayoutExceedsCredit, RefundExceedsCharge, RefundExceedsPaid: see handleWriteOffDebt
+// refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — both #record-payment-form (desk) and #self-pay-form (resident) render only when ledger.accountKey exists and (ledger.balanceCents||0) > 0
+// refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: cap — both forms' amount input is prefilled to ledger.balanceCents/100 and its `max` is set to the same value
+// refusal-courtesy: CreditCafeAccount/WriteOffExceedsBalance: unreachable — neither #record-payment-form's nor #self-pay-form's submit handler ever sets prefill.reason, so it defaults server-side to "payment" (post_entry, packages/cafe-ledger/scripts.go); the reason=="waiver" branch that raises WriteOffExceedsBalance never runs from either form here
 async function renderResident() {
   const body = document.getElementById("resident-body");
   const selfMode = !isFrontDesk();
@@ -1822,6 +1888,31 @@ async function renderResident() {
       '<p class="lead">You owe ' + escapeHtml(money(ledger.balanceCents)) +
       (ledger.isOverdue ? " (" + escapeHtml(overdueDaysPhrase(ledger)) + "; a reminder was sent " : " (a reminder was sent ") +
       escapeHtml(reminderSentDate(ledger)) + "). Pay your balance below to open a new tab.</p>" +
+      "</div>"
+    );
+  } else if (selfMode && residentOwnLeaseRow && residentOwnLeaseRow.approved === false) {
+    // refusal-courtesy: OpenTab/LeaseNotApproved: hide — this panel replaces
+    // the Open Tab button with the reason, mirroring fillLeaseSelect's own
+    // disabled-option copy on the POS/front-desk picker (loadResident resolves
+    // residentOwnLeaseRow from /api/residents before the first render).
+    parts.push(
+      '<div class="panel">' +
+      "<h2>No open tab</h2>" +
+      '<p class="lead">Your lease is awaiting landlord approval — a house tab cannot open until then.</p>' +
+      "</div>"
+    );
+  } else if (selfMode && !residentOpenTabAllowed(residentOwnLeaseRow, new Date())) {
+    // refusal-courtesy: OpenTab/TenancyEnded: hide — this panel replaces the
+    // Open Tab button once residentOpenTabAllowed(residentOwnLeaseRow, now)
+    // is false for a reason other than approval (checked above), i.e. the
+    // lease's own leaseEnd column has been reached. The calendar date of the
+    // UTC stamp, the same slice fillLeaseSelect's own disabled-option copy
+    // uses — a local rendering of a midnight-UTC term end names the day
+    // before in every zone west of Greenwich.
+    parts.push(
+      '<div class="panel">' +
+      "<h2>No open tab</h2>" +
+      '<p class="lead">Your lease ended ' + escapeHtml(residentOwnLeaseRow.leaseEnd.slice(0, 10)) + " — a house tab cannot open once your tenancy has ended.</p>" +
       "</div>"
     );
   } else if (selfMode) {
@@ -2189,6 +2280,11 @@ async function renderResident() {
 // this same account, and the amount may not exceed what that charge still has
 // un-refunded, both proven server-side against the charge's own aspects and
 // links. An edited reversesRef or an inflated amount only fails closed.
+// refusal-courtesy: RefundCafeCharge/InvalidState: none — the account's .balance aspect being a foreign class is a data-integrity fault (post_entry, packages/cafe-ledger/scripts.go), not state any read model exposes
+// refusal-courtesy: RefundCafeCharge/NoCreditToPayOut, PayoutExceedsCash, PayoutExceedsCredit: unreachable — RefundCafeCharge calls post_entry(entry_type="credit", ...) (packages/cafe-ledger/scripts.go); is_payout requires entry_type == "debit", so the payout branch never runs
+// refusal-courtesy: RefundCafeCharge/RefundExceedsCharge: cap — renderResident only draws the refund-charge-btn when remaining (a charge's amountCents minus refundedByCharge, both read off this same ledger list) is > 0, and this function prefills amountCents to that remaining value and sets the field's max to it, so a larger typed amount never leaves the form
+// refusal-courtesy: RefundCafeCharge/RefundExceedsPaid: none — cashCents (the account's cash-floor) is never projected to cmd/cafe-app's read models (ledger.go), so no field here can bound a refund against it
+// refusal-courtesy: RefundCafeCharge/NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: unreachable — RefundCafeCharge calls post_entry(..., allow_reverses_ref=True, ...) (packages/cafe-ledger/scripts.go); is_payment requires not allow_reverses_ref, so the whole is_payment block these codes live in never runs
 async function wireRefundCharge(accountKey, onDone) {
   const host = document.getElementById("refund-form-host");
   if (!host) return;
@@ -2257,6 +2353,13 @@ async function wireRefundCharge(accountKey, onDone) {
         host.innerHTML = '<p class="meta">The refund form is unavailable.</p>';
         return;
       }
+      // The remaining amount is the most that can still be refunded on this
+      // charge (RefundCafeCharge's cumulative cap), so the control is bound
+      // to it the way the self-pay amount is bound to the balance: a larger
+      // typed amount never leaves the form.
+      const amountInput = mount.querySelector('[name="amountCents"]');
+      const remaining = parseInt(btn.getAttribute("data-amount"), 10);
+      if (amountInput && remaining > 0) amountInput.max = String(remaining);
       submitBtn.textContent = handle.descriptor.submitLabel;
       document.getElementById("refund-cancel").addEventListener("click", () => { host.innerHTML = ""; });
       document.getElementById("refund-form").addEventListener("submit", async (ev) => {
