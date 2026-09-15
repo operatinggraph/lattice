@@ -118,8 +118,8 @@ func TestPackage_DDLs(t *testing.T) {
 }
 
 // TestPackage_Permissions pins the exact (op, scope) → roles matrix and nothing
-// else, and the location-domain dependency. The scope=self row is what makes
-// the landlord path reachable, and the ABSENCE of one on AssignUnitOwner /
+// else, and the location-domain dependency. The scope=self rows are what make
+// the landlord path reachable on each listing op, and the ABSENCE of one on AssignUnitOwner /
 // RemoveUnitOwner is load-bearing: those ops confer management, so a
 // self-scoped grant on either would let any signed-in identity make itself the
 // landlord of any unit.
@@ -134,6 +134,8 @@ func TestPackage_Permissions(t *testing.T) {
 		{"SetListingStatus", "any"}:  {"operator"},
 		{"AssignUnitOwner", "any"}:   {"operator"},
 		{"RemoveUnitOwner", "any"}:   {"operator"},
+		{"SetListing", "self"}:       {"consumer"},
+		{"SetUnitAddress", "self"}:   {"consumer"},
 		{"SetListingStatus", "self"}: {"consumer"},
 	}
 	if got := len(Package.Permissions); got != len(wantPerms) {
@@ -234,28 +236,39 @@ func TestPackage_Permissions(t *testing.T) {
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)
 	}
-	// One op-meta: SetListingStatus, the package's only user-facing op (the
-	// other four are operator-only, which the trusted admin tool dispatches
-	// itself). It must stay a FULL descriptor — a bare meta would satisfy the
-	// count while leaving the op unrenderable, which is the S1 hole the
-	// Standard exists to close.
+	// Four op-metas: the three listing ops (each a landlord-path op) plus
+	// AssignUnitOwner (the shipped post-listing form dispatches it). Each must
+	// stay a FULL descriptor — a bare meta would satisfy the count while
+	// leaving the op unrenderable, which is the S1 hole the Standard exists to
+	// close. RemoveUnitOwner has no shipped screen and carries no op-meta.
 	if got := len(Package.OpMetas); got != 4 {
 		t.Fatalf("expected 4 opMetas, got %d", got)
 	}
-	meta := Package.OpMetas[0]
-	if meta.OperationType != "SetListingStatus" {
-		t.Fatalf("opMeta = %s, want SetListingStatus", meta.OperationType)
+	byOp := map[string]pkgmgr.OpMetaSpec{}
+	for _, m := range Package.OpMetas {
+		byOp[m.OperationType] = m
 	}
-	if meta.Presentation == nil || meta.Presentation.Title == "" ||
-		meta.InputSchema == "" || len(meta.FieldDescriptions) == 0 || meta.Dispatch == nil {
-		t.Fatalf("SetListingStatus must carry a FULL descriptor, got %+v", meta)
+	// The landlord path is scope=self, so each listing descriptor must say so
+	// — naming "standing" would send a descriptor-driven client down the
+	// operator path and get a landlord refused — and each must declare the
+	// manages link the probe reads as its optionalRead.
+	for _, op := range []string{"SetListing", "SetUnitAddress", "SetListingStatus"} {
+		m, ok := byOp[op]
+		if !ok {
+			t.Fatalf("no opMeta for %s", op)
+		}
+		if m.Presentation == nil || m.Presentation.Title == "" ||
+			m.InputSchema == "" || len(m.FieldDescriptions) == 0 || m.Dispatch == nil {
+			t.Fatalf("%s must carry a FULL descriptor, got %+v", op, m)
+		}
+		if m.Dispatch.AuthContext != "self" {
+			t.Fatalf("%s authContext = %q, want self", op, m.Dispatch.AuthContext)
+		}
+		if len(m.Dispatch.OptionalReads) != 1 || m.Dispatch.OptionalReads[0] != "lnk.identity.{actor:id}.manages.unit.{payload.unit:id}" {
+			t.Fatalf("%s optionalReads = %v, want the manages link", op, m.Dispatch.OptionalReads)
+		}
 	}
-	// The landlord path is scope=self, so the descriptor must say so — naming
-	// "standing" here would send a descriptor-driven client down the
-	// operator path and get it refused.
-	if meta.Dispatch.AuthContext != "self" {
-		t.Fatalf("SetListingStatus authContext = %q, want self", meta.Dispatch.AuthContext)
-	}
+	meta := byOp["SetListingStatus"]
 	if meta.Dispatch.Class != loftspaceListingDDL || meta.Dispatch.TargetType != "unit" {
 		t.Fatalf("unexpected SetListingStatus dispatch: %+v", meta.Dispatch)
 	}

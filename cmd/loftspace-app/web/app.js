@@ -1125,12 +1125,14 @@ function workplaceAnchor() {
 // ownership guard binds to the unit under the write. A session with no `manages`
 // anchor sends nothing and rides whatever standing grant it holds.
 //
-// Sending it is safe even for a session that ALSO holds a standing scope=any
-// grant, and that is a server-side property, not a claim about this predicate:
-// step 3 authorizes a scope=any caller without inspecting the target at all, so
-// the ownership guards — which key on the platform's own authTargetValidated bit
-// — stay inert for an operator or front-desk actor. Staff read portfolio-wide
-// through the wildcard anchor, and this never narrows their writes to match.
+// A session that ALSO holds a standing scope=any grant for the op projects two
+// rows, and step 3 authorizes on the first row that succeeds in doc order: with
+// a target attached it may resolve on the self row, and the ownership guards —
+// keyed on the platform's own authTargetValidated bit — then confine that
+// operator to the units it manages, exactly as they confine a landlord. That is
+// fail-closed and only ever narrower than the standing grant, and it applies
+// only in this landlord console (a session with no manages anchor sends no
+// target); the operator's other surfaces send none and stay portfolio-wide.
 function landlordSubmit() {
   return isLandlord() ? { authContext: { target: state.applicant } } : undefined;
 }
@@ -5113,9 +5115,23 @@ async function submitPostListing(ev) {
 
     const addr = { unit: unitKey, line1, city, region, postal };
     if (line2) addr.line2 = line2;
+    // Both writes ride the landlord's own scope=self grant when the session
+    // holds a manages anchor (landlordSubmit), and the management link is the
+    // script's ownership probe: declared optional — its ABSENCE is the denial,
+    // so a required declaration would turn every unauthorized call into a
+    // hydration miss before the guard could answer (the setListingStatus
+    // idiom). A session with no manages anchor sends neither and rides its
+    // standing grant.
     await opOrThrow(
-      { operationType: "SetUnitAddress", class: "loftspaceListing", reads: [unitKey], payload: addr },
+      {
+        operationType: "SetUnitAddress",
+        class: "loftspaceListing",
+        reads: [unitKey],
+        optionalReads: manageLinkKey(unitKey),
+        payload: addr,
+      },
       "set the address",
+      landlordSubmit(),
     );
 
     const listing = {
@@ -5132,8 +5148,15 @@ async function submitPostListing(ev) {
     if (bathrooms !== "") listing.bathrooms = Number(bathrooms);
     if (sqft !== "") listing.sqft = Number(sqft);
     await opOrThrow(
-      { operationType: "SetListing", class: "loftspaceListing", reads: [unitKey], payload: listing },
+      {
+        operationType: "SetListing",
+        class: "loftspaceListing",
+        reads: [unitKey],
+        optionalReads: manageLinkKey(unitKey),
+        payload: listing,
+      },
       editing ? "save the listing" : "create the listing",
+      landlordSubmit(),
     );
 
     if (editing) {

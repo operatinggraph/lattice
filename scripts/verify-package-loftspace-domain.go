@@ -12,9 +12,10 @@
 //	1 address  aspect-type DDL (class=meta.ddl.aspectType) admitting SetUnitAddress.
 //	1 loftspaceOwnership DDL meta-vertex (class=meta.ddl.vertexType) admitting
 //	  AssignUnitOwner + RemoveUnitOwner, with its self-description aspects.
-//	6 permission vertices — one per (operationType, scope) pair: scope=any granted
-//	  to operator for all five ops, plus SetListingStatus scope=self granted to
-//	  consumer (the landlord path). See loftspaceOpGrants.
+//	8 permission vertices — one per (operationType, scope) pair: scope=any granted
+//	  to operator for all five ops, plus SetListing / SetUnitAddress /
+//	  SetListingStatus scope=self granted to consumer (the landlord path). See
+//	  loftspaceOpGrants.
 //	1 package vertex + manifest aspect (name=loftspace-domain).
 //
 // Run via: go run ./scripts/verify-package-loftspace-domain.go
@@ -56,7 +57,7 @@ var (
 // a second grantedBy link, never a second vertex — the vertex count below is
 // therefore the number of DISTINCT scopes, not of grants.
 //
-// SetListingStatus is the one op with two: scope=any to operator, and scope=self
+// The three listing ops each carry two: scope=any to operator, and scope=self
 // to consumer — the landlord path, where the script requires the acting
 // identity's `manages` link to the payload unit. The ownership ops deliberately
 // have no self grant: they are what CONFERS management, so a self-scoped grant
@@ -68,8 +69,8 @@ type permGrant struct {
 }
 
 var loftspaceOpGrants = map[string][]permGrant{
-	"SetListing":       {{"any", "operator"}},
-	"SetUnitAddress":   {{"any", "operator"}},
+	"SetListing":       {{"any", "operator"}, {"self", "consumer"}},
+	"SetUnitAddress":   {{"any", "operator"}, {"self", "consumer"}},
 	"SetListingStatus": {{"any", "operator"}, {"self", "consumer"}},
 	"AssignUnitOwner":  {{"any", "operator"}},
 	"RemoveUnitOwner":  {{"any", "operator"}},

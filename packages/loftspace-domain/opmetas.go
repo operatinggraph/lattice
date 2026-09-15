@@ -4,19 +4,26 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // OpMetas declares the op-meta vertices for this package's user-facing ops.
 //
-// SetListingStatus carries a single grant — consumer at scope=self — so its
-// dispatch is unambiguously the self path: a landlord flips the status of a
-// unit they manage, bound in-script by their own manages link.
+// The three listing ops — SetListing, SetUnitAddress, SetListingStatus — each
+// carry a consumer scope=self grant (permissions.go), so every one dispatches
+// on the self path: a landlord edits the economics, the address, or the status
+// of a unit they manage, bound in-script by their own manages link, which each
+// descriptor declares as the optionalRead the probe reads. An operator who
+// ALSO holds `consumer` projects both a scope=any and a scope=self row for the
+// op, and step 3 authorizes on the first row that succeeds in doc order — so
+// with a target attached it may resolve on the self row and be confined by the
+// probe to the units it manages (fail-closed, never wider). A client that is
+// not in a self-voiced surface sends no target (descriptorform's selfVoice).
 //
-// SetListing, SetUnitAddress, and AssignUnitOwner are granted to `operator`
-// alone (permissions.go's mk() helper — scope=any, no consumer/landlord row),
-// so each is AuthContext "standing": the shipped loftspace-app posts a real
-// landlord-facing listing form against them (submitPostListing, app.js), which
-// is exactly the app-seam rule (vertical-package-standard.md §15) — a shipped
-// screen is proof a person triggers the op, whatever its grant roles.
-// RemoveUnitOwner stays bare: no `cmd/*-app` source references it, so it
-// carries no app-seam obligation, and the trusted admin tool (an operator
-// calling it directly) hardcodes its own dispatch.
+// AssignUnitOwner is granted to `operator` alone (scope=any, no
+// consumer/landlord row), so it is AuthContext "standing": the shipped
+// loftspace-app posts a real landlord-facing listing form against it
+// (submitPostListing, app.js), which is exactly the app-seam rule
+// (vertical-package-standard.md §15) — a shipped screen is proof a person
+// triggers the op, whatever its grant roles. RemoveUnitOwner stays bare: no
+// `cmd/*-app` source references it, so it carries no app-seam obligation, and
+// the trusted admin tool (an operator calling it directly) hardcodes its own
+// dispatch.
 //
 // Dispatch.Class is the owning DDL's CanonicalName, never the vertical name
 // (service-domain's RequestService idiom).
@@ -99,10 +106,16 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       loftspaceListingDDL,
-				AuthContext: "standing",
+				AuthContext: "self",
 				TargetField: "unit",
 				TargetType:  "unit",
 				Reads:       []string{"{payload.unit}"},
+				// The management link is the landlord ownership probe's own
+				// declared read (ddls.go, class-(d)) — absence is a denial the
+				// script raises, not a missing-key failure at dispatch.
+				OptionalReads: []string{
+					"lnk.identity.{actor:id}.manages.unit.{payload.unit:id}",
+				},
 			},
 		},
 		{
@@ -133,10 +146,15 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       loftspaceListingDDL,
-				AuthContext: "standing",
+				AuthContext: "self",
 				TargetField: "unit",
 				TargetType:  "unit",
 				Reads:       []string{"{payload.unit}"},
+				// Same declared optionalRead as SetListing: the probe's manages
+				// link, whose absence is the script's denial.
+				OptionalReads: []string{
+					"lnk.identity.{actor:id}.manages.unit.{payload.unit:id}",
+				},
 			},
 		},
 		{

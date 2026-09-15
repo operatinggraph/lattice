@@ -60,7 +60,11 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			"unit with no listing) — the op a lease-application's convergence directOp dispatches to mark a unit " +
 			"leased on approval, and the op a landlord calls to take a unit off-market (withdrawn) or relist it " +
 			"(available). All three are unconditioned upserts (create-if-absent / overwrite-if-present) so " +
-			"an operator can correct a listing or flip status by hand. The target unit MUST be alive + " +
+			"an operator can correct a listing or flip status by hand. All three also carry a consumer scope=self " +
+			"grant — the landlord path — and on that validated self path every one of them requires the acting " +
+			"identity's own manages link to the payload unit (lnk.identity.<actor>.manages.unit.<unit>, declared as an " +
+			"optionalRead) BEFORE the unit's liveness is checked, so the script's own answer never reveals whether a unit exists. " +
+			"The target unit MUST be alive + " +
 			"a vtx.unit.<NanoID> key; the caller lists the unit key in ContextHint.Reads. Neither aspect is sensitive (they " +
 			"attach to a unit, not an identity).",
 		Script: loftspaceListingDDLScript,
@@ -319,8 +323,9 @@ def parts_of(key, name, want_type):
 
 def require_manages(unit_key, what):
     # The landlord ownership probe: a signed-in landlord authorizes a listing
-    # transition via a scope=self grant, and what confines them is their
-    # management link to the unit they are transitioning.
+    # write (economics, address, or a status transition) via a scope=self
+    # grant, and what confines them is their management link to the unit
+    # under the write.
     #
     # It binds the platform-VALIDATED self path and only that path. The
     # convergence directOp that drives a unit to leased runs as Weaver's service
@@ -337,18 +342,18 @@ def require_manages(unit_key, what):
     if len(actor_parts) != 3 or actor_parts[0] != "vtx" or actor_parts[1] != "identity":
         fail("AuthDenied: " + op.actor + " is not an identity, so it holds no management link; " + what)
     _, unit_id = parts_of(unit_key, "unit", "unit")
-    # read-posture: (d) declared optionalReads at SetListingStatus dispatch on
-    # the landlord path. optionalReads, not reads: absence IS the denial this
+    # read-posture: (d) declared optionalReads at every landlord-path dispatch
+    # of the three listing ops. optionalReads, not reads: absence IS the denial this
     # probe exists to produce, so hydrating it as required would turn every
     # unauthorized call into a HydrationMiss the instant the guard's own
     # kv.Read named it — still fatal, just not pre-empting the guard from
     # hydration itself.
     lnk = kv.Read("lnk.identity." + actor_parts[2] + ".manages.unit." + unit_id)
     if lnk == None or lnk.isDeleted:
-        # The unit key is deliberately NOT named: the caller reached here with a
-        # resource key it already holds, and echoing the unit that resource
-        # belongs to would turn a denial into a lookup for a resource it does
-        # not own.
+        # Nothing beyond what the caller itself supplied is named: what
+        # carries the payload unit the caller already holds, and the probe
+        # adds no fact about it (not whether it exists, not who manages it),
+        # so a denial is never a lookup.
         fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
 
 def require_live_unit(state, key):
@@ -399,6 +404,10 @@ def execute(state, op):
     if ot == "SetListing":
         unit = required_string(p, "unit")
         parts_of(unit, "unit", "unit")
+        # workplace-exempt: (ownership-bound) the ownership probe answers before
+        # require_live_unit, so a caller who manages nothing cannot use this op
+        # to learn whether a unit exists.
+        require_manages(unit, "cannot set the listing on " + unit)
         require_live_unit(state, unit)
 
         data = {
@@ -426,6 +435,9 @@ def execute(state, op):
     if ot == "SetUnitAddress":
         unit = required_string(p, "unit")
         parts_of(unit, "unit", "unit")
+        # workplace-exempt: (ownership-bound) same discharge as SetListing --
+        # the probe answers before the liveness check.
+        require_manages(unit, "cannot set the address on " + unit)
         require_live_unit(state, unit)
 
         data = {

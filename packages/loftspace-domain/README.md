@@ -20,8 +20,9 @@ Depends: `location-domain` (install `lattice-pkg install packages/loftspace-doma
 | **Operations** (5) | `SetListing` · `SetUnitAddress` · `SetListingStatus` · `AssignUnitOwner` · `RemoveUnitOwner` |
 | **Projection lenses** (2) | `availableListings` → `loftspace-listings` (`nats-kv`) · `applicantRosterRead` → `read_loftspace_identities` (protected `postgres`, secure lens; both `full` engine) |
 
-Every op is granted to the `operator` role at `scope: any` (`permissions.go`) — the trusted single-identity
-model, no new capability surface, identical to `clinic-domain`.
+Every op is granted to the `operator` role at `scope: any`, and the three listing ops additionally to
+`consumer` at `scope: self` — the landlord path, confined in-script by the acting identity's own `manages`
+link to the payload unit (`permissions.go`). The ownership ops carry no self grant: they confer management.
 
 ## Key shapes (Contract #1)
 
