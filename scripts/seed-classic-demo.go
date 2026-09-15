@@ -1822,12 +1822,24 @@ func submitOpTolerating(ctx context.Context, conn *substrate.Conn, actorKey, ope
 
 // scriptCode returns the script's own refusal code carried on a rejected
 // reply ("" for an accepted reply or a rejection the script did not raise).
+// A Starlark fail("Code: message") reaches the reply as ErrCodeScriptFailed
+// with Details{"code": "ScriptError", "message": "fail: Code: message"}
+// (processor.classifyStepError) — the domain code is the first colon-delimited
+// token of that message, never Details["code"] itself.
 func scriptCode(reply *processor.OperationReply) string {
 	if reply.Status == processor.ReplyStatusAccepted || reply.Error == nil || reply.Error.Code != processor.ErrCodeScriptFailed {
 		return ""
 	}
-	code, _ := reply.Error.Details["code"].(string)
-	return code
+	msg, _ := reply.Error.Details["message"].(string)
+	if msg == "" {
+		msg = reply.Error.Message
+	}
+	msg = strings.TrimPrefix(msg, "fail: ")
+	code, _, found := strings.Cut(msg, ":")
+	if !found {
+		return ""
+	}
+	return strings.TrimSpace(code)
 }
 
 // submitSelfOp is submitOp for a platform scope=self grant, where
