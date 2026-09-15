@@ -217,6 +217,13 @@ read	TombstoneSessionSeries	lnk.identity.<id>.worksAt.building.<id>
 # stranger's slot cells released through it. The occurrence id comes out of the
 # walk, so no dispatcher can name this key: the caller holds only a series key.
 read	TombstoneSessionSeries	lnk.session.<id>.atStudio.studio.<id>
+# TombstoneStudio's front-of-house binder is CreateStudio's workplace walk
+# (worksAt_covers), but off the studio's OWN building, which the script
+# resolves from the studio's locatedAt link rather than from the payload — so
+# the worksAt key tested at that building is a class-(e) follow-up off the
+# declared locatedAt walk (link-shaped, hence listed; category 3), not a
+# payload-direct declaration gap.
+read	TombstoneStudio	lnk.identity.<id>.worksAt.building.<id>
 read	UpdateMenuItem	lnk.identity.<id>.worksAt.building.<id>
 read	VerifyGuarantor	lnk.identity.<id>.manages.unit.<id>
 read	VoidCharge	lnk.identity.<id>.worksAt.building.<id>
@@ -426,6 +433,11 @@ walk	TombstoneSessionSeries	vtx.building.<id> containedIn out
 # dispatcher that could name its hub up front.
 walk	TombstoneSessionSeries	vtx.session.<id> ledBy out
 walk	TombstoneSessionSeries	vtx.studio.<id> locatedAt out
+# TombstoneStudio's front-of-house binder walks the studio's building's
+# containedIn ancestors (worksAt_covers) when the direct worksAt link at that
+# building is absent — the building is discovered by the declared locatedAt
+# walk, so no dispatcher can name this hub up front.
+walk	TombstoneStudio	vtx.building.<id> containedIn out
 walk	UpdateMenuItem	vtx.building.<id> containedIn out
 walk	UpdateMenuItem	vtx.menuitem.<id> servedAt out
 walk	VerifyGuarantor	vtx.leaseapp.<id> appliesToUnit out

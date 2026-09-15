@@ -16,11 +16,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // booker IS an identity directly, not a business vertex a linked identity
 // must resolve through.
 //
-// CreateStudio, CreateSession, CreateSessionSeries, CreateBooking,
-// JoinWaitlist and CancelBooking additionally grant `frontOfHouse` at
-// scope=any — the studio front-desk beat: opening a studio, scheduling a
-// class (or a whole recurring series of them), booking a member in or
-// waitlisting them, and releasing a member's seat. scope=any carries no
+// CreateStudio, TombstoneStudio, CreateSession, CreateSessionSeries,
+// CreateBooking, JoinWaitlist and CancelBooking additionally grant
+// `frontOfHouse` at scope=any — the studio front-desk beat: opening a studio
+// and retiring one, scheduling a class (or a whole recurring series of them),
+// booking a member in or waitlisting them, and releasing a member's seat.
+// scope=any carries no
 // platform-checked target, so each of those scripts
 // binds the standing path itself with the workplace walk (`require_workplace`):
 // a non-operator caller must hold a `worksAt` link covering a location the
@@ -28,7 +29,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // `session -atStudio-> studio -locatedAt-> location` for the two booking ops.
 // The location is never taken from the caller's word: CreateStudio guards on
 // the location it is about to link, and an unlocated studio therefore stays
-// operator-only. This is the same confinement CreateSession already carries,
+// operator-only — TombstoneStudio resolves the same candidate off the
+// studio's own locatedAt link, so an unlocated studio is retired by the
+// operator alone too. This is the same confinement CreateSession already carries,
 // and it leaves the scope=self consumer path untouched — `require_workplace`
 // returns early on `op.authTargetValidated`, so a member still books and
 // cancels their own seat while holding no `worksAt` link at all.
@@ -111,7 +114,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants the operator and front-of-house staff the right to submit CreateStudio (opens a studio at a location) — the script confines a non-operator caller to a location they worksAt, and a studio named with no location stays operator-only (an empty candidate list denies).",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
-		mk("TombstoneStudio"),
+		{
+			OperationType: "TombstoneStudio",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit TombstoneStudio (retires a studio) — the script confines a non-operator caller to a studio at a location they worksAt, resolved off the studio's own locatedAt link (an unlocated studio yields an empty candidate list and stays operator-only), and refuses either caller while the studio still has an upcoming class (HasUpcomingClasses).",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
 		{
 			OperationType: "CreateSession",
 			Scope:         "any",

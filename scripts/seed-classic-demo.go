@@ -1018,6 +1018,7 @@ func readAspectFullName(ctx context.Context, conn *substrate.Conn, aspectKey str
 func reapDuplicateStudios(ctx context.Context, conn *substrate.Conn, adminKey, keep string) {
 	keys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.studio.")
 	must(err, "list vtx.studio. keys")
+	upcoming := upcomingClassesByStudio(ctx, conn, time.Now().UTC().Format(time.RFC3339))
 	for _, key := range keys {
 		if key == keep || !alive(ctx, conn, key) {
 			continue
@@ -1038,11 +1039,69 @@ func reapDuplicateStudios(ctx context.Context, conn *substrate.Conn, adminKey, k
 		if aspect.Data.Name != "Classic Demo Studio" {
 			continue
 		}
-		submitOp(ctx, conn, adminKey, "TombstoneStudio", "studio",
-			map[string]any{"studioKey": key},
-			&processor.ContextHint{Reads: []string{key}})
+		// TombstoneStudio refuses HasUpcomingClasses while any live class at
+		// the studio is still ahead (wellness-domain ddls.go) — a duplicate
+		// that a verify fire scheduled onto is kept rather than aborting the
+		// seed; call its classes off first.
+		if classes := upcoming[key]; len(classes) > 0 {
+			fmt.Printf("==> kept duplicate studio: %s (%s) has an upcoming class %s\n", key, aspect.Data.Name, classes[0])
+			continue
+		}
+		if reply := submitTombstoneStudio(ctx, conn, adminKey, key); reply.Status != processor.ReplyStatusAccepted {
+			fmt.Printf("==> kept duplicate studio: %s (%s) refused %s\n", key, aspect.Data.Name, scriptCode(reply))
+			continue
+		}
 		fmt.Printf("==> reaped duplicate studio: %s (%s)\n", key, aspect.Data.Name)
 	}
+}
+
+// submitTombstoneStudio dispatches TombstoneStudio for one studio, tolerating
+// the op's own HasUpcomingClasses refusal (a class scheduled between the
+// reaper's pre-check and the op's own walk) — any other rejection is fatal as
+// with submitOp. The envelope declares the two payload-hubbed walks the op's
+// descriptor names (the upcoming-class walk over the studio's inbound atStudio
+// links and the confinement's one-page locatedAt walk); the {actor}-hubbed
+// holdsRole probe is resolved from the descriptor by withDeclaredEnumerations.
+func submitTombstoneStudio(ctx context.Context, conn *substrate.Conn, adminKey, studioKey string) *processor.OperationReply {
+	return submitOpTolerating(ctx, conn, adminKey, "TombstoneStudio", "studio",
+		map[string]any{"studioKey": studioKey},
+		&processor.ContextHint{
+			Reads: []string{studioKey},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: studioKey, Relation: "atStudio", Direction: "in"},
+				{Hub: studioKey, Relation: "locatedAt", Direction: "out"},
+			},
+		},
+		"HasUpcomingClasses")
+}
+
+// upcomingClassesByStudio maps each studio key to the live sessions still
+// held at it (via a live atStudio link) whose .schedule.startsAt is after
+// now — the set TombstoneStudio's HasUpcomingClasses refusal reads, computed
+// once per reaper pass so a studio can be skipped before the op refuses it.
+// Session keys are sorted so the printed "kept" line is stable across runs.
+func upcomingClassesByStudio(ctx context.Context, conn *substrate.Conn, now string) map[string][]string {
+	sessionKeys, err := conn.KVListKeysPrefix(ctx, bootstrap.CoreKVBucket, "vtx.session.")
+	must(err, "list vtx.session. keys")
+	out := map[string][]string{}
+	for _, key := range sessionKeys {
+		if strings.Count(key, ".") != 2 || !alive(ctx, conn, key) {
+			continue
+		}
+		_, startsAt, ok := readSchedule(ctx, conn, key+".schedule")
+		if !ok || startsAt == "" || startsAt <= now {
+			continue
+		}
+		studioKey, found := findSessionStudio(ctx, conn, key)
+		if !found {
+			continue
+		}
+		out[studioKey] = append(out[studioKey], key)
+	}
+	for _, classes := range out {
+		sort.Strings(classes)
+	}
+	return out
 }
 
 // isVerifyLitterName reports whether a display name follows this codebase's
@@ -1128,10 +1187,21 @@ func reapVerifyLitter(ctx context.Context, conn *substrate.Conn, adminKey string
 		studioKeysSorted = append(studioKeysSorted, key)
 	}
 	sort.Strings(studioKeysSorted)
+	// Re-read after the session reaps above: TombstoneStudio refuses
+	// HasUpcomingClasses while any live class at the studio is still ahead
+	// (wellness-domain ddls.go), and every upcoming litter session was just
+	// called off — what remains upcoming at a litter studio is a class
+	// scheduled since the session scan, kept rather than aborting the seed.
+	upcoming := upcomingClassesByStudio(ctx, conn, now)
 	for _, key := range studioKeysSorted {
-		submitOp(ctx, conn, adminKey, "TombstoneStudio", "studio",
-			map[string]any{"studioKey": key},
-			&processor.ContextHint{Reads: []string{key}})
+		if classes := upcoming[key]; len(classes) > 0 {
+			fmt.Printf("==> kept verify-litter studio: %s (%s) has an upcoming class %s\n", key, litterStudios[key], classes[0])
+			continue
+		}
+		if reply := submitTombstoneStudio(ctx, conn, adminKey, key); reply.Status != processor.ReplyStatusAccepted {
+			fmt.Printf("==> kept verify-litter studio: %s (%s) refused %s\n", key, litterStudios[key], scriptCode(reply))
+			continue
+		}
 		fmt.Printf("==> reaped verify-litter studio: %s (%s)\n", key, litterStudios[key])
 	}
 }
@@ -1712,6 +1782,52 @@ func submitOp(ctx context.Context, conn *substrate.Conn, actorKey, operationType
 	must(err, "submit "+operationType)
 	mustAccepted(reply, operationType)
 	return reply
+}
+
+// submitOpTolerating is submitOp for a dispatch whose rejection under one of
+// the named SCRIPT codes is a designed refusal the caller handles (a reaper
+// keeping a studio the op declines to retire), not a broken seed: such a
+// reply is returned for the caller to read; a transport error or any other
+// rejection is fatal exactly as with submitOp. A script's `fail("Code: …")`
+// reaches the reply as ErrCodeScriptFailed with the script's own code under
+// Details["code"] (processor.classifyStepError), which is what scriptCode
+// reads.
+func submitOpTolerating(ctx context.Context, conn *substrate.Conn, actorKey, operationType, class string, payload map[string]any, hint *processor.ContextHint, codes ...string) *processor.OperationReply {
+	reqID, err := substrate.NewNanoID()
+	must(err, "generate requestId")
+	payloadBytes, err := json.Marshal(payload)
+	must(err, "marshal payload")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: operationType,
+		Actor:         actorKey,
+		Class:         class,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Payload:       payloadBytes,
+		ContextHint:   withDeclaredEnumerations(operationType, actorKey, hint),
+	}
+	reply, err := output.SubmitOp(ctx, conn, env)
+	must(err, "submit "+operationType)
+	if got := scriptCode(reply); got != "" {
+		for _, code := range codes {
+			if got == code {
+				return reply
+			}
+		}
+	}
+	mustAccepted(reply, operationType)
+	return reply
+}
+
+// scriptCode returns the script's own refusal code carried on a rejected
+// reply ("" for an accepted reply or a rejection the script did not raise).
+func scriptCode(reply *processor.OperationReply) string {
+	if reply.Status == processor.ReplyStatusAccepted || reply.Error == nil || reply.Error.Code != processor.ErrCodeScriptFailed {
+		return ""
+	}
+	code, _ := reply.Error.Details["code"].(string)
+	return code
 }
 
 // submitSelfOp is submitOp for a platform scope=self grant, where

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -120,7 +121,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		op, scope string
 		grantsTo  []string
 	}{
-		{"CreateStudio", "any", staff}, {"TombstoneStudio", "any", operatorOnly},
+		{"CreateStudio", "any", staff}, {"TombstoneStudio", "any", staff},
 		{"CreateSession", "any", staff}, {"CreateSessionSeries", "any", staff},
 		// TombstoneSessionSeries is staff-only where TombstoneSession below is
 		// staff + provider: an instructor cancels the class they lead, never a
@@ -153,5 +154,35 @@ func TestPackage_StructurePins(t *testing.T) {
 		if !slices.Equal(got.GrantsTo, want.grantsTo) {
 			t.Errorf("Permissions[%d] (%s/%s): grantsTo %v, want %v", i, want.op, want.scope, got.GrantsTo, want.grantsTo)
 		}
+	}
+}
+
+// TestTombstoneStudio_FanoutBudgetPinned pins the page budget of
+// TombstoneStudio's upcoming-classes walk (STUDIO_SESSION_PAGE_LIMIT ×
+// MAX_STUDIO_SESSION_PAGES = 16,384 atStudio links) and the refusal that
+// answers past it. The exhaustion path is pinned by its text rather than
+// driven live: reaching it means seeding 16,385 atStudio links on one studio
+// per run (each a substrate round trip — some thirty times the largest
+// fanout any package vector seeds, cafe-ledger's 501-entry arrears budget),
+// which no wellness fixture can afford on every pipeline. The walk's
+// pagination itself is the identity-hygiene idiom the corpus already proves
+// (identity_has_open_tasks, 256/64), copied verbatim here.
+func TestTombstoneStudio_FanoutBudgetPinned(t *testing.T) {
+	for _, want := range []string{
+		"STUDIO_SESSION_PAGE_LIMIT = 256",
+		"MAX_STUDIO_SESSION_PAGES = 64",
+		`kv.Links(studio_key, "atStudio", "in", cursor, STUDIO_SESSION_PAGE_LIMIT)`,
+		`fail("StudioSessionFanoutTooLarge: "`,
+		`fail("HasUpcomingClasses: "`,
+	} {
+		if !strings.Contains(studioDDLScript, want) {
+			t.Errorf("studioDDLScript must contain %q", want)
+		}
+	}
+	// The budget is a cardinality claim over a relation ReassignSession
+	// repoints, so the walk must page with a cursor loop, never a one-page
+	// read — a `None, 1` here would read the first link only.
+	if strings.Contains(studioDDLScript, `kv.Links(studio_key, "atStudio", "in", None, 1)`) {
+		t.Errorf("the atStudio walk must page with the bounded cursor loop, not a one-page read")
 	}
 }

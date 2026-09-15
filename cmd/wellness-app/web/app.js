@@ -3378,9 +3378,7 @@ const GRID_HORIZON_DAYS = 7;
 // on the page.
 function studioGridWarning(s, sessions) {
   const now = Date.now();
-  const upcoming = sessions.filter(
-    (se) => se.studioKey === s.studioKey && se.startsAt && new Date(se.startsAt).getTime() > now,
-  );
+  const upcoming = upcomingSessionsAt(s, sessions, now);
   if (!upcoming.length) {
     return '<p class="studio-grid-dry" style="color:#b00020;font-weight:600;">Schedule is empty — no upcoming classes at this studio.</p>';
   }
@@ -3399,15 +3397,41 @@ function studioGridWarning(s, sessions) {
   return "";
 }
 
+// upcomingSessionsAt is the studio's still-ahead classes off the already
+// projected wellnessSessions rows (studioKey/startsAt): the set the grid
+// warning measures its horizon over and the set TombstoneStudio's own
+// HasUpcomingClasses refusal reads (a live session at the studio with a
+// startsAt after submittedAt, packages/wellness-domain/ddls.go). One filter
+// so the card's Retire courtesy and the horizon warning cannot disagree
+// about which classes count.
+function upcomingSessionsAt(s, sessions, now) {
+  return (sessions || []).filter(
+    (se) => se.studioKey === s.studioKey && se.startsAt && new Date(se.startsAt).getTime() > now,
+  );
+}
+
+// retireCaption is the reason a studio cannot be retired yet, or "" when it
+// can: the courtesy for TombstoneStudio's HasUpcomingClasses refusal, so the
+// desk reads it on the card instead of meeting it as a toast after clicking.
+function retireCaption(upcomingCount) {
+  if (!upcomingCount) return "";
+  return "Call off its " + upcomingCount + " upcoming " + (upcomingCount === 1 ? "class" : "classes") + " first";
+}
+
+// studioCard renders one studio's admin card. The Retire control is enabled
+// when retireCaption is empty and otherwise disabled and titled with it, the
+// caption also printed as a meta line above the actions.
 function studioCard(s, sessions) {
   const id = domId(s.studioKey);
+  const caption = retireCaption(upcomingSessionsAt(s, sessions || [], Date.now()).length);
   return (
     '<div class="card">' +
     '<div class="who">' + esc(s.name || "?") + "</div>" +
     '<div class="meta">' + esc(shortKey(s.studioKey)) + "</div>" +
     studioGridWarning(s, sessions || []) +
+    (caption ? '<p class="meta studio-retire-hold">' + esc(caption) + ".</p>" : "") +
     '<div class="card-actions"><button id="sess-toggle-' + id + '" class="ghost">Schedule a class</button>' +
-    '<button id="retire-' + id + '" class="danger">Retire</button></div>' +
+    '<button id="retire-' + id + '" class="danger"' + (caption ? ' disabled title="' + esc(caption) + '"' : "") + ">Retire</button></div>" +
     '<div id="sess-form-' + id + '" class="session-form" hidden>' +
     '<div class="field"><label>Class name</label><input type="text" id="sess-name-' + id + '" placeholder="e.g. Vinyasa Flow" maxlength="120" /></div>' +
     '<div class="field"><label>Starts</label><input type="datetime-local" id="sess-starts-' + id + '" step="900" /></div>' +
@@ -3464,14 +3488,29 @@ function wireStudioCard(s) {
       submit: document.getElementById("sess-create-" + id),
     });
   });
+  // refusal-courtesy: TombstoneStudio/HasUpcomingClasses: disable — studioCard renders the Retire button disabled, captioned with the count, while upcomingSessionsAt finds any class at the studio still ahead of now; the op's own walk is authoritative for a class scheduled since the page loaded.
+  // refusal-courtesy: TombstoneStudio/StudioSessionFanoutTooLarge: none — the page cap (64 pages of 256 atStudio links) sits far above any studio this desk schedules, and a studio holding that many classes is already refused HasUpcomingClasses on the first upcoming one.
   document.getElementById("retire-" + id).addEventListener("click", async () => {
     const btn = document.getElementById("retire-" + id);
     btn.disabled = true;
     try {
+      // A staff submit carries NO authContext.target: TombstoneStudio's
+      // frontOfHouse grant is scope=any, confined in-script by the caller's
+      // own worksAt walk off the studio's locatedAt link (createStudio's
+      // shape). The studio is an (a)-declared REQUIRED read; the two
+      // payload-hubbed walks the script runs — the upcoming-class walk over
+      // the studio's inbound atStudio links and the confinement's locatedAt
+      // walk — are declared as metadata (Contract #2 §2.5.1): declaring a walk
+      // does not hydrate it, it says which bounded live enumeration this
+      // submission expects.
       await opOrThrow(
         {
           operationType: "TombstoneStudio", class: "studio",
           reads: [s.studioKey],
+          enumerations: [
+            { hub: s.studioKey, relation: "atStudio", direction: "in" },
+            { hub: s.studioKey, relation: "locatedAt", direction: "out" },
+          ],
           payload: { studioKey: s.studioKey },
         },
         "retire the studio"
@@ -3781,7 +3820,9 @@ async function createSession(studioKey, els) {
     if (els.price) els.price.value = "";
     if (els.residentPrice) els.residentPrice.value = "";
     if (els.repeatCount) els.repeatCount.value = "1";
-    staffSessionsCache = null;
+    // sessionsCache too: the studio card's Retire hold counts upcoming
+    // classes off it, and the class just scheduled is one.
+    staffSessionsCache = null; sessionsCache = null;
     document.getElementById("roster-session").dataset.loaded = "";
     setTimeout(renderStudiosAdmin, 700);
   } catch (e) {
@@ -3829,7 +3870,9 @@ function init() {
   document.getElementById("billing-payment").addEventListener("click", () => submitBillingEntry("WellnessCreditAccount", "record the payment"));
   document.getElementById("billing-waive").addEventListener("click", () => submitBillingEntry("WellnessCreditAccount", "waive the charge", "waiver"));
   document.getElementById("studios-refresh").addEventListener("click", () => {
-    studiosCache = null; instructorsCache = null;
+    // sessionsCache as well: a class called off elsewhere releases the
+    // card's Retire hold only once the sessions are re-read.
+    studiosCache = null; instructorsCache = null; sessionsCache = null;
     renderStudiosAdmin();
   });
   document.getElementById("studio-new-toggle").addEventListener("click", () => {

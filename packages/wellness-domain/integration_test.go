@@ -2106,12 +2106,14 @@ func TestReassignSession_NonOperatorCannotMoveStudio(t *testing.T) {
 
 // TestReassignSession_OperatorRepairsSessionWithTombstonedStudio is the
 // board row's actual scenario (verticals.md "retiring a studio strands its
-// classes"): TombstoneStudio already removed the session's studio — exactly
-// as reapDuplicateStudios / an operator's own TombstoneStudio call leaves it
-// — so wellnessSessionsSpec's projection can no longer hand a caller that
-// dead key back to round-trip as `studio`. An operator omits `studio`
-// entirely and supplies only newStudio; the script derives the CURRENT
-// (dead) studio off the session's still-live atStudio link instead.
+// classes"): the session's studio is dead under a still-upcoming class — the
+// state a class scheduled concurrently with the retire leaves (TombstoneStudio's
+// HasUpcomingClasses walk is a read-only guard, ddls.go) — so
+// wellnessSessionsSpec's projection can no longer hand a caller that dead key
+// back to round-trip as `studio`. An operator omits `studio` entirely and
+// supplies only newStudio; the script derives the CURRENT (dead) studio off the
+// session's still-live atStudio link instead. The tombstone is seeded rather
+// than submitted: the op itself refuses this exact state.
 func TestReassignSession_OperatorRepairsSessionWithTombstonedStudio(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "reassignstudiofix")
@@ -2123,19 +2125,11 @@ func TestReassignSession_OperatorRepairsSessionWithTombstonedStudio(t *testing.T
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("CreateSession at the soon-to-be-dead studio = %v, want Accepted", outcome)
 	}
-	tsEnv := &processor.OperationEnvelope{
-		RequestID: testutil.GenReqID("wdrsfxtombstone01"), Lane: processor.LaneDefault,
-		OperationType: "TombstoneStudio", Actor: domainActorKey, SubmittedAt: "2026-07-08T08:00:00Z", Class: "studio",
-		Payload:     json.RawMessage(`{"studioKey":"` + deadStudio + `"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{deadStudio}},
-	}
-	testutil.PublishOp(t, conn, tsEnv)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
-
-	// The atStudio link survives the studio's own tombstone (no cascade,
-	// package.go) — this is what session_atstudio_link (ddls.go) reads.
+	// The studio dies with no cascade onto the atStudio link (package.go) —
+	// this is what session_atstudio_link (ddls.go) reads.
+	seedTombstonedVertex(t, ctx, conn, deadStudio, "studio")
 	if !keyExists(t, ctx, conn, atStudioLnkKey(t, sessionKey, deadStudio)) {
-		t.Fatalf("the atStudio link must survive TombstoneStudio (no-cascade doctrine)")
+		t.Fatalf("the atStudio link must survive the studio's tombstone (no-cascade doctrine)")
 	}
 
 	env := &processor.OperationEnvelope{

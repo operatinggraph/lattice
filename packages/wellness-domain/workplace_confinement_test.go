@@ -1275,3 +1275,80 @@ func TestWorkplace_StaffCancelSeriesConfinedToTheirBuilding(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkplace_TombstoneStudioConfinedToTheStaffersBuilding: TombstoneStudio
+// grants frontOfHouse at scope=any (permissions.go), confined by the studio's
+// OWN locatedAt link rather than anything the caller supplies — the candidate
+// CreateStudio guarded on when it linked the studio. The positive sibling
+// leads; the cross-building denial is then checked to answer AHEAD of the
+// upcoming-classes walk, so a staffer at another building learns nothing about
+// this studio's schedule; an unlocated studio (empty candidate list) stays an
+// operator ceremony exactly as minting one does.
+func TestWorkplace_TombstoneStudioConfinedToTheStaffersBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcretire")
+	wcSeedStaff(t, ctx, conn) // staff A worksAt building A; buildings A + B exist
+	capDoc := wcStaffCapDoc()
+	capDoc.PlatformPermissions = append(capDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "TombstoneStudio", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, capDoc)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcrtstudioa0000001", "Studio A")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+
+	// POSITIVE SIBLING: a studio at their own building.
+	if got, why := tombstoneStudioAs(t, ctx, conn, cp, cons,
+		"wdwcrtretirea0000001", studioA, wcStaffKey, "2026-07-08T08:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("staff TombstoneStudio at its OWN building = %v (%s), want Accepted "+
+			"(the positive sibling — if this fails the negatives prove nothing)", got, why)
+	}
+	if keyExists(t, ctx, conn, studioA) {
+		t.Fatalf("%s must be tombstoned by the accepted retire", studioA)
+	}
+
+	// A studio at building B, holding an upcoming class: staff A is denied,
+	// and denied by the confinement guard — not by HasUpcomingClasses, which
+	// would tell them the studio has a class ahead.
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdwcrtstudiob0000001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioB, wcBuildingBKey, wcBuildingBID)
+	if _, outcome := createSession(t, ctx, conn, cp, cons, "wdwcrtsessionb000001",
+		studioB, "Evening Flow", "2026-07-08T18:00:00Z", "2026-07-08T18:30:00Z", 20); outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession at studio B = %v, want Accepted", outcome)
+	}
+	got, why := tombstoneStudioAs(t, ctx, conn, cp, cons,
+		"wdwcrtretireb0000001", studioB, wcStaffKey, "2026-07-08T08:00:00Z")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff TombstoneStudio at ANOTHER building = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("refused with %q, want the confinement guard's message", why)
+	}
+	if strings.Contains(why, "HasUpcomingClasses") {
+		t.Errorf("refused with %q — the confinement must answer before the upcoming-classes walk, "+
+			"so a staffer outside the building learns nothing about this studio's schedule", why)
+	}
+	if !keyExists(t, ctx, conn, studioB) {
+		t.Errorf("the denied cross-building retire tombstoned %s; it must be denied before any mutation", studioB)
+	}
+
+	// An unlocated studio yields an empty candidate list: denied for staff,
+	// retired by the operator.
+	placeless := createStudio(t, ctx, conn, cp, cons, "wdwcrtstudion0000001", "Nowhere Studio")
+	got, why = tombstoneStudioAs(t, ctx, conn, cp, cons,
+		"wdwcrtretiren0000001", placeless, wcStaffKey, "2026-07-08T08:00:00Z")
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff TombstoneStudio on a studio with NO location = %v, want Rejected — an empty "+
+			"candidate list must deny, not fall open", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("refused with %q, want the confinement guard's message", why)
+	}
+	if got, why := tombstoneStudioAs(t, ctx, conn, cp, cons,
+		"wdwcrtretiren0000002", placeless, domainActorKey, "2026-07-08T08:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("operator TombstoneStudio on a studio with NO location = %v (%s), want Accepted — the "+
+			"operator is workplace-exempt; only the staff path is confined", got, why)
+	}
+	if keyExists(t, ctx, conn, placeless) {
+		t.Fatalf("%s must be tombstoned by the operator's accepted retire", placeless)
+	}
+}

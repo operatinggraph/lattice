@@ -111,7 +111,13 @@ func studioVertexTypeDDL() pkgmgr.DDLSpec {
 			"can find the studio from a resident's containedIn chain; service-access authZ stays entirely on " +
 			"service-location's availableAt. A studio with no location is legal and simply un-browsable. " +
 			"TombstoneStudio soft-deletes one (no cascade onto its " +
-			"sessions — the projection lenses anchor on the live root, mirroring clinic-domain's no-cascade rule).",
+			"sessions — the projection lenses anchor on the live root, mirroring clinic-domain's no-cascade rule) " +
+			"and refuses HasUpcomingClasses while any live session at the studio still has a .schedule.startsAt " +
+			"after submittedAt (walking the studio's inbound atStudio links, bounded; StudioSessionFanoutTooLarge " +
+			"past the page cap) — call the class off first; a class that has already started is history and never " +
+			"blocks the retire. Granted to operator + frontOfHouse; a front-of-house caller is confined in-script to a " +
+			"studio at a building they worksAt (resolved off the studio's own locatedAt link; an unlocated studio " +
+			"stays operator-only).",
 		Script: studioDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"name":{"type":"string","description":"The studio's display name (CreateStudio; required)."},` +
@@ -142,9 +148,9 @@ func studioVertexTypeDDL() pkgmgr.DDLSpec {
 					"Rejects a dead location or a key that is not a location key.",
 			},
 			{
-				Name:            "TombstoneStudio — remove a studio",
+				Name:            "TombstoneStudio — retire a studio",
 				Payload:         map[string]any{"studioKey": "vtx.studio.<NanoID>"},
-				ExpectedOutcome: "Soft-deletes the studio vertex. Returns primaryKey. Rejects an absent / already-dead studio.",
+				ExpectedOutcome: "Soft-deletes the studio vertex. Returns primaryKey. Rejects an absent / already-dead studio, a studio with a still-upcoming class (HasUpcomingClasses), and a front-of-house caller who does not worksAt the studio's building (AuthDenied).",
 			},
 		},
 	}
@@ -1638,8 +1644,14 @@ def execute(state, op):
 `
 
 // studioDDLScript handles CreateStudio + TombstoneStudio. Known-key reads
-// only — the optional location endpoint is a required declared read (state)
-// when the param is supplied, never a kv.Read.
+// off the hydrated state — the optional location endpoint is a required
+// declared read when the param is supplied, never a kv.Read — plus the
+// sanctioned bounded enumerations (Contract #2 §2.5.1): the holdsRole /
+// worksAt confinement walks shared with the session script, TombstoneStudio's
+// one-page locatedAt walk that resolves the studio's own building for that
+// confinement, and its paged inbound atStudio walk (with a per-candidate
+// session + .schedule follow-up read) that refuses a retire while any class
+// at the studio is still upcoming.
 const studioDDLScript = `
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -1959,6 +1971,81 @@ def enforce_workplace(location_keys, what):
     fail("AuthDenied: " + op.actor + " does not worksAt any location covering " +
          str(location_keys) + "; " + what)
 
+def studio_locations(studio_key):
+    # The studio's own building -- the studio -locatedAt-> location link
+    # CreateStudio writes. The caller has already proved the studio alive off
+    # the declared read, so no vertex gate precedes the walk here.
+    # read-posture: (e) relation=locatedAt epoch=none -- CreateStudio writes
+    # at most ONE locatedAt link and no op repoints or adds to it, so a page
+    # of one is the whole set; the list shape is the consumer's contract.
+    page, _ = kv.Links(studio_key, "locatedAt", "out", None, 1)
+    locs = []
+    for lk in page:
+        if not lk.isDeleted:
+            locs.append(lk.targetVertex)
+    return locs
+
+STUDIO_SESSION_PAGE_LIMIT = 256
+MAX_STUDIO_SESSION_PAGES = 64
+
+def require_no_upcoming_classes(studio_key, submitted):
+    # A studio still holding an upcoming class is refused from
+    # TombstoneStudio, not silently retired out from under its booked, charged
+    # classes -- call the class off first (TombstoneSession /
+    # TombstoneSessionSeries release its seats and refund through
+    # wellnessOrphanedBookingSettlement). Enumerated via the sanctioned bounded
+    # kv.Links (Contract #2 §2.5.1), direction "in" -- the studio is the
+    # atStudio link's TARGET (session is source, per Contract #1 §1.1). A
+    # session ReassignSession moved to another studio has this studio's link
+    # tombstoned and is passed over; a live LINK alone does not mean a class:
+    # TombstoneSession leaves the atStudio link live, so each candidate's
+    # session vertex is read and only a live one whose .schedule.startsAt is
+    # still ahead of submittedAt blocks. A class that has started is HISTORY
+    # and never blocks a retire -- the studio's record is not what is being
+    # removed. Canonical-UTC RFC3339 compares lexically == chronologically,
+    # the same at-the-boundary reading TombstoneSessionSeries uses: starting
+    # exactly at submittedAt counts as started.
+    #
+    # This is a prove-absence walk over the studio's LIFETIME of atStudio
+    # links -- history keeps its link and its vertex, so an accepted retire
+    # reads every class the studio ever hosted. The .schedule is read first
+    # and a started or scheduleless class is passed over on that one read;
+    # the vertex read (is it tombstoned?) is paid only for a class the
+    # schedule says is still ahead. One page of 256 links costs at most
+    # 1 + 256 reads on a fully-historical studio, so the wall (the script
+    # budget, not the live-read budget) is what bounds a long-lived studio.
+    cursor = None
+    for _page in range(MAX_STUDIO_SESSION_PAGES):
+        # read-posture: (e) relation=atStudio epoch=none (read-only guard: a
+        # class scheduled concurrently with the retire slips past -- accepted,
+        # the same posture identity-hygiene's open-task guard records; the
+        # stranded session then reads missingStudio and ReassignSession's
+        # operator repair path moves it)
+        links, cursor = kv.Links(studio_key, "atStudio", "in", cursor, STUDIO_SESSION_PAGE_LIMIT)
+        for lk in links:
+            if lk.isDeleted:
+                continue
+            sess_key = lk.sourceVertex
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above (data-derived key)
+            sched = kv.Read(sess_key + ".schedule")
+            if sched == None or sched.isDeleted:
+                continue
+            starts_at = sched.data.get("startsAt")
+            if starts_at == None or not (submitted < starts_at):
+                continue
+            # A live LINK plus an upcoming schedule is still not a class:
+            # TombstoneSession leaves both behind and tombstones only the
+            # vertex, so the root decides.
+            # read-posture: (e) per-candidate follow-up read, same walk.
+            sess = kv.Read(sess_key)
+            if sess == None or sess.isDeleted:
+                continue
+            fail("HasUpcomingClasses: " + studio_key + " still has an upcoming class " + sess_key + " starting " + starts_at + "; call it off first")
+        if cursor == None:
+            return
+    fail("StudioSessionFanoutTooLarge: " + studio_key + " has too many atStudio links to enumerate at retire time; call off enough classes to bring it under the page cap first")
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -2006,6 +2093,20 @@ def execute(state, op):
         skey = required_string(p, "studioKey")
         if not vertex_alive(state, skey):
             fail("UnknownStudio: " + skey)
+        # Staff-standing confinement: a front-of-house caller retires only a
+        # studio at a building they worksAt, resolved off the studio's own
+        # locatedAt link. An unlocated studio yields an empty candidate list,
+        # which require_workplace denies for anyone but an operator -- the
+        # same posture CreateStudio takes on minting one. It answers BEFORE
+        # the upcoming-classes walk below, so a staffer at another building
+        # learns nothing about this studio's schedule from the refusal.
+        # workplace-exempt: (no-validated-path) TombstoneStudio is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no
+        # task mints it, so nothing but the operator escape reaches the
+        # exemption.
+        if not workplace_exempt():
+            require_workplace(studio_locations(skey), "cannot retire " + skey)
+        require_no_upcoming_classes(skey, time.rfc3339_utc(op.submittedAt))
         mutations = [make_tombstone(skey)]
         return {"mutations": mutations, "events": [], "response": {"primaryKey": skey}}
 

@@ -26,8 +26,9 @@
 //	  self-description.
 //	21 permission vertices: one per (operationType, scope) pair (Contract #8
 //	  §8.1). Most ops carry a single scope=any vertex granted to operator;
-//	  CreateStudio/CreateSession/CreateSessionSeries/TombstoneSessionSeries/
-//	  ReassignSessionSeries additionally grant frontOfHouse at scope=any (the
+//	  CreateStudio/TombstoneStudio/CreateSession/CreateSessionSeries/
+//	  TombstoneSessionSeries/ReassignSessionSeries additionally grant
+//	  frontOfHouse at scope=any (the
 //	  studio front-desk beat — the series call-off and series move are
 //	  deliberately NOT granted to provider, unlike TombstoneSession);
 //	  TombstoneSession/
@@ -94,7 +95,7 @@ type permGrant struct {
 
 var wellnessOpGrants = map[string][]permGrant{
 	"CreateStudio":              {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"TombstoneStudio":           {{"any", "operator"}},
+	"TombstoneStudio":           {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"CreateSession":             {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"CreateSessionSeries":       {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"TombstoneSessionSeries":    {{"any", "operator"}, {"any", "frontOfHouse"}},

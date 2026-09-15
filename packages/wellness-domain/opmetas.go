@@ -23,12 +23,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // naming why. cmd/wellness-app reaches both through its own hand-built
 // envelopes either way.
 //
-// TombstoneStudio and CreateInstructor are granted `operator` alone
-// (permissions.go's mk() helper — entity provisioning stays a trusted-tool
-// ceremony, mirroring clinic-domain's CreateProvider/TombstoneProvider), so
-// both are AuthContext "standing"; cmd/wellness-app wires real staff forms to
-// both (the app-seam rule, vertical-package-standard.md §15), which is what
-// makes them user-facing by demonstration despite the operator-only grant.
+// CreateInstructor is granted `operator` alone (permissions.go's mk() helper
+// — entity provisioning stays a trusted-tool ceremony, mirroring
+// clinic-domain's CreateProvider/TombstoneProvider), and TombstoneStudio is
+// granted [operator, frontOfHouse] like CreateStudio, workplace-confined
+// in-script to the studio's own building; both are AuthContext "standing", and
+// cmd/wellness-app wires real staff forms to both (the app-seam rule,
+// vertical-package-standard.md §15), which is what makes CreateInstructor
+// user-facing by demonstration despite the operator-only grant.
 //
 // Dispatch.Class on each entry is "booking" — the booking DDL's own
 // CanonicalName (bookingVertexDDL), the Contract #2 §2.1 envelope `class`
@@ -794,18 +796,19 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "TombstoneStudio",
+			// refusal-courtesy(facet): HasUpcomingClasses, StudioSessionFanoutTooLarge: none — edgeEntityStudios (edge-manifest/lenses.go) projects no upcoming-class count or flag for a studio, so the generic form cannot hide the op while a class is still ahead; the refusal names the class to call off first.
 			Presentation: &pkgmgr.OpPresentationSpec{
-				Title:       "Remove studio",
-				Description: "Remove a studio. Does not cascade onto its sessions or bookings.",
+				Title:       "Retire studio",
+				Description: "Retire a studio at the building you work at. Refused while the studio still has an upcoming class — call its classes off first. Does not cascade onto classes that already ran or their bookings.",
 				Icon:        "building",
 				Tone:        "destructive",
-				SubmitLabel: "Remove studio",
+				SubmitLabel: "Retire studio",
 			},
 			InputSchema: `{"type":"object","properties":` +
-				`{"studioKey":{"type":"string","description":"vtx.studio.<NanoID> of the studio to remove — auto-filled from the studio being viewed."}},` +
+				`{"studioKey":{"type":"string","description":"vtx.studio.<NanoID> of the studio to retire — auto-filled from the studio being viewed."}},` +
 				`"required":["studioKey"]}`,
 			FieldDescriptions: map[string]string{
-				"studioKey": "The studio being removed — auto-filled by the client from the studio being viewed (dispatch.targetField), not user-entered.",
+				"studioKey": "The studio being retired — auto-filled by the client from the studio being viewed (dispatch.targetField), not user-entered.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       studioVertexDDL,
@@ -813,6 +816,18 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "studioKey",
 				TargetType:  studioVertexDDL,
 				Reads:       []string{"{payload.studioKey}"},
+				// The upcoming-class refusal's walk over the studio's inbound
+				// atStudio links (the studio is in the payload, so DECLARED;
+				// each candidate's session + .schedule is a class-(e)
+				// follow-up read the walk resolves), the front-of-house
+				// confinement's one-page locatedAt walk that resolves the
+				// studio's own building, and the operator-role probe over the
+				// actor's holdsRole links (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.studioKey}", Relation: "atStudio", Direction: "in"},
+					{Hub: "{payload.studioKey}", Relation: "locatedAt", Direction: "out"},
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
 			},
 		},
 		{
