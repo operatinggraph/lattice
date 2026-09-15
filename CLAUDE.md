@@ -146,6 +146,10 @@ behavior becomes load-bearing. (For NATS — the substrate — the authority is 
     no-ops it. `DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`. A test that re-installs a
     modified `Definition` over the real install derives its "one higher" version from `Package.Version`, never
     a literal — a literal turns the upgrade into a same-version skip on the next bump (lease-signing, 2026-09-13).
+  - **A `//go:build ignore` file (every `scripts/*.go`) is invisible to `golangci-lint`, so its gofmt is
+    checked by CI's own `gofmt -l .` step and by nothing in the local list** — a new lint gate whose comment
+    block gofmt reflows reddened `main` from a green `golangci-lint run ./...` (2026-09-14,
+    `lint-links-page-limit`). `gofmt -l scripts/` before committing any `scripts/` change.
 
   **`.github/workflows/ci.yml` is the authority for what must be green** — read its steps rather than
   trusting this list, which is a summary and has been incomplete before.
