@@ -147,10 +147,13 @@ Also: `CreateLeaseApplication`'s `leaseTermMonths` / `requestedRent` gained `"mi
 lens cannot project without `$now` (`SessionInPast`, `SessionStarted`, `ScheduleInPast`), and codes on state no
 read model projects (`RefundExceedsPaid`'s `cashCents`; a renewal's signature / guarantor state on Facet's row).
 
-**Facet gap that is a design question, not a lens column.** Facet's entity-ref picker has ONE op-agnostic
-courtesy column (`available`). `CreateBooking` refuses `SessionFull` while `JoinWaitlist` REQUIRES a full session,
-so a per-op candidate filter is needed to give either op its courtesy without breaking the other — a descriptor
-vocabulary extension (FORK-1 territory), filed as a `📐` row on the board with the absent pattern named.
+**Facet gap — filed as a design question, dissolved the same day into a lens column (Winston, 2026-09-15,
+[triage](verticals-designer-triage-2026-09-15.md)).** `CreateBooking` refuses `SessionFull` while `JoinWaitlist`
+REQUIRES a full session; this pass filed a per-op entity-ref candidate filter (a `📐` row) — but the pair never
+touches the picker (`TargetField: "session"`, no `x-entityRef`; the session is the viewed row), where the
+vocabulary's `Dispatch.VisibleWhen` already gates per op. The fix was `edgeEntitySessions`' `full` column plus
+two `VisibleWhen` declarations (`5cb0aa03`). The harm had been priced in the picker's units — the mechanism
+under review — not on the op's actual offer path.
 
 **Review classification (close pass).** design-gap ×2 in the gate itself, both caught cold (an exempt family is a
 claim about the corpus's coding discipline — the corpus falsified it; a site census over literals is a claim that
