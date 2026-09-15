@@ -45,6 +45,12 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
   member picker beside it already dropped as seated, dead-ending in `DoubleBooked` (2026-09-13 census). Check: when
   an op gains a server refusal, walk every form that dispatches it and give each the courtesy its sibling already has
   (hide / `max` / prefill / disable); the census shape is "ops dispatched from 2+ sites × the script's `fail(`s".
+  **Third sighting (café `ItemUnavailable`, 2026-09-15, caught cold):** the third form was in ANOTHER client — Facet's
+  descriptor-driven self-order, whose entity-ref picker is fed by edge-manifest's `edgeEntityMenuItems`, not by the
+  café app's `/api/menu` — so a grep of the app's own dispatch sites found two forms and missed it. The census spans
+  every client that dispatches the op: `grep -rn 'x-entityRef: *"<type>"'` for the picker and
+  `packages/edge-manifest/lenses.go`'s `edgeEntity<Type>Tail` for the column the refusal keys on; the fix is the lens
+  projecting the flag and the picker dropping the row (`entityRefCandidates`), column-driven like `*Cents`.
 - **A count the FE promises for an op's effect must apply the op's own predicate, not a coarser key** — the
   roster's "Call off the remaining N classes" tallied upcoming occurrences per series while the op cancels
   only those still held at the confirmed studio, so one occurrence moved elsewhere made the button promise N

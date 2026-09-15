@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-13 · `5e6e08a0` · A reversal is aged against the charge it reverses — a `reversesKey` credit retires its debit before the FIFO, lockstep across both app statements and café's `arrears_head`; orphan double refund closed; live.
+- 2026-09-13 · `bd07bed1` · A patient's late cancel owes the no-show fee and the desk's correction bills it — a 24h self-path clock, the correction carries the fee, the ledger bills the fee's presence; proven live incl. the waiver reversal.
 - 2026-09-13 · `a2724692` · A recurring visit is credited by a booked visit, never by the clock — the gap opens only on a qualifying visit, the advance re-anchors on it (`StaleRow`+OCC), the Book calendar carries the due floor; proven live.
 - 2026-09-13 · `8a046814` · The renewal chain asks the tenant for a profile before a signature — a `submitProfile` leg gates `signRenewal`'s `pre`, three `staleUserTasks` arms, the inbox opens the profile form; the refused task signed live.
 - 2026-09-13 · `8a046814` · `SetApplicantProfile`'s descriptor declares `references` as the DDL's string array, not an integer count the script dropped to zero.
