@@ -202,12 +202,17 @@ func Lenses() []pkgmgr.LensSpec {
 // The WHERE keeps only studios carrying a .profile aspect (the
 // availableListings/clinicProviders aspect-presence idiom). Per-row key is
 // the studio key (the IntoKey default); studioKey repeats it in the body.
+// noShowFeeCents is the studio's recorded no-show policy, null for a studio
+// with none — the desk roster reads it to name the amount its No-show button
+// bills (SetBookingAttendance resolves the same policy server-side), so a
+// null here means "the $25 default applies", never "free".
 const wellnessStudiosSpec = `MATCH (s:studio)
 WHERE s.profile.data.name <> null
 RETURN
   s.key AS key,
   s.key AS studioKey,
-  s.profile.data.name AS name`
+  s.profile.data.name AS name,
+  s.profile.data.noShowFeeCents AS noShowFeeCents`
 
 // wellnessInstructorsSpec projects one row per NAMED instructor — the
 // "who leads this class" picker on the staff scheduling form, mirroring

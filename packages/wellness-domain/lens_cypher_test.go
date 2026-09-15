@@ -191,6 +191,30 @@ func TestWellnessStudios_RostersNamedStudios(t *testing.T) {
 	require.Equal(t, "Sunrise Yoga Room", v["name"])
 }
 
+// TestWellnessStudios_ProjectsNoShowFeePolicy pins the noShowFeeCents column:
+// the studio's recorded policy as stored (0 included — fee-free is a policy),
+// and null for a studio with none, which the desk must read as "the default
+// applies", never as "free".
+func TestWellnessStudios_ProjectsNoShowFeePolicy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	tenKey := f.vtx(t, "ten", "studio")
+	f.aspect(t, "ten", "profile", "studioProfile", map[string]any{"name": "Ten Dollar Room", "noShowFeeCents": 1000.0})
+	freeKey := f.vtx(t, "free", "studio")
+	f.aspect(t, "free", "profile", "studioProfile", map[string]any{"name": "Free Room", "noShowFeeCents": 0.0})
+	noneKey := f.vtx(t, "none", "studio")
+	f.aspect(t, "none", "profile", "studioProfile", map[string]any{"name": "Quiet Room"})
+
+	rows := f.project(t, wellnessStudiosSpec)
+	require.Len(t, rows, 3)
+	require.Equal(t, 1000.0, wdRowByKey(rows, tenKey)["noShowFeeCents"])
+	require.Equal(t, 0.0, wdRowByKey(rows, freeKey)["noShowFeeCents"])
+	require.Nil(t, wdRowByKey(rows, noneKey)["noShowFeeCents"], "a studio with no policy projects null, not 0")
+	require.Equal(t, "Quiet Room", wdRowByKey(rows, noneKey)["name"])
+}
+
 // TestWellnessSessions_JoinsStudio proves the schedule-grid join: one row per
 // session, with the neighbour aspect-hop (studioName) and anchor hops
 // (startsAt/endsAt/capacity) resolved.

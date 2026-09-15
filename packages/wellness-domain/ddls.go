@@ -101,10 +101,10 @@ func studioVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     studioVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateStudio", "TombstoneStudio"},
+		PermittedCommands: []string{"CreateStudio", "TombstoneStudio", "SetStudioProfile"},
 		Description: "Wellness studio DDL. Vertex shape: vtx.studio.<NanoID>, class=studio, root data = {} " +
 			"(minimal, D5 — the data lives in the .profile aspect). CreateStudio mints the studio + writes the " +
-			".profile aspect {name (required)} atomically, and — when the optional location param is supplied — " +
+			".profile aspect {name (required), noShowFeeCents (optional)} atomically, and — when the optional location param is supplied — " +
 			"the studio locatedAt location LINK (lnk.studio.<id>.locatedAt.<locType>.<locId>, class \"locatedAt\"; " +
 			"source = the later-arriving studio, target = the pre-existing location, Contract #1 §1.1). locatedAt " +
 			"carries NO authorization meaning — it exists so reachability walks (edge-manifest's entity lenses) " +
@@ -117,21 +117,29 @@ func studioVertexTypeDDL() pkgmgr.DDLSpec {
 			"past the page cap) — call the class off first; a class that has already started is history and never " +
 			"blocks the retire. Granted to operator + frontOfHouse; a front-of-house caller is confined in-script to a " +
 			"studio at a building they worksAt (resolved off the studio's own locatedAt link; an unlocated studio " +
-			"stays operator-only).",
+			"stays operator-only). SetStudioProfile edits the .profile aspect of a live studio — name and/or " +
+			"noShowFeeCents, at least one required; each supplied field replaces its stored value and an omitted one " +
+			"is carried forward (an OCC upsert on the profile's read revision) — under the same operator + " +
+			"frontOfHouse grant and the same locatedAt confinement as TombstoneStudio. noShowFeeCents is the " +
+			"studio's no-show policy in whole cents, validated a non-negative integer at both writers: " +
+			"SetBookingAttendance bills it on a noShow mark that names no fee of its own (0 = fee-free), and a " +
+			"studio with no policy recorded bills SetBookingAttendance's documented default.",
 		Script: studioDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"name":{"type":"string","description":"The studio's display name (CreateStudio; required)."},` +
+			`{"name":{"type":"string","description":"The studio's display name (CreateStudio: required; SetStudioProfile: optional, replaces the stored name when supplied)."},` +
+			`"noShowFeeCents":{"type":"integer","minimum":0,"description":"Optional no-show policy in whole cents (CreateStudio, SetStudioProfile). A non-negative integer; 0 means a no-show at this studio bills no fee. Absent on CreateStudio = no policy recorded (SetBookingAttendance bills its documented 2500 default); on SetStudioProfile an omitted value keeps the stored one."},` +
 			`"studioId":{"type":"string","description":"Optional bare NanoID for the new studio vertex (CreateStudio); absent → minted."},` +
 			`"location":{"type":"string","description":"Optional vtx.<locType>.<NanoID> location the studio is at (CreateStudio; validated alive + an admitted location type segment; writes the locatedAt link). Listed in ContextHint.Reads when supplied."},` +
-			`"studioKey":{"type":"string","description":"vtx.studio.<NanoID> of an existing studio (TombstoneStudio; required, validated alive)."}},` +
+			`"studioKey":{"type":"string","description":"vtx.studio.<NanoID> of an existing studio (TombstoneStudio, SetStudioProfile; required, validated alive)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.studio.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"name":      "The studio's display name. Stored on the .profile aspect (CreateStudio; required).",
-			"studioId":  "Optional bare NanoID (no dots / key segments) for the new studio vertex. Absent → minted with nanoid.new().",
-			"location":  "Optional full vtx.<locType>.<NanoID> key of a location-domain location (e.g. a building) the studio is at. Validated alive + an admitted location type segment; CreateStudio writes the studio locatedAt location link (no authZ meaning — browse reachability only). MUST be listed in ContextHint.Reads when supplied.",
-			"studioKey": "Full vtx.studio.<NanoID> key of an existing studio vertex to tombstone (TombstoneStudio).",
+			"name":           "The studio's display name. Stored on the .profile aspect (CreateStudio: required; SetStudioProfile: optional — supplied replaces it, omitted keeps it).",
+			"noShowFeeCents": "The studio's no-show policy in whole cents, stored on the .profile aspect (CreateStudio, SetStudioProfile; optional). Validated a non-negative integer at both writers (InvalidArgument otherwise). SetBookingAttendance reads it when a noShow mark names no fee of its own: a positive value is billed, 0 bills nothing, and a studio with no policy recorded bills the documented 2500 default. On SetStudioProfile an omitted value keeps the stored policy.",
+			"studioId":       "Optional bare NanoID (no dots / key segments) for the new studio vertex. Absent → minted with nanoid.new().",
+			"location":       "Optional full vtx.<locType>.<NanoID> key of a location-domain location (e.g. a building) the studio is at. Validated alive + an admitted location type segment; CreateStudio writes the studio locatedAt location link (no authZ meaning — browse reachability only). MUST be listed in ContextHint.Reads when supplied.",
+			"studioKey":      "Full vtx.studio.<NanoID> key of an existing studio vertex to tombstone (TombstoneStudio) or whose profile to edit (SetStudioProfile; its .profile aspect MUST be listed in ContextHint.Reads alongside the vertex).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -148,9 +156,24 @@ func studioVertexTypeDDL() pkgmgr.DDLSpec {
 					"Rejects a dead location or a key that is not a location key.",
 			},
 			{
+				Name:    "CreateStudio — register a studio with a no-show policy",
+				Payload: map[string]any{"name": "Sunrise Yoga Room", "noShowFeeCents": 1000},
+				ExpectedOutcome: "Mints the studio + .profile {name, noShowFeeCents: 1000}: a member marked noShow " +
+					"on one of its classes with no fee named on the mark is billed $10. Rejects a negative or " +
+					"fractional noShowFeeCents (InvalidArgument).",
+			},
+			{
 				Name:            "TombstoneStudio — retire a studio",
 				Payload:         map[string]any{"studioKey": "vtx.studio.<NanoID>"},
 				ExpectedOutcome: "Soft-deletes the studio vertex. Returns primaryKey. Rejects an absent / already-dead studio, a studio with a still-upcoming class (HasUpcomingClasses), and a front-of-house caller who does not worksAt the studio's building (AuthDenied).",
+			},
+			{
+				Name:    "SetStudioProfile — record a fee-free no-show policy",
+				Payload: map[string]any{"studioKey": "vtx.studio.<NanoID>", "noShowFeeCents": 0},
+				ExpectedOutcome: "Upserts .profile with noShowFeeCents: 0 and the stored name carried forward " +
+					"(OCC on the profile's read revision). Returns primaryKey. Rejects an absent / dead studio " +
+					"(UnknownStudio), a payload naming neither name nor noShowFeeCents, a negative or fractional " +
+					"fee (InvalidArgument), and a front-of-house caller who does not worksAt the studio's building (AuthDenied).",
 			},
 		},
 	}
@@ -160,22 +183,32 @@ func studioProfileAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     studioProfileAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateStudio"},
+		PermittedCommands: []string{"CreateStudio", "SetStudioProfile"},
 		Description: "Studio profile aspect (wellness). Stored as vtx.studio.<NanoID>.profile (class " +
-			"studioProfile) = {name}. Non-sensitive. Written by CreateStudio (whose studio vertexType DDL owns " +
-			"the script); this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler.",
+			"studioProfile) = {name, noShowFeeCents?}. Non-sensitive. Written by CreateStudio (mints it) and " +
+			"SetStudioProfile (merges supplied fields over it under OCC); the studio vertexType DDL owns the " +
+			"script and this aspect-type DDL is the step-6 write gate. noShowFeeCents is the studio's no-show " +
+			"policy in whole cents — a non-negative integer, 0 meaning fee-free, absent meaning no policy " +
+			"recorded — read by SetBookingAttendance when a noShow mark names no fee of its own. " +
+			"Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"name":{"type":"string"}}}`,
+			`{"name":{"type":"string"},"noShowFeeCents":{"type":"integer","minimum":0}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"name": "The studio's display name.",
+			"name":           "The studio's display name.",
+			"noShowFeeCents": "The studio's no-show policy in whole cents (non-negative integer; 0 = fee-free; absent = no policy recorded, so SetBookingAttendance bills its documented default).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "studio profile aspect",
 				Payload:         map[string]any{"name": "Sunrise Yoga Room"},
 				ExpectedOutcome: "Stored as vtx.studio.<NanoID>.profile; written by CreateStudio.",
+			},
+			{
+				Name:            "studio profile aspect with a no-show policy",
+				Payload:         map[string]any{"name": "Sunrise Yoga Room", "noShowFeeCents": 1000},
+				ExpectedOutcome: "Stored as vtx.studio.<NanoID>.profile; written by CreateStudio or SetStudioProfile. A noShow mark on one of the studio's classes that names no fee bills $10.",
 			},
 		},
 	}
@@ -945,11 +978,15 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"ReleaseOrphanedBooking (and, for className/classStartsAt, wellness-ledger's wellnessLedgerHistory " +
 			"lens), since a marked booking is " +
 			"no longer CancelBooking-eligible. Transitioning to noShow also stores a noShowFeeCents amount on " +
-			".status — caller-supplied or a 2500 default when omitted, the staff-observed default (the same idiom " +
-			"clinic-domain's SetAppointmentStatus uses). A caller-supplied 0 is the one exception: it means no fee " +
-			"at all, and the field is left off .status entirely rather than written as 0 — that's how the " +
+			".status — caller-supplied, or when omitted resolved from the STUDIO the session is at now: its " +
+			".profile.noShowFeeCents policy when recorded (CreateStudio / SetStudioProfile), else the documented " +
+			"2500 no-policy default (the same idiom clinic-domain's SetAppointmentStatus uses, with the amount " +
+			"the studio's rather than the script's). A fee of 0 — caller-supplied or the studio's policy — means " +
+			"no fee at all, and the field is left off .status entirely rather than written as 0 — that's how the " +
 			"automated pastDueBookingsTarget sweep marks a documentation lapse (nobody at the desk checked the " +
-			"member in) as distinct from a staff-observed no-show; a negative value is rejected. When present and " +
+			"member in) and how the desk waives a fee, as distinct from a billable no-show; a negative value is " +
+			"rejected, and a recorded studio policy that is not a non-negative whole number is refused " +
+			"(InvalidState) rather than billed. When present and " +
 			"positive, wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge " +
 			"against the booker's ledger account. It is re-markable — " +
 			"attended and noShow correct each other. noShowFeeCents itself is NOT in the carry-forward field set " +
@@ -1009,7 +1046,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			`"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> of an existing booking (CancelBooking / SetBookingAttendance / ReleaseOrphanedBooking; required, validated alive)."},` +
 			`"status":{"type":"string","description":"attended | noShow (SetBookingAttendance; required). Re-markable — either value corrects the other."},` +
 			`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> the caller is bound to (SetBookingAttendance; required for an instructor (non-operator) caller marking a booking on their OWN class — validated via identifiedBy + ledBy)."},` +
-			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetBookingAttendance; optional). 0 means no fee is charged (used by the automated pastDueBookings sweep to mark a documentation lapse rather than a billable no-show); any other supplied value must be positive. Defaults to 2500 when omitted. Stored on .status; wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge against the booker's ledger account."}},` +
+			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetBookingAttendance; optional). 0 means no fee is charged (the automated pastDueBookings sweep sends it to mark a documentation lapse rather than a billable no-show; the desk sends it to waive the fee); any other supplied value must be positive. When omitted the fee is the studio's recorded noShowFeeCents policy (the studio the session is at now; 0 bills nothing), or 2500 for a studio with no policy recorded. Stored on .status; wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge against the booker's ledger account."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the operation wrote; vtx.session.<NanoID> for PromoteWaitlistedBookings, which writes across a whole class's waitlist rather than onto one booking."}}}`,
@@ -1021,7 +1058,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"bookingKey":     "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking), record attendance on (SetBookingAttendance), or release (ReleaseOrphanedBooking, Weaver-dispatched only).",
 			"status":         "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
 			"instructor":     "Full vtx.instructor.<NanoID> key the caller claims to be. Required for a non-operator SetBookingAttendance caller: the script requires the caller's own identifiedBy binding to it AND the session's ledBy link to it, so a forged value only fails closed.",
-			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow). 0 is allowed and means no fee is charged — the automated pastDueBookings sweep sends this to signal a documentation lapse (nobody checked the member in) rather than a billable no-show; any other supplied value must be positive. Defaults to 2500 when omitted. Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session/className/classStartsAt are).",
+			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow). 0 is allowed and means no fee is charged — the automated pastDueBookings sweep sends this to signal a documentation lapse (nobody checked the member in) rather than a billable no-show, and the desk sends it to waive the fee; any other supplied value must be positive. When omitted the fee is resolved from the studio the session is at now: its .profile.noShowFeeCents policy when recorded (a policy of 0 bills nothing), else 2500 for a studio with no policy recorded. Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session/className/classStartsAt are).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -1078,9 +1115,11 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 					"session":    "vtx.session.<NanoID>",
 					"status":     "noShow",
 				},
-				ExpectedOutcome: "As the attended case, but upserts .status {value: noShow, noShowFeeCents: 2500, " +
-					"...} (the default, since noShowFeeCents was omitted) — wellness-ledger's wellnessNoShowSettlement " +
-					"lens reads it to post a DebitAccount charge against the booker's ledger account once one exists.",
+				ExpectedOutcome: "As the attended case, but upserts .status {value: noShow, noShowFeeCents: <fee>, " +
+					"...} where <fee> is the studio's recorded noShowFeeCents policy (omitted from .status when that " +
+					"policy is 0) or 2500 for a studio with no policy recorded, since noShowFeeCents was omitted from " +
+					"the payload — wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount " +
+					"charge against the booker's ledger account once one exists.",
 			},
 			{
 				Name: "SetBookingAttendance — correct a no-show back to attended",
@@ -1221,7 +1260,8 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"every candidate a class with free seats can take rather than to the one CancelBooking just freed a " +
 			"seat for, promotedAt stamped with the dispatch's submittedAt), and SetBookingAttendance (value=attended|noShow, an OCC upsert " +
 			"carrying rate / seat / booker / session / className / classStartsAt / promotedAt forward untouched, and — only " +
-			"when transitioning to noShow — a noShowFeeCents amount: caller-supplied or a 2500 default) — the " +
+			"when transitioning to noShow — a noShowFeeCents amount: caller-supplied, else the studio's recorded " +
+			"policy, else a 2500 default) — the " +
 			"booking vertexType DDL owns all four scripts; this aspect-type DDL is the step-6 write gate. seat / " +
 			"waitlistSlot / booker / session are internal bookkeeping (the claimed seat or waitlist-slot index, " +
 			"the booker's identity key, the session key) CancelBooking (seat, booker, and — for its promotion " +
@@ -1263,7 +1303,7 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"className":      "The session's .schedule.name at the moment this booking was created or waitlisted (a point-in-time snapshot, not a live relationship). Carried forward unchanged by CancelBooking's promotion upsert and SetBookingAttendance. wellness-ledger's wellnessLedgerHistory lens reads it so a member's billing history still names the class after TombstoneSession kills the session vertex.",
 			"classStartsAt":  "The session's .schedule.startsAt at the moment this booking was created or waitlisted, the same snapshot idiom as className, RFC3339 UTC. Carried forward and read by wellnessLedgerHistory alongside className.",
 			"promotedAt":     "The instant a waitlisted booking was handed its seat — the promoting op's submittedAt, RFC3339 UTC — present only on a booking that CancelBooking or PromoteWaitlistedBookings promoted (never on a direct CreateBooking seat), carried forward unchanged by SetBookingAttendance and CancelBooking's forfeit upsert, and gone with the booking's tombstone. CancelBooking reads it to exempt a seat promoted at or after the two-hour cutoff from the late-cancel forfeit; the wellnessBookings lens projects it so the seating can be badged.",
-			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow (caller-supplied positive number, or a 2500 default when omitted). Read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge.",
+			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow and the fee is positive (caller-supplied, else the studio's recorded .profile.noShowFeeCents policy, else a 2500 default for a studio with no policy). Read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -1676,6 +1716,11 @@ def make_link(key, source, target, cls, local_name, data):
                          "sourceVertex": source, "targetVertex": target,
                          "localName": local_name, "data": data}}
 
+def make_aspect_upsert_occ(vtx_key, local_name, cls, data, rev):
+    return {"op": "update", "key": vtx_key + "." + local_name, "expectedRevision": rev,
+            "document": {"class": cls, "isDeleted": False,
+                         "vertexKey": vtx_key, "localName": local_name, "data": data}}
+
 def make_tombstone(key):
     return {"op": "tombstone", "key": key}
 
@@ -1686,6 +1731,26 @@ def required_string(p, name):
     if v == None or type(v) != type("") or len(v.strip()) == 0:
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
+
+def optional_fee_cents(p, name):
+    # An optional money amount in whole cents: absent or null is "not
+    # supplied"; anything else must be a non-negative integer, refused at
+    # the mint rather than tolerated. The value is load-bearing downstream --
+    # SetBookingAttendance derives a member's no-show charge from it -- so a
+    # fractional, negative, boolean or string amount is never stored for the
+    # reader to trip over. A whole-valued JSON number arrives as a Starlark
+    # int (the sandbox converts 25.0 to 25); a fractional one arrives as a
+    # float and is refused by the type test.
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None:
+        return None
+    if type(v) != type(0):
+        fail("InvalidArgument: " + name + ": must be a whole number of cents; got " + str(v))
+    if v < 0:
+        fail("InvalidArgument: " + name + ": must not be negative; got " + str(v))
+    return v
 
 def bare_nanoid_or_mint(p, name):
     if not hasattr(p, name):
@@ -1707,6 +1772,23 @@ def optional_string(p, name):
     v = getattr(p, name)
     if v == None or type(v) != type(""):
         return None
+    v = v.strip()
+    if len(v) == 0:
+        return None
+    return v
+
+def optional_text(p, name):
+    # An optional text field on an EDIT: absent, null or blank is "not
+    # supplied" (the stored value is carried); any non-string is refused
+    # rather than silently read as absent, so a form that sends a number
+    # where a name belongs learns so instead of having its edit dropped.
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None:
+        return None
+    if type(v) != type(""):
+        fail("InvalidArgument: " + name + ": must be a string; got " + str(v))
     v = v.strip()
     if len(v) == 0:
         return None
@@ -2060,6 +2142,7 @@ def execute(state, op):
 
     if ot == "CreateStudio":
         name = required_string(p, "name")
+        no_show_fee = optional_fee_cents(p, "noShowFeeCents")
         loc = optional_string(p, "location")
 
         # Staff-standing confinement: a studio is opened AT a location, and the
@@ -2085,9 +2168,16 @@ def execute(state, op):
 
         sid = bare_nanoid_or_mint(p, "studioId")
         skey = "vtx.studio." + sid
+        # The no-show policy is recorded only when supplied: a profile with no
+        # noShowFeeCents means "no policy recorded", which SetBookingAttendance
+        # bills at its documented default. A supplied 0 IS a policy (fee-free)
+        # and is stored as such.
+        profile = {"name": name}
+        if no_show_fee != None:
+            profile["noShowFeeCents"] = no_show_fee
         mutations = [
             make_vtx(skey, "studio", {}),
-            make_aspect(skey, "profile", "studioProfile", {"name": name}),
+            make_aspect(skey, "profile", "studioProfile", profile),
         ]
         if loc != None:
             ltype, lid = parts_of(loc, "location", "")
@@ -2117,6 +2207,70 @@ def execute(state, op):
         require_no_upcoming_classes(skey, time.rfc3339_utc(op.submittedAt))
         mutations = [make_tombstone(skey)]
         return {"mutations": mutations, "events": [], "response": {"primaryKey": skey}}
+
+    if ot == "SetStudioProfile":
+        skey = required_string(p, "studioKey")
+        parts_of(skey, "studioKey", "studio")
+        if not vertex_alive(state, skey):
+            fail("UnknownStudio: " + skey)
+        cls = class_of(state, skey)
+        if cls != "studio":
+            fail("WrongClass: studioKey: " + skey + " has class " + str(cls) + ", required studio")
+        name = optional_text(p, "name")
+        no_show_fee = optional_fee_cents(p, "noShowFeeCents")
+        if name == None and no_show_fee == None:
+            fail("InvalidArgument: at least one of name, noShowFeeCents is required")
+        # Staff-standing confinement: the same studio-at-a-building-they-worksAt
+        # rule TombstoneStudio applies, resolved off the studio's own locatedAt
+        # link; an unlocated studio yields an empty candidate list and stays an
+        # operator ceremony. It answers before the profile is read, so a
+        # staffer at another building learns nothing about this studio's
+        # policy from the refusal.
+        # workplace-exempt: (no-validated-path) SetStudioProfile is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no
+        # task mints it, so nothing but the operator escape reaches the
+        # exemption.
+        if not workplace_exempt():
+            require_workplace(studio_locations(skey), "cannot set the profile of " + skey)
+        profile_key = skey + ".profile"
+        # read-posture: (a) declared read at SetStudioProfile dispatch -- the
+        # profile is MERGED, not replaced: a descriptor-driven form cannot
+        # pre-fill an editable field from the studio row, so a form that
+        # changes only the fee would otherwise have to re-type the name (or
+        # blank it). Each supplied field overwrites its stored value and an
+        # omitted one is carried forward off this read; the OCC upsert below
+        # is keyed on the read's revision so two concurrent edits commit one.
+        # CreateStudio always mints the aspect, so it is absent only when it
+        # was removed out of band: a submitter that DECLARES the read faults
+        # HydrationMiss before this branch runs, and one that does not falls
+        # through to a live get that finds any profile that exists -- so the
+        # refusal below is reached exactly by an undeclared submitter on a
+        # studio whose profile is genuinely gone, and there is nothing to
+        # merge over.
+        profile = kv.Read(profile_key)
+        if profile == None or profile.isDeleted:
+            fail("InvalidState: " + profile_key + " is missing; CreateStudio mints it, so the aspect was removed out of band -- nothing to merge over")
+        merged = {}
+        for field in ["name", "noShowFeeCents"]:
+            carried = profile.data.get(field)
+            if carried != None:
+                merged[field] = carried
+        if name != None:
+            merged["name"] = name
+        if no_show_fee != None:
+            merged["noShowFeeCents"] = no_show_fee
+        elif "noShowFeeCents" in merged:
+            # A carried policy is re-validated on the way through: the stored
+            # value is what SetBookingAttendance bills, and a rename must not
+            # re-write a malformed one (a row that predates the mint check)
+            # under a fresh revision as if it were sound. The repair is the
+            # other field of this same op.
+            carried_fee = merged["noShowFeeCents"]
+            if type(carried_fee) != type(0) or carried_fee < 0:
+                fail("InvalidState: " + profile_key + ".noShowFeeCents is " + str(carried_fee) + ", not a non-negative whole number of cents; supply noShowFeeCents to repair it")
+        mutations = [make_aspect_upsert_occ(skey, "profile", "studioProfile", merged, profile.revision)]
+        events = [{"class": "wellness.studioProfileSet", "data": {"studioKey": skey}}]
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": skey}}
 
     fail("UnknownOperation: " + ot)
 `
@@ -4590,6 +4744,41 @@ def session_studio(session_key):
             break
     return studio
 
+# The fee a studio with no recorded policy bills, in cents. The only place
+# the literal lives; the studio vertex DDL and SetBookingAttendance's
+# descriptor name it.
+NO_POLICY_NO_SHOW_FEE_CENTS = 2500
+
+def studio_no_show_fee(session_key):
+    # The fee a noShow mark that names no fee of its own bills: the policy
+    # recorded on the studio the session is at NOW (session_studio -- the
+    # same live atStudio walk the front-of-house confinement runs, so a
+    # class ReassignSession moved to another studio is billed by that
+    # studio's policy, the same rule its confinement already applies).
+    # Absent policy -- no live studio link, no profile, or a profile with no
+    # noShowFeeCents -- bills the no-policy default; the studio VERTEX is not
+    # gated, since a retired studio's recorded policy still governs the
+    # classes it hosted. A recorded value that is not a non-negative
+    # integer is refused rather than billed: both writers validate at the
+    # mint (optional_fee_cents in the studio script), so a malformed value
+    # is a row that predates the check, and the named refusal is what
+    # points an operator at SetStudioProfile to repair it.
+    studio = session_studio(session_key)
+    if studio == None:
+        return NO_POLICY_NO_SHOW_FEE_CENTS
+    # read-posture: (e) per-candidate follow-up read off the atStudio
+    # enumeration above (data-derived key -- the studio is unknown until the
+    # walk resolves it, and no dispatcher can name it up front).
+    profile = kv.Read(studio + ".profile")
+    if profile == None or profile.isDeleted:
+        return NO_POLICY_NO_SHOW_FEE_CENTS
+    fee = profile.data.get("noShowFeeCents")
+    if fee == None:
+        return NO_POLICY_NO_SHOW_FEE_CENTS
+    if type(fee) != type(0) or fee < 0:
+        fail("InvalidState: " + studio + ".profile.noShowFeeCents is " + str(fee) + ", not a non-negative whole number of cents; repair it with SetStudioProfile before recording a no-show")
+    return fee
+
 def session_locations(session_key):
     # A booking's location is where its session's studio sits -- the session
     # -atStudio-> studio link CreateSession writes, then that studio's own
@@ -5365,24 +5554,27 @@ def execute(state, op):
                 merged[field] = carried
 
         # No-show fee (billing consequence for a missed class): only meaningful
-        # when transitioning TO noShow. Caller-supplied noShowFeeCents or a
-        # default placeholder (2500) when omitted — mirrors clinic-domain's
+        # when transitioning TO noShow. A caller-supplied noShowFeeCents wins
+        # outright; an omitted one is resolved from the STUDIO's recorded
+        # policy (studio_no_show_fee -- the studio the session is at now,
+        # walked on every leg, operator included, since the fee is a billing
+        # fact and not a confinement). Mirrors clinic-domain's
         # SetAppointmentStatus in spirit, but unlike clinic (which splits the
         # automated sweep and the staff path into two separate ops) wellness
         # dispatches both through this one SetBookingAttendance op, so the
         # "no fee" signal has to be a value, not the absence of a call: an
         # explicit noShowFeeCents:0 means the automated pastDueBookings sweep
         # marked a documentation lapse (nobody at the desk checked the member
-        # in), not a real no-show, so no fee is written at all; an omitted
-        # value still defaults to 2500, the staff-observed default. Negative
-        # values are rejected; positive values are stored as-is. Deliberately
-        # NOT in the carry-forward loop above: a later re-mark to attended
-        # drops it (the field only matters while the booking IS a noShow) —
-        # and reverses whichever no-show-fee charge already posted, below.
+        # in), or the desk waived the fee, so no fee is written at all; a
+        # studio policy of 0 lands the same way. Negative values are
+        # rejected; positive values are stored as-is. Deliberately NOT in
+        # the carry-forward loop above: a later re-mark to attended drops it
+        # (the field only matters while the booking IS a noShow) — and
+        # reverses whichever no-show-fee charge already posted, below.
         if value == "noShow":
             fee_cents = optional_number(p, "noShowFeeCents")
             if fee_cents == None:
-                fee_cents = 2500
+                fee_cents = studio_no_show_fee(session)
             elif fee_cents < 0:
                 fail("InvalidArgument: noShowFeeCents: must not be negative")
             if fee_cents > 0:

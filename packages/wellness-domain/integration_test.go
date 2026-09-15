@@ -80,6 +80,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateLeaseApplication", Scope: "any"},
 			{OperationType: "CreateStudio", Scope: "any"},
 			{OperationType: "TombstoneStudio", Scope: "any"},
+			{OperationType: "SetStudioProfile", Scope: "any"},
 			{OperationType: "CreateSession", Scope: "any"},
 			{OperationType: "CreateSessionSeries", Scope: "any"},
 			{OperationType: "TombstoneSessionSeries", Scope: "any"},

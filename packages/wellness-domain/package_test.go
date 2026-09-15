@@ -48,10 +48,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Lenses), 9; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 21; got != want {
+	if got, want := len(Package.Permissions), 22; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 14; got != want {
+	if got, want := len(Package.OpMetas), 15; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -121,7 +121,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		op, scope string
 		grantsTo  []string
 	}{
-		{"CreateStudio", "any", staff}, {"TombstoneStudio", "any", staff},
+		{"CreateStudio", "any", staff}, {"TombstoneStudio", "any", staff}, {"SetStudioProfile", "any", staff},
 		{"CreateSession", "any", staff}, {"CreateSessionSeries", "any", staff},
 		// TombstoneSessionSeries is staff-only where TombstoneSession below is
 		// staff + provider: an instructor cancels the class they lead, never a

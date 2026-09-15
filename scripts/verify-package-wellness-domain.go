@@ -8,7 +8,7 @@
 // orchestration-base + service-domain + identity-domain + lease-signing).
 // Asserts:
 //
-//	20 DDLs: studio (CreateStudio + TombstoneStudio), session (CreateSession +
+//	20 DDLs: studio (CreateStudio + TombstoneStudio + SetStudioProfile), session (CreateSession +
 //	  TombstoneSession + ReassignSession + CreateSessionSeries +
 //	  TombstoneSessionSeries + ReassignSessionSeries), sessionseries
 //	  (CreateSessionSeries + TombstoneSessionSeries + ReassignSessionSeries),
@@ -24,9 +24,9 @@
 //	  meta.ddl.aspectType — ddls.go's comment explains why a vertex-shaped
 //	  mutation uses the aspectType Kind], wellnessRefundDetail), each with its
 //	  self-description.
-//	21 permission vertices: one per (operationType, scope) pair (Contract #8
+//	22 permission vertices: one per (operationType, scope) pair (Contract #8
 //	  §8.1). Most ops carry a single scope=any vertex granted to operator;
-//	  CreateStudio/TombstoneStudio/CreateSession/CreateSessionSeries/
+//	  CreateStudio/TombstoneStudio/SetStudioProfile/CreateSession/CreateSessionSeries/
 //	  TombstoneSessionSeries/ReassignSessionSeries additionally grant
 //	  frontOfHouse at scope=any (the
 //	  studio front-desk beat — the series call-off and series move are
@@ -76,7 +76,7 @@ const (
 )
 
 var wellnessExpectedOps = []string{
-	"CreateStudio", "TombstoneStudio",
+	"CreateStudio", "TombstoneStudio", "SetStudioProfile",
 	"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries",
 	"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance",
 	"CreateInstructor", "TombstoneInstructor", "SetInstructorProfile", "BindInstructorIdentity",
@@ -96,6 +96,7 @@ type permGrant struct {
 var wellnessOpGrants = map[string][]permGrant{
 	"CreateStudio":              {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"TombstoneStudio":           {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"SetStudioProfile":          {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"CreateSession":             {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"CreateSessionSeries":       {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"TombstoneSessionSeries":    {{"any", "operator"}, {"any", "frontOfHouse"}},
@@ -202,12 +203,12 @@ func main() {
 	fmt.Printf("verify-package-wellness-domain: scanning %d Core KV keys...\n", len(allKeys))
 
 	ddlChecks := []ddlCheck{
-		{canonical: "studio", class: "meta.ddl.vertexType", ops: []string{"CreateStudio", "TombstoneStudio"}},
+		{canonical: "studio", class: "meta.ddl.vertexType", ops: []string{"CreateStudio", "TombstoneStudio", "SetStudioProfile"}},
 		{canonical: "session", class: "meta.ddl.vertexType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
 		{canonical: "sessionseries", class: "meta.ddl.vertexType", ops: []string{"CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
 		{canonical: "booking", class: "meta.ddl.vertexType", ops: []string{"CreateBooking", "CancelBooking", "JoinWaitlist", "SetBookingAttendance", "ReleaseOrphanedBooking", "PromoteWaitlistedBookings"}},
 		{canonical: "instructor", class: "meta.ddl.vertexType", ops: []string{"CreateInstructor", "TombstoneInstructor", "SetInstructorProfile", "BindInstructorIdentity"}},
-		{canonical: "studioProfile", class: "meta.ddl.aspectType", ops: []string{"CreateStudio"}},
+		{canonical: "studioProfile", class: "meta.ddl.aspectType", ops: []string{"CreateStudio", "SetStudioProfile"}},
 		{canonical: "sessionSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "ReassignSession", "CreateSessionSeries", "ReassignSessionSeries"}},
 		{canonical: "sessionSeriesDefinition", class: "meta.ddl.aspectType", ops: []string{"CreateSessionSeries"}},
 		{canonical: "studioSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},

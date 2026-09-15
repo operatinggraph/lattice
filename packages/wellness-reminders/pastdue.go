@@ -38,12 +38,12 @@ import (
 // Params bag is map[string]string, so an unprefixed "0" arrives at the
 // Starlark script as the string "0", and ddls.go's optional_number rejects
 // any non-numeric-typed value, returning None — the field never lands on
-// .status and every sweep-driven no-show silently bills the 2500 default
+// .status and every sweep-driven no-show silently bills the studio's fee
 // instead. json:0 decodes through resolveParam (strategist.go) into the
 // JSON number 0 before dispatch, so optional_number sees the number it
 // checks for. A staff-observed SetBookingAttendance call (which omits the
-// field entirely, never sending "0" in any form) still bills the default
-// $25. Once dispatched, wellness-ledger's
+// field entirely, never sending "0" in any form) still bills the studio's
+// recorded no-show fee, $25 for a studio with none. Once dispatched, wellness-ledger's
 // existing wellnessNoShowSettlement lens (unchanged by this package) reads
 // noShowFeeCents when present and positive to post the account charge — this
 // closes only the missing status transition, not the billing gate, which
@@ -146,7 +146,7 @@ func pastDueBookingsTarget() pkgmgr.WeaverTargetSpec {
 			"after the class finishes is recorded as a no-show — a documentation lapse (nobody at the desk " +
 			"checked the member in), not a staff-observed missed visit, so this sweep marks the booking noShow " +
 			"WITHOUT billing a fee (explicit noShowFeeCents:0); only a staff-observed SetBookingAttendance call " +
-			"bills the default $25.",
+			"bills the studio's recorded no-show fee, $25 if none.",
 		LensRef: "pastDueBookings",
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_noshow_transition": {

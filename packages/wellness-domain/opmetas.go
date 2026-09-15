@@ -7,7 +7,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // three consumer (scope=self) ones, CreateBooking, JoinWaitlist and
 // CancelBooking; the staff standing ones, CreateStudio, CreateSession,
 // CreateSessionSeries, TombstoneSessionSeries, ReassignSessionSeries,
-// TombstoneStudio and CreateInstructor; and the
+// TombstoneStudio, SetStudioProfile and CreateInstructor; and the
 // provider-hat standing ones, TombstoneSession, SetBookingAttendance and
 // SetInstructorProfile — mirroring clinic-domain's adoption (Fire 5 Inc 1)
 // and service-domain's original RequestService op-meta.
@@ -25,9 +25,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // CreateInstructor is granted `operator` alone (permissions.go's mk() helper
 // — entity provisioning stays a trusted-tool ceremony, mirroring
-// clinic-domain's CreateProvider/TombstoneProvider), and TombstoneStudio is
-// granted [operator, frontOfHouse] like CreateStudio, workplace-confined
-// in-script to the studio's own building; both are AuthContext "standing", and
+// clinic-domain's CreateProvider/TombstoneProvider), and TombstoneStudio and
+// SetStudioProfile are granted [operator, frontOfHouse] like CreateStudio,
+// workplace-confined in-script to the studio's own building; all are AuthContext "standing", and
 // cmd/wellness-app wires real staff forms to both (the app-seam rule,
 // vertical-package-standard.md §15), which is what makes CreateInstructor
 // user-facing by demonstration despite the operator-only grant.
@@ -458,10 +458,10 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "SetBookingAttendance",
 			// refusal-courtesy(facet): SessionNotStarted: none — edgeEntityBookingsTail (edge-manifest/lenses.go) projects no `available` column reflecting whether the session has started; a not-yet-started booking is still offered.
 			// refusal-courtesy(facet): WrongSession: unreachable — the op-meta's ContextParams auto-fills session from {entity.sessionKey}, the exact value the script's forSession check compares against; no field lets a Facet submitter supply a different one.
-			// refusal-courtesy(facet): InvalidState: none — a missing .status/.schedule aspect, or a waitlisted/forfeited booking, on a row already offered by the lens is a state no `available` column projects.
+			// refusal-courtesy(facet): InvalidState: none — a missing .status/.schedule aspect, a waitlisted/forfeited booking, or a studio whose recorded noShowFeeCents policy is malformed, on a row already offered by the lens is a state no `available` column projects.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Record attendance",
-				Description: "Mark whether this member showed up for the class.",
+				Description: "Mark whether this member showed up for the class. A no-show bills the studio's recorded no-show fee ($25 for a studio with no policy recorded; nothing when the policy is 0).",
 				Icon:        "check",
 				Tone:        "primary",
 				SubmitLabel: "Record",
@@ -469,13 +469,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			InputSchema: `{"type":"object","properties":` +
 				`{"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> being marked — auto-filled from the booking being viewed."},` +
 				`"session":{"type":"string","description":"vtx.session.<NanoID> — must be the booking's actual session."},` +
-				`"status":{"type":"string","title":"Attendance","enum":["attended","noShow"],"enumLabels":{"attended":"Attended","noShow":"No-show"},"description":"Whether the member showed up."},` +
+				`"status":{"type":"string","title":"Attendance","enum":["attended","noShow"],"enumLabels":{"attended":"Attended","noShow":"No-show — bills the studio's no-show fee"},"description":"Whether the member showed up. A no-show bills the studio's recorded no-show fee, $25 if the studio has none recorded."},` +
 				`"instructor":{"type":"string","description":"vtx.instructor.<NanoID> of your own instructor record — required when marking as an instructor rather than staff."}},` +
 				`"required":["bookingKey","session","status"]}`,
 			FieldDescriptions: map[string]string{
 				"bookingKey": "The booking being marked — auto-filled by the client from the booking being viewed (dispatch.targetField), not user-entered.",
 				"session":    "Must match the booking's actual forSession link — a client renders this from the booking record it already loaded.",
-				"status":     "Did the member show up? Either answer corrects the other, so a mistaken mark can be restated.",
+				"status":     "Did the member show up? Either answer corrects the other, so a mistaken mark can be restated. A no-show bills the fee the studio's profile records (nothing when that policy is 0; $25 when the studio has no policy recorded) — the form names no amount of its own, so the studio's policy is what applies.",
 				"instructor": "Your own instructor record — auto-filled from your identity's own instructor self-anchor. Required when marking as an instructor (a class you lead); staff mark with no instructor field.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -776,11 +776,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"name":{"type":"string","title":"Name","description":"What the studio is called, e.g. Flow Room."},` +
+				`"noShowFeeCents":{"type":"integer","minimum":0,"title":"No-show fee (cents)","description":"What a member is billed for missing a class here, in whole cents — 0 for no fee. Leave blank to record no policy; a studio with none bills $25."},` +
 				`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the building it sits in — auto-filled from where you work."}},` +
 				`"required":["name","location"]}`,
 			FieldDescriptions: map[string]string{
-				"name":     "What the studio is called, as members will see it on the schedule.",
-				"location": "The building the studio sits in — filled by the client from where you work, not typed.",
+				"name":           "What the studio is called, as members will see it on the schedule.",
+				"noShowFeeCents": "The studio's no-show policy in whole cents: what a member is billed when the desk marks them a no-show without naming a fee. 0 records a fee-free policy; blank records none, and a studio with no policy bills $25. Whole cents only, never negative. Editable later with SetStudioProfile.",
+				"location":       "The building the studio sits in — filled by the client from where you work, not typed.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       studioVertexDDL,
@@ -843,6 +845,50 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// actor's holdsRole links (actor_holds_operator).
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{payload.studioKey}", Relation: "atStudio", Direction: "in"},
+					{Hub: "{payload.studioKey}", Relation: "locatedAt", Direction: "out"},
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
+			OperationType: "SetStudioProfile",
+			// refusal-courtesy(facet): InvalidState: unreachable — the absent-profile arm is reached only by a submitter that declares no read for {payload.studioKey}.profile on a studio whose profile was removed out of band; a descriptor-driven client declares it (Reads below) and a missing declared key faults HydrationMiss before the script runs. The carried-malformed-policy arm needs a stored noShowFeeCents that is not a non-negative integer, which both writers refuse at the mint, and edgeEntityStudios (edge-manifest/lenses.go) projects no column that could hide the op on such a row.
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Edit studio",
+				Description: "Rename a studio at the building you work at, or set what a member is billed for missing a class there. Only the fields you fill change.",
+				Icon:        "building",
+				Tone:        "primary",
+				SubmitLabel: "Save studio",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"studioKey":{"type":"string","description":"vtx.studio.<NanoID> of the studio being edited — auto-filled from the studio being viewed."},` +
+				`"name":{"type":"string","title":"Name","description":"A new name for the studio, as members see it on the schedule. Leave blank to keep the current one."},` +
+				`"noShowFeeCents":{"type":"integer","minimum":0,"title":"No-show fee (cents)","description":"What a member is billed for missing a class here, in whole cents — 0 for no fee. Leave blank to keep the current policy; a studio with none recorded bills $25."}},` +
+				`"required":["studioKey"]}`,
+			FieldDescriptions: map[string]string{
+				"studioKey":      "The studio being edited — auto-filled by the client from the studio being viewed (dispatch.targetField), not user-entered.",
+				"name":           "Optional. A new display name for the studio; the current one is kept when blank. At least one of name / no-show fee must be supplied.",
+				"noShowFeeCents": "Optional. The studio's no-show policy in whole cents — what a member is billed when the desk marks them a no-show without naming a fee. 0 records a fee-free policy; blank keeps the current policy (a studio with none bills $25). Whole cents only, never negative. At least one of name / no-show fee must be supplied.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       studioVertexDDL,
+				AuthContext: "standing",
+				TargetField: "studioKey",
+				TargetType:  studioVertexDDL,
+				// The studio vertex (the script's vertex_alive/class_of pair
+				// reads it out of `state`) AND its .profile: the edit merges
+				// the supplied fields over the stored profile under OCC on
+				// that aspect's revision, so the aspect is a REQUIRED read —
+				// CreateStudio always mints it, and the script refuses its
+				// absence as an undeclared read rather than minting a
+				// nameless profile.
+				Reads: []string{"{payload.studioKey}", "{payload.studioKey}.profile"},
+				// The front-of-house confinement's one-page locatedAt walk
+				// that resolves the studio's own building, and the
+				// operator-role probe over the actor's holdsRole links
+				// (actor_holds_operator) — TombstoneStudio's pair, minus the
+				// upcoming-class walk this op never runs.
+				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{payload.studioKey}", Relation: "locatedAt", Direction: "out"},
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},

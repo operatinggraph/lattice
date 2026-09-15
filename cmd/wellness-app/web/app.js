@@ -1695,6 +1695,26 @@ async function renderRoster() {
   const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
   const canMark = (isLeader || isStaff()) && started;
 
+  // Best-effort: the No-show button's stated amount is a courtesy label, not
+  // load-bearing — SetBookingAttendance re-resolves the studio's policy
+  // itself regardless of what renders here. A failed studios fetch, or a
+  // session whose studio isn't in the cache, leaves `studio` undefined and
+  // attendanceActions falls back to the plain "No-show" label (still
+  // offering the waiver button, which needs no amount). Only fetched when
+  // attendance can actually be marked — otherwise attendanceActions never
+  // renders and the studio row would go unused.
+  let studio;
+  if (canMark && se && se.studioKey) {
+    try {
+      const studios = await loadStudios();
+      if (generation !== rosterGeneration) return;
+      studio = (studios || []).find((x) => x.studioKey === se.studioKey);
+    } catch (_) {
+      /* attendanceActions falls back to the plain "No-show" label */
+    }
+  }
+  if (generation !== rosterGeneration) return;
+
   // bookings.length counts every live row on this session — booked,
   // waitlisted, and forfeited alike — so split all three out for the summary
   // and the staff seat gate below: neither a waitlisted nor a forfeited
@@ -1710,7 +1730,7 @@ async function renderRoster() {
   // (wellness-domain ddls.go) — once the class has begun, attendance is the
   // record of what happened and a seat is no longer front-desk-releasable.
   body.innerHTML = bookings.length
-    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, canMark, isStaff() && !started)).join("") + "</div>"
+    ? '<div class="grid">' + bookings.map((b) => rosterCard(b, canMark, isStaff() && !started, studio)).join("") + "</div>"
     : '<div class="empty">No one has booked this session yet.</div>';
   if ((isLeader || isStaff()) && !started && bookings.length) {
     summary.textContent += " — attendance opens when the class starts";
@@ -2294,7 +2314,7 @@ function bindAttendance(sessionKey, mine) {
     btn.addEventListener("click", async () => {
       buttons.forEach((b) => (b.disabled = true));
       try {
-        await markAttendance(btn.dataset.attend, sessionKey, btn.dataset.value, mine);
+        await markAttendance(btn.dataset.attend, sessionKey, btn.dataset.value, mine, btn.dataset.waive === "1");
         toast("Attendance recorded.", true);
         await awaitProjectedStatus(sessionKey, btn.dataset.attend, btn.dataset.value);
         await renderRoster();
@@ -2362,21 +2382,22 @@ async function awaitProjectedBooking(query, sessionKey, bookerKey) {
   return false;
 }
 
-// markAttendance submits SetBookingAttendance for a booking, either on a
-// class `mine` leads (the two ownership-probe optionalReads bind that path)
-// or, when `mine` is falsy, as front-of-house staff (the script's workplace
-// walk binds that path instead, packages/wellness-domain/ddls.go). It carries
-// NO authContext.target either way — the grant is scope=any.
-// refusal-courtesy: SetBookingAttendance/SessionNotStarted: hide — bindAttendance is only wired when canMark (renderRoster: (isLeader || isStaff()) && started); the Attended/No-show buttons never appear before the class begins.
-// refusal-courtesy: SetBookingAttendance/InvalidState: hide — attendanceActions is rendered only when `markable && !forfeited && !waitlisted` (rosterCard), covering the two state-derived InvalidState causes — a forfeited booking's seat is already gone, a waitlisted booking never held one; the remaining causes are missing .status/.schedule aspects, a correctness fault no control here could gate.
-// refusal-courtesy: SetBookingAttendance/WrongSession: unreachable — sessionKey is renderRoster's own selection, and bookings are fetched scoped to it (/api/bookings?sessionKey=); every rendered row already belongs to that session, so no control lets a mismatched one reach the payload.
-async function markAttendance(bookingKey, sessionKey, value, mine) {
+// attendancePayload builds SetBookingAttendance's reads/optionalReads/payload
+// for one attendance mark, split out of markAttendance as a pure function so
+// its shape is goja-pinnable with no network stub (mirrors attendanceActions/
+// rosterCard's own pure-render split from their async click handlers). An
+// explicit noShowFeeCents is included ONLY when waiveFee is truthy — the
+// plain No-show mark sends none, so SetBookingAttendance resolves the
+// studio's own recorded policy (or its 2500 default) itself, the same fee
+// the roster's button label already names via resolveNoShowFeeCents.
+function attendancePayload(bookingKey, sessionKey, value, mine, waiveFee) {
   const bookId = idOf(bookingKey);
   const sessId = idOf(sessionKey);
   const optionalReads = [
     "lnk.booking." + bookId + ".forSession.session." + sessId,
   ];
   const payload = { bookingKey: bookingKey, session: sessionKey, status: value };
+  if (waiveFee) payload.noShowFeeCents = 0;
   if (mine) {
     optionalReads.push(
       "lnk.session." + sessId + ".ledBy.instructor." + idOf(mine),
@@ -2384,17 +2405,34 @@ async function markAttendance(bookingKey, sessionKey, value, mine) {
     );
     payload.instructor = mine;
   }
+  return {
+    // The booking's own .status is required — the script carries its rate /
+    // seat / booker forward onto this write, so its absence is a correctness
+    // error, not a rejection. The session's .schedule is required for the
+    // same reason: its startsAt is what answers SessionNotStarted. The
+    // session-match and the two ownership probes are (d)-declared — an absent
+    // link is a meaningful rejection, not a correctness error.
+    reads: [bookingKey, bookingKey + ".status", sessionKey + ".schedule"],
+    optionalReads,
+    payload,
+  };
+}
+
+// markAttendance submits SetBookingAttendance for a booking, either on a
+// class `mine` leads (the two ownership-probe optionalReads bind that path)
+// or, when `mine` is falsy, as front-of-house staff (the script's workplace
+// walk binds that path instead, packages/wellness-domain/ddls.go). It carries
+// NO authContext.target either way — the grant is scope=any.
+// refusal-courtesy: SetBookingAttendance/SessionNotStarted: hide — bindAttendance is only wired when canMark (renderRoster: (isLeader || isStaff()) && started); the Attended/No-show buttons never appear before the class begins.
+// refusal-courtesy: SetBookingAttendance/InvalidState: hide — attendanceActions is rendered only when `markable && !forfeited && !waitlisted` (rosterCard), covering the two state-derived InvalidState causes — a forfeited booking's seat is already gone, a waitlisted booking never held one; the remaining causes are missing .status/.schedule aspects or a studio whose recorded noShowFeeCents policy is malformed (studio_no_show_fee, packages/wellness-domain/ddls.go), correctness faults no control here could gate.
+// refusal-courtesy: SetBookingAttendance/WrongSession: unreachable — sessionKey is renderRoster's own selection, and bookings are fetched scoped to it (/api/bookings?sessionKey=); every rendered row already belongs to that session, so no control lets a mismatched one reach the payload.
+async function markAttendance(bookingKey, sessionKey, value, mine, waiveFee) {
+  const { reads, optionalReads, payload } = attendancePayload(bookingKey, sessionKey, value, mine, waiveFee);
   await opOrThrow(
     {
       operationType: "SetBookingAttendance",
       class: "booking",
-      // The booking's own .status is required — the script carries its rate /
-      // seat / booker forward onto this write, so its absence is a correctness
-      // error, not a rejection. The session's .schedule is required for the
-      // same reason: its startsAt is what answers SessionNotStarted. The
-      // session-match and the two ownership probes are (d)-declared — an absent
-      // link is a meaningful rejection, not a correctness error.
-      reads: [bookingKey, bookingKey + ".status", sessionKey + ".schedule"],
+      reads,
       optionalReads,
       payload,
     },
@@ -3046,7 +3084,7 @@ const ATTENDANCE_MARKS = {
   forfeited: { badge: "settled", label: "forfeited" },
 };
 
-function rosterCard(b, markable, cancellable) {
+function rosterCard(b, markable, cancellable, studio) {
   const mark = ATTENDANCE_MARKS[b.status];
   const waitlisted = b.status === "waitlisted";
   const forfeited = b.status === "forfeited";
@@ -3073,7 +3111,7 @@ function rosterCard(b, markable, cancellable) {
     // waitlisted booking gets no attendance action either — it never held a
     // seat, so SetBookingAttendance refuses it too (InvalidState) — but it
     // does keep the release action, releasing its waitlist slot.
-    (markable && !forfeited && !waitlisted ? attendanceActions(b) : "") +
+    (markable && !forfeited && !waitlisted ? attendanceActions(b, studio) : "") +
     (cancellable && !forfeited ? seatCancelAction(b) : "") +
     "</div>"
   );
@@ -3088,14 +3126,53 @@ function seatCancelAction(b) {
     esc(b.bookingKey) + '" data-booker="' + esc(b.bookerKey) + '">' + label + "</button></div>";
 }
 
-// attendanceActions renders the two marks as a pair, with the one already
-// recorded disabled — either value corrects the other, so the control the
-// instructor needs is always the OTHER one.
-function attendanceActions(b) {
-  const btn = (value, label) =>
+// resolveNoShowFeeCents mirrors SetBookingAttendance's own fee resolution
+// (studio_no_show_fee, packages/wellness-domain/ddls.go) client-side, for
+// the No-show button's stated amount only — the script re-resolves the same
+// policy at submit time regardless of what this button says. `studio` is
+// the roster session's studioKey joined to the /api/studios cache
+// (renderRoster); undefined when that row isn't loaded (a failed fetch, or
+// a stale cache), in which case the amount is simply unknown rather than
+// guessed at.
+function resolveNoShowFeeCents(studio) {
+  if (!studio) return undefined;
+  return typeof studio.noShowFeeCents === "number" ? studio.noShowFeeCents : 2500;
+}
+
+// noShowLabel names the No-show button's amount: the studio's recorded
+// policy, "no fee" for an explicit 0, or the $25 default for a studio with
+// none recorded — falling back to a bare "No-show" when the amount itself
+// isn't known (resolveNoShowFeeCents(undefined)).
+function noShowLabel(feeCents) {
+  if (feeCents === undefined) return "No-show";
+  if (feeCents === 0) return "No-show (no fee)";
+  return "No-show (" + money(feeCents) + ")";
+}
+
+// attendanceActions renders Attended / No-show as a pair, with the one
+// already recorded disabled — either value corrects the other, so the
+// control the instructor needs is always the OTHER one. When the resolved
+// no-show fee is positive (or unknown — resolveNoShowFeeCents(undefined)), a
+// third "No-show, waive fee" button is offered beside it: it needs no
+// amount to be useful, so a missing studio row never withholds it, only the
+// label on the plain No-show button. bindAttendance reads the button's own
+// data-waive flag and markAttendance sends an explicit noShowFeeCents: 0
+// only for that button's click — the plain No-show button sends none, so
+// SetBookingAttendance resolves the studio's policy itself.
+function attendanceActions(b, studio) {
+  const feeCents = resolveNoShowFeeCents(studio);
+  const btn = (value, label, waive) =>
     '<button class="ghost" data-attend="' + esc(b.bookingKey) + '" data-value="' + esc(value) + '"' +
+    (waive ? ' data-waive="1"' : "") +
     (b.status === value ? " disabled" : "") + ">" + esc(label) + "</button>";
-  return '<div class="card-actions">' + btn("attended", "Attended") + btn("noShow", "No-show") + "</div>";
+  const offerWaive = feeCents === undefined || feeCents > 0;
+  return (
+    '<div class="card-actions">' +
+    btn("attended", "Attended") +
+    btn("noShow", noShowLabel(feeCents)) +
+    (offerWaive ? btn("noShow", "No-show, waive fee", true) : "") +
+    "</div>"
+  );
 }
 
 // ---- Roster billing (front desk records a charge/payment) --------------
@@ -3395,13 +3472,14 @@ async function submitBillingEntry(opType, what, reason) {
 // ddls.go) — for the new studio, the location it is about to sit at; for a
 // class, the location its studio already sits at.
 //
-// The new-studio form asks only for a NAME. The location is not the staffer's
-// to choose: the script guards on the location the studio will be linked to,
-// and the only one a staffer can name and pass is the building they work at,
-// so the form fills it from the `worksAt` anchor and says where it is going
-// rather than offering a picker whose every other option would fail closed.
-// (The same call the CreateStudio op-meta makes for descriptor-driven clients,
-// where the field is the `{me.workplace}` self-anchor.)
+// The new-studio form asks for a NAME and an optional no-show fee. The
+// location is not the staffer's to choose: the script guards on the location
+// the studio will be linked to, and the only one a staffer can name and pass
+// is the building they work at, so the form fills it from the `worksAt`
+// anchor and says where it is going rather than offering a picker whose
+// every other option would fail closed. (The same call the CreateStudio
+// op-meta makes for descriptor-driven clients, where the field is the
+// `{me.workplace}` self-anchor.)
 
 // toUtcInstant canonicalizes a datetime-local field ("YYYY-MM-DDTHH:MM",
 // grid-stepped) to the whole-second UTC RFC3339 instant CreateSession's grid
@@ -3457,13 +3535,35 @@ function renderNewStudioForm() {
   where.textContent = "Opens at " + shortKey(workplace) + " — where you work.";
 }
 
+// dollarsToCents converts a dollar-amount field's raw string value to whole
+// cents, or undefined for a blank, non-numeric, or negative entry — the
+// noShowFeeCents fields' shared "stays omitted" idiom (blank = no policy on
+// CreateStudio, blank = keep the current policy on SetStudioProfile). A
+// malformed entry is treated the same as blank rather than coerced or
+// rejected client-side, mirroring createSession's own price parsing above:
+// "abc" or "-5" reads as "no amount entered", not a confusing NaN/negative
+// op rejection.
+function dollarsToCents(raw) {
+  const trimmed = (raw == null ? "" : String(raw)).trim();
+  if (trimmed === "") return undefined;
+  const dollars = Number(trimmed);
+  if (!Number.isFinite(dollars) || dollars < 0) return undefined;
+  return Math.round(dollars * 100);
+}
+
 async function createStudio() {
   const nameEl = document.getElementById("studio-new-name");
+  const feeEl = document.getElementById("studio-new-noshow-fee");
   const submit = document.getElementById("studio-new-create");
   const name = nameEl.value.trim();
   const workplace = anchorKey("worksAt");
   if (!name) { toast("Enter a studio name.", false); return; }
   if (!workplace) { toast("You have no workplace to open a studio at.", false); return; }
+  // Blank (or malformed) stays OMITTED from the payload — CreateStudio's own
+  // "no policy recorded" (SetBookingAttendance bills its 2500 default), not
+  // coerced to a fee-free 0, which is itself a real, distinct value a
+  // staffer must enter deliberately.
+  const noShowFeeCents = dollarsToCents(feeEl.value);
   submit.disabled = true;
   try {
     // A staff submit carries NO authContext.target: CreateStudio's
@@ -3472,18 +3572,21 @@ async function createStudio() {
     //
     // The location is an (a)-declared REQUIRED read — the script validates it
     // alive + typed (require_live_typed) before linking the studio to it.
+    const payload = { name, location: workplace };
+    if (noShowFeeCents !== undefined) payload.noShowFeeCents = noShowFeeCents;
     await opOrThrow(
       {
         operationType: "CreateStudio",
         class: "studio",
         reads: [workplace],
-        payload: { name, location: workplace },
+        payload,
       },
       "open the studio",
       false,
     );
     toast("Studio opened.", true);
     nameEl.value = "";
+    feeEl.value = "";
     document.getElementById("studio-new-form").hidden = true;
     studiosCache = null;
     document.getElementById("schedule-studio").dataset.loaded = "";
@@ -3577,9 +3680,24 @@ function retireCaption(upcomingCount) {
   return "Call off its " + upcomingCount + " upcoming " + (upcomingCount === 1 ? "class" : "classes") + " first";
 }
 
+// noShowFeeCardLine names the studio's recorded no-show policy the way the
+// Studios admin card states it — mirrors resolveNoShowFeeCents/noShowLabel's
+// reasoning (above) but for the admin card's own copy, which draws the "no
+// policy" case out as its own sentence rather than folding it into the $25
+// default the way the roster's compact button label does.
+function noShowFeeCardLine(s) {
+  return typeof s.noShowFeeCents === "number"
+    ? "No-show fee: " + money(s.noShowFeeCents)
+    : "No-show fee: none (bills $25)";
+}
+
 // studioCard renders one studio's admin card. The Retire control is enabled
 // when retireCaption is empty and otherwise disabled and titled with it, the
-// caption also printed as a meta line above the actions.
+// caption also printed as a meta line above the actions. The no-show fee
+// line is followed by an Edit toggle that reveals an inline Save form
+// (wireStudioCard) dispatching SetStudioProfile — the same disabled/caption
+// idiom Retire uses, minus a courtesy caption, since SetStudioProfile carries
+// no state refusal this card's own data could ever trip.
 function studioCard(s, sessions) {
   const id = domId(s.studioKey);
   const caption = retireCaption(upcomingSessionsAt(s, sessions || [], Date.now()).length);
@@ -3587,6 +3705,13 @@ function studioCard(s, sessions) {
     '<div class="card">' +
     '<div class="who">' + esc(s.name || "?") + "</div>" +
     '<div class="meta">' + esc(shortKey(s.studioKey)) + "</div>" +
+    '<div class="meta">' + esc(noShowFeeCardLine(s)) +
+    ' <button id="fee-edit-' + id + '" class="ghost">Edit</button></div>' +
+    '<div id="fee-form-' + id + '" class="session-form" hidden>' +
+    '<div class="field"><label>No-show fee ($)</label>' +
+    '<input type="number" id="fee-input-' + id + '" min="0" step="0.01" placeholder="required to save" /></div>' +
+    '<button id="fee-save-' + id + '">Save</button>' +
+    "</div>" +
     studioGridWarning(s, sessions || []) +
     (caption ? '<p class="meta studio-retire-hold">' + esc(caption) + ".</p>" : "") +
     '<div class="card-actions"><button id="sess-toggle-' + id + '" class="ghost">Schedule a class</button>' +
@@ -3611,6 +3736,65 @@ function wireStudioCard(s) {
   const id = domId(s.studioKey);
   const form = document.getElementById("sess-form-" + id);
   const instrSelect = document.getElementById("sess-instr-" + id);
+  const feeForm = document.getElementById("fee-form-" + id);
+  const feeInput = document.getElementById("fee-input-" + id);
+  document.getElementById("fee-edit-" + id).addEventListener("click", () => {
+    feeForm.hidden = !feeForm.hidden;
+    if (!feeForm.hidden) {
+      feeInput.value = typeof s.noShowFeeCents === "number" ? (s.noShowFeeCents / 100).toFixed(2) : "";
+    }
+  });
+  // refusal-courtesy: SetStudioProfile/UnknownStudio: unreachable — s.studioKey names a studio /api/studios itself just projected off the wellnessStudios lens; the card submits that same key back, never a typed one.
+  // refusal-courtesy: SetStudioProfile/WrongClass: unreachable — same reasoning as UnknownStudio above: the lens only ever resolves a studio-class vertex.
+  // refusal-courtesy: SetStudioProfile/InvalidArgument: hide — the Save handler bails before dispatching when the field is blank ("at least one of name, noShowFeeCents" can never be unmet from here); the fractional/negative half is steered by the <input type="number" min="0" step="0.01"> control and caught the same way dollarsToCents treats any other malformed amount, as "no value entered".
+  // refusal-courtesy: SetStudioProfile/InvalidState: unreachable — CreateStudio always mints the .profile aspect this op edits, and the wellnessStudios lens (`WHERE s.profile.data.name <> null`) only ever projects a studio that already has one.
+  document.getElementById("fee-save-" + id).addEventListener("click", async () => {
+    const btn = document.getElementById("fee-save-" + id);
+    const noShowFeeCents = dollarsToCents(feeInput.value);
+    if (noShowFeeCents === undefined) {
+      toast("Enter a non-negative no-show fee to save (blank leaves the current policy unchanged — close Edit instead).", false);
+      return;
+    }
+    // identityKey() throws when whoami never resolved (app.js's own doc
+    // comment on it) — same catch-and-toast treatment as
+    // wireInstructorCard's own identityKey() call below, rather than an
+    // unhandled throw that leaves the button permanently disabled.
+    let me;
+    try {
+      me = identityKey();
+    } catch (e) {
+      toast(e.message, false);
+      return;
+    }
+    btn.disabled = true;
+    try {
+      // A staff submit carries NO authContext.target: SetStudioProfile's
+      // frontOfHouse grant is scope=any, confined in-script by the caller's
+      // own worksAt walk off the studio's locatedAt link — the same
+      // confinement shape the Retire handler below uses. The studio AND its
+      // .profile are (a)-declared REQUIRED reads (opmetas.go): the edit
+      // merges over the stored profile under OCC, so name is omitted
+      // entirely and carried forward unchanged.
+      await opOrThrow(
+        {
+          operationType: "SetStudioProfile", class: "studio",
+          reads: [s.studioKey, s.studioKey + ".profile"],
+          enumerations: [
+            { hub: s.studioKey, relation: "locatedAt", direction: "out" },
+            { hub: me, relation: "holdsRole", direction: "out" },
+          ],
+          payload: { studioKey: s.studioKey, noShowFeeCents },
+        },
+        "set the no-show fee",
+      );
+      toast("No-show fee updated.", true);
+      studiosCache = null;
+      setTimeout(renderStudiosAdmin, 700);
+    } catch (e) {
+      toast(e.message, false);
+      btn.disabled = false;
+    }
+  });
   document.getElementById("sess-toggle-" + id).addEventListener("click", async () => {
     form.hidden = !form.hidden;
     if (form.hidden || instrSelect.dataset.loaded) return;

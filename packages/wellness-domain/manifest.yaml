@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.27.12
+version: 0.27.13
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -41,10 +41,15 @@ description: |
   not begun is rejected (SessionNotStarted, the mirror of SessionInPast), and
   the same standing guard confines a bound instructor to bookings on sessions
   they lead. Transitioning to noShow also stores a noShowFeeCents amount
-  (caller-supplied or a 2500 default, mirroring clinic-domain's
+  (caller-supplied, else the studio's recorded studioProfile.noShowFeeCents
+  policy — set by CreateStudio or SetStudioProfile, 0 meaning fee-free —
+  else a 2500 default for a studio with no policy, mirroring clinic-domain's
   SetAppointmentStatus) that wellness-ledger's wellnessNoShowSettlement
   Weaver playbook reads to auto-charge the booker's ledger account; the field
   is dropped on a later re-mark to attended, though a posted charge stands.
+  SetStudioProfile edits a live studio's name and/or no-show policy under
+  TombstoneStudio's grant and locatedAt confinement, and wellnessStudios
+  projects the policy so the desk can name the amount a no-show bills.
   Six plain projection lenses
   (wellnessStudios, wellnessSessions, wellnessBookings, wellnessInstructors,
   wellnessMembers, wellnessBookers) are the P5 read models a wellness FE reads;
@@ -184,6 +189,9 @@ declares:
     - operationType: TombstoneStudio
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: SetStudioProfile
+      scope: any
+      grantsTo: [operator, frontOfHouse]
     - operationType: CreateSession
       scope: any
       grantsTo: [operator, frontOfHouse]
@@ -259,5 +267,6 @@ declares:
     - operationType: ReassignSessionSeries
     - operationType: CreateStudio
     - operationType: TombstoneStudio
+    - operationType: SetStudioProfile
     - operationType: CreateInstructor
     - operationType: SetInstructorProfile

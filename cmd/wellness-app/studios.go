@@ -9,15 +9,28 @@ import (
 )
 
 // studioProjection is one row of the wellness-domain `wellnessStudios` lens.
+// NoShowFeeCents mirrors sessionProjection's own ResidentPriceCents field
+// (sessions.go): a pointer because the lens's cypher hands back a JSON
+// number for a recorded policy and a JSON null for a studio with none, and
+// that "policy 0 (fee-free)" vs "no policy recorded (SetBookingAttendance
+// bills its 2500 default)" distinction is exactly what the roster's No-show
+// button and the studio card's fee line both need preserved — collapsing it
+// to a bare int64 would make an unset policy indistinguishable from a
+// deliberate $0 one.
 type studioProjection struct {
-	StudioKey string `json:"studioKey"`
-	Name      string `json:"name"`
+	StudioKey      string   `json:"studioKey"`
+	Name           string   `json:"name"`
+	NoShowFeeCents *float64 `json:"noShowFeeCents"`
 }
 
-// studioRow is the studio-picker row the Schedule view renders.
+// studioRow is the studio-picker row the Schedule view renders, and the row
+// the Studios admin card and the roster's attendanceActions read the
+// no-show policy off. NoShowFeeCents mirrors studioProjection's own field —
+// nil (omitted from the JSON response) when the studio declares no policy.
 type studioRow struct {
-	StudioKey string `json:"studioKey"`
-	Name      string `json:"name"`
+	StudioKey      string `json:"studioKey"`
+	Name           string `json:"name"`
+	NoShowFeeCents *int64 `json:"noShowFeeCents,omitempty"`
 }
 
 // computeStudios decodes every wellnessStudios row, sorted by name. A row
@@ -34,7 +47,16 @@ func computeStudios(keys []string, get kvGetter) []studioRow {
 		if json.Unmarshal(raw, &p) != nil || p.StudioKey == "" {
 			continue
 		}
-		rows = append(rows, studioRow(p))
+		var noShowFeeCents *int64
+		if p.NoShowFeeCents != nil {
+			v := int64(*p.NoShowFeeCents)
+			noShowFeeCents = &v
+		}
+		rows = append(rows, studioRow{
+			StudioKey:      p.StudioKey,
+			Name:           p.Name,
+			NoShowFeeCents: noShowFeeCents,
+		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Name != rows[j].Name {

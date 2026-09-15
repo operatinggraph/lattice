@@ -121,6 +121,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
+			OperationType: "SetStudioProfile",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit SetStudioProfile (renames a studio and/or records its no-show fee policy) — the script confines a non-operator caller to a studio at a location they worksAt, resolved off the studio's own locatedAt link exactly as TombstoneStudio does (an unlocated studio yields an empty candidate list and stays operator-only).",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
 			OperationType: "CreateSession",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit CreateSession (schedules a class on a studio's grid) — the studio front-desk beat.",

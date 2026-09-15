@@ -287,7 +287,21 @@ var appOpCeilings = map[string]int{
 	// beside it is: the series has no entity row to render against yet, not a
 	// new descriptor-catalog gap. The day a series-entity lens lands, both
 	// literals migrate together.
-	"cmd/wellness-app": 15,
+	// 16: SetStudioProfile is the Studios admin card's inline "no-show fee"
+	// edit (wireStudioCard, app.js), submitted beside the same card's
+	// hand-built CreateStudio/TombstoneStudio ceremonies (this ceiling
+	// already counts both). Its descriptor is fully renderable — TargetType
+	// `studio` resolves off the wellnessStudios lens the same way
+	// SetInstructorProfile's does off wellnessInstructors — so this is not a
+	// TargetType gap like 14/15 above; it is hand-wired because the whole
+	// Studios card (unlike the separate Instructors section, which DOES use
+	// the descriptor-catalog path for SetInstructorProfile) is one
+	// hand-built surface end to end, and the fee edit reuses that same
+	// card's own locatedAt-confinement enumeration shape the Retire handler
+	// beside it already hand-assembles. Rendering one field of one card
+	// through a second, catalog-driven paradigm would fragment that card's
+	// authorship, not close a descriptor-catalog gap.
+	"cmd/wellness-app": 16,
 }
 
 // quotedOpLike matches a quoted PascalCase identifier — the shape every

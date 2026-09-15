@@ -204,6 +204,11 @@ read	SetBookingAttendance	lnk.identity.<id>.worksAt.building.<id>
 read	SetMenuItemAvailability	lnk.identity.<id>.worksAt.building.<id>
 read	SetMenuItemLocation	lnk.menuitem.<id>.servedAt.unit.<id>
 read	SetRenewalTerms	lnk.identity.<id>.manages.unit.<id>
+# SetStudioProfile's front-of-house binder is TombstoneStudio's verbatim: the
+# worksAt key is tested at the building the studio's own declared locatedAt
+# walk resolves, a link-shaped class-(e) follow-up (category 3) no dispatcher
+# can name up front.
+read	SetStudioProfile	lnk.identity.<id>.worksAt.building.<id>
 read	SetVisitSeriesSite	lnk.identity.<id>.worksAt.building.<id>
 read	Settle	vtx.leaseapp.<id>
 read	StartVisitSeries	lnk.identity.<id>.worksAt.building.<id>
@@ -437,6 +442,11 @@ walk	SetMenuItemAvailability	vtx.menuitem.<id> servedAt out
 walk	SetMenuItemLocation	vtx.menuitem.<id> servedAt out
 walk	SetRenewalTerms	vtx.leaseapp.<id> appliesToUnit out
 walk	SetRenewalTerms	vtx.renewal.<id> renews out
+# SetStudioProfile's front-of-house binder walks the studio's building's
+# containedIn ancestors (worksAt_covers) when the direct worksAt link at that
+# building is absent — TombstoneStudio's row below, for the same
+# link-discovered hub.
+walk	SetStudioProfile	vtx.building.<id> containedIn out
 walk	SetVisitSeriesSite	vtx.building.<id> containedIn out
 walk	SetVisitSeriesSite	vtx.provider.<id> practicesAt out
 walk	SetVisitSeriesSite	vtx.visitseries.<id> atSite out

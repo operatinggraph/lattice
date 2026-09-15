@@ -16,7 +16,7 @@ import (
 // over — one filter, so the courtesy and the warning cannot disagree about
 // which classes count.
 func TestStudioCard_RetireDisabledWhileAClassIsUpcoming(t *testing.T) {
-	vm := webHelperVM(t, "esc", "shortKey", "domId", "upcomingSessionsAt", "studioGridWarning", "retireCaption", "studioCard")
+	vm := webHelperVM(t, "esc", "shortKey", "domId", "upcomingSessionsAt", "studioGridWarning", "retireCaption", "money", "noShowFeeCardLine", "studioCard")
 	// GRID_HORIZON_DAYS is a top-level `const`, not a function, so the
 	// function-shaped extraction cannot lift it.
 	if _, err := vm.RunString(`const GRID_HORIZON_DAYS = 7;`); err != nil {
