@@ -56,7 +56,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "loftspace-ledger",
-	Version: "0.7.3",
+	Version: "0.7.4",
 	Description: "Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount, independently-minted " +
 		"id, one per lease via a .ledgerAccount guard aspect on the leaseapp) + the transaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo; DebitAccount's " +
@@ -73,4 +73,12 @@ var Package = pkgmgr.Definition{
 	Lenses:      Lenses(),
 	Permissions: Permissions(),
 	OpMetas:     OpMetas(),
+	// DebitAccount carries no op-meta: it is Weaver's clause-authorized
+	// charge and the operator's CLI charge, with no shipped screen; the
+	// person-facing "Record charge" descriptor is LoftspaceRecordCharge's.
+	// An upgrade that drops an op-meta must declare its disposition; no
+	// task is ever minted forOperation DebitAccount (CreateTask is
+	// operator-only and no playbook targets it), so cancelling open
+	// referents is a no-op declaration, not a work-destroying one.
+	RetireCancelsOpenTasks: []string{"DebitAccount"},
 }
