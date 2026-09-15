@@ -152,10 +152,16 @@ func TestKVMarkerProvenance_ExpiryIsTheOnlyMaxAgeMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, c.KVDelete(ctx, bucket, deletedKey))
 
-	// 3. An arm the client then purges with a TTL of its own.
+	// 3. An arm the client then purges with a TTL of its own. The purge marker
+	// has to outlive the collector's delivery lag: the ordered consumer is
+	// started before the writes, but a marker the server has already swept by
+	// MaxAge before the consumer fetches it is a marker the collector never
+	// sees, and on a loaded runner the two awaits ahead of this one in the
+	// assertion order can take longer than a one-second TTL.
+	const purgeMarkerTTL = 3 * time.Second
 	_, err = c.KVPutWithTTL(ctx, bucket, purgedKey, []byte(`{"setAt":"t0"}`), 2*time.Second)
 	require.NoError(t, err)
-	require.NoError(t, c.KVPurgeWithTTL(ctx, bucket, purgedKey, time.Second, 0))
+	require.NoError(t, c.KVPurgeWithTTL(ctx, bucket, purgedKey, purgeMarkerTTL, 0))
 
 	// 4. An arm superseded by a re-arm before its own TTL runs out.
 	//
@@ -202,13 +208,13 @@ func TestKVMarkerProvenance_ExpiryIsTheOnlyMaxAgeMarker(t *testing.T) {
 
 	// The client purge, and — the load-bearing half — no MaxAge marker minted
 	// over it when its own TTL runs out. The window outlasts both the purge
-	// marker's 1s TTL and the arm's original 2s TTL.
+	// marker's TTL and the arm's original 2s TTL.
 	purge := awaitMarker(t, mc, purgedSubj, 2, "the client purge must deliver a marker")
 	require.Empty(t, purge.Body)
 	require.Equal(t, KVOperationPurge, purge.Header(KVOperationHeader))
 	require.Empty(t, purge.Header(MarkerReasonHeader),
 		"a client purge is not an expiry and must carry no marker reason")
-	requireNoFurtherMarker(t, mc, purgedSubj, 2, 4*time.Second,
+	requireNoFurtherMarker(t, mc, purgedSubj, 2, purgeMarkerTTL+2*time.Second,
 		"an expiring purge marker must not be re-marked as a MaxAge expiry")
 
 	// The evicted arm: the re-arm's own value is the only thing after it. The
