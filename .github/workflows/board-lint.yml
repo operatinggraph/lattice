@@ -5,17 +5,21 @@ name: Board lint
 # paths-ignores `**/*.md` + `_bmad-output/**`, so a board-only commit (the
 # Surveyor / PO / Steward docs commits) never triggers it — this dedicated
 # workflow fires on exactly the board paths so a fire that re-bloats a row,
-# section, or Done-log entry fails here. (The main lint-build job also runs
-# this script, as a backstop on code commits.)
+# section, or Done-log entry fails here. The same script caps every component
+# doc's "Review keeps catching" dossier (docs/components/*.md — twelve entries,
+# the cap each dossier states for itself), so those paths fire it too. (The
+# main lint-static job also runs this script, as a backstop on code commits.)
 on:
   push:
     branches: [main]
     paths:
       - '_bmad-output/planning-artifacts/backlog/**'
+      - 'docs/components/**'
       - 'scripts/lint-board.go'
   pull_request:
     paths:
       - '_bmad-output/planning-artifacts/backlog/**'
+      - 'docs/components/**'
       - 'scripts/lint-board.go'
 
 jobs:

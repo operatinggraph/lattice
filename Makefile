@@ -2180,7 +2180,8 @@ lint-web:
 	go run ./scripts/lint-web.go
 
 ## lint-board — Backlog-board discipline (index-not-journal): row/section/Done-log
-## budgets + journal-pattern + dependency-consistency. Advisory; STRICT=1 exits non-zero.
+## budgets + journal-pattern + dependency-consistency, and the 12-entry cap on every
+## component doc's "Review keeps catching" dossier. Advisory; STRICT=1 exits non-zero.
 lint-board:
 	@echo "==> Linting backlog board..."
 	go run ./scripts/lint-board.go

@@ -538,242 +538,123 @@ The descriptor idiom to copy is `packages/clinic-domain/opmetas.go`.
 
 The recurring review-finding classes for package authoring — fire briefs copy the applicable entries into
 part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
-(`agents/steward/SKILL.md` §4). **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate
-mechanizes it (name the gate, strike the entry).
+(`agents/steward/SKILL.md` §4). **Capped at 12 one-liners** (`lint-board` fails a dossier past the cap);
+an entry RETIRES when a lint/test gate mechanizes it (name the gate, strike the entry — the gate's own
+header and `lint-gates.md` carry the rule and its boundary, not this list). An entry is
+**class · minting incident(s) · the check that catches it**; a second sighting is appended as a date and a
+name, never as a second paragraph, and a class whose check is a gate-shaped rule is mechanized rather than
+grown. The full narrative of every entry below is in the minting commit and the item's design doc.
 
-Retired: *a confinement guard tested only as the operator has never run* — `lint-workplace-staff-vector`
-(two sightings: café `Charge`, 2026-09-13; wellness `JoinWaitlist`, 2026-09-15, commit `7507be53`) requires,
-for every op whose script reaches `require_workplace`/`enforce_workplace`/`enforce_workplace_confined` AND
-whose own `pkgmgr.PermissionSpec` grants it at scope=any to a role other than `operator` (an op with no such
-grant is unreachable by any non-operator actor by construction — `actor_holds_operator` exempts the
-operator before the guard ever runs — and is printed `SKIP <pkg> <Op>: operator-only grant`, café
-`DebitAccount` being the corpus's one live instance), a non-operator staff cap-doc func granting it at
-scope=any in the package's own `_test.go` files, or an explicit `// staff-vector: <Op> — <why>`
-declaration. The 2026-09-15 sweep found five live gaps (cafe-domain `SetMenuItemLocation`, clinic-domain
-`RecordEncounter` + `RescheduleAppointment`, wellness-domain `CreateSessionSeries`, plus `DebitAccount`
-before the operator-only refinement showed it needed none) and closed all of them with real staff
-vectors — each surfaced genuine undeclared reads/walks the drift guard had never seen exercised by a
-non-operator actor, fixed by hand in `internal/testutil/read_drift_baseline.txt` alongside the vector.
-STRICT=1 is clean. The walk that stays: the gate proves LISTING — a scope=any grant to a non-operator
-actor exists somewhere in the package — not that a `Test*` function actually SUBMITS the op under that
-grant and asserts on the outcome; a listed-but-unexercised op is invisible to it.
-Retired: *a lens MATCH edit is a corpus edit* — `internal/refractor/*_corpus_census_test.go` (branch decomposition,
-sibling groups, label set, grouping key, walk scope, hop index) fail by lens name on any `Spec` edit; run
-`go test ./internal/refractor/ -run 'Corpus|Census' -count=1` before merge and re-pin deliberately.
-Retired: *a new refusal on an existing op is a claim about EVERY dispatcher* — `lint-seed-declared-reads` pins every
-`scripts/` seed / verify envelope's `OptionalReads` to the op's descriptor (twice-seen: wellness `SessionStarted`,
-café `TenancyEnded`, both 2026-09-14); the outcome half stays a walk — a `mustAccepted` caller needs the same skip
-the op now applies (`ensureApprovedTenancy` now skips an ended term), found at the same `grep -rn "<Op>" scripts/`.
-Retired: *a `kv.Links` call with no page limit is charged at the 256-unit default* — `lint-links-page-limit`
-fails any call without a `limit` (33 sites censused 2026-09-14 after the cafe-ledger `arrears_entries` mint). The
-half that stays a walk: the LIMIT is a cardinality claim, and `None, 1` is right only for a relation no op ever
-repoints — `ListLinks` returns tombstoned links in the page and keys sort by target id, so a repointed relation
-(`atStudio`, `ledBy`, `appliesToUnit`, `assignedTo`) pages with the bounded first-live cursor loop; grep the
-relation's `make_link_tombstone` writers before choosing, and price a per-candidate walk as
-`candidates × (1 + limit)` against `DefaultLiveReadBudget`.
-Retired: *a shared-vertex repoint needs a content-and-revision gate against every other writer* —
-`lint-live-read-pinned-mutation` fails a class (e)/(c)/unannotated `kv.Read` (directly, through a read helper such as
-`vertex_live`, or a `kv.Links` page entry's `.key`) followed reachably in the same def by an `update`/`tombstone` on
-that key with no `expectedRevision` (six sightings 2026-08-15 → 2026-09-13; the 2026-09-14 census pinned seven more
-sites, `# occ: live-unpinned <why>` declares a deliberate bare retire). The half that stays a walk: the SUBJECT
-re-derived on the OCC re-execute (wellness `ReassignSessionSeries` — pin the caller's `anchorKey` + stamp and refuse
-`AnchorMoved`), an enumeration-shaped CAP (café `RefundCafeCharge` — keep the tally as a field on the declared read),
-a directOp rewriting a maintained aspect off the Weaver row alone (clinic `AdvanceVisitSeries` — declare
-`row.entityKey.<aspect>`, refuse `StaleRow`), a read whose result reaches the mutation through a candidate list or an
-`.extend`-returned batch, and a `(a)`/`(d)`/`(f)` annotation, which the gate trusts as declared rather than verifies
-against the dispatcher (that half is `lint-derive-reads-bare-vector`'s).
-Retired: *a guard's OCC rests on whoever writes its read declaration* — `lint-derive-reads-bare-vector` requires,
-for every op a script's `derive_reads` dispatches on, a `Test*UndeclaredSubmitter*` vector whose envelope declares no
-`Reads`/`OptionalReads`/`EgressReads`; the read-drift guard armed on every `CapabilityPipeline` then fails any lazy
-read, and a key the derivation cannot return (a `ddl[…].metaKey`-shaped ownership link) is read from `state` and
-refused absent, the vector asserting that refusal (lease-signing, the second sighting). The 2026-09-14 census found
-the same false-refusal shape in seven `derive_reads` — the vertex ROOT was never derived, so `vertex_alive(state, k)`
-read a live undeclared target as unknown — and one real OCC hole (`RescheduleAppointment`'s bare `.schedule` update).
-The walk that remains: which keys an op DELIBERATELY withholds from derivation, and why — ClaimIdentity's
-`.credentialBinding` (a claimed target would pay an envelope decrypt an unclaimed one does not) and
-RevokeIdentityClaim's three required Reads (an undeclared submitter is refused, never served) — each stated at the
-arm, so a widening mirrors the reason and not the shape.
+Retired (the gate names the rule; the walk that stays is in the gate's header):
+*a confinement guard tested only as the operator has never run* → `lint-workplace-staff-vector` (café `Charge` 2026-09-13; wellness `JoinWaitlist` 2026-09-15) ·
+*a lens MATCH edit is a corpus edit* → `internal/refractor/*_corpus_census_test.go` (`go test ./internal/refractor/ -run 'Corpus|Census'`) ·
+*a new refusal on an existing op is a claim about EVERY dispatcher* → `lint-seed-declared-reads` (wellness `SessionStarted`, café `TenancyEnded`, 2026-09-14; a `mustAccepted` seed caller still needs the op's new skip by hand) ·
+*a `kv.Links` call with no page limit is charged at the 256-unit default* → `lint-links-page-limit` (33 sites, 2026-09-14; the LIMIT is still a cardinality claim — a repointed relation pages with the first-live cursor loop) ·
+*a shared-vertex repoint needs a content-and-revision gate against every other writer* → `lint-live-read-pinned-mutation` (six sightings 2026-08-15 → 2026-09-13; a SUBJECT re-derived on the OCC re-execute, an enumeration-shaped cap, and a directOp rewriting a maintained aspect off the Weaver row alone stay walks) ·
+*a guard's OCC rests on whoever writes its read declaration* → `lint-derive-reads-bare-vector` (lease-signing, 2026-09-13; which keys an op DELIBERATELY withholds from derivation is stated at the arm).
 
-- **A live `kv.Read` of a sensitive aspect FAILS, it does not degrade, when its holder is shredded** — the vault
-  returns `ErrKeyShredded` and the script dies `ScriptFailed`, so an op that "reads a sibling name if present" is
-  refused for every erased subject even though the shredded envelope stays PRESENT with `data.shredded=true`.
-  Minted: lease-signing `SignLease`'s tenant-name snapshot (2026-09-13), caught cold — the package's own deleted
-  precedent had documented the probe. Check: before any (e)-follow-up `kv.Read` of a sensitive aspect, read the
-  holder's `.piiKey` and skip on `shredded`; the test shreds BEFORE the op and asserts acceptance.
-- **A cross-package type guard must survive the migration window in BOTH directions** — when a type's class
-  or key shape changes, the old and new populations are live simultaneously and nothing rewrites the old
-  documents, so a guard admitting only one is a silent outage on the other. Minted: dynamic-type-taxonomy B1
-  (`cls == "location"` would have rejected all 69 live locations; the accepted-widening arm was then unpinned
-  in 4 of 7 packages, so narrowing it back left the whole suite green). Check: every guard needs a *positive*
-  vector per live shape, not just a negative — and mutation-test each by narrowing the set.
-- **A playbook `Params` entry bound to an OPTIONAL-hop column is a dispatch refusal on every row where the hop
-  misses** — Weaver declines a null param outright (`strategist.go` "references row.<col>, which is null/absent"),
-  the gap stands open forever, and nothing in the package's own suite notices because every fixture seeds the hop.
-  Minted: café `cafeArrearsReminders` (2026-09-06), live — the one account with no `heldFor` lease was never
-  evaluated. Check: every `Params` value names a column the anchor itself projects (`entityKey` or an aspect on it);
-  anything reached by a walk is resolved by the op from state, and one lens pin seeds the anchor with the walk missing.
-- **A declared sensitive read is decrypted BEFORE the script runs, so declaring it unconditionally can
-  break the very population the op exists for** — step 4 hydrates every declared aspect, and a sensitive
-  one decrypts under its owner's DEK. An op whose whole purpose is cleaning up after an erased owner
-  faults at hydration (`vault: identity key shredded`) if it declares that owner's aspect on the arm where
-  the owner is dead. Declare per-arm, from the dispatcher's own classification, and make the residual race
-  fail closed and loudly. Minted: `TombstoneOrphanedCredentialIndex`'s owner-array rewrite (2026-08-23) —
-  nine tests fell to the unconditional declaration. Check: for any `optionalReads` naming a `Sensitive:
-  true` aspect, ask which arm reaches it with the holder's key already destroyed. **Second sighting
-  (2026-09-13), on the timing axis:** deriving `{target}.credentialBinding` for `ClaimIdentity` (so a
-  re-claim after `RevokeIdentityClaim` could CAS the tombstone) made a claimed target pay an envelope
-  read + decrypt an unclaimed one never pays — the claimed-vs-wrong-key gap NFR-S6 had equalized, measured
-  at +0.08–0.12 ms with CIs excluding zero; and a claimed-then-shredded target faulted at hydration instead
-  of counting `erased`. Closed by writing the binding with the unconditioned `update` idiom instead of
-  reading it. Check, on any timing-uniform path: a sensitive aspect whose PRESENCE is the state being
-  hidden is never declared or derived — write it blind. Mechanized as an instrument, not a gate:
-  `claim_timing_probe_test.go`'s already-claimed fixture is now a real secret-claimed identity with a live
-  binding, so the probe measures the production shape.
-- **A cap derived from a paged sweep must be summed over every ARM the gap covers, not one arm's reach** —
-  a sweep that drains one relation per commit, in fixed order, needs `Σ_arms(pages × pageLimit) / perCommit`
-  dispatches; a drained arm returns empty and yields to the next rather than failing, so dispatches past
-  one arm's ceiling are still progress. Minted: the erasure residue caps (2026-08-24) were derived from a
-  single arm and under-sized 2× and 3×. Check: count the sweep's `collect_*` call sites, and pin the
-  constant against the script's own page constants rather than asserting it equals itself.
-- **A standing `scope=any` write on an entity with no workplace must confine by the target's STATE MACHINE, not by
-  liveness** — a bind that accepts any live identity lets a front-desk actor attach a stranger's record to their own
-  claimed login and inherit its read grants; identity-domain already confines its front/back-of-house writes to
-  `unclaimed` for exactly this reason. Minted: clinic `BindPatientIdentity` (2026-09-06), caught cold as BLOCKING.
-  Check: for every op granted to a staff role that names an identity (or any actor-bearing vertex) by key, ask
-  which `.state` values the script refuses and whether the caller could name themselves.
-- **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
- **Second shape (clinic `visitSeriesDue`, 2026-09-13, caught cold as BLOCKING):** a gap that stays OPEN across dispatches with CHANGED params is one stuck episode — the anti-storm mark Acks the re-projected row, the 30-min mark lease reclaims it, and the 3-attempt directOp budget wedges the anchor at the 4th cycle (`GapBudgetExhausted`) even though every dispatch succeeded. Check: for a level-triggered gap over a growing set, prove the FIRST dispatch closes it (aggregate to the run's extreme — `max`, not `min` — and pin a re-projection after the op's write showing the gap shut); a gap that is designed to re-open on the next member needs its own episode boundary, which Weaver does not have.
-- **A new KIND of an existing entry type passes every predicate written over the TYPE — a cap for "a debit" caps
-  the new debit too, or admits it, and only a census of that field's comparisons says which.** `RefundCafeCharge`'s
-  `reversed_charge` refused `type != "debit"`; the fire that added a `payout` debit left it accepting a payout as
-  `reversesRef` — an unbounded cash loop (pay → refund → pay out → refund the payout). Minted: cafe-ledger
-  `PayoutCafeCredit` (2026-09-14), caught cold as BLOCKING. Check: when a script writes a new value into a
-  classification field (`type`, `status`, `reason`), grep every `data.get("<field>")` comparison in the package
-  and decide per site whether the new kind is in or out; the third sighting of *the "leg" is every writer of the
-  guarded VALUE* — a generic gate does not exist, the check is a census per new kind.
-- **Two individually-capped verbs compose into a leak neither cap states — name the CONSERVED QUANTITY and enforce it
-  where the phantom is minted.** A waiver (capped at owed), a refund (capped at the charge) and a payout (capped at
-  the credit) each held, and waiver → refund → payout handed out cash for a charge nobody paid. Minted: cafe-ledger
-  (2026-09-14), caught cold; closed by `cashCents` on `.balance` (credit may never exceed net cash in). Check: for
-  any ledger with more than one clearing verb, write the quantity that must be conserved across ALL of them
-  (cash in ≥ cash out) as a maintained field and refuse at the verb that would mint the surplus, not at the one
-  that spends it.
-- **A link that TWO ops walk needs the idempotency probe on both — "dispatched at most once per booking" is a claim
-  about one op, not about the link.** `SetBookingAttendance` guarded its no-show refund with a `reverses in` probe
-  because it is re-markable; `ReleaseOrphanedBooking` walked the same `settles` link with none, so a fee reversed by an
-  attended re-mark, re-marked noShow, and then released on call-off was refunded twice. Minted: wellness-domain
-  (2026-09-13, caught cold). Check: for every link a refund/settlement mint walks, list every op that can reach that
-  walk and the states each leaves the anchor in; a probe that exists on one of them exists on all, or the exclusion is
-  stated per pair (CancelBooking is exempt only because it tombstones the anchor).
-- **An amount cap written for the self-service leg leaves the staff leg unbounded, and a bounded replay hoisted
-  above the ownership proof is an amplification primitive.** The trust argument ("no rail verifies the payment")
-  is a property of the op, not of who submitted it; and a history replay that runs before the walk proving the
-  caller may name the account lets any grant-holder bill ~500 live reads to a stranger's key. Minted: café
-  `CreditCafeAccount` (2026-09-05). Check: ask which leg the guard is NOT on, and what runs before the proof that
-  names the target. Second sighting (clinic `NotYetStarted`, 2026-09-13, caught cold): the clock landed on the
-  first-transition op while the terminal→terminal repair op (`CorrectAppointmentStatus`) reached the same
-  `completed`/`noShow` value with no clock — cancel-then-correct was the side door. The "leg" is every op that
-  writes the guarded VALUE, not every dispatcher of the guarded op: grep the aspect's writers before closing.
-- **A lens that reads a RECORDED fact depends on whoever arms the timer that records it — couple the two
-  populations in one fragment, and never host a neighbour's window on an anchor nothing reads.** Two shapes
-  in one item (expiry-as-a-recorded-fact, 2026-09-02). (a) `appointmentReminders` closed its gap on
-  `pastDueAppointments`' recorded end but excluded one terminal status where the past-due lens excluded
-  three, so a `completed`/`noShow` never-reminded appointment held a gap no timer could ever close —
-  `GapBudgetExhausted` per row, forever (found by the close pass; the lens tests exercised `scheduled` ×12).
-  (b) `leaseApplicationComplete` and `renewalComplete` each projected a `freshUntil` computed from the
-  background-check INSTANCE's window, so their own timers marked the wrong vertex and, once the instance
-  recorded its own lapse, fired into a marker no cypher read. Check: for every `byTarget.<t>` a lens reads,
-  name the lens that projects `freshUntil` for target `t`, assert both gate on ONE shared status fragment
-  (pin it on the shipped specs, not on the constant), and for every `freshUntil` a lens projects, name the
-  reader of the marker it will produce — none ⇒ delete the column. The same coupling binds a lens to the OP
-  its gap dispatches: every conjunct of `missing_<g>` must count the population the op's own test reads
-  (`wellnessWaitlistPromotion` counted `status = booked` while `PromoteWaitlistedBookings` read seat cells —
-  a class that ran and was rescheduled opened a gap the op could only decline, `GapBudgetExhausted` forever;
-  2026-09-06 close pass). Check: for each gap conjunct, name the op-side read that answers the same question.
-  Second sighting 2026-09-13: `capabilityEphemeral`'s population-coverage pin landed fixture-based; the
-  shipped-spec fragment pin (`TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment`) is the shape.
-  Third sighting (lease-signing `tenancyEnd`, 2026-09-14, caught cold): two TARGETS over one unit — `missing_relist`
-  counted a rival as live only with a `.tenancy` while `missing_listingLeased` claimed the unit on `approved` alone,
-  a relist/lease ping-pong on a pre-`.tenancy` approval. The membership test a gap conjunct applies to a neighbour
-  must be the neighbour's OWN claim predicate, verbatim.
-- **A recorded value is read as the FACT it records, never as a proxy for the event it was derived from — and
-  a hydrated aspect's absence is two facts, not one.** Two shapes in one item (rent-clause term, 2026-09-13,
-  both caught cold). (a) `BackfillClauseTerm` re-gridded a clause's recorded DUE (`chargeValidUntil`, always
-  `postedAt + 720h`) by "the period containing the due", which for a 31-day period whose charge posted on its
-  first day is the period already billed — an immediate double charge on two live tenants had the install
-  slipped 18 days; the fix inverts the stamp exactly (`due − window`) and re-grids the CHARGE instant. Check: for
-  any migration or normalization of a recorded timestamp, name the event it was derived from and the exact
-  derivation, and invert that — never re-interpret the derived value; pin a vector whose derived value and source
-  event fall in different periods. (b) `DebitAccount` read `.status ∉ state` as "never charged" (period 0), but
-  `CreateClause` writes `.status` unconditionally, so absence can only mean the dispatcher never declared the
-  OptionalRead — a pre-upgrade envelope would have rewound a period-5 clause and the lens catch-up re-billed five
-  periods. Check: for every `key in state` test on an OptionalRead whose absence carries a benign meaning, prove
-  the key can be absent for a live vertex; if its writer always creates it, absence means undeclared → fail
-  closed, and the negative vector submits the envelope WITHOUT the declaration. Third sighting (loftspace-ledger
-  `dueAt`, 2026-09-14, caught cold): the untermed charge's due date was written as the posting instant while the
-  clause's recorded lapse — the fact the lens opened the gap at — sat hydrated beside it; a stamp that names a
-  date reads the recorded one when it exists and derives only in its absence. Fourth sighting (café `CreditHold`,
-  2026-09-15, caught cold): `.arrears.sentAt` records the reminder's SEND INTENT (stamped with the outbox event; the
-  adapter's outcome lands on `.arrearsNotification`), and the hold's prose promised "a reminder went out" — state
-  the recorded event's exact meaning at the reader, and name the aspect that would carry the delivery fact.
-- **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from — a segment that names
-  the wrong vertex type binds nothing from that side while binding fine from the other.** `mint_clause` wrote
-  `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires: the lease-anchored inbound
-  walk (`srcType = clause`, correct) counted the clause, so every test and the live gap converged, and a
-  clause-anchored `(c)-[:governs]->(l:leaseapp)` designed in this fire could never have bound on the six live
-  clauses (`adjacency/store.go` `OtherType: dstType`). Found by the builder, whose fixture had built keys from the
-  vertex type — the `edge` fixture now goes through `substrate.ParseLinkKey` + `adjacency.EventsForLink` so
-  `OtherType` comes from the KEY as live. Check: a package test pins the literal link-key string each `make_link`
-  writes against the target's `vtx.<type>` (`TestClauseSatisfaction_GovernsLinkKeyNamesTheLeaseappType` is the
-  shape), and a lens fixture never derives a link's endpoint type from anything but the key.
-- **A consumer-table row that reads "X cannot happen by construction" is a claim about the OP's refusals, not the
-  lens's gate — an operator-callable op reaches every state the lens never dispatches.** The `tenancyEnd` design
-  left `renewalComplete` untouched because the lens ends no term under an open renewal; `EndTenancy` walks no
-  renewals, so a by-hand end stranded the plan's `signRenewal` leg behind a permanent `TenancyEnded` refusal.
-  Minted: lease-signing (2026-09-14), caught cold. Check: for every "by construction" exclusion in a consumer
-  census, name the refusal in the OP that enforces it; if the op admits the state, the consumer takes the conjunct.
-- **A new value on a status aspect is a census of every OP GUARD that enumerated the old values, not only of the
-  lenses and the FE** — `.decision` gained `lost`; the lens census conjoined every `landlordDecision` gate and the FE
-  followed the boolean, but `SignLease`'s refusal was keyed on the mutable premise (`unit leased ∧ decision ≠
-  approved`), so once the unit relisted a lost application could sign under a still-live grant, and the fire's own
-  test asserted that acceptance. Minted: lease-signing `RecordApplicationLoss` (2026-09-14), caught cold. Check:
-  `grep -n '\.decision\|decision_value\|\.get("value")'` across the package's scripts and decide the new value's
-  arm at every guard; a guard that reads the premise a recorded fact replaces takes the fact as its own conjunct.
-  **Second sighting (clinic `RecordEncounter`, 2026-09-14), on the reverse axis:** a new op refusal named a SET of
-  statuses (`VisitNotHeld` = cancelled ∪ noShow) while the sibling package's lens gating on the same fact read
-  `<> 'cancelled'` alone, so a documented visit corrected to noShow kept its follow-up reminder armed — caught
-  cold. The census runs both ways: a new value walks the op guards, a new refused set walks every
-  `status.data.value <>` conjunct in the lenses that gate on that status. Mechanize on the next sighting.
+- **A sensitive aspect whose holder is shredded FAILS the op, never degrades** — a live `kv.Read` dies
+  `ErrKeyShredded`/`ScriptFailed` though the envelope stays present with `data.shredded=true`; a DECLARED one faults
+  at step-4 hydration before the script runs; deriving a binding whose PRESENCE is the hidden state leaks it on the
+  timing axis. Minted: `TombstoneOrphanedCredentialIndex` (2026-08-23); `SignLease` tenant-name (2026-09-13);
+  `ClaimIdentity` binding (2026-09-13, +0.08–0.12 ms, CIs excluding zero). Check: declare per-arm from the
+  dispatcher's own classification; before an (e)-follow-up read of a sensitive aspect read the holder's `.piiKey`
+  and skip on `shredded`, the test shredding BEFORE the op and asserting acceptance; the residual race fails closed
+  and loudly; on a timing-uniform path write the binding blind (`claim_timing_probe_test.go` measures the shape).
+- **A cross-package type guard must survive the migration window in BOTH directions** — old and new populations
+  are live simultaneously and nothing rewrites the old documents. Minted: dynamic-type-taxonomy B1 (`cls ==
+  "location"` would have rejected all 69 live locations; the widening arm was unpinned in 4 of 7 packages). Check:
+  a *positive* vector per live shape, not just a negative — and mutation-test each by narrowing the set.
+- **A dispatch declaration must name what the runtime actually binds** — a playbook `Params` on an OPTIONAL-hop
+  column is a Weaver refusal (`strategist.go` "references row.<col>, which is null/absent") on every row where the
+  hop misses, the gap open forever and every fixture seeding the hop; a descriptor hub `{actor}` for a walk the
+  script runs from a payload key normalizes to the same `vtx.identity.<id>` on the self leg, so the read-drift
+  guard measures nothing on the staff leg. Minted: café `cafeArrearsReminders` (2026-09-06, live — the one
+  account with no `heldFor` lease was never evaluated); wellness `CreateBooking`'s `heldFor` hub (2026-09-15).
+  Check (Params): a value names a column the anchor itself projects, or one the gap's OWN conjunct requires
+  non-null (café tab `missing_charge` carries `accountKey <> null`); anything else reached by a walk is resolved by
+  the op from state, and one lens pin seeds the anchor with the walk missing. Check (Hub): a declared hub names the
+  identity the SCRIPT walks from, and the staff-leg vector resolves it with the payload, not the actor —
+  `grep 'Hub: "{actor}"'` on every op whose script walks from a payload key.
+- **A gap's budget and cadence are derived from its WHOLE loop, not one arm or one window** — a cap summed over
+  one arm of a multi-relation sweep under-sizes it (erasure residue caps, 2026-08-24, 2× and 3×); a gap that
+  re-opens on a recorded clock lapse mints a successor per window while the prior instance stays live (lease-signing
+  `bgcheckFreshnessWindow`, 2026-09-03: 3,637 instances on one identity); a level-triggered gap that stays OPEN
+  across successful dispatches with CHANGED params wedges the anchor at the 4th cycle, `GapBudgetExhausted` (clinic
+  `visitSeriesDue`, 2026-09-13). Check: count the sweep's `collect_*` call sites and pin
+  `Σ_arms(pages × pageLimit) / perCommit` against the script's own page constants; price a `validUntil`/`freshUntil` window as a vendor-validity policy over the stack's lifetime and name
+  what retires the superseded artifact; for a gap over a growing set prove the FIRST dispatch closes it (aggregate to
+  the run's extreme, pin a re-projection after the op's write) — Weaver has no episode boundary of its own.
+- **A standing `scope=any` write on an entity with no workplace confines by the target's STATE MACHINE, not by
+  liveness** — a bind accepting any live identity lets a desk actor attach a stranger's record to their own login and
+  inherit its grants (identity-domain confines to `unclaimed` for this reason). Minted: clinic `BindPatientIdentity`
+  (2026-09-06, BLOCKING). Check: for every op granted to a staff role that names an actor-bearing vertex by key, list
+  the `.state` values the script refuses and ask whether the caller could name themselves.
+- **The "leg" of a guard is every op that WRITES the guarded value and every conjunct that READS it — a new
+  kind, value or refused set walks all of them.** An amount cap on the self-service leg left the staff leg unbounded
+  and a bounded replay ran before the ownership proof (café `CreditCafeAccount`, 2026-09-05); a clock on the
+  first-transition op left the terminal→terminal repair op a side door (clinic `NotYetStarted` vs
+  `CorrectAppointmentStatus`, 2026-09-13); a `settles` walk had its `reverses` probe on one of the two ops that reach
+  it (wellness `ReleaseOrphanedBooking`, 2026-09-13); a `payout` debit passed `type != "debit"` as `reversesRef`
+  (café `PayoutCafeCredit`, 2026-09-14); `.decision = lost` left `SignLease` keyed on the mutable premise it replaced
+  (2026-09-14); a refusal naming a SET (`VisitNotHeld` = cancelled ∪ noShow) left the sibling lens at `<> 'cancelled'`
+  (clinic `RecordEncounter`, 2026-09-14). Check: before closing a guard grep the aspect's writers; a guard that reads
+  the premise a recorded fact replaces takes the fact as its own conjunct; for a new classification value grep every
+  `data.get("<field>")` comparison in the package and every `status.data.value <>` conjunct in every lens gating on
+  that status, in every package anchoring the type, deciding each site; for a link a refund/settlement mint walks,
+  list every op that can reach the walk and the states each leaves the anchor in — a probe on one exists on all or
+  the exclusion is stated per pair; nothing runs before the walk that proves the caller may name the target.
+  Mechanize on the next sighting.
+- **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
+  and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
+  for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
+  ledger with more than one clearing verb, maintain the quantity conserved across ALL of them (cash in ≥ cash out) as
+  a field and refuse at the verb that would mint the surplus, not the one that spends it.
+- **A consumer's exclusion is grounded in the predicate that ENFORCES it — a gap conjunct is its neighbour's own
+  claim predicate verbatim, a "by construction" row names the op refusal** — `appointmentReminders` excluded one
+  terminal status where `pastDueAppointments` excluded three (2026-09-02, `GapBudgetExhausted` forever);
+  `wellnessWaitlistPromotion` counted `status = booked` while its op read seat cells (2026-09-06); `tenancyEnd`'s
+  `missing_relist` and `missing_listingLeased` disagreed on "live rival" (2026-09-14, a relist/lease ping-pong); the
+  `tenancyEnd` consumer table left `renewalComplete` alone "by construction" while `EndTenancy` walks no renewals
+  (2026-09-14). Check: for every `byTarget.<t>` a lens reads, both gates sit on ONE shared status fragment pinned on
+  the shipped specs (`TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment` is the shape); for each
+  gap conjunct name the op-side read that answers the same question, and a membership test applied to a neighbour is
+  the neighbour's OWN claim predicate, verbatim; for every `freshUntil` a lens projects name the reader of its marker
+  (none ⇒ delete the column); for every "cannot happen" exclusion name the refusal in the OP — if the op admits the
+  state, the consumer takes the conjunct.
+- **A recorded value is read as the FACT it records, never as a proxy for the event it was derived from — and a
+  hydrated aspect's absence is two facts, not one.** `BackfillClauseTerm` re-gridded a recorded due by "the period
+  containing it" (an immediate double charge, 2026-09-13); `DebitAccount` read `.status ∉ state` as "never charged"
+  when `CreateClause` writes it unconditionally (2026-09-13); an untermed charge's `dueAt` was the posting instant
+  with the clause's recorded lapse hydrated beside it (2026-09-14); café `CreditHold` read `.arrears.sentAt` — the
+  SEND INTENT — as "a reminder went out" (2026-09-15). Check: invert the exact derivation of a recorded timestamp,
+  never re-interpret it, with a vector whose derived value and source event fall in different periods; a stamp that
+  names a date reads the recorded one when it exists; for every `key in state` test on an OptionalRead prove the key
+  can be absent for a live vertex, else absence means undeclared → fail closed (the negative vector submits WITHOUT
+  the declaration); state the recorded event's exact meaning at the reader.
+- **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from** — `mint_clause` wrote
+  `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires; the inbound walk bound fine, a
+  clause-anchored `(c)-[:governs]->(l:leaseapp)` never could (`adjacency/store.go` `OtherType: dstType`). Check: a
+  package test pins the literal link-key string each `make_link` writes against the target's `vtx.<type>`
+  (`TestClauseSatisfaction_GovernsLinkKeyNamesTheLeaseappType`); a lens fixture derives a link's endpoint type from
+  nothing but the key (`substrate.ParseLinkKey` + `adjacency.EventsForLink`).
 - **A field a self-scoped op stores as informational becomes load-bearing the moment another op derives from it —
-  validate at the mint, not the reader.** `.terms.leaseTermMonths` / `requestedRent` / `moveInDate` were free text
-  the applicant wrote through `require_number` / `optional_string`; once `DecideLeaseApplication` derived the
-  tenancy from them a zero term ended a lease the minute it was approved and a bare `2026-9-15` died as an unnamed
-  ScriptError at approval. Minted: lease-signing (2026-09-14), caught cold by both reviewers. Check: when a script
-  starts reading an aspect another op writes, open that writer's validation and refuse the malformed shapes THERE
-  (`InvalidTerms`), storing the normalized value; the reader keeps a named refusal for rows that predate the check.
-- **A mirrored optional back-reference keeps the precedent's LIVENESS check and drops its OWNERSHIP check — and a
-  field added for the staff form reaches the self leg unless the self branch names it.** clinic-ledger's `reversesRef`
-  was mirrored from café's, which refuses a charge "on another account"; the mirror validated alive only, so a
-  front-desk waiver could disarm another patient's `missing_reversal`, and once the descriptor carried the field a
-  self-paying patient could reverse their own fee. Minted: clinic-ledger `visitRef`/`reversesRef` (2026-09-14), caught
-  cold. Check: for every `<x>Ref` a script validates, name the relation that ties it to the op's target
-  (`postedTo`, `forPatient`) and read that link — deterministic keys through `derive_reads`, walk-resolved ones as the
-  `(e)` follow-up with a `read_drift_baseline` row; and grep the `authContextTarget` branch for every optional field
-  the descriptor exposes.
-- **A mirror that drops one of the precedent's write-time branches drops the INVARIANT that branch enforced — and
-  an invariant re-homed onto a sampled evaluator must be proven with events interleaved between the samples.** Café's
-  `post_entry` ends an arrears episode on `.balance → 0`; the wellness mirror has no balance, kept only the stale/carry
-  branch, and "a finished episode's send record dies with it" went with the dropped branch — a pay-to-zero and a fresh
-  charge inside one Weaver dispatch window fused two episodes (a hold on a not-yet-due charge, never reminded). Minted:
-  wellness-ledger `EvaluateWellnessArrears` (2026-09-15), caught cold as BLOCKING. Check: for every precedent branch a
-  mirror omits, list what that branch enforced and name the new site that enforces it; the vector posts two entries
-  between two evaluations, never one entry per evaluation (the shape every green test had).
-- **A declared enumeration hub that NORMALIZES to the real hub's shape passes the read-drift guard without declaring the
-  real hub.** CreateBooking's hold walked `heldFor` from `{payload.booker}`; the descriptor declared `{actor}`, and on
-  the staff leg (booker ≠ actor) `NormalizeEnumeration` collapsed both to `vtx.identity.<id> heldFor in`, so the guard
-  measured nothing. Minted: wellness-domain (2026-09-15), caught cold. Check: a declared hub names the identity the
-  SCRIPT walks from (a payload field when the walk is over a payload-named vertex), and the staff-leg vector resolves the
-  declaration with the payload, not the actor; grep `Hub: "{actor}"` on every op whose script walks from a payload key.
+  validate at the mint, not the reader.** `.terms.leaseTermMonths` / `requestedRent` / `moveInDate` were free text until
+  `DecideLeaseApplication` derived the tenancy from them (a zero term ended a lease at approval; `2026-9-15` died
+  unnamed). Minted: lease-signing (2026-09-14). Check: when a script starts reading an aspect another op writes, open
+  that writer's validation and refuse the malformed shapes THERE (`InvalidTerms`), storing the normalized value; the
+  reader keeps a named refusal for rows that predate the check.
+- **A mirror that drops one of the precedent's checks or branches drops the INVARIANT it enforced** — clinic-ledger's
+  `reversesRef` kept café's liveness check and dropped its ownership check (a desk waiver could disarm another
+  patient's `missing_reversal`; the descriptor field then reached the self leg, 2026-09-14); wellness's arrears
+  evaluator kept café's stale/carry branch and dropped `.balance → 0`, and the episode boundary went with it (two
+  entries inside one Weaver window fused two episodes, 2026-09-15, BLOCKING). Check: for every precedent branch or
+  conjunct the mirror omits, write what it enforced and name the new site that enforces it; for every `<x>Ref`, name
+  the relation tying it to the op's target and read that link — deterministic keys through `derive_reads`,
+  walk-resolved ones as the `(e)` follow-up with a `read_drift_baseline` row — grepping the `authContextTarget`
+  branch for every optional field the descriptor exposes; a sampled-evaluator invariant is proven with events interleaved BETWEEN
+  the samples, never one entry per evaluation.
+
 ## Related contracts
 
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.

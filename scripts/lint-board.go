@@ -44,6 +44,19 @@
 //	                 label, make the filer declare — the shipped `# read-posture:`
 //	                 shape (lint-conventions.go). Backstops the filing-inflation
 //	                 the 2026-08-20 backlog audit found (📐 rows 0→12 in 9 days).
+//	FAIL  dossier  — a component doc's "Review keeps catching" dossier
+//	                 (docs/components/*.md) holds more entries than the cap
+//	                 every dossier states for itself ("capped at 12
+//	                 one-liners"). The cap was prose: _packages.md reached 20
+//	                 entries / 27 KB (3216c40d) — two to four sightings appended
+//	                 to one entry as new paragraphs, every fire brief copying
+//	                 the whole block into its part 5 — before anything counted.
+//	                 An entry is a top-level `- **` bullet under that heading;
+//	                 the way out is the dossier's own rule — mechanize a class
+//	                 into a gate and strike it, or fold same-root classes —
+//	                 never a bigger cap. `--selftest` proves the rule on a
+//	                 fixture and replays the minting revision when history
+//	                 holds it.
 //	WARN  dep      — a 🚧/🏗️/📋/📐 row "behind X / blocked-on X" where X reads done.
 //	WARN  openrows — a lane has more than openRowWarnMax open (non-Done-log)
 //	                 rows. Never fails, even under --strict: closure pressure
@@ -69,6 +82,20 @@ const (
 	doneCountMax   = 35     // Done-log entries before the oldest should roll to archive/ (WARN)
 	openRowWarnMax = 80     // open (non-Done-log) rows before a closure/consolidation unit is preferred (WARN)
 	fileMaxBytes   = 40_000 // a lane file ceiling (clean lattice ≈22KB)
+	// dossierEntryMax is the cap every component dossier states for itself
+	// ("capped at 12 one-liners", docs/components/*.md). dossierBytesWarn is
+	// advisory: twelve entries that are each a paragraph defeat the cap's
+	// purpose (a brief copies the block), so a dossier past it is flagged for
+	// its owner without blocking a build.
+	dossierEntryMax  = 12
+	dossierBytesWarn = 20_000
+)
+
+// dossierDir holds the component docs whose dossiers the cap governs, and
+// dossierHeading is the section every one of them titles the same way.
+const (
+	dossierDir     = "docs/components"
+	dossierHeading = "review keeps catching"
 )
 
 var defaultFiles = []string{
@@ -100,12 +127,16 @@ var (
 	// leave behind. The `=======` arm is anchored to a whole line of exactly
 	// seven, which no setext underline in this tree uses (every heading is ATX).
 	conflictRe = regexp.MustCompile(`^(?:<{7}|>{7})[ \t]|^={7}$`)
+	// dossierEntryRe matches one dossier entry: a top-level bullet opening in
+	// bold (the class name). Continuation lines are indented, and a retired
+	// line reads `Retired: …`, so neither counts.
+	dossierEntryRe = regexp.MustCompile(`^- \*\*`)
 )
 
 type finding struct {
 	file string
 	line int
-	kind string // row | journal | section | doneline | filesize | conflict | dep | openrows
+	kind string // row | journal | section | doneline | filesize | conflict | dossier | dep | openrows
 	warn bool
 	msg  string
 }
@@ -113,6 +144,9 @@ type finding struct {
 func main() {
 	strict := os.Getenv("STRICT") == "1"
 	files := os.Args[1:]
+	if len(files) == 1 && files[0] == "--selftest" {
+		os.Exit(selftest())
+	}
 	files = filterFlags(files, &strict)
 	if len(files) == 0 {
 		files = defaultFiles
@@ -132,6 +166,7 @@ func main() {
 	}
 	all = append(all, depCheck(rowStates, doneItems)...)
 	all = append(all, conflictSweep()...)
+	all = append(all, dossierSweep()...)
 
 	fails, warns := 0, 0
 	for _, x := range all {
@@ -261,6 +296,123 @@ func checkFile(path string) ([]finding, map[string]bool, []rowRef) {
 			fmt.Sprintf("lane has %d open rows > %d — prefer a closure/consolidation unit next (steward SKILL §4)", openRowCount, openRowWarnMax)})
 	}
 	return out, doneItems, rows
+}
+
+// dossierSweep applies the entry cap to every component doc's "Review keeps
+// catching" section. It runs over docs/components/*.md regardless of which
+// files the caller named, for the same reason conflictSweep does: the cap is
+// a repo invariant the board discipline happens to share (an index, not a
+// journal), and the dossier's readers — every fire brief — are the ones who
+// pay for a breach.
+func dossierSweep() []finding {
+	paths, err := filepath.Glob(filepath.Join(dossierDir, "*.md"))
+	if err != nil {
+		return nil
+	}
+	var out []finding
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		out = append(out, dossierFindings(path, string(data))...)
+	}
+	return out
+}
+
+// dossierFindings is the per-document rule: count the top-level entries between
+// the dossier heading and the next `##` heading, fail past the cap, warn past
+// the byte budget. A doc with no dossier section reports nothing — the cap
+// governs a dossier's size, not whether a component keeps one.
+func dossierFindings(path, text string) []finding {
+	var out []finding
+	inDossier := false
+	start, entries, size := 0, 0, 0
+	n := 0
+	for _, line := range strings.Split(text, "\n") {
+		n++
+		if m := headingRe.FindStringSubmatch(line); m != nil && strings.HasPrefix(line, "## ") {
+			if inDossier {
+				break
+			}
+			if strings.Contains(strings.ToLower(m[1]), dossierHeading) {
+				inDossier, start = true, n
+			}
+			continue
+		}
+		if !inDossier {
+			continue
+		}
+		size += len(line) + 1
+		if dossierEntryRe.MatchString(line) {
+			entries++
+		}
+	}
+	if !inDossier {
+		return nil
+	}
+	if entries > dossierEntryMax {
+		out = append(out, finding{path, start, "dossier", false,
+			fmt.Sprintf("dossier has %d entries > %d cap — mechanize a class into a gate and strike it, or fold same-root classes into one `class · incident · check` line; never raise the cap", entries, dossierEntryMax)})
+	}
+	if size > dossierBytesWarn {
+		out = append(out, finding{path, start, "dossier", true,
+			fmt.Sprintf("dossier is %d bytes > %d — entries are one-liners (class · minting incident · the check); a sighting appends a date and a name, not a paragraph", size, dossierBytesWarn)})
+	}
+	return out
+}
+
+// selftest proves the dossier rule the way the other gates prove theirs: a
+// fixture at the cap passes, one past it fails, and the minting revision —
+// docs/components/_packages.md at 3216c40d, twenty entries — fails when the
+// checkout's history holds it (a depth-1 CI clone does not; the replay is
+// skipped there, never reported red).
+func selftest() int {
+	entry := "- **class** — incident. Check: the check.\n  continuation line.\n"
+	doc := func(n int) string {
+		var b strings.Builder
+		b.WriteString("# Component\n\n## Review keeps catching (dossier)\n\nRetired: *x* → `lint-x`.\n\n")
+		for i := 0; i < n; i++ {
+			b.WriteString(entry)
+		}
+		b.WriteString("\n## Related contracts\n\n- **not an entry** — lives outside the section.\n")
+		return b.String()
+	}
+	fails := func(fs []finding) int {
+		c := 0
+		for _, f := range fs {
+			if !f.warn {
+				c++
+			}
+		}
+		return c
+	}
+	ok := true
+	report := func(name string, pass bool) {
+		tag := "PASS"
+		if !pass {
+			tag, ok = "FAIL", false
+		}
+		fmt.Printf("%s  selftest  %s\n", tag, name)
+	}
+	report("a dossier at the cap is clean", fails(dossierFindings("fixture.md", doc(dossierEntryMax))) == 0)
+	report("a dossier one past the cap fails", fails(dossierFindings("fixture.md", doc(dossierEntryMax+1))) == 1)
+	report("a doc with no dossier reports nothing", len(dossierFindings("fixture.md", "# Component\n\n## Overview\n\n- **bullet** — not a dossier.\n")) == 0)
+	report("a bullet after the next heading is not an entry", fails(dossierFindings("fixture.md", doc(dossierEntryMax)+"- **late** — x.\n")) == 0)
+
+	const minting = "3216c40d:docs/components/_packages.md"
+	if exec.Command("git", "cat-file", "-e", minting).Run() != nil {
+		fmt.Println("SKIP  selftest  minting revision " + minting + " not in this checkout's history (depth-1 clone)")
+	} else if blob, err := exec.Command("git", "show", minting).Output(); err != nil {
+		report("minting revision readable", false)
+	} else {
+		report("the minting revision (_packages.md at 3216c40d, 20 entries) fails", fails(dossierFindings("_packages.md@3216c40d", string(blob))) == 1)
+	}
+	if !ok {
+		return 1
+	}
+	fmt.Println("lint-board: selftest clean")
+	return 0
 }
 
 // conflictSweep reports any git conflict marker committed into a tracked text
