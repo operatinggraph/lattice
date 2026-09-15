@@ -16,6 +16,7 @@
       <span id="patient-self-name" class="readonly" hidden></span>
       <button id="new-patient" class="ghost">＋ New patient</button>
       <span id="patient-contact" class="patient-contact" aria-live="polite"></span>
+      <span id="patient-arrears" class="arrears-badge" aria-live="polite"></span>
       <button id="connect-login" class="ghost" hidden>Connect a login</button>
       <button id="reset-login" class="ghost" hidden>Reset login</button>
       <span id="signed-in-as" class="patient-contact" aria-live="polite"></span>
@@ -126,6 +127,12 @@
         <div class="ledger-record-form">
           <input type="number" id="ledger-amount" step="0.01" min="0.01" placeholder="Amount ($)" aria-label="Amount in dollars" />
           <input type="text" id="ledger-memo" placeholder="Memo (optional)" aria-label="Memo" />
+          <select id="ledger-visit" aria-label="For visit">
+            <option value="">For visit: none</option>
+          </select>
+          <select id="ledger-waive-target" aria-label="Charge to waive">
+            <option value="">Charge to waive: whole balance</option>
+          </select>
           <button type="button" id="ledger-charge" class="ghost">+ Record charge</button>
           <button type="button" id="ledger-payment" class="ghost">+ Record payment</button>
           <button type="button" id="ledger-waive" class="ghost">🚫 Waive charge</button>

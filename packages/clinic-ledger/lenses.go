@@ -167,19 +167,31 @@ RETURN
 // the read model is keyed by vtx.clinictransaction.<id>; transactionKey
 // repeats it in the body for the reader.
 //
-// The settles hop is OPTIONAL (unlike the two above) because most
-// transactions — copays, payments — never settle an appointment; only a
-// clinicNoShowSettlement-dispatched debit does (targets.go's
-// appointmentRef param, written as the settles link). Surfacing
-// appointmentKey/visitStartsAt here is what lets a reader tie an otherwise
-// identical "No-show fee" line to the specific visit that caused it — the
-// link already existed for noShowSettlementSpec's own convergence check
-// (:105-ish above); this just also projects it into the history a patient
-// or front-desk actually reads.
+// The three hops below the required pair are OPTIONAL because most
+// transactions carry none of them:
+//   - settles (appt): the line IS the fee this appointment's status carries —
+//     a clinicNoShowSettlement-dispatched debit (targets.go's appointmentRef
+//     param). The link exists for noShowSettlementSpec's own convergence
+//     check above; projecting it here is what ties an otherwise identical
+//     "No-show fee" line to the visit that caused it.
+//   - forVisit (v): the line is FOR this visit — a desk copay or procedure
+//     charge posted with visitRef. No convergence lens reads it.
+//   - reverses (rt): a credit that gives back one named charge — a
+//     clinicNoShowSettlement reversal, or a desk waiver that names the charge
+//     it forgives. reversesKey is the column a statement ages on (the same
+//     name café's and wellness's histories project).
+//
+// A line has at most one visit, so the two visit hops coalesce into one
+// appointmentKey/visitStartsAt pair and settlesFee says which relation
+// supplied it: true when the line is the visit's fee, false otherwise (the
+// engine answers `null <> null` with false, so a line naming no visit at all
+// reads false too, never null).
 const ledgerHistorySpec = `MATCH (t:clinictransaction)
 MATCH (t)-[:postedTo]->(a:clinicaccount)
 MATCH (a)-[:heldFor]->(pt:patient)
 OPTIONAL MATCH (t)-[:settles]->(appt:appointment)
+OPTIONAL MATCH (t)-[:forVisit]->(v:appointment)
+OPTIONAL MATCH (t)-[:reverses]->(rt:clinictransaction)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -192,8 +204,10 @@ RETURN
   t.entry.data.billedTo AS billedTo,
   t.entry.data.expectedReimbursementCents AS expectedReimbursementCents,
   t.entry.data.reason AS reason,
-  appt.key AS appointmentKey,
-  appt.schedule.data.startsAt AS visitStartsAt`
+  coalesce(appt.key, v.key) AS appointmentKey,
+  coalesce(appt.schedule.data.startsAt, v.schedule.data.startsAt) AS visitStartsAt,
+  (appt.key <> null) AS settlesFee,
+  rt.key AS reversesKey`
 
 // patientAccountsSpec projects one row per patient — the anchor is the
 // patient (not the account), so a patient with no ledger account yet still

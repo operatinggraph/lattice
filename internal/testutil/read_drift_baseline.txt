@@ -74,6 +74,12 @@ read	Charge	lnk.identity.<id>.worksAt.building.<id>
 read	Charge	lnk.identity.<id>.worksAt.unit.<id>
 read	Charge	vtx.leaseapp.<id>
 read	ClinicCreditAccount	lnk.patient.<id>.identifiedBy.identity.<id>
+# ClinicDebitAccount's visitRef patient check: the forPatient link it reads is
+# keyed by the patient id its own heldFor walk resolves off the account (the
+# walk ClinicCreditAccount's ownership proof already carries), so it is a
+# class-(e) follow-up no dispatcher can name up front — link-shaped, hence
+# listed rather than admitted by the guard's vertex-root rule.
+read	ClinicDebitAccount	lnk.appointment.<id>.forPatient.patient.<id>
 # CorrectAppointmentStatus reuses SetAppointmentStatus's staff-standing
 # confinement verbatim, so it inherits the same two undeclarable follow-ups
 # (the `SetAppointmentStatus` rows below): each hangs off a vertex only a prior

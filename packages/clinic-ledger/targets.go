@@ -72,7 +72,12 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// .balance DDL revision carries none and a charge against one posts
 					// without writing it — only a self-scoped patient payment ever
 					// backfills, so this unattended dispatch never replays a history.
-					OptionalReads: []string{"row.accountKey.balance"},
+					//
+					// row.appointmentKey.status: the fee the op verifies before writing
+					// settles (NoFeeToSettle) — the appointment's current status, read
+					// through the same derived-aspect form. derive_reads guarantees it
+					// whatever a dispatcher declares; this states it.
+					OptionalReads: []string{"row.accountKey.balance", "row.appointmentKey.status"},
 				},
 				"missing_reversal": {
 					Action:    "directOp",
@@ -94,6 +99,11 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// Params only. Declaring either here would fail step4 hydrate the
 					// same way missing_charge's memo field already did (comment above).
 					Reads: []string{"row.accountKey", "row.chargeTxKey"},
+					// The postedTo link post_entry reads to prove chargeTxKey is a
+					// charge on accountKey (WrongAccount) is composed from BOTH
+					// columns, which row.<col>.<aspect> templating cannot express
+					// (resolveReadKey, strategist.go) — the op's own derive_reads
+					// declares it for this dispatch as it does for every other.
 					// OptionalReads: same derived-aspect / absence-tolerant shape as
 					// missing_charge above, and the same reason for no postedTo walk —
 					// a reversal is a staff-voice credit, so it is neither capped by the

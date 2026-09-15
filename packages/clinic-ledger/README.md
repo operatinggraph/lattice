@@ -1,6 +1,6 @@
 # clinic-ledger
 
-The Clinic patient payment ledger (v0.3.0) — a per-patient financial account that records charges
+The Clinic patient payment ledger (v0.5.0) — a per-patient financial account that records charges
 (copays, invoice lines) and payments as an **append-only** transaction history. The account also
 carries a maintained `.balance` aspect (`{balanceCents}`) — an O(1) authorization cache kept in
 lockstep with every posted entry via an auto-conditioned, retry-eligible update (no explicit
@@ -17,9 +17,10 @@ running stack).
 |---|---|
 | **Vertex types** (2) | `clinicaccount` (root `{}`, D5, `.balance` aspect) · `clinictransaction` (root `{}`, D5, `.entry` aspect incl. a debit-only payer dimension) |
 | **Aspect types** (2) | `clinicLedgerAccountGuard` — `vtx.patient.<id>.ledgerAccount`, the per-patient create-only uniqueness guard · `clinicAccountBalance` — `vtx.clinicaccount.<id>.balance`, the maintained running-total cache |
-| **Links** (2) | `heldFor` (account → patient) · `postedTo` (transaction → account) |
+| **Links** (5) | `heldFor` (account → patient) · `postedTo` (transaction → account) · `settles` (transaction → appointment: the line IS the visit's fee) · `forVisit` (transaction → appointment: the line is FOR the visit) · `reverses` (credit → the charge it gives back) |
 | **Operations** (3) | `ClinicCreateAccount` · `ClinicDebitAccount` · `ClinicCreditAccount` |
-| **Projection lenses** (2) | `clinicLedgerHistory` (one row per transaction) → `clinic-ledger-history` · `clinicPatientAccounts` (patient → account key lookup) → `clinic-patient-accounts` (both `nats-kv`, `full` engine) |
+| **Projection lenses** (2) | `clinicLedgerHistory` (one row per transaction, carrying the visit it names and the charge it reverses) → `clinic-ledger-history` · `clinicPatientAccounts` (patient → account key lookup) → `clinic-patient-accounts` (both `nats-kv`, `full` engine) |
+| **Weaver target** (1) | `clinicNoShowSettlement` — charges the fee an appointment's status carries once, opens the account first if needed, and reverses a charge whose appointment is later corrected to a fee-less status |
 
 All three operations are granted to `operator` and `frontOfHouse` at `scope: any` (`permissions.go`),
 unconfined — a patient carries no building to workplace-confine to. The front desk opens a patient's
@@ -38,6 +39,9 @@ vtx.patient.<id>.ledgerAccount         class=clinicLedgerAccountGuard  {accountK
 
 lnk.clinicaccount.<id>.heldFor.patient.<id>            (account → patient; account is the later-arriving vertex)
 lnk.clinictransaction.<id>.postedTo.clinicaccount.<id> (transaction → account; transaction is the later-arriving vertex)
+lnk.clinictransaction.<id>.settles.appointment.<id>    (debit → appointment; ClinicDebitAccount appointmentRef)
+lnk.clinictransaction.<id>.forVisit.appointment.<id>   (debit → appointment; ClinicDebitAccount visitRef)
+lnk.clinictransaction.<id>.reverses.clinictransaction.<id> (credit → the reversed debit; ClinicCreditAccount reversesRef)
 ```
 
 Vertical-prefixed (`clinicaccount`/`clinictransaction`, not `loftspace-ledger`'s bare
@@ -119,6 +123,44 @@ collected via a `ClinicCreditAccount` payment. Both fields reject on `ClinicCred
 has nothing to bill). This is **not** X12 837/835 claims/clearinghouse integration — that
 certified-EHR-scale lift is explicitly out of bounds for a reference vertical; the dimension only
 bounds what a debit entry *claims* about its payer.
+
+## A charge names its visit — two relations, never both
+
+A `ClinicDebitAccount` can name an appointment in one of two ways, and the op refuses both at once
+(`InvalidArgument`):
+
+- **`appointmentRef` → `settles`**: the line **is** the fee the appointment's current status carries
+  (a no-show fee, a late-cancellation fee). This is the shape `clinicNoShowSettlement`'s `missing_charge`
+  gap dispatches. The op reads the appointment's `.status` and refuses **`NoFeeToSettle`** unless it
+  carries `noShowFeeCents > 0` — `missing_reversal` reads a fee-less status beside a live `settles` link as a
+  correction that owes a reversal, so a `settles` link minted against a fee-less appointment would be credited
+  straight back. The `.status` key is declared by the script's own `derive_reads` (an `optionalRead`, beside
+  `.balance`) whenever the payload carries a well-formed appointment key, so the guard reads a hydrated,
+  OCC-conditioned document whatever the submitter declared; `CreateAppointment` always writes `.status`, so
+  absence means no fee, never "not yet loaded". A Weaver dispatch that races a status correction is refused
+  rather than charged-then-reversed.
+- **`visitRef` → `forVisit`**: the line is **for** the visit — a desk copay, a procedure charge. Validated
+  alive (`UnknownAppointment`) and as this account's patient's own appointment (`WrongPatient` — the patient
+  comes from the account's `heldFor` walk, which the descriptor declares, never the payload); rejected on a
+  `ClinicCreditAccount`, as `appointmentRef` is. No convergence lens reads `forVisit`, so
+  a copay on a no-show appointment neither counts as its fee nor opens a reversal; only `clinicLedgerHistory`
+  projects it. The FE's charge form fills it from the visit the desk picks (the descriptor carries
+  `visitRef` and declares `{payload.visitRef}`; an absent optional field's template is dropped, so a plain
+  charge declares nothing extra).
+
+A `ClinicCreditAccount` names the charge it gives back through **`reversesRef` → `reverses`** — the
+`missing_reversal` dispatch does, and so does a desk waiver that picks the charge it forgives (the descriptor
+carries `reversesRef`; a self-scoped patient payment is refused `AuthDenied` if it sends one, since the link
+would disarm the reversal a later correction owes the patient). The charge must be posted to the same account
+(`WrongAccount`) — the `postedTo` link key is deterministic from the two payload keys, so `derive_reads` declares
+it as an `optionalRead` for every `ClinicCreditAccount` carrying a well-formed `reversesRef`. A hand waiver that names a no-show fee
+therefore carries the `reverses` link `missing_reversal` counts, so a later status correction does not credit
+the fee a second time.
+
+`clinicLedgerHistory` projects, per line: `appointmentKey` / `visitStartsAt` (coalesced across `settles` and
+`forVisit` — a line has at most one visit), `settlesFee` (`true` when the line is that visit's fee, `false`
+otherwise) and `reversesKey` (the charge a credit reverses, or null) — the column a statement retires the named
+debit on before ageing the rest FIFO.
 
 ## Where the ledger is surfaced
 

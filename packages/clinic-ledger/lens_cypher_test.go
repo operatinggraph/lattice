@@ -431,6 +431,67 @@ func TestClinicLedgerHistory_SettlesAppointment_ProjectsVisit(t *testing.T) {
 	require.Equal(t, "vtx.appointment."+f.ids["noshow_appt"], v["appointmentKey"],
 		"the settles link ties this charge to the visit that caused it")
 	require.Equal(t, "2026-08-05T09:00:00Z", v["visitStartsAt"])
+	require.Equal(t, true, v["settlesFee"], "a settles line IS the visit's fee")
+	require.Nil(t, v["reversesKey"], "a debit reverses nothing")
+}
+
+// TestClinicLedgerHistory_ForVisit_ProjectsVisitNotFee: a charge posted with
+// visitRef reaches the history through the forVisit hop — the same
+// appointmentKey/visitStartsAt pair a settles line projects, coalesced from
+// the other relation — and settlesFee false says the line is FOR the visit,
+// not its fee.
+func TestClinicLedgerHistory_ForVisit_ProjectsVisitNotFee(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newClFixture(t)
+	f.mkPostedTransaction(t, "visitcopay", 2500, "Office visit copay")
+	f.vtx(t, "visitcopay_appt", "appointment")
+	f.aspect(t, "visitcopay_appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-08-07T10:00:00Z"})
+	f.edge(t, "forVisit", "visitcopay_tx", "visitcopay_appt")
+
+	rows := f.project(t, "clinicLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "vtx.appointment."+f.ids["visitcopay_appt"], v["appointmentKey"],
+		"the forVisit link names the visit the copay is for")
+	require.Equal(t, "2026-08-07T10:00:00Z", v["visitStartsAt"])
+	require.Equal(t, false, v["settlesFee"], "a forVisit line is for the visit, never its fee")
+	require.Nil(t, v["reversesKey"])
+}
+
+// TestClinicLedgerHistory_Reverses_ProjectsReversesKey: a credit that
+// reverses a charge (a clinicNoShowSettlement reversal, or a desk waiver that
+// named the charge it forgives) projects the charge's key as reversesKey —
+// the column a statement retires the named debit on before its FIFO.
+func TestClinicLedgerHistory_Reverses_ProjectsReversesKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newClFixture(t)
+	f.mkPostedTransaction(t, "rev", 2500, "No-show fee")
+	f.vtx(t, "rev_credit", "clinictransaction")
+	f.edge(t, "postedTo", "rev_credit", "rev_acct")
+	f.edge(t, "reverses", "rev_credit", "rev_tx")
+	f.aspect(t, "rev_credit", "entry", "transactionEntry", map[string]any{
+		"type": "credit", "amountCents": 2500.0, "memo": "Fee reversal (corrected)", "postedAt": "2026-08-08T00:00:00Z", "reason": "waiver",
+	})
+
+	rows := f.project(t, "clinicLedgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["key"].(string)] = r.Values
+	}
+	credit := byKey["vtx.clinictransaction."+f.ids["rev_credit"]]
+	require.NotNil(t, credit)
+	require.Equal(t, "vtx.clinictransaction."+f.ids["rev_tx"], credit["reversesKey"],
+		"the reverses link names the charge this credit gives back")
+	require.Nil(t, credit["appointmentKey"])
+	require.Equal(t, false, credit["settlesFee"], "a line naming no visit is nobody's fee")
+	debit := byKey["vtx.clinictransaction."+f.ids["rev_tx"]]
+	require.NotNil(t, debit)
+	require.Nil(t, debit["reversesKey"], "the reversed charge itself reverses nothing — the hop is outbound only")
 }
 
 func TestClinicLedgerHistory_NoSettlesLink_ProjectsNullVisit(t *testing.T) {
@@ -445,6 +506,8 @@ func TestClinicLedgerHistory_NoSettlesLink_ProjectsNullVisit(t *testing.T) {
 	v := rows[0].Values
 	require.Nil(t, v["appointmentKey"], "a copay settles no appointment — OPTIONAL MATCH leaves it null")
 	require.Nil(t, v["visitStartsAt"])
+	require.Equal(t, false, v["settlesFee"], "the engine answers (null <> null) with false, so settlesFee is a plain boolean on every line")
+	require.Nil(t, v["reversesKey"])
 }
 
 // TestClinicLedgerHistory_ProjectsWaiverReason proves the lens surfaces a

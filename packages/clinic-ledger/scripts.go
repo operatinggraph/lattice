@@ -338,6 +338,23 @@ def backfill_balance(acct_key):
         fail("AuthDenied: could not backfill this account's balance (too much transaction history for one op)")
     return balance_cents
 
+def held_for_patient_id(acct_key):
+    # The NanoID of the patient this account is held for, walked off the
+    # account's OWN heldFor topology (never the payload), or None when the
+    # account carries no live patient. Two callers, one predicate: the self-pay
+    # ownership proof and the visitRef patient check.
+    # read-posture: (e) relation=heldFor epoch=none -- an account carries
+    # exactly one heldFor link, so this is never a keyspace scan.
+    held_for_page, _ = kv.Links(acct_key, "heldFor", "out")
+    patient_key = None
+    for lk in held_for_page:
+        if not lk.isDeleted:
+            patient_key = lk.targetVertex
+    if patient_key == None:
+        return None
+    _, patient_id = parts_of(patient_key, "heldFor target", "patient")
+    return patient_id
+
 def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -387,22 +404,20 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
             fail("AuthDenied: a patient may only credit (pay down) their own account, not charge it")
         if reason == "waiver":
             fail("AuthDenied: a patient may only pay down their own account, not waive a charge")
+        # A reverses link is what disarms missing_reversal: a patient who could
+        # name their own no-show fee here would mark it reversed by paying it,
+        # and a later status correction would then give nothing back.
+        if hasattr(p, "reversesRef") and getattr(p, "reversesRef") != None:
+            fail("AuthDenied: a patient may only pay down their own account, not reverse a charge")
         # authcontext-target: (ownership) the value derives an identity whose
         # ownership of the account's own patient is then proven by the
         # identifiedBy link read below -- a forged target only fails closed.
         # The patient is recovered from the account's OWN heldFor topology,
         # never the payload, so a forged claim only fails closed.
         _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
-        # read-posture: (e) relation=heldFor epoch=none -- an account carries
-        # exactly one heldFor link, so this is never a keyspace scan.
-        held_for_page, _ = kv.Links(acct_key, "heldFor", "out")
-        patient_key = None
-        for lk in held_for_page:
-            if not lk.isDeleted:
-                patient_key = lk.targetVertex
-        if patient_key == None:
+        patient_id = held_for_patient_id(acct_key)
+        if patient_id == None:
             fail("AuthDenied: account " + acct_key + " carries no live patient")
-        _, patient_id = parts_of(patient_key, "heldFor target", "patient")
         # read-posture: (e) per-candidate follow-up read off the enumeration
         # above -- the patient id is data-derived, unknowable client-side.
         identified_by = kv.Read("lnk.patient." + patient_id + ".identifiedBy.identity." + target_identity_id)
@@ -494,14 +509,68 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
             fail("AuthDenied: a payment of " + dollars(amount_cents) +
                  " exceeds the outstanding balance of " + dollars(owed_cents))
 
+    # Two ways a charge names an appointment, never both (ClinicDebitAccount
+    # only -- a credit has no visit to name):
+    #   appointmentRef -- this transaction IS the fee the appointment's status
+    #     carries (the settles link clinicNoShowSettlement reads to converge its
+    #     missing_charge / missing_reversal gaps).
+    #   visitRef -- this transaction is FOR the visit (a copay, a procedure), a
+    #     forVisit link no convergence lens walks; only clinicLedgerHistory
+    #     projects it so the history can say which visit a line concerns.
+    # A settles link is only ever written while the appointment's CURRENT
+    # status carries a fee: missing_reversal reads "fee-less status AND a live
+    # settles link" as a correction that owes a reversal, so a settles link
+    # minted against a fee-less appointment would be credited straight back.
+    # The .status read is a declared optionalRead this script's own
+    # derive_reads hydrates whenever the payload carries a well-formed
+    # appointment key, so absence here means no fee (CreateAppointment always
+    # writes .status) -- refused, never assumed.
     appt_key = None
     appt_id = None
+    visit_key = None
+    visit_id = None
+    has_visit_ref = hasattr(p, "visitRef") and getattr(p, "visitRef") != None
     if allow_appointment_ref:
         appt_key = optional_string(p, "appointmentRef")
+        visit_key = optional_string(p, "visitRef")
+        if appt_key != None and visit_key != None:
+            fail("InvalidArgument: visitRef/appointmentRef: a charge is either the fee an appointment carries (appointmentRef) or for a visit (visitRef), not both")
         if appt_key != None:
             _, appt_id = parts_of(appt_key, "appointmentRef", "appointment")
             if not vertex_alive(state, appt_key):
                 fail("UnknownAppointment: " + appt_key)
+            # read-posture: (d) optionalReads -- derived server-side by this
+            # script's own derive_reads(op) for a well-formed appointmentRef
+            # (Contract #2 §2.5 class (g)), and declared statically by
+            # targets.go's missing_charge GapActionSpec.OptionalReads.
+            status_doc = kv.Read(appt_key + ".status")
+            fee_cents = None
+            if status_doc != None and not status_doc.isDeleted:
+                fee_cents = status_doc.data.get("noShowFeeCents")
+            if fee_cents == None or (type(fee_cents) != type(0) and type(fee_cents) != type(0.0)) or fee_cents <= 0:
+                fail("NoFeeToSettle: " + appt_key + " carries no fee in its current status; a charge for a visit names it through visitRef")
+        if visit_key != None:
+            _, visit_id = parts_of(visit_key, "visitRef", "appointment")
+            if not vertex_alive(state, visit_key):
+                fail("UnknownAppointment: " + visit_key)
+            # The visit must be THIS account's patient's: a charge that named a
+            # stranger's appointment would put that visit on this patient's
+            # statement. The patient comes from the account's own heldFor walk,
+            # never the payload.
+            visit_patient_id = held_for_patient_id(acct_key)
+            if visit_patient_id == None:
+                fail("WrongPatient: account " + acct_key + " carries no live patient")
+            # read-posture: (e) per-candidate follow-up read off the heldFor
+            # enumeration in held_for_patient_id -- the patient id is
+            # data-derived, unknowable client-side.
+            for_patient = kv.Read("lnk.appointment." + visit_id + ".forPatient.patient." + visit_patient_id)
+            if for_patient == None or for_patient.isDeleted:
+                fail("WrongPatient: visitRef " + visit_key + " is not this patient's visit")
+    else:
+        if has_visit_ref:
+            fail("InvalidArgument: visitRef: only valid on a debit (charge), not a credit (payment/waiver)")
+        if hasattr(p, "appointmentRef") and getattr(p, "appointmentRef") != None:
+            fail("InvalidArgument: appointmentRef: only valid on a debit (charge), not a credit (payment/waiver)")
 
     # reversesRef (ClinicCreditAccount only): the mirror of appointmentRef
     # above, one level removed — an optional back-reference to the
@@ -519,6 +588,18 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
             _, reverses_id = parts_of(reverses_key, "reversesRef", "clinictransaction")
             if not vertex_alive(state, reverses_key):
                 fail("UnknownTransaction: " + reverses_key)
+            # The reversed charge must be posted to THIS account: a credit on
+            # one account naming a debit on another would retire that debit
+            # from a statement it never paid. The postedTo link key is
+            # deterministic from the two payload keys.
+            # read-posture: (d) optionalReads -- derived server-side by this
+            # script's own derive_reads(op) for a well-formed reversesRef
+            # (Contract #2 §2.5 class (g)); the Weaver missing_reversal
+            # dispatch cannot template a two-column link key, so the
+            # derivation is what declares it there.
+            posted_to = kv.Read("lnk.clinictransaction." + reverses_id + ".postedTo.clinicaccount." + acct_id)
+            if posted_to == None or posted_to.isDeleted:
+                fail("WrongAccount: reversesRef " + reverses_key + " is not posted to this account")
     elif hasattr(p, "reversesRef") and getattr(p, "reversesRef") != None:
         fail("InvalidArgument: reversesRef: only valid on a credit (payment/waiver), not a debit (charge)")
 
@@ -612,6 +693,15 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
         settles_lnk = "lnk.clinictransaction." + tx_id + ".settles.appointment." + appt_id
         mutations.append(make_link(settles_lnk, tx_key, appt_key, "settles", "settles", {}))
 
+    # forVisit: the transaction (later-arriving) is the source, the
+    # pre-existing appointment is the target (Contract #1 §1.1) -- "this
+    # transaction is for this visit". Only written when the caller supplied
+    # visitRef. clinicLedgerHistory projects it as the line's appointmentKey /
+    # visitStartsAt (settlesFee false); no convergence lens reads it.
+    if visit_key != None:
+        for_visit_lnk = "lnk.clinictransaction." + tx_id + ".forVisit.appointment." + visit_id
+        mutations.append(make_link(for_visit_lnk, tx_key, visit_key, "forVisit", "forVisit", {}))
+
     # reverses: the credit (later-arriving) is the source, the pre-existing
     # debit transaction is the target (Contract #1 §1.1). Only written when
     # the caller supplied reversesRef. clinicNoShowSettlement's
@@ -630,8 +720,8 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
 
 NANOID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
 
-def is_clinicaccount_key(key):
-    # Contract #1's whole vertex grammar for a clinicaccount, not a prefix test.
+def is_vertex_key_of(key, vtx_type):
+    # Contract #1's whole vertex grammar for one vertex type, not a prefix test.
     # derive_reads returns keys the Processor validates against that grammar,
     # answering a malformed one with a DeriveReadsInvalid hydration fault raised
     # BEFORE the operation's own validation runs. Deriving straight off an
@@ -642,7 +732,7 @@ def is_clinicaccount_key(key):
     if key == None or type(key) != type(""):
         return False
     parts = key.split(".")
-    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "clinicaccount":
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != vtx_type:
         return False
     if len(parts[2]) != 20:
         return False
@@ -650,6 +740,15 @@ def is_clinicaccount_key(key):
         if ch not in NANOID_ALPHABET:
             return False
     return True
+
+def is_clinicaccount_key(key):
+    return is_vertex_key_of(key, "clinicaccount")
+
+def is_appointment_key(key):
+    return is_vertex_key_of(key, "appointment")
+
+def is_clinictransaction_key(key):
+    return is_vertex_key_of(key, "clinictransaction")
 
 def derive_reads(op):
     # Contract #2 §2.5 class (g). The Processor runs this at the head of step 4
@@ -674,6 +773,14 @@ def derive_reads(op):
     # would block every entry against such an account rather than let a self-pay
     # backfill it.
     #
+    # The same channel carries a ClinicDebitAccount's appointmentRef .status
+    # (post_entry refuses NoFeeToSettle unless that aspect carries a fee) and a
+    # ClinicCreditAccount's reversesRef postedTo link (WrongAccount unless the
+    # charge is on this account): guards whose reads the submitter could leave
+    # undeclared would fall through to live reads the caller never
+    # conditioned. optionalReads because the refusal is what absence means --
+    # a HydrationMiss would say the same thing less clearly.
+    #
     # The op argument is a struct -- op.operationType, op.actor, op.payload
     # (also a struct). No kv, no nanoid: both are fail-closed stubs in this
     # pass, and a derivation that reads state is a read, not a derivation.
@@ -686,7 +793,20 @@ def derive_reads(op):
     acct_key = optional_string(op.payload, "accountKey")
     if not is_clinicaccount_key(acct_key):
         return {}
-    return {"optionalReads": [acct_key + ".balance"]}
+    optional_reads = [acct_key + ".balance"]
+    if ot == "ClinicDebitAccount":
+        appt_key = optional_string(op.payload, "appointmentRef")
+        if is_appointment_key(appt_key):
+            optional_reads.append(appt_key + ".status")
+    else:
+        # The postedTo link post_entry reads to prove reversesRef is a charge on
+        # THIS account (WrongAccount) -- deterministic from the two payload
+        # keys, so it is declared here rather than read live.
+        reverses_key = optional_string(op.payload, "reversesRef")
+        if is_clinictransaction_key(reverses_key):
+            optional_reads.append("lnk.clinictransaction." + reverses_key.split(".")[2] +
+                                  ".postedTo.clinicaccount." + acct_key.split(".")[2])
+    return {"optionalReads": optional_reads}
 
 def execute(state, op):
     ot = op.operationType

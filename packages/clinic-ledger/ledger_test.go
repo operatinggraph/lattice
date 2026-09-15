@@ -16,10 +16,13 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"go.starlark.net/starlark"
+	"go.starlark.net/starlarkstruct"
 
 	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/starlarksandbox"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
 	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
@@ -632,11 +635,68 @@ func createAppointment(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 	return "vtx.appointment." + nanoIDFromRequestID(reqID)
 }
 
-// TestDebitAccount_AppointmentRefWritesSettlesLink (test 3). A DebitAccount
-// carrying appointmentRef writes the settles audit link (transaction→
-// appointment) the clinicNoShowSettlement lens reads; a plain DebitAccount
-// with no appointmentRef writes no such link (byte-for-byte the existing
-// self-pay shape).
+// markNoShow submits SetAppointmentStatus{noShow} for apptKey at submittedAt
+// (at or after the visit's startsAt — the op refuses NotYetStarted before it),
+// declaring the reads clinic-domain's own descriptor names for a terminal
+// transition. clinic-domain writes noShowFeeCents (2500 by default) onto the
+// .status aspect, which is the fee post_entry's appointmentRef verifies.
+func markNoShow(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, apptKey, providerKey, patientKey, submittedAt string) {
+	t.Helper()
+	apptID := apptKey[len("vtx.appointment."):]
+	providerID := providerKey[len("vtx.provider."):]
+	patientID := patientKey[len("vtx.patient."):]
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetAppointmentStatus",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "appointment",
+		Payload: json.RawMessage(`{"appointmentKey":"` + apptKey + `","status":"noShow","provider":"` + providerKey +
+			`","patient":"` + patientKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{apptKey, apptKey + ".schedule",
+				"lnk.appointment." + apptID + ".withProvider.provider." + providerID,
+				"lnk.appointment." + apptID + ".forPatient.patient." + patientID},
+			OptionalReads: []string{apptKey + ".status"},
+			Enumerations:  testutil.DeclaredEnumerations("SetAppointmentStatus", ledgerActorKey, clinicdomain.OpMetas()),
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// apptDebitEnv builds one operator-voice ClinicDebitAccount naming an
+// appointment through refField ("appointmentRef" or "visitRef"), declaring
+// the shape the Weaver / descriptor dispatchers send: both vertex keys, the
+// account's .balance, for appointmentRef the appointment's .status, and for
+// visitRef the account's heldFor walk the descriptor declares (the patient
+// check's enumeration).
+func apptDebitEnv(label, acctKey, refField, apptKey string) *processor.OperationEnvelope {
+	hint := &processor.ContextHint{Reads: []string{acctKey, apptKey}, OptionalReads: []string{acctKey + ".balance"}}
+	if refField == "appointmentRef" {
+		hint.OptionalReads = append(hint.OptionalReads, apptKey+".status")
+	} else {
+		hint.Enumerations = []processor.EnumerationHint{{Hub: acctKey, Relation: "heldFor", Direction: "out"}}
+	}
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicDebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:00:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"` + refField + `":"` + apptKey + `"}`),
+		ContextHint:   hint,
+	}
+}
+
+// TestDebitAccount_AppointmentRefWritesSettlesLink. A DebitAccount carrying
+// appointmentRef against an appointment whose status carries a fee (a noShow)
+// writes the settles audit link (transaction→appointment) the
+// clinicNoShowSettlement lens reads; a plain DebitAccount with no
+// appointmentRef writes no such link (byte-for-byte the existing self-pay
+// shape). The positive vector for TestDebitAccount_AppointmentRefNoFeeRefused.
 func TestDebitAccount_AppointmentRefWritesSettlesLink(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "apptref")
@@ -646,22 +706,13 @@ func TestDebitAccount_AppointmentRefWritesSettlesLink(t *testing.T) {
 	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctapref0001", patientKey)
 	apptKey := createAppointment(t, ctx, conn, cp, cons, "mkapptapref0000001", patientKey, providerKey, "2026-06-25T15:00:00Z", "2026-06-25T15:30:00Z")
 	apptID := apptKey[len("vtx.appointment."):]
+	markNoShow(t, ctx, conn, cp, cons, "noshowapref00000001", apptKey, providerKey, patientKey, "2026-06-25T15:30:00Z")
 
-	debitReqID := testutil.GenReqID("debitapref0000000001")
-	debitEnv := &processor.OperationEnvelope{
-		RequestID:     debitReqID,
-		Lane:          processor.LaneDefault,
-		OperationType: "ClinicDebitAccount",
-		Actor:         ledgerActorKey,
-		SubmittedAt:   "2026-06-26T09:00:00Z",
-		Class:         "clinictransaction",
-		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"appointmentRef":"` + apptKey + `"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{acctKey, apptKey, acctKey + ".balance"}},
-	}
+	debitEnv := apptDebitEnv("debitapref0000000001", acctKey, "appointmentRef", apptKey)
 	testutil.PublishOp(t, conn, debitEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
-	settlesLnk := "lnk.clinictransaction." + nanoIDFromRequestID(debitReqID) + ".settles.appointment." + apptID
+	settlesLnk := "lnk.clinictransaction." + nanoIDFromRequestID(debitEnv.RequestID) + ".settles.appointment." + apptID
 	if !keyExists(t, ctx, conn, settlesLnk) {
 		t.Fatalf("settles link must exist: %s", settlesLnk)
 	}
@@ -684,6 +735,133 @@ func TestDebitAccount_AppointmentRefWritesSettlesLink(t *testing.T) {
 	if keyExists(t, ctx, conn, plainSettlesLnk) {
 		t.Fatalf("a plain DebitAccount with no appointmentRef must write no settles link, found %s", plainSettlesLnk)
 	}
+}
+
+// TestDebitAccount_AppointmentRefNoFeeRefused: appointmentRef against an
+// appointment whose current status carries no fee (a scheduled visit) is
+// refused NoFeeToSettle — a settles link on a fee-less appointment would read
+// to clinicNoShowSettlement's missing_reversal as a correction owed a credit.
+// The positive vector is TestDebitAccount_AppointmentRefWritesSettlesLink.
+func TestDebitAccount_AppointmentRefNoFeeRefused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "apptrefnofee")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatarnf000000001", "Ines Barbosa")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprovarnf00000001", "Dr. Oyelaran", "family-medicine")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctarnf00001", patientKey)
+	apptKey := createAppointment(t, ctx, conn, cp, cons, "mkapptarnf000000001", patientKey, providerKey, "2026-06-25T15:00:00Z", "2026-06-25T15:30:00Z")
+
+	assertRejectedBecause(t, ctx, conn, cp, cons, apptDebitEnv("debitarnf0000000001", acctKey, "appointmentRef", apptKey), "NoFeeToSettle")
+}
+
+// TestDebitAccount_AppointmentRefStatusUndeclared submits the two
+// appointmentRef vectors above with a hint that never mentions .status — the
+// bare vertex keys post_entry's own vertex_alive checks need and nothing else,
+// the shape a client that never read the descriptor sends. The refusal and the
+// acceptance must both hold: the fee check reads .status through the key
+// derive_reads declares on the submitter's behalf, not through anything the
+// submitter chose to declare. (A hint with no keys at all fails
+// vertex_alive's UnknownAccount before the fee is ever read, so the vertex
+// keys are the floor this test stands on.) TestDeriveReads_* pins the
+// derivation itself, since a live read would answer this test the same way.
+func TestDebitAccount_AppointmentRefStatusUndeclared(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "apptrefundecl")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpataru000000001", "Kofi Mensah")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprovaru00000001", "Dr. Petrova", "family-medicine")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctaru00001", patientKey)
+	undeclared := func(label, apptKey string) *processor.OperationEnvelope {
+		env := apptDebitEnv(label, acctKey, "appointmentRef", apptKey)
+		env.ContextHint = &processor.ContextHint{Reads: []string{acctKey, apptKey}}
+		return env
+	}
+
+	scheduledKey := createAppointment(t, ctx, conn, cp, cons, "mkapptaru000000001", patientKey, providerKey, "2026-06-25T15:00:00Z", "2026-06-25T15:30:00Z")
+	assertRejectedBecause(t, ctx, conn, cp, cons, undeclared("debitaru0000000001", scheduledKey), "NoFeeToSettle")
+
+	noShowKey := createAppointment(t, ctx, conn, cp, cons, "mkapptaru000000002", patientKey, providerKey, "2026-06-25T16:00:00Z", "2026-06-25T16:30:00Z")
+	markNoShow(t, ctx, conn, cp, cons, "noshowaru000000001", noShowKey, providerKey, patientKey, "2026-06-25T16:30:00Z")
+	env := undeclared("debitaru0000000002", noShowKey)
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	settlesLnk := "lnk.clinictransaction." + nanoIDFromRequestID(env.RequestID) + ".settles.appointment." + noShowKey[len("vtx.appointment."):]
+	if !keyExists(t, ctx, conn, settlesLnk) {
+		t.Fatalf("settles link must exist: %s", settlesLnk)
+	}
+}
+
+// TestDebitAccount_VisitRefWritesForVisitLink: a charge FOR a visit (a copay)
+// names it through visitRef and writes the forVisit link — against the
+// appointment type, transaction as source — and no settles link, so
+// clinicNoShowSettlement never reads the copay as the visit's fee. The visit
+// needs no fee: it is scheduled.
+func TestDebitAccount_VisitRefWritesForVisitLink(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "visitref")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatvref000000001", "Liu Wen")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprovvref00000001", "Dr. Adeyemi", "family-medicine")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctvref00001", patientKey)
+	apptKey := createAppointment(t, ctx, conn, cp, cons, "mkapptvref000000001", patientKey, providerKey, "2026-06-25T15:00:00Z", "2026-06-25T15:30:00Z")
+	apptID := apptKey[len("vtx.appointment."):]
+
+	env := apptDebitEnv("debitvref0000000001", acctKey, "visitRef", apptKey)
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	txID := nanoIDFromRequestID(env.RequestID)
+
+	forVisitLnk := "lnk.clinictransaction." + txID + ".forVisit.appointment." + apptID
+	if !keyExists(t, ctx, conn, forVisitLnk) {
+		t.Fatalf("forVisit link must exist: %s", forVisitLnk)
+	}
+	lnk := readDoc(t, ctx, conn, forVisitLnk)
+	if lnk["sourceVertex"] != "vtx.clinictransaction."+txID || lnk["targetVertex"] != apptKey {
+		t.Fatalf("forVisit link = %v, want source %s target %s", lnk, "vtx.clinictransaction."+txID, apptKey)
+	}
+	settlesLnk := "lnk.clinictransaction." + txID + ".settles.appointment." + apptID
+	if keyExists(t, ctx, conn, settlesLnk) {
+		t.Fatalf("a visitRef charge must write no settles link, found %s", settlesLnk)
+	}
+}
+
+// TestDebitAccount_VisitRefValidation: visitRef and appointmentRef together
+// are refused (a line is the fee OR for a visit); visitRef on a credit is
+// refused; a visitRef naming no live appointment is UnknownAppointment.
+func TestDebitAccount_VisitRefValidation(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "visitrefval")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatvrv000000001", "Aiko Tanaka")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "mkprovvrv00000001", "Dr. Haddad", "family-medicine")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctvrv00001", patientKey)
+	apptKey := createAppointment(t, ctx, conn, cp, cons, "mkapptvrv000000001", patientKey, providerKey, "2026-06-25T15:00:00Z", "2026-06-25T15:30:00Z")
+	markNoShow(t, ctx, conn, cp, cons, "noshowvrv000000001", apptKey, providerKey, patientKey, "2026-06-25T15:30:00Z")
+
+	both := apptDebitEnv("debitvrv0000000001", acctKey, "appointmentRef", apptKey)
+	both.Payload = json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"appointmentRef":"` + apptKey + `","visitRef":"` + apptKey + `"}`)
+	assertRejectedBecause(t, ctx, conn, cp, cons, both, "InvalidArgument: visitRef/appointmentRef")
+
+	credit := apptDebitEnv("creditvrv000000001", acctKey, "visitRef", apptKey)
+	credit.OperationType = "ClinicCreditAccount"
+	assertRejectedBecause(t, ctx, conn, cp, cons, credit, "InvalidArgument: visitRef")
+
+	// The descriptor declares {payload.visitRef} under reads, so a client's
+	// own submit against an absent visit fails closed at step 4
+	// (HydrationMiss) before the script runs — the shape
+	// TestDebitAccount_UnknownAppointmentRefRejected pins for appointmentRef.
+	// Declaring the key absence-tolerant here is what lets the script's own
+	// vertex_alive refusal be the one under test.
+	const absentAppt = "vtx.appointment.CLABSENTAPPTHJKMNPQR"
+	unknown := apptDebitEnv("debitvrv0000000002", acctKey, "visitRef", absentAppt)
+	unknown.ContextHint = &processor.ContextHint{Reads: []string{acctKey}, OptionalReads: []string{acctKey + ".balance", absentAppt}}
+	assertRejectedBecause(t, ctx, conn, cp, cons, unknown, "UnknownAppointment")
+
+	// Another patient's visit is not this patient's: the charge would put a
+	// stranger's appointment on this statement (WrongPatient).
+	otherPatient := createPatient(t, ctx, conn, cp, cons, "mkpatvrv000000002", "Bram Visser")
+	otherAppt := createAppointment(t, ctx, conn, cp, cons, "mkapptvrv000000002", otherPatient, providerKey, "2026-06-26T15:00:00Z", "2026-06-26T15:30:00Z")
+	assertRejectedBecause(t, ctx, conn, cp, cons, apptDebitEnv("debitvrv0000000003", acctKey, "visitRef", otherAppt), "WrongPatient")
 }
 
 // TestDebitAccount_UnknownAppointmentRefRejected rejects a DebitAccount whose
@@ -1269,6 +1447,78 @@ func TestCreditAccount_ConsumerSelfScope_RejectedWaiver(t *testing.T) {
 	}
 }
 
+// TestCreditAccount_ConsumerSelfScope_RejectedReversesRef: a self-scoped
+// payment may not name the charge it pays as reversed — the reverses link is
+// what disarms clinicNoShowSettlement's missing_reversal, so a patient paying
+// their own no-show fee through it would forfeit the refund a later status
+// correction owes them. The positive self-pay vector is
+// TestCreditAccount_ConsumerSelfScope_Allowed.
+func TestCreditAccount_ConsumerSelfScope_RejectedReversesRef(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselfreverses")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	patientKey := seedPatientWithIdentity(t, ctx, conn, "CLLEDGERSELFREVRPATN", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditselfrevsetup01", patientKey)
+	debitEnv := staffDebitEnv("creditselfrevdebit01", acctKey, 2500)
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	debitTxKey := "vtx.clinictransaction." + nanoIDFromRequestID(debitEnv.RequestID)
+
+	env := selfPayEnv("creditselfrevpay0001", acctKey, 2500)
+	env.Payload = json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":2500,"reversesRef":"` + debitTxKey + `"}`)
+	// The charge is declared, so the only thing standing between this
+	// envelope and a reverses link is the self-leg refusal itself.
+	env.ContextHint.Reads = append(env.ContextHint.Reads, debitTxKey)
+	assertRejectedBecause(t, ctx, conn, cp, cons, env, "AuthDenied: a patient may only pay down their own account, not reverse a charge")
+}
+
+// TestCreditAccount_ReversesRefOtherAccountRejected: reversesRef must name a
+// charge posted to THIS account — a credit on one account naming a debit on
+// another would retire that debit from a statement it never paid
+// (WrongAccount). The positive vector is
+// TestCreditAccount_ReversesRefWritesReversesLink.
+func TestCreditAccount_ReversesRefOtherAccountRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "reversesotheracct")
+
+	patientA := createPatient(t, ctx, conn, cp, cons, "mkpatrroa000000001", "Nadia Ferreira")
+	acctA := createAccount(t, ctx, conn, cp, cons, "createacctrroa00001", patientA)
+	patientB := createPatient(t, ctx, conn, cp, cons, "mkpatrroa000000002", "Yusuf Demir")
+	acctB := createAccount(t, ctx, conn, cp, cons, "createacctrroa00002", patientB)
+	debitEnv := staffDebitEnv("debitrroa0000000001", acctB, 2500)
+	testutil.PublishOp(t, conn, debitEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	debitOnB := "vtx.clinictransaction." + nanoIDFromRequestID(debitEnv.RequestID)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("creditrroa000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ClinicCreditAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-06-26T09:05:00Z",
+		Class:         "clinictransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctA + `","amountCents":2500,"reason":"waiver","reversesRef":"` + debitOnB + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctA, debitOnB}, OptionalReads: []string{acctA + ".balance"}},
+	}
+	assertRejectedBecause(t, ctx, conn, cp, cons, env, "WrongAccount")
+}
+
+// TestCreditAccount_AppointmentRefRejected: appointmentRef on a credit is
+// refused rather than ignored, the way visitRef on a credit is.
+func TestCreditAccount_AppointmentRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditapptref")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "mkpatcar000000001", "Hana Sato")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctcar00001", patientKey)
+	env := apptDebitEnv("creditcar000000001", acctKey, "appointmentRef", "vtx.appointment.CLABSENTAPPTHJKMNPQR")
+	env.OperationType = "ClinicCreditAccount"
+	env.ContextHint = &processor.ContextHint{Reads: []string{acctKey}, OptionalReads: []string{acctKey + ".balance"}}
+	assertRejectedBecause(t, ctx, conn, cp, cons, env, "InvalidArgument: appointmentRef: only valid on a debit")
+}
+
 // --- The account's maintained .balance running total ----------------------
 
 // balanceCents reads back the account's own .balance aspect — the O(1) running
@@ -1585,14 +1835,117 @@ func TestDeriveReads_BalanceKey(t *testing.T) {
 			t.Fatalf("derive_reads does not mention %q — that op's .balance update would be unconditioned whenever its submitter omits the declaration", want)
 		}
 	}
-	if !strings.Contains(derive, `{"optionalReads": [acct_key + ".balance"]}`) {
+	if !strings.Contains(derive, `optional_reads = [acct_key + ".balance"]`) || !strings.Contains(derive, `{"optionalReads": optional_reads}`) {
 		t.Fatalf("derive_reads no longer returns the account's .balance under optionalReads:\n%s", derive)
+	}
+	if !strings.Contains(derive, `optional_reads.append(appt_key + ".status")`) {
+		t.Fatalf("derive_reads no longer returns the appointmentRef's .status — the NoFeeToSettle guard would read a key the submitter never conditioned:\n%s", derive)
 	}
 	// optionalReads, never reads: a legacy account carries no .balance, and a
 	// required read's absence is a HydrationMiss on the very branch the replay
 	// exists for.
 	if strings.Contains(derive, `"reads"`) {
 		t.Fatalf("derive_reads returns a hard `reads` entry — every legacy account would HydrationMiss:\n%s", derive)
+	}
+}
+
+// runDeriveReads executes the clinictransaction script's derive_reads under
+// the sandbox with the same op shape the Processor hands it (a struct whose
+// payload is a struct of the JSON fields) and returns the optionalReads it
+// derives. The globals are the names the script resolves at compile time;
+// derive_reads calls none of them, and the Processor's own pre-pass binds
+// them to failing stubs for the same reason.
+func runDeriveReads(t *testing.T, operationType string, payload map[string]any) []string {
+	t.Helper()
+	var script string
+	for _, d := range clinicledger.DDLs() {
+		if d.CanonicalName == "clinictransaction" {
+			script = d.Script
+		}
+	}
+	fields := starlark.StringDict{}
+	for k, v := range payload {
+		switch x := v.(type) {
+		case string:
+			fields[k] = starlark.String(x)
+		case int:
+			fields[k] = starlark.MakeInt(x)
+		default:
+			t.Fatalf("runDeriveReads: unsupported payload value %T", v)
+		}
+	}
+	op := starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
+		"operationType":     starlark.String(operationType),
+		"actor":             starlark.String(ledgerActorKey),
+		"payload":           starlarkstruct.FromStringDict(starlarkstruct.Default, fields),
+		"authContextTarget": starlark.String(""),
+	})
+	globals := starlark.StringDict{"state": starlark.None, "op": op, "ddl": starlark.None, "nanoid": starlark.None,
+		"crypto": starlark.None, "time": starlark.None, "json": starlark.None, "kv": starlark.None, "primordialActor": starlark.None}
+	out, sErr := starlarksandbox.Execute(context.Background(), script, "derive_reads", starlark.Tuple{op}, globals, starlarksandbox.Budget{Wall: 5 * time.Second})
+	if sErr != nil {
+		t.Fatalf("derive_reads(%s): %s", operationType, sErr.Message)
+	}
+	dict, ok := out.(*starlark.Dict)
+	if !ok {
+		t.Fatalf("derive_reads returned %s, want a dict", out.Type())
+	}
+	if _, found, _ := dict.Get(starlark.String("reads")); found {
+		t.Fatalf("derive_reads returned a hard `reads` entry: %v", out)
+	}
+	v, found, _ := dict.Get(starlark.String("optionalReads"))
+	if !found {
+		return nil
+	}
+	list, ok := v.(*starlark.List)
+	if !ok {
+		t.Fatalf("optionalReads is %s, want a list", v.Type())
+	}
+	var keys []string
+	for i := 0; i < list.Len(); i++ {
+		keys = append(keys, string(list.Index(i).(starlark.String)))
+	}
+	return keys
+}
+
+// TestDeriveReads_AppointmentStatus runs the derivation itself: a
+// ClinicDebitAccount whose appointmentRef is a well-formed appointment key
+// derives that appointment's .status beside the account's .balance; a
+// ClinicCreditAccount whose reversesRef is a well-formed transaction key
+// derives the postedTo link post_entry's WrongAccount check reads; a
+// malformed ref derives only .balance (post_entry's own parts_of raises the
+// InvalidArgument, never a DeriveReadsInvalid fault); neither op derives the
+// other's key. Behaviourally invisible
+// otherwise — an undeclared kv.Read falls through to a live GET that returns
+// the same document — so the derivation's output is what this pins.
+func TestDeriveReads_AppointmentStatus(t *testing.T) {
+	const acctKey = "vtx.clinicaccount.CLDRACCTHJKMNPQRSTUV"
+	const apptKey = "vtx.appointment.CLDRAPPTHJKMNPQRSTUV"
+	const txKey = "vtx.clinictransaction.CLDRTXNHJKMNPQRSTUVW"
+	cases := []struct {
+		name    string
+		op      string
+		payload map[string]any
+		want    []string
+	}{
+		{"debit with appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey + ".balance", apptKey + ".status"}},
+		{"debit with visitRef derives no status", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "visitRef": apptKey}, []string{acctKey + ".balance"}},
+		{"debit with malformed appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.appointment.short"}, []string{acctKey + ".balance"}},
+		{"debit with wrong-type appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.patient.CLDRAPPTHJKMNPQRSTUV"}, []string{acctKey + ".balance"}},
+		{"plain debit", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500}, []string{acctKey + ".balance"}},
+		{"credit with appointmentRef never derives status", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey + ".balance"}},
+		{"malformed accountKey derives nothing", "ClinicDebitAccount", map[string]any{"accountKey": "nope", "amountCents": 2500, "appointmentRef": apptKey}, nil},
+		{"credit with reversesRef derives the postedTo link", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey + ".balance", "lnk.clinictransaction.CLDRTXNHJKMNPQRSTUVW.postedTo.clinicaccount.CLDRACCTHJKMNPQRSTUV"}},
+		{"credit with malformed reversesRef", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": "vtx.clinictransaction.short"}, []string{acctKey + ".balance"}},
+		{"debit with reversesRef derives no link", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey + ".balance"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runDeriveReads(t, tc.op, tc.payload)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("derive_reads(%s, %v) = %v, want %v", tc.op, tc.payload, got, tc.want)
+			}
+		})
 	}
 }
 

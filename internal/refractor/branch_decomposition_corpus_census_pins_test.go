@@ -35,7 +35,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"clinicAppointmentsRead":         {"g3/o3!no-aggregating-item", 0, 3},
 	"clinicEncountersRead":           {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicIdentitiesRead":           {"g0/o0!no-aggregating-item", 0, 0},
-	"clinicLedgerHistory":            {"g1/o1!no-aggregating-item", 0, 1},
+	"clinicLedgerHistory":            {"g3/o3!no-aggregating-item", 0, 3},
 	"clinicNoShowSettlement":         {"g2/o3[credit,tx] g0/o0!no-aggregating-item", 1, 2},
 	"clinicPatientAccounts":          {"g1/o1!no-aggregating-item", 0, 1},
 	"clinicPatientReadGrants":        {"g0/o0!no-aggregating-item", 0, 0},
@@ -190,7 +190,7 @@ var decomposingCorpusLenses = []string{
 // siblingBranchGroupLenses is the design's §2 claim made executable: the lenses
 // holding two or more SIBLING branch groups in one stage. The design said
 // FOURTEEN by eye and the fire brief's coarse scan bounded it above at
-// thirty-two clause-counted literals; the analysis derives TWENTY-NINE.
+// thirty-two clause-counted literals; the analysis derives THIRTY-THREE.
 var siblingBranchGroupLenses = []string{
 	"applicantOnboarding",
 	"appointmentReminders",
@@ -200,6 +200,7 @@ var siblingBranchGroupLenses = []string{
 	"clauseSatisfaction",
 	"clinicAppointments",
 	"clinicAppointmentsRead",
+	"clinicLedgerHistory",
 	"clinicNoShowSettlement",
 	"clinicPatientsRead",
 	"edgeIdentity",

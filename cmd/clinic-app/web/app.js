@@ -40,6 +40,7 @@ const state = {
   mySeries: [], // the selected patient's own recurring visit series (PROTECTED, patient-self RLS, D1.5)
   mySeriesProjectionHealthy: true, // same signal as apptsProjectionHealthy, for /api/my-visit-series
   ledger: null, // the selected patient's last-loaded /api/ledger response (billing history + balance)
+  arrears: new Map(), // patientKey -> GET /api/staff/arrears row, front-desk sessions only (loadArrears). Reset on load, refreshed after every ledger write — a missing entry reads as "not a debtor", never a stuck stale one.
   patient: null, // the patient key whose record is on screen (a data selection, not an actor choice)
   view: "book",
   highlight: null,
@@ -704,8 +705,10 @@ function nameForPatient(key) {
 // linked identity yet, a linked identity missing that field, or a shredded one.
 function renderPatientContact() {
   const el = $("#patient-contact");
+  const arrearsEl = $("#patient-arrears");
   renderConnectLogin();
   renderResetLogin();
+  if (arrearsEl) arrearsEl.textContent = state.patient ? arrearsBadgeText(state.arrears.get(state.patient)) : "";
   if (!el) return;
   const m = state.patients.find((p) => p.patientKey === state.patient);
   if (!m) {
@@ -777,6 +780,30 @@ async function loadPatients(q) {
   syncBookPatient();
   applySelfPatientLock();
   renderSignedInAs();
+  // The unfiltered call is the roster's first load for this session — a
+  // front-desk search keystroke narrows patientOptions only and re-fetching
+  // arrears on every debounce would be wasted work for a map that only the
+  // ledger and the roster/contact badges below ever changed.
+  if (!query && isFrontDesk()) loadArrears();
+}
+
+// loadArrears (re)builds state.arrears from GET /api/staff/arrears —
+// front-desk sessions only; a patient's own session sees its balance on the
+// ledger panel already and holds no roster to badge. Best-effort: a fetch
+// failure clears the map rather than leaving a stale one, since a missing
+// badge is the safe failure and a stuck stale one is not. Re-paints the
+// surfaces the map feeds directly, since those may already have rendered
+// (synchronously, off the pre-fetch map) by the time this resolves.
+async function loadArrears() {
+  try {
+    const data = await appGet("/api/staff/arrears");
+    state.arrears = new Map((data.arrears || []).map((row) => [row.patientKey, row]));
+  } catch (_) {
+    state.arrears = new Map();
+  }
+  populatePatientSelect();
+  renderPatientContact();
+  if (state.ledger) renderLedger(state.ledger);
 }
 
 // applySelfPatientLock locks the header's patient picker to the signed-in
@@ -840,7 +867,8 @@ function populatePatientSelect() {
   for (const p of options) {
     const o = document.createElement("option");
     o.value = p.patientKey;
-    o.textContent = p.name;
+    const badge = arrearsBadgeText(state.arrears.get(p.patientKey));
+    o.textContent = p.name + (badge ? " — " + badge : "");
     sel.append(o);
   }
   const values = options.map((p) => p.patientKey);
@@ -3114,6 +3142,15 @@ async function submitBook(ev) {
   }
   payload.site = site;
 
+  // Courtesy only — CreateAppointment enforces nothing about arrears,
+  // whoever submits. Asked before the button is disabled so declining leaves
+  // the form exactly as it was (wellness's bookSelectedGuest/bookMemberIn
+  // posture, app.js:1673-1681).
+  const overduePrompt = overdueBookingPrompt(nameForPatient(state.patient), state.arrears.get(state.patient));
+  if (overduePrompt && !window.confirm(overduePrompt)) {
+    return;
+  }
+
   const asSelf = actingAsSelf();
 
   const submit = $("#book-submit");
@@ -3220,6 +3257,7 @@ function apptMatchesFilter(a, filter) {
 }
 
 function renderAppts() {
+  populateVisitPicker();
   const grid = $("#appts");
   const empty = $("#appts-empty");
   grid.innerHTML = "";
@@ -3841,6 +3879,34 @@ function moneyAmount(cents) {
   return typeof cents === "number" ? "$" + (cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
 }
 
+// arrearsBadgeText renders one GET /api/staff/arrears row as the short "owes
+// $25.00 · 3 days overdue" the roster select, the patient-contact line, and
+// the ledger balance header all append beside a debtor — "" for no row (not
+// yet fetched, or the patient owes nothing), the common case, so a caller can
+// append the result unconditionally. Mirrors wellness's arrearsBadgeText
+// (cmd/wellness-app/web/app.js:2915).
+function arrearsBadgeText(row) {
+  if (!row || !(Number(row.balanceCents) > 0)) return "";
+  let text = "owes " + moneyAmount(row.balanceCents);
+  if (row.isOverdue) {
+    const days = Number(row.daysOverdue) || 0;
+    text += " · " + days + (days === 1 ? " day" : " days") + " overdue";
+  }
+  return text;
+}
+
+// overdueBookingPrompt is the confirm() message submitBook shows before
+// booking an overdue patient — "" when row is absent or not overdue, so the
+// caller can gate window.confirm on the return value being non-empty rather
+// than re-deriving the overdue check itself. Mirrors wellness's
+// bookSelectedGuest/bookMemberIn confirm wording (app.js:1673-1681).
+function overdueBookingPrompt(name, row) {
+  if (!row || !row.isOverdue) return "";
+  const days = Number(row.daysOverdue) || 0;
+  return name + " owes " + moneyAmount(row.balanceCents) + ", " + days + (days === 1 ? " day" : " days") +
+    " overdue. Book them anyway?";
+}
+
 // customerMemo strips a raw entity key from a ledger memo before it reaches
 // a customer surface — a memo is free text an operator typed, so nothing
 // stops one from embedding a bare NanoID (2026-08-29: a remediation memo did
@@ -3894,38 +3960,205 @@ async function loadLedger() {
 
 // renderLedger paints the balance + transaction list from the last loaded
 // /api/ledger response.
+// localDate renders an RFC3339 instant as a local calendar date the same way
+// every ledger-line date already does — used for postedAt/dueAt/visitStartsAt
+// alike so an instant is never rendered UTC-sliced in one place and local in
+// another beside it.
+function localDate(instant) {
+  const d = new Date(instant);
+  return isNaN(d) ? instant : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+// ledgerLineLabel renders one ledger row's full display line: date, signed
+// amount, memo, and visit reference, plus the row's own deriveStatement
+// annotation — a debit's open/due/overdue state, or a reversing credit's
+// named charge. byKey resolves a credit's reversesKey to the debit row it
+// names (memo + date), since that fact lives on the OTHER row, not this one;
+// an unresolvable reversesKey (the named row fell outside this response, or
+// is gone) still labels the line "reverses charge" rather than silently
+// dropping the annotation. A debit with no open remainder reads "settled"
+// rather than "paid" — a debit closed by a waiver or a reversal moved no
+// cash, and the line must not claim it did.
+function ledgerLineLabel(t, byKey) {
+  const isWaiver = t.type === "credit" && t.reason === "waiver";
+  const sign = t.type === "debit" ? "+" : "−";
+  let line = localDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents) +
+    (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "");
+  if (t.visitStartsAt) {
+    line += " (visit " + localDate(t.visitStartsAt) + ")";
+  }
+  if (t.type === "debit") {
+    if (t.openCents > 0) {
+      const openAmt = moneyAmount(t.openCents);
+      if (t.isOverdue) {
+        const days = Number(t.daysOverdue) || 0;
+        line += " · open " + openAmt + " · " + days + (days === 1 ? " day" : " days") + " overdue";
+      } else if (t.dueAt) {
+        line += " · open " + openAmt + " · due " + localDate(t.dueAt);
+      } else {
+        line += " · open " + openAmt;
+      }
+    } else {
+      line += " · settled";
+    }
+  } else if (t.reversesKey) {
+    const rt = byKey && typeof byKey.get === "function" ? byKey.get(t.reversesKey) : undefined;
+    const name = rt && rt.memo ? customerMemo(rt.memo) : "charge";
+    line += rt && rt.postedAt ? " · reverses " + name + " of " + localDate(rt.postedAt) : " · reverses " + name;
+  }
+  return line;
+}
+
+// visitPickerOptions lists the patient's own visits a copay can be posted
+// against through the Charge form's "For visit" picker: not cancelled/
+// no-show (nothing to charge against a visit that never happened as
+// scheduled) — the op itself accepts any alive appointment of this patient,
+// so excluding a checked-in visit that hasn't reached its scheduled start
+// (checkedIn carries no clock of its own, and a check-in copay is exactly
+// the moment this picker exists for) would refuse the primary use of the
+// picker as a courtesy narrowing. Newest first, capped at 20 so a
+// long-history patient's select stays usable.
+function visitPickerOptions(appts) {
+  return (appts || [])
+    .filter((a) => a.status !== "cancelled" && a.status !== "noShow")
+    .sort((a, b) => Date.parse(b.startsAt) - Date.parse(a.startsAt))
+    .slice(0, 20)
+    .map((a) => ({
+      value: a.appointmentKey,
+      label: localDate(a.startsAt) + " " + new Date(a.startsAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) +
+        " · " + (a.providerName || shortKey(a.providerKey)) + " · " + a.status,
+    }));
+}
+
+// openChargeOptions lists a statement's still-open debits (openCents > 0) as
+// the Waive form's "charge to waive" choices — oldest first, the same order
+// deriveStatement itself ages the FIFO queue by, so the charge that has been
+// open longest leads the picker.
+function openChargeOptions(transactions) {
+  return (transactions || [])
+    .filter((t) => t.type === "debit" && t.openCents > 0)
+    .sort((a, b) => (a.postedAt !== b.postedAt ? (a.postedAt < b.postedAt ? -1 : 1) : (a.transactionKey < b.transactionKey ? -1 : 1)))
+    .map((t) => ({
+      value: t.transactionKey,
+      label: localDate(t.postedAt) + " · " + moneyAmount(t.openCents) + " remaining" + (t.memo ? " — " + customerMemo(t.memo) : ""),
+    }));
+}
+
+// defaultWaiveTarget picks the Waive form's default selection from the open
+// debits a patient statement offers: the single open charge when there is
+// exactly one, "" (whole balance) otherwise. A lone open debit is almost
+// always what a desk waiver means to forgive — defaulting the picker to it
+// (rather than "whole balance") is what keeps a same-amount waiver typed
+// without touching the picker from posting with no reversesRef, which
+// otherwise leaves a later status correction to credit the same fee a
+// second time.
+function defaultWaiveTarget(options) {
+  return (options || []).length === 1 ? options[0].value : "";
+}
+
+// populateVisitPicker fills #ledger-visit from the patient's own appointments
+// (state.appts) — called wherever renderAppts() runs, since both read the
+// same data and a visit booked/changed since the last render must show up
+// here too.
+function populateVisitPicker() {
+  const sel = $("#ledger-visit");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "For visit: none";
+  sel.append(placeholder);
+  for (const opt of visitPickerOptions(state.appts)) {
+    const o = document.createElement("option");
+    o.value = opt.value;
+    o.textContent = opt.label;
+    sel.append(o);
+  }
+  const values = Array.from(sel.options).map((o) => o.value);
+  sel.value = values.includes(prev) ? prev : "";
+}
+
+// populateWaiveTargetPicker fills #ledger-waive-target from the statement
+// just rendered, defaulting the selection via defaultWaiveTarget — a single
+// open debit is pre-selected (and onWaiveTargetChange applied, so the amount
+// is prefilled and capped) rather than left on "whole balance", so an
+// untouched waiver of the one open charge still carries reversesRef. Several
+// open debits leave "whole balance" selected — the desk must pick.
+function populateWaiveTargetPicker(transactions) {
+  const sel = $("#ledger-waive-target");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Charge to waive: whole balance";
+  sel.append(placeholder);
+  const options = openChargeOptions(transactions);
+  for (const opt of options) {
+    const o = document.createElement("option");
+    o.value = opt.value;
+    o.textContent = opt.label;
+    sel.append(o);
+  }
+  sel.value = defaultWaiveTarget(options);
+  onWaiveTargetChange();
+}
+
+// onWaiveTargetChange prefills #ledger-amount with the picked charge's open
+// remainder and caps the field there — the sibling-form courtesy (the "For
+// visit" picker's own descriptor form caps nothing, since a charge amount is
+// never bounded by the visit it names). Choosing "whole balance" clears the
+// cap.
+function onWaiveTargetChange() {
+  const sel = $("#ledger-waive-target");
+  const amountInput = $("#ledger-amount");
+  if (!sel || !amountInput) return;
+  if (!sel.value) {
+    amountInput.removeAttribute("max");
+    return;
+  }
+  const t = ((state.ledger && state.ledger.transactions) || []).find((x) => x.transactionKey === sel.value);
+  if (!t) return;
+  const dollars = (t.openCents / 100).toFixed(2);
+  amountInput.value = dollars;
+  amountInput.max = dollars;
+}
+
 function renderLedger(data) {
   const balanceEl = $("#ledger-balance");
   const list = $("#ledger-list");
   const empty = $("#ledger-empty");
 
   const owed = data.balanceCents || 0;
-  if (owed > 0) balanceEl.textContent = "Balance owed: " + moneyAmount(owed);
-  else if (owed < 0) balanceEl.textContent = "Credit balance: " + moneyAmount(-owed);
-  else balanceEl.textContent = "Balance: $0.00 (paid in full)";
+  let balanceLine;
+  if (owed > 0) balanceLine = "Balance owed: " + moneyAmount(owed);
+  else if (owed < 0) balanceLine = "Credit balance: " + moneyAmount(-owed);
+  else balanceLine = "Balance: $0.00 (paid in full)";
+  if (owed > 0 && data.dueDate) {
+    if (data.isOverdue) {
+      const days = Number(data.daysOverdue) || 0;
+      balanceLine += " · " + days + (days === 1 ? " day" : " days") + " overdue";
+    } else {
+      balanceLine += " · due " + localDate(data.dueDate);
+    }
+  }
+  balanceEl.textContent = balanceLine;
 
   const txs = data.transactions || [];
   list.innerHTML = "";
+  populateWaiveTargetPicker(txs);
   if (txs.length === 0) {
     empty.hidden = false;
     empty.textContent = "No charges or payments recorded yet.";
     return;
   }
   empty.hidden = true;
+  const byKey = new Map(txs.map((t) => [t.transactionKey, t]));
   for (const t of txs) {
     const li = document.createElement("li");
     const isWaiver = t.type === "credit" && t.reason === "waiver";
     li.className = "ledger-entry " + t.type + (isWaiver ? " waiver" : "");
-    const sign = t.type === "debit" ? "+" : "−";
-    const d = new Date(t.postedAt);
-    const when = isNaN(d) ? t.postedAt : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-    let line = when + " · " + sign + moneyAmount(t.amountCents) + (isWaiver ? " (waived)" : "") + (t.memo ? " — " + customerMemo(t.memo) : "");
-    if (t.visitStartsAt) {
-      const vd = new Date(t.visitStartsAt);
-      const visitWhen = isNaN(vd) ? t.visitStartsAt : vd.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      line += " (visit " + visitWhen + ")";
-    }
-    li.textContent = line;
+    li.textContent = ledgerLineLabel(t, byKey);
     list.append(li);
   }
 }
@@ -3986,6 +4219,12 @@ async function openLedgerAccount(patientKey) {
 // (applyHatGating hides #ledger-waive from a patient's own session) — the
 // server rejects reason:"waiver" on a self-scoped submit regardless, so this
 // is a UI convenience, not the security boundary.
+//
+// #ledger-visit (a charge only) and #ledger-waive-target (a waiver only)
+// carry visitRef/reversesRef into the same prefill object — the payment
+// button reads neither, and each is read only for the op it applies to, so a
+// stale selection left over from switching buttons can never leak into the
+// wrong op's payload.
 async function submitLedgerEntry(opType, what, reason) {
   if (!state.patient) {
     toast("Select a patient first.", "err");
@@ -4000,6 +4239,21 @@ async function submitLedgerEntry(opType, what, reason) {
   }
   const cents = Math.round(dollars * 100);
   const memo = memoInput.value.trim();
+
+  // "For visit" only means anything on a charge; "Charge to waive" only on a
+  // waiver — the payment button reads neither select.
+  const visitSel = $("#ledger-visit");
+  const visitRef = opType === "ClinicDebitAccount" && visitSel ? visitSel.value : "";
+  const waiveTargetSel = $("#ledger-waive-target");
+  const reversesRef = reason === "waiver" && waiveTargetSel ? waiveTargetSel.value : "";
+  if (reversesRef) {
+    const target = ((state.ledger && state.ledger.transactions) || []).find((t) => t.transactionKey === reversesRef);
+    if (target && cents > target.openCents) {
+      toast("That waiver exceeds the picked charge's open remainder (" + moneyAmount(target.openCents) + ").", "err");
+      return;
+    }
+  }
+
   const chargeBtn = $("#ledger-charge");
   const paymentBtn = $("#ledger-payment");
   const waiveBtn = $("#ledger-waive");
@@ -4018,7 +4272,10 @@ async function submitLedgerEntry(opType, what, reason) {
     const { renderOpForm } = await loadDescriptorform();
     const row = (state.opCatalog || {})[opType];
     if (!row) throw new Error("this action is unavailable");
-    const context = { target: accountKey, prefill: { amountCents: cents, memo: memo || undefined, reason } };
+    const prefill = { amountCents: cents, memo: memo || undefined, reason };
+    if (visitRef) prefill.visitRef = visitRef;
+    if (reversesRef) prefill.reversesRef = reversesRef;
+    const context = { target: accountKey, prefill };
     if (opType === "ClinicCreditAccount") {
       context.me = patientIdentityKey();
       context.selfVoice = actingAsSelf();
@@ -4040,7 +4297,11 @@ async function submitLedgerEntry(opType, what, reason) {
     toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", "ok");
     amountInput.value = "";
     memoInput.value = "";
+    amountInput.removeAttribute("max");
+    if (visitSel) visitSel.value = "";
+    if (waiveTargetSel) waiveTargetSel.value = "";
     setTimeout(loadLedger, 700);
+    if (isFrontDesk()) setTimeout(loadArrears, 700);
   } catch (e) {
     if (!sent || e.rejected) {
       toast("Could not " + what + " — " + e.message, "err");
@@ -6039,8 +6300,12 @@ function applyHatGating() {
   renderResetLogin();
   const chargeBtn = $("#ledger-charge");
   if (chargeBtn) chargeBtn.hidden = !fd;
+  const visitSel = $("#ledger-visit");
+  if (visitSel) visitSel.hidden = !fd;
   const waiveBtn = $("#ledger-waive");
   if (waiveBtn) waiveBtn.hidden = !fd;
+  const waiveTargetSel = $("#ledger-waive-target");
+  if (waiveTargetSel) waiveTargetSel.hidden = !fd;
   for (const id of ["#go-availability", "#go-sites"]) {
     const link = $(id);
     const hint = link && link.closest(".hint");
@@ -6244,6 +6509,7 @@ function init() {
   $("#ledger-charge").addEventListener("click", () => submitLedgerEntry("ClinicDebitAccount", "record the charge"));
   $("#ledger-payment").addEventListener("click", () => submitLedgerEntry("ClinicCreditAccount", "record the payment"));
   $("#ledger-waive").addEventListener("click", () => submitLedgerEntry("ClinicCreditAccount", "waive the charge", "waiver"));
+  $("#ledger-waive-target").addEventListener("change", onWaiveTargetChange);
   $("#reload-followups").addEventListener("click", loadFollowups);
   $("#followups-filter").addEventListener("change", renderFollowups);
   $("#reload-series").addEventListener("click", loadSeries);
