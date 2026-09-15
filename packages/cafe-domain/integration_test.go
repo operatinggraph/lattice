@@ -330,6 +330,7 @@ func openTabExpect(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 			OptionalReads: []string{leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: leaseAppKey, Relation: "heldFor", Direction: "in"},
 			},
 		},
 	}
@@ -424,6 +425,7 @@ func TestOpenTab_RejectsUnapprovedLease(t *testing.T) {
 			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision", leaseKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: leaseKey, Relation: "heldFor", Direction: "in"},
 			},
 		},
 	}
@@ -447,6 +449,7 @@ func openTabEnv(label, leaseAppKey, submittedAt string) *processor.OperationEnve
 			OptionalReads: []string{leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: leaseAppKey, Relation: "heldFor", Direction: "in"},
 			},
 		},
 	}
@@ -506,6 +509,181 @@ func TestOpenTab_RejectsEndedTenancy(t *testing.T) {
 	if outcome, reply = testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
 		openTabEnv("cdopentenancynone001", seedLease(t, ctx, conn, "BBCAFEDMNTNCYNQNEHJK"), "2026-07-07T12:00:00Z")); outcome != processor.OutcomeAccepted {
 		t.Fatalf("OpenTab with no .tenancy: outcome = %q error = %+v, want accepted", outcome, reply.Error)
+	}
+}
+
+// seedCafeAccount seeds a cafe-ledger account held for a lease the way
+// CreateAccount mints it: the vtx.cafeaccount vertex plus the heldFor link
+// (cafeaccount → leaseapp). Returns the account key.
+func seedCafeAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, acctID, leaseKey string) string {
+	t.Helper()
+	acctKey := "vtx.cafeaccount." + acctID
+	leaseID := strings.TrimPrefix(leaseKey, "vtx.leaseapp.")
+	seedVertex(t, ctx, conn, acctKey, "cafeaccount", map[string]any{})
+	seedLink(t, ctx, conn, "lnk.cafeaccount."+acctID+".heldFor.leaseapp."+leaseID,
+		acctKey, leaseKey, "heldFor", "heldFor")
+	return acctKey
+}
+
+// seedRentAccount seeds the loftspace rent ledger's account held for the same
+// lease — a second heldFor in-link on the leaseapp whose source is a
+// vtx.account, never a café account. Returns the account key.
+func seedRentAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, acctID, leaseKey string) string {
+	t.Helper()
+	acctKey := "vtx.account." + acctID
+	leaseID := strings.TrimPrefix(leaseKey, "vtx.leaseapp.")
+	seedVertex(t, ctx, conn, acctKey, "account", map[string]any{})
+	seedLink(t, ctx, conn, "lnk.account."+acctID+".heldFor.leaseapp."+leaseID,
+		acctKey, leaseKey, "heldFor", "heldFor")
+	return acctKey
+}
+
+// remindedArrears is the .arrears data cafe-ledger's EvaluateCafeArrears
+// writes once a reminder has gone out in the current episode — the shape
+// OpenTab's credit hold refuses on.
+func remindedArrears() map[string]any {
+	return map[string]any{
+		"dueAt": "2026-06-20T12:00:00Z", "remindedFor": "2026-06-20T12:00:00Z",
+		"sentAt": "2026-06-21T03:00:00Z", "evaluatedAt": "2026-07-06T03:00:00Z",
+	}
+}
+
+// openTabRejectedWith submits OpenTab for the lease and asserts a rejection
+// whose message carries want, and that neither the tab the request would
+// have minted nor the lease's cafeOpenTab guard was written.
+func openTabRejectedWith(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseKey, want string) {
+	t.Helper()
+	env := openTabEnv(label, leaseKey, "2026-07-07T12:00:00Z")
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("%s: outcome = %q error = %+v, want rejected", label, outcome, reply.Error)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, want) {
+		t.Fatalf("%s: rejected with %+v, want a message carrying %q", label, reply.Error, want)
+	}
+	if tabKey := "vtx.tab." + nanoIDFromRequestID(env.RequestID); keyExists(t, ctx, conn, tabKey) {
+		t.Fatalf("%s: a refused OpenTab must mint no tab, found %s", label, tabKey)
+	}
+	if keyExists(t, ctx, conn, leaseKey+".cafeOpenTab") {
+		t.Fatalf("%s: a refused OpenTab must not claim the lease's cafeOpenTab guard", label)
+	}
+}
+
+// openTabAcceptedFor submits OpenTab for the lease, asserts acceptance, and
+// that the tab the request minted and the lease's cafeOpenTab guard both
+// exist — the positive mirror of openTabRejectedWith.
+func openTabAcceptedFor(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseKey, why string) {
+	t.Helper()
+	env := openTabEnv(label, leaseKey, "2026-07-07T12:00:00Z")
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("OpenTab %s: outcome = %q error = %+v, want accepted", why, outcome, reply.Error)
+	}
+	if tabKey := "vtx.tab." + nanoIDFromRequestID(env.RequestID); !keyExists(t, ctx, conn, tabKey) {
+		t.Fatalf("OpenTab %s: accepted but minted no tab at %s", why, tabKey)
+	}
+	if !keyExists(t, ctx, conn, leaseKey+".cafeOpenTab") {
+		t.Fatalf("OpenTab %s: accepted but claimed no cafeOpenTab guard on the lease", why)
+	}
+}
+
+// TestOpenTab_RefusesCreditHold proves a lease whose café account has been
+// reminded of a balance it still owes opens no new tab: cafe-ledger's
+// .arrears.sentAt is present exactly while a reminder has gone out in the
+// current arrears episode, and that — not dueAt alone — is the hold. The
+// account is reached by the lease's heldFor in-links filtered to the café
+// account, so the rent ledger's vtx.account link beside it neither hides nor
+// stands in for it. The positive vectors come first: an overdue-but-unreminded
+// episode and an owes-nothing evaluation both open.
+func TestOpenTab_RefusesCreditHold(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "credithold")
+
+	// Overdue, not yet reminded: dueAt without sentAt is not a hold.
+	overdue := seedLease(t, ctx, conn, "BBCAFEDMNHQLDNQRMNDA")
+	overdueAcct := seedCafeAccount(t, ctx, conn, "BBCAFEDMNHQLDNQRMACC", overdue)
+	seedAspect(t, ctx, conn, overdueAcct, "arrears", "cafeAccountArrears", map[string]any{
+		"dueAt": "2026-06-20T12:00:00Z", "evaluatedAt": "2026-07-06T03:00:00Z",
+	})
+	openTabAcceptedFor(t, ctx, conn, cp, cons, "cdholdoverdueonly001", overdue, "on an overdue-but-unreminded account")
+
+	// Owes nothing: the episode ended and {evaluatedAt} alone remains.
+	square := seedLease(t, ctx, conn, "BBCAFEDMNHQLDSQUAREA")
+	squareAcct := seedCafeAccount(t, ctx, conn, "BBCAFEDMNHQLDSQUAREB", square)
+	seedAspect(t, ctx, conn, squareAcct, "arrears", "cafeAccountArrears", map[string]any{
+		"evaluatedAt": "2026-07-06T03:00:00Z",
+	})
+	openTabAcceptedFor(t, ctx, conn, cp, cons, "cdholdsquare00000001", square, "on a square account")
+
+	// Reminded and still owing: the hold.
+	held := seedLease(t, ctx, conn, "BBCAFEDMNHQLDLEASEHJ")
+	heldAcct := seedCafeAccount(t, ctx, conn, "BBCAFEDMNHQLDACCTHJK", held)
+	seedAspect(t, ctx, conn, heldAcct, "arrears", "cafeAccountArrears", remindedArrears())
+	openTabRejectedWith(t, ctx, conn, cp, cons, "cdholdreminded000001", held,
+		"CreditHold: this lease's café account owes a balance a reminder went out for on 2026-06-21")
+
+	// The rent ledger's account beside the café one: the type filter must
+	// still find the café account and hold.
+	both := seedLease(t, ctx, conn, "BBCAFEDMNHQLDBQTHLSE")
+	seedRentAccount(t, ctx, conn, "BBCAFEDMNHQLDBQTHRNT", both)
+	bothCafe := seedCafeAccount(t, ctx, conn, "BBCAFEDMNHQLDBQTHCAF", both)
+	seedAspect(t, ctx, conn, bothCafe, "arrears", "cafeAccountArrears", remindedArrears())
+	openTabRejectedWith(t, ctx, conn, cp, cons, "cdholdbothledgers001", both, "CreditHold")
+
+	// Only the rent ledger's account, no café account at all: nothing to
+	// hold on, whatever the rent account's own aspects say.
+	rentOnly := seedLease(t, ctx, conn, "BBCAFEDMNHQLDRNTQNLY")
+	rentAcct := seedRentAccount(t, ctx, conn, "BBCAFEDMNHQLDRNTQNLA", rentOnly)
+	seedAspect(t, ctx, conn, rentAcct, "arrears", "cafeAccountArrears", remindedArrears())
+	openTabAcceptedFor(t, ctx, conn, cp, cons, "cdholdrentonly000001", rentOnly, "with only a rent account held for the lease")
+
+	// An .arrears document of the wrong class is a fault, never state to
+	// decide a hold on.
+	wrong := seedLease(t, ctx, conn, "BBCAFEDMNHQLDWRNGCLS")
+	wrongAcct := seedCafeAccount(t, ctx, conn, "BBCAFEDMNHQLDWRNGACC", wrong)
+	seedAspect(t, ctx, conn, wrongAcct, "arrears", "somethingElse", map[string]any{"evaluatedAt": "2026-07-06T03:00:00Z"})
+	openTabRejectedWith(t, ctx, conn, cp, cons, "cdholdwrongclass0001", wrong, "InvalidState")
+}
+
+// TestOpenTab_RefusesCreditHold_SelfLeg proves the hold binds the resident's
+// own self-service OpenTab exactly as it binds the desk's: the debt is the
+// lease's, and the applicant satisfying the applicationFor probe changes
+// nothing about it.
+func TestOpenTab_RefusesCreditHold_SelfLeg(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "creditholdself")
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNHQLDSELFLSE", domainConsumerID)
+	applicationForLnk := "lnk.leaseapp.BBCAFEDMNHQLDSELFLSE.applicationFor.identity." + domainConsumerID
+	acctKey := seedCafeAccount(t, ctx, conn, "BBCAFEDMNHQLDSELFACC", leaseKey)
+	seedAspect(t, ctx, conn, acctKey, "arrears", "cafeAccountArrears", remindedArrears())
+
+	reqID := testutil.GenReqID("cdholdself0000000001")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "OpenTab",
+		Actor:         domainConsumerKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{leaseKey},
+			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision", leaseKey + ".tenancy"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: leaseKey, Relation: "heldFor", Direction: "in"},
+			},
+		},
+		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, "CreditHold") {
+		t.Fatalf("self-service OpenTab on a held account: outcome = %q error = %+v, want a CreditHold rejection", outcome, reply.Error)
+	}
+	if keyExists(t, ctx, conn, "vtx.tab."+nanoIDFromRequestID(reqID)) || keyExists(t, ctx, conn, leaseKey+".cafeOpenTab") {
+		t.Fatalf("a held self-service OpenTab must mint no tab and claim no guard")
 	}
 }
 
@@ -784,10 +962,90 @@ func TestVoidCharge_ByLineId_RejectsUnknownLine(t *testing.T) {
 		SubmittedAt:   "2026-07-22T12:06:00Z",
 		Class:         "tab",
 		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-9"}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+		// The workplace confinement walk runs before the line lookup, so a
+		// refused unknown line still declares it.
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
 	}
 	testutil.PublishOp(t, conn, voidEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestVoidCharge_ByLineId_RejectsDoubleVoid proves a line voids once: the
+// second VoidCharge naming an already-voided line is refused
+// UnknownChargeLine (void_line_by_id matches live lines only), and the tab's
+// totalCents and lines are exactly what the first void left.
+func TestVoidCharge_ByLineId_RejectsDoubleVoid(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "voidlinetwice")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVLTWLEASEHJ")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvltw0000001", leaseKey)
+
+	charge := func(label string, amountCents int) {
+		t.Helper()
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "Charge",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-22T12:05:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":` + strconv.Itoa(amountCents) + `}`),
+			ContextHint: &processor.ContextHint{
+				Reads: []string{tabKey, tabKey + ".status"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	}
+	charge("cdvltwcharge00000001", 450)
+	charge("cdvltwcharge00000002", 350)
+
+	void := func(label string, outcome processor.MessageOutcome) {
+		t.Helper()
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "VoidCharge",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-22T12:06:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-1"}`),
+			ContextHint: &processor.ContextHint{
+				Reads: []string{tabKey, tabKey + ".status"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		}
+		testutil.PublishOp(t, conn, env)
+		testutil.DriveOne(t, ctx, cp, cons, outcome)
+	}
+	void("cdvltwvoid0000000001", processor.OutcomeAccepted)
+	after := readDoc(t, ctx, conn, tabKey+".status")
+	afterData, _ := after["data"].(map[string]any)
+	if got, _ := afterData["totalCents"].(float64); got != 350 {
+		t.Fatalf("totalCents after the first void = %v, want 350", got)
+	}
+	afterLines, _ := json.Marshal(afterData["lines"])
+
+	void("cdvltwvoid0000000002", processor.OutcomeRejected)
+	again := readDoc(t, ctx, conn, tabKey+".status")
+	againData, _ := again["data"].(map[string]any)
+	if got, _ := againData["totalCents"].(float64); got != 350 {
+		t.Fatalf("totalCents after the refused second void = %v, want 350 unchanged", got)
+	}
+	if againLines, _ := json.Marshal(againData["lines"]); string(againLines) != string(afterLines) {
+		t.Fatalf("lines changed across a refused second void:\n before %s\n after  %s", afterLines, againLines)
+	}
 }
 
 // TestChargeVoidSettleItemsMemo_ProjectsLiveNonVoidedLines proves the Unit A
@@ -1047,6 +1305,9 @@ func TestVoidCharge_RejectsForConsumer(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
 			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision", leaseKey + ".tenancy"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: leaseKey, Relation: "heldFor", Direction: "in"},
+			},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}
@@ -1645,6 +1906,9 @@ func TestOpenTab_ConsumerSelfScope_Allowed(t *testing.T) {
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseKey},
 			OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision", leaseKey + ".tenancy"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: leaseKey, Relation: "heldFor", Direction: "in"},
+			},
 		},
 		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
 	}
@@ -2569,6 +2833,12 @@ func TestDescriptorDrivenSelfService_OpenSettleReopen(t *testing.T) {
 		for _, r := range openDispatch.OptionalReads {
 			optional = append(optional, substituteDispatch(r, domainConsumerKey, vars))
 		}
+		var enumerations []processor.EnumerationHint
+		for _, e := range openDispatch.Enumerations {
+			enumerations = append(enumerations, processor.EnumerationHint{
+				Hub: substituteDispatch(e.Hub, domainConsumerKey, vars), Relation: e.Relation, Direction: e.Direction,
+			})
+		}
 		// The declarations must cover both halves of the script's needs.
 		wantGuard := leaseKey + ".cafeOpenTab"
 		wantLink := "lnk.leaseapp." + leaseID + ".applicationFor.identity." + domainConsumerID
@@ -2577,6 +2847,12 @@ func TestDescriptorDrivenSelfService_OpenSettleReopen(t *testing.T) {
 		}
 		if !slices.Contains(optional, wantLink) {
 			t.Fatalf("OpenTab optionalReads %v must declare the ownership link %q", optional, wantLink)
+		}
+		// And the credit-hold walk: the lease's heldFor in-links, resolved
+		// from the payload the descriptor itself filled.
+		wantWalk := processor.EnumerationHint{Hub: leaseKey, Relation: "heldFor", Direction: "in"}
+		if !slices.Contains(enumerations, wantWalk) {
+			t.Fatalf("OpenTab enumerations %v must declare the credit-hold walk %+v", enumerations, wantWalk)
 		}
 
 		body, err := json.Marshal(payload)
@@ -2592,7 +2868,7 @@ func TestDescriptorDrivenSelfService_OpenSettleReopen(t *testing.T) {
 			SubmittedAt:   "2026-07-07T12:00:00Z",
 			Class:         openDispatch.Class,
 			Payload:       body,
-			ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optional},
+			ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optional, Enumerations: enumerations},
 			AuthContext:   &processor.AuthContext{Target: domainConsumerKey},
 		})
 		if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {

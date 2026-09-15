@@ -669,7 +669,27 @@ async function loadLeasePickerContext() {
     const ld = await appGet("/api/frontdesk-lease-details");
     (ld.leaseDetails || []).forEach((d) => { leaseDetailsByLease[d.leaseAppKey] = d; });
   } catch (_) { /* front-desk not installed / unreachable — unit address just doesn't show */ }
-  return { residentsByLease, approvedByLease, leaseDetailsByLease };
+  // Each lease's house-tab balance (/api/frontdesk-balances — at most one row
+  // per leaseAppKey, only non-zero balances), the picker's arrears badge and
+  // the Open Tab gate's input. Best-effort, same degrade-to-hidden posture.
+  const { balances, balancesByLease } = await loadBalances();
+  return { residentsByLease, approvedByLease, leaseDetailsByLease, balances, balancesByLease };
+}
+
+// loadBalances reads /api/frontdesk-balances into both the list the arrears
+// panel renders and a by-lease map for the pickers and the Open Tab gate. An
+// unreachable endpoint yields empty structures rather than throwing: a
+// balance that cannot be read is not evidence of a debt, so no badge shows
+// and no tab is held client-side (the op still refuses a real hold).
+async function loadBalances() {
+  let balances = [];
+  const balancesByLease = {};
+  try {
+    const bal = await appGet("/api/frontdesk-balances");
+    balances = bal.balances || [];
+    balances.forEach((b) => { balancesByLease[b.leaseAppKey] = b; });
+  } catch (_) { /* balances unreachable — badge + arrears list just don't show */ }
+  return { balances, balancesByLease };
 }
 
 // fillLeaseSelect renders every pickable lease. When gateOnApproval is true
@@ -685,8 +705,11 @@ async function loadLeasePickerContext() {
 // so an unapproved lease's debt stays collectable. The same gate disables a
 // lease whose tenancy has ended (tenancyEnded — OpenTab refuses TenancyEnded
 // past the term the front-desk lens projects), again only on positive
-// evidence: a lease with no projected term stays selectable.
-function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, approvedByLease, gateOnApproval) {
+// evidence: a lease with no projected term stays selectable. Every option
+// also carries arrearsBadge(balancesByLease[leaseAppKey]) — a debtor is
+// never disabled here, since picking the lease is how the desk sees why it
+// is held and where to take the payment.
+function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, approvedByLease, gateOnApproval, balancesByLease) {
   const prev = select.value;
   select.innerHTML = "";
   if (!leases.length) {
@@ -716,6 +739,7 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, 
     } else {
       opt.textContent = who + unit + (l.accountKey ? "" : " (no café account yet)");
     }
+    opt.textContent += arrearsBadge(balancesByLease && balancesByLease[l.leaseAppKey]);
     select.appendChild(opt);
   }
   if (prev && leases.some((l) => l.leaseAppKey === prev)) select.value = prev;
@@ -732,12 +756,76 @@ function tenancyEnded(detail, now) {
   return now.getTime() >= end;
 }
 
+// openTabGate decides what a lease's Open Tab control does from its balance
+// row — /api/frontdesk-balances and /api/ledger carry the same
+// balanceCents/isOverdue/daysOverdue/reminderSentAt fields, so the POS and
+// the resident view share this one rule:
+//   "hold"    — a reminder has gone out for the current arrears episode
+//               (reminderSentAt, cafe-ledger's .arrears.sentAt). OpenTab
+//               refuses CreditHold on exactly this condition, on the staff
+//               and resident legs alike, so the control renders the reason
+//               instead of a button that could only toast the refusal.
+//               Binds regardless of isOverdue: a part-payment can move the
+//               FIFO head inside its term while the episode's reminder
+//               stands, and the op holds until the balance clears.
+//   "confirm" — overdue, not yet reminded. The op accepts; the desk (or the
+//               resident) is asked first, the wellness/clinic desk courtesy.
+//   "open"    — nothing owed, or owed inside its term. No row at all is a
+//               lease with a zero balance.
+function openTabGate(balance) {
+  if (balance && balance.reminderSentAt) return "hold";
+  if (balance && balance.isOverdue) return "confirm";
+  return "open";
+}
+
+// overdueDaysPhrase renders a balance row's daysOverdue as "N days overdue"
+// (singular at one), the phrase the pickers, confirms and hold panels share.
+function overdueDaysPhrase(balance) {
+  const days = Number(balance && balance.daysOverdue) || 0;
+  return days + (days === 1 ? " day" : " days") + " overdue";
+}
+
+// arrearsBadge is the lease-picker suffix for a balance row: "" when the
+// gate is open, else " · owes $X" + " · N days overdue" (when overdue) +
+// " · credit hold" (when held). Plain text — it lands in option.textContent.
+function arrearsBadge(balance) {
+  const gate = openTabGate(balance);
+  if (gate === "open") return "";
+  return (
+    " · owes " + money(balance.balanceCents) +
+    (balance.isOverdue ? " · " + overdueDaysPhrase(balance) : "") +
+    (gate === "hold" ? " · credit hold" : "")
+  );
+}
+
+// reminderSentDate renders a balance row's reminderSentAt as a local
+// calendar date for the hold copy ("?" when the stamp does not parse).
+function reminderSentDate(balance) {
+  const d = new Date(balance.reminderSentAt);
+  return isNaN(d.getTime()) ? "?" : d.toLocaleDateString();
+}
+
+// confirmOverdueOpen asks before opening a tab on an overdue-but-unreminded
+// balance: true when the caller may proceed (the gate is not "confirm", or
+// the desk/resident accepted). `who` is "You" on the resident's own leg.
+function confirmOverdueOpen(who, balance) {
+  if (openTabGate(balance) !== "confirm") return true;
+  const owes = who === "You" ? "You owe " : who + " owes ";
+  return window.confirm(owes + money(balance.balanceCents) + ", " + overdueDaysPhrase(balance) + ". Open a tab anyway?");
+}
+
 // ---- POS view (staff only) --------------------------------------------
+
+// posResidentsByLease is the POS picker's lease → resident identity join,
+// kept from the last loadPos so renderPos can name the debtor in the hold
+// panel and the overdue confirm without re-reading the roster per render.
+let posResidentsByLease = {};
 
 async function loadPos() {
   const select = document.getElementById("pos-lease");
   const [leases, ctx] = await Promise.all([loadLeases(), loadLeasePickerContext()]);
-  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, true);
+  posResidentsByLease = ctx.residentsByLease;
+  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, true, ctx.balancesByLease);
   await renderPos();
 }
 
@@ -759,22 +847,35 @@ async function renderPos() {
     body.innerHTML = '<div class="empty">' + escapeHtml(picked.textContent) + "</div>";
     return;
   }
-  let tabs, menu;
+  let tabs, menu, balances;
   try {
+    // The balance is re-read per render (not taken from the picker's load)
+    // so a payment just taken on the Front Desk tab lifts the hold here on
+    // the next render without a picker refresh.
     const results = await Promise.all([
       appGet("/api/tabs?leaseAppKey=" + encodeURIComponent(leaseAppKey)),
       appGet("/api/menu?leaseAppKey=" + encodeURIComponent(leaseAppKey)),
+      loadBalances(),
     ]);
     tabs = results[0].tabs || [];
     menu = results[1];
+    balances = results[2].balancesByLease;
   } catch (e) {
     body.innerHTML = '<div class="empty">' + escapeHtml(e.message) + "</div>";
     return;
   }
   const open = tabs.find((t) => t.status === "open");
   if (!open) {
+    const balance = balances[leaseAppKey];
+    const bookerKey = posResidentsByLease[leaseAppKey];
+    const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(leaseAppKey);
+    if (openTabGate(balance) === "hold") {
+      body.innerHTML = renderCreditHoldPanel(who, balance);
+      return;
+    }
     body.innerHTML = renderOpenTabForm();
     document.getElementById("open-tab-btn").addEventListener("click", async () => {
+      if (!confirmOverdueOpen(who, balance)) return;
       const btn = document.getElementById("open-tab-btn");
       btn.disabled = true;
       try {
@@ -784,6 +885,7 @@ async function renderPos() {
             class: "tab",
             reads: [leaseAppKey],
             optionalReads: [leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision", leaseAppKey + ".tenancy"],
+            enumerations: [{ hub: leaseAppKey, relation: "heldFor", direction: "in" }],
             payload: { leaseAppKey },
           },
           "open the tab"
@@ -904,6 +1006,24 @@ function renderOpenTabForm() {
   );
 }
 
+// renderCreditHoldPanel is the POS's no-open-tab panel for a held lease: who
+// owes what, for how long, when the reminder went out, and where the desk
+// clears it — no Open Tab button, since the op refuses CreditHold until a
+// payment or a write-off on the Front Desk tab's arrears row ends the
+// episode.
+function renderCreditHoldPanel(who, balance) {
+  return (
+    '<div class="panel">' +
+    "<h2>Credit hold</h2>" +
+    '<p class="lead">' + escapeHtml(who) + " owes " + escapeHtml(money(balance.balanceCents)) +
+    (balance.isOverdue ? " · " + escapeHtml(overdueDaysPhrase(balance)) : "") +
+    " · reminder sent " + escapeHtml(reminderSentDate(balance)) + "</p>" +
+    '<p class="meta">A new tab cannot be opened while the reminded balance stands. ' +
+    "Take a payment or write the balance off from the Front Desk tab's arrears row.</p>" +
+    "</div>"
+  );
+}
+
 function renderOpenTabCard(tab, items) {
   const catalog = items || [];
   return (
@@ -950,10 +1070,11 @@ function keepSoonest(byLease, item) {
 // the desk's Today panel: how many tabs settled, the gross they took, what
 // sold (per line description, non-voided lines only) and what was voided.
 // Gross is the sum of each tab's frozen totalCents — the figure the ledger
-// was charged — not a re-sum of its lines: a legacy amount-only void
-// subtracts from the total without marking a line, so the two can differ,
-// and the difference (if any) is reported as an unitemized remainder rather
-// than hidden inside an item. A tab is "today's" by its settledAt, the
+// was charged — not a re-sum of its lines: every void is by line, so on a
+// tab settled under the current package the two agree, and any difference
+// can only come from a tab settled under an earlier package version or
+// charged before .status.lines existed; that difference (if any) is
+// reported as an unitemized remainder rather than hidden inside an item. A tab is "today's" by its settledAt, the
 // instant the money moved; open tabs are the grid's, not this panel's.
 function summarizeToday(tabs, now) {
   // Next-midnight via the date constructor, not +24h: a DST day is 23 or 25
@@ -1070,19 +1191,12 @@ async function loadFrontDesk() {
   // already returns at most one row per leaseAppKey, so no keepSoonest
   // reduction is needed here. Best-effort, same degrade-to-hidden posture
   // as the joins above.
-  let balancesByLease = {};
-  let balancesList = [];
-  try {
-    const bal = await appGet("/api/frontdesk-balances");
-    balancesList = bal.balances || [];
-    balancesList.forEach((b) => { balancesByLease[b.leaseAppKey] = b; });
-  } catch (_) { /* balances unreachable — badge + arrears list just don't show */ }
-
   // Same resident-name/unit-address join the lease pickers use
   // (loadLeasePickerContext) — the card's "who" + rent/term lines, and the
-  // standalone arrears list's own resident-name resolution below. Called
-  // once and reused for both, rather than once per renderer.
-  const { residentsByLease, leaseDetailsByLease } = await loadLeasePickerContext();
+  // standalone arrears list's own resident-name resolution below; the
+  // balances ride along in the same context. Called once and reused for
+  // both, rather than once per renderer.
+  const { residentsByLease, leaseDetailsByLease, balances: balancesList, balancesByLease } = await loadLeasePickerContext();
 
   // The standalone arrears list — every lease that owes money, whether or
   // not it currently has an open tab. Rendered regardless of tabs.length:
@@ -1558,7 +1672,7 @@ async function loadResident() {
     label.hidden = false;
     select.hidden = false;
     const ctx = await loadLeasePickerContext();
-    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, false);
+    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, false, ctx.balancesByLease);
   } else {
     label.hidden = true;
     select.hidden = true;
@@ -1630,6 +1744,18 @@ async function renderResident() {
         "</div>"
       );
     }
+  } else if (selfMode && openTabGate(ledger) === "hold") {
+    // The resident's own copy of the POS hold panel: the ledger response
+    // carries the same balance fields, and the op refuses the resident's
+    // OpenTab on the same condition — the button would only toast.
+    parts.push(
+      '<div class="panel">' +
+      "<h2>Your café account is on hold</h2>" +
+      '<p class="lead">You owe ' + escapeHtml(money(ledger.balanceCents)) +
+      (ledger.isOverdue ? " (" + escapeHtml(overdueDaysPhrase(ledger)) + "; a reminder was sent " : " (a reminder was sent ") +
+      escapeHtml(reminderSentDate(ledger)) + "). Pay your balance below to open a new tab.</p>" +
+      "</div>"
+    );
   } else if (selfMode) {
     parts.push(
       '<div class="panel">' +
@@ -1872,6 +1998,7 @@ async function renderResident() {
     const openBtn = document.getElementById("resident-open-tab-btn");
     if (openBtn) {
       openBtn.addEventListener("click", async () => {
+        if (!confirmOverdueOpen("You", ledger)) return;
         openBtn.disabled = true;
         try {
           await opOrThrow(
@@ -1880,6 +2007,7 @@ async function renderResident() {
               class: "tab",
               reads: [leaseAppKey],
               optionalReads: [leaseAppKey + ".cafeOpenTab", applicationForOptionalRead(leaseAppKey), leaseAppKey + ".decision", leaseAppKey + ".tenancy"],
+              enumerations: [{ hub: leaseAppKey, relation: "heldFor", direction: "in" }],
               payload: { leaseAppKey },
             },
             "open the tab",

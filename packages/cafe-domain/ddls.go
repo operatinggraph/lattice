@@ -45,7 +45,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"(minimal, D5 — the running total lives on the .status aspect). OpenTab{leaseAppKey} validates the lease " +
 			"is alive, rejects LeaseNotApproved unless the lease's own lease-signing .decision aspect reads " +
 			"approved, rejects TenancyEnded once submittedAt reaches the lease's .tenancy leaseEnd (rent stops there too, so the " +
-			"house tab closes to a moved-out resident at the same instant; a lease with no .tenancy has no term to have ended), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
+			"house tab closes to a moved-out resident at the same instant; a lease with no .tenancy has no term to have ended), rejects CreditHold once the lease's " +
+			"café account carries an arrears episode a reminder has gone out for (cafe-ledger's .arrears.sentAt, reached by a live heldFor " +
+			"walk from the lease — never a caller-declared read — and dropped by cafe-ledger only when the balance returns to zero; overdue-but-unreminded " +
+			"is not a hold; enforced on the staff and resident-self legs alike), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
 			"cafeOpenTabGuard aspect on the leaseapp, mirroring cafe-ledger's cafeLedgerAccountGuard: a class-(d) " +
 			"optionalReads dedup — create the guard fresh on a lease's first-ever tab, OCC-revive it from its prior " +
 			"tombstone on a later one), mints the tab, writes .status {value: open, totalCents: 0, openedAt, " +
@@ -144,7 +147,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"{value: open, totalCents: 0, itemsMemo: \"\", lines: [], openedAt, leaseAppKey} + the chargedTo and openFor links " +
 					"(both tab→leaseapp) + claims " +
 					"the lease's cafeOpenTabGuard. Returns primaryKey (the tab key). Rejects UnknownLeaseApplication " +
-					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, TenancyEnded if its .tenancy leaseEnd has passed, or OpenTabAlreadyExists if the lease already has an open tab.",
+					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, TenancyEnded if its .tenancy leaseEnd has passed, CreditHold if the lease's café account has been reminded of a balance it still owes (.arrears.sentAt set), or OpenTabAlreadyExists if the lease already has an open tab.",
 			},
 			{
 				Name:    "Charge — ring up an off-menu item on an open tab (operator)",
@@ -904,6 +907,74 @@ def leaseapp_unit(lease_key, memo=None):
         memo[lease_key] = unit
     return unit
 
+def cafe_account_for_lease(lease_key):
+    # The café account held for this lease, or None where no live one exists
+    # -- a lease whose settlement has never minted one (cafeTabSettlement's
+    # missing_account gap fires on the FIRST settle, so a first-ever tab has
+    # no account yet) owes nothing and cannot be on hold. The account is
+    # resolved from the GRAPH, never from the payload: cafe-ledger's
+    # CreateAccount is what writes the heldFor link (cafeaccount -> leaseapp),
+    # so the caller has no field to omit or forge that would reach a
+    # different account. The leaseapp carries at most one live café account
+    # (cafe-ledger's cafeLedgerAccountGuard is a create-only per-lease guard)
+    # but ALSO a loftspace vtx.account.<id> heldFor in-link from the rent
+    # ledger, so the walk filters on the source key's type segment rather
+    # than taking the first live link. Paged with leaseapp_unit's bound: a
+    # page can hold a tombstoned link ahead of the live one. The bound
+    # (LIVE_LINK_PAGE_LIMIT x MAX_LIVE_LINK_PAGES = 32 links) exceeds what
+    # the heldFor->leaseapp writers can ever put on one lease -- cafe-ledger's
+    # CreateAccount and loftspace-ledger's CreateAccount, one link each,
+    # neither ever tombstoned -- so running out of pages cannot happen here
+    # and the final None below is unreachable; a copy of this walk into a
+    # relation with wider fan-in must fail closed on exhaustion the way
+    # actor_holds_operator does, not answer "no account".
+    cursor = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=heldFor epoch=none -- a leaseapp carries
+        # at most one live heldFor in-link per ledger (café + rent), so this
+        # is never a keyspace scan. An account created concurrently with this
+        # OpenTab has no arrears episode yet and so nothing to hold on.
+        page, cursor = kv.Links(lease_key, "heldFor", "in", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            if lk.sourceVertex.startswith("vtx.cafeaccount."):
+                return lk.sourceVertex
+        if cursor == None:
+            return None
+    return None
+
+def require_no_credit_hold(lease_key):
+    # The credit hold: a lease whose café account carries an arrears episode
+    # a reminder has already gone out for opens no new tab. cafe-ledger's
+    # EvaluateCafeArrears writes .arrears.sentAt the moment it sends the
+    # reminder and carries it across every write of the same episode, dropping
+    # it only when the balance returns to zero (the episode ends) -- so sentAt
+    # present means exactly "this resident was reminded and still owes",
+    # while dueAt alone (overdue, not yet reminded) or a bare {evaluatedAt}
+    # (nothing owed) is not a hold. The rule holds on EVERY leg -- staff
+    # standing and resident self alike -- because the debt is the lease's,
+    # not the caller's. The state is reached by the walk above rather than a
+    # caller-declared read: a hold that rested on the submitter's declaration
+    # would be a hold the submitter could decline to declare.
+    acct_key = cafe_account_for_lease(lease_key)
+    if acct_key == None:
+        return
+    # read-posture: (e) per-candidate follow-up read off the enumeration
+    # above -- the account is unknown until the heldFor walk resolves it, so
+    # its .arrears key is data-derived and undeclarable client-side.
+    arrears = kv.Read(acct_key + ".arrears")
+    if arrears == None or arrears.isDeleted:
+        return
+    # The CLASS, not just the key: cafe-ledger is the sole writer of a
+    # .arrears aspect and writes exactly this class, so a document of any
+    # other class here is a fault to refuse, never state to decide a hold on.
+    if not hasattr(arrears, "class") or getattr(arrears, "class") != "cafeAccountArrears":
+        fail("InvalidState: this lease's café account arrears aspect is not a cafeAccountArrears")
+    sent_at = arrears.data.get("sentAt")
+    if sent_at != None:
+        fail("CreditHold: this lease's café account owes a balance a reminder went out for on " + str(sent_at)[:10] + "; the balance must be paid or written off before a new tab opens")
+
 def class_of(state, key):
     if key not in state:
         return None
@@ -1072,6 +1143,10 @@ def execute(state, op):
             lease_end = tenancy.data.get("leaseEnd")
             if type(lease_end) == "string" and time.rfc3339_utc(op.submittedAt) >= time.rfc3339_utc(lease_end):
                 fail("TenancyEnded: this lease's tenancy ended on " + lease_end[:10] + "; a house tab can no longer be opened against it")
+
+        # Credit hold: refused on every leg once the lease's café account has
+        # been reminded of an outstanding balance (require_no_credit_hold).
+        require_no_credit_hold(lease_key)
 
         # One open tab per lease, guarded by a deterministic aspect on the
         # LEASEAPP (not the tab — the tab's own id is independent and
@@ -1260,20 +1335,24 @@ def execute(state, op):
         # WHICH line, never HOW MUCH.
         line_id = required_string(p, "lineId")
         existing = require_open_status(state, tab_key)
-        existing_lines = existing.data.get("lines", [])
-        new_lines, line_amount = void_line_by_id(existing_lines, line_id)
-        if line_amount == None:
-            fail("UnknownChargeLine: " + line_id)
-        amount_cents = line_amount
 
-        # Staff-standing confinement: the lease comes from the tab's OWN
-        # .status aspect (never the payload), same derivation as Charge/Settle.
+        # Staff-standing confinement, BEFORE the line lookup: the lease comes
+        # from the tab's OWN .status aspect (never the payload), same
+        # derivation as Charge/Settle. Confinement precedes UnknownChargeLine
+        # so a staffer confined to another building learns nothing about
+        # which line ids a foreign tab carries from the refusal it gets.
         # workplace-exempt: (no-validated-path) VoidCharge is granted scope=any
         # to operator + frontOfHouse only (permissions.go) and no task mints it,
         # so nothing but the operator escape reaches the exemption.
         if not op.authTargetValidated:
             require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
                               "cannot void a charge on tab " + tab_key)
+
+        existing_lines = existing.data.get("lines", [])
+        new_lines, line_amount = void_line_by_id(existing_lines, line_id)
+        if line_amount == None:
+            fail("UnknownChargeLine: " + line_id)
+        amount_cents = line_amount
 
         # Clamped, not rejected: a tab whose recorded total already sits
         # below the sum of its live lines (or a void that would overshoot

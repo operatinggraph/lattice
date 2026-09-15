@@ -141,3 +141,22 @@ never a payload value).
 One-open-tab-per-lease exclusivity IS built, not out of scope: the `cafeOpenTabGuard` aspect (Inventory
 above) is a per-lease dedup guard `OpenTab` claims and `Settle` releases, rejecting a second concurrent
 `OpenTab` on the same lease with `OpenTabAlreadyExists` (`ddls.go`).
+
+## OpenTab refusals
+
+`OpenTab{leaseAppKey}` refuses `UnknownLeaseApplication` (lease absent or tombstoned), `LeaseNotApproved`
+(no lease-signing `.decision` reading `approved`), `TenancyEnded` (`submittedAt` at or past the lease's
+`.tenancy` `leaseEnd`), `CreditHold`, `OpenTabAlreadyExists` (the guard above), and — on the resident-self
+leg — `AuthDenied` when the target identity is not the lease's own applicant.
+
+**Credit hold.** A lease whose café account carries an arrears episode a reminder has already gone out for
+opens no new tab, on the staff and resident-self legs alike. The signal is `cafe-ledger`'s
+`vtx.cafeaccount.<id>.arrears.sentAt`: `EvaluateCafeArrears` stamps it when it emits the reminder
+notification — it records the send INTENT (the adapter's delivery outcome lands on the account's
+`.arrearsNotification`, which the hold does not read) — carries it across every write of the same episode,
+and drops it only when the balance returns to zero. So `sentAt` present means "reminded and still owes",
+while `dueAt` alone (overdue, not yet reminded) or a bare `{evaluatedAt}` is not a hold. `OpenTab` reaches the account by a live class-(e) walk of the lease's
+`heldFor` in-links filtered to `vtx.cafeaccount.` (the rent ledger's `vtx.account` link sits beside it),
+then the per-candidate `.arrears` read — never a caller-declared read, so no submitter can decline to
+declare it. An `.arrears` document of any other class is `InvalidState`. Clearing the hold is a payment or a
+write-off on the account (the Front Desk arrears row); there is no override verb.

@@ -306,6 +306,9 @@ func main() {
 			&processor.ContextHint{
 				Reads:         []string{leaseAppKey},
 				OptionalReads: []string{leaseAppKey + ".cafeOpenTab", leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
+				// The credit-hold walk's hub is the payload lease — a
+				// payload-templated hub declaredEnumerations leaves to the caller.
+				Enumerations: []processor.EnumerationHint{{Hub: leaseAppKey, Relation: "heldFor", Direction: "in"}},
 			})
 		tabKey = tabReply.PrimaryKey
 		fmt.Printf("==> tab:             %s (open)\n", tabKey)

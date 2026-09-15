@@ -116,6 +116,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// actor_holds_operator).
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+					// The credit-hold walk: the lease's café account, reached
+					// by its heldFor in-link (ddls.go cafe_account_for_lease).
+					{Hub: "{payload.leaseAppKey}", Relation: "heldFor", Direction: "in"},
 				},
 			},
 		},

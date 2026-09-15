@@ -144,6 +144,7 @@ func submitOpenTabAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision", leaseKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: leaseKey, Relation: "heldFor", Direction: "in"},
 			},
 		},
 	}
