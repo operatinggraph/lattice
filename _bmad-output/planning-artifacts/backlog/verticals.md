@@ -59,7 +59,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
-- 2026-09-15 · `5cb0aa03` · A full class offers Join waitlist, not Book, in Facet — `edgeEntitySessions.full` + `VisibleWhen` on the pair; the `📐` picker-filter row dissolved ([triage](../../../docs/reviews/verticals-designer-triage-2026-09-15.md)); live.
+- 2026-09-15 · `5cb0aa03` · A full class offers Join waitlist, not Book, in Facet — `edgeEntitySessions.full` + `VisibleWhen`; the `📐` picker-filter row dissolved ([triage](../../../docs/reviews/verticals-designer-triage-2026-09-15.md)).
 - 2026-09-15 · `c6b25579` · `lint-refusal-courtesy` — every dispatch site declares its courtesy per state refusal (52 ops, Facet incl.); six siblings fixed; [census](../../../docs/reviews/verticals-refusal-courtesy-gate-2026-09-15.md).
 - 2026-09-15 · `fd9cd157` · The desk takes an item off the menu for the day — `SetMenuItemAvailability` sets `.price.available`, both lenses project it, all three pickers grey it, `Charge` refuses `ItemUnavailable`; refused live.
 - 2026-09-15 · `fd9cd157` · A posted charge opens to its receipt — `receiptLines` joins a ledger row to its settled tab by `tabKey`; the statement renders the lines (price, who ordered, voids) collapsed, resident and desk alike; live.
