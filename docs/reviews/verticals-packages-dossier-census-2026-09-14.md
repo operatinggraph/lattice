@@ -49,4 +49,30 @@ clean — never a green run alone.
 
 ## Findings by class
 
-(filled at close)
+| Class | Sites enumerated | Live instances | Disposition |
+|---|---|---|---|
+| P1 `kv.Links` with no page limit | 105 `kv.Links` calls across 83 scripts / 31 packages (gate `--list` on `9594cb3d`) | 33 — clinic-domain ×7, clinic-reminders ×3, clinic-ledger ×1, cafe-domain ×1, cafe-ledger ×5, wellness-domain ×8, wellness-ledger ×1, loftspace-ledger ×2, lease-signing ×2, orchestration-base ×2, maintenance-domain ×1 | fixed per relation (write-once → `None, 1`; repointed → bounded first-live loop; multi-valued → named page constant + full walk); **gate** `lint-links-page-limit`; entry retired. The dossier's own `None, 1` prescription falsified for repointed relations (fire brief) — `ledBy` was briefed write-once and reclassified from `ReassignSession`'s doc comment |
+| P2 confinement guard tested only as operator | 25 confined ops (café 10, clinic 8, wellness 5, LoftSpace 2) | 0 — every op has a non-operator staff vector (`workplace_confinement_test.go` / `frontdesk_confinement_test.go` / `landlord_manages_guard_test.go`) | keeps |
+| P3 playbook `Params` on an `OPTIONAL MATCH` column | 16 targets | 0 — clinic-ledger's `missing_charge` conjoins `accountKey <> null`; `missing_reversal` implies `txCount = 1`, and no op tombstones a `clinicaccount` or its `heldFor`, so a null `accountKey` is unreachable; clinic-reminders `handledAt` gated `<> null` | keeps; once-seen (café `cafeArrearsReminders`), the mechanization needs the cypher alias chain (which `WITH`/`RETURN` name a variable bound by `OPTIONAL MATCH`, and whether the gap column conjoins it `<> null`) |
+| P4 live `kv.Read` then unconditioned mutation | 94 `kv.Read` sites (café 18, clinic 52, wellness 6, LoftSpace sampled) | 0 — the bare-`update` helpers (`make_aspect_update`, cafe-ledger ×5 / clinic-ledger ×1) act only on keys `derive_reads` hydrates on every dispatch | keeps |
+| P5 sensitive read without a shredded check | 5 `Sensitive: true` aspects (lease-signing 4, clinic 1) | 0 — no script `kv.Read`s one; the leasedoc `tenantName` read sits behind the erasure gate | keeps |
+| P6 self-leg vs staff-leg asymmetry | 12 branching ops | 0 — every asymmetry carries its reason in the script (a self cap on `CreditAccount`, `identifiedBy` on the patient legs) | keeps |
+| P7 status-value census | `.status` / `.decision` / `type` / `reason` writers vs guards vs lens conjuncts | 0 divergences | keeps |
+| P8 absence read as benign | 27 `in state` / `.get` tests on OptionalReads | 0 — the `DebitAccount` fail-closed from 2026-09-13 holds; the rest are liveness helpers | keeps |
+| P9 link-key type segment | every `make_link` / `lnk.` construction | 0 | keeps |
+
+## Gate
+
+`lint-links-page-limit` parses every shipped package script (the `pkgregistry` corpus) with `go.starlark.net/syntax`;
+a `kv.Links` call must pass a 5th positional argument or `limit=` that resolves to an integer literal, a module-level
+integer constant, or the enclosing helper's own parameter; a missing limit, a cursor-only call, or a bare literal at
+or above the engine default (256) is a finding; a named constant resolving that high is exempt (six platform-package
+sites). Self-tests on every run including the drop-the-limit mutation, refuses an all-clear over zero examined
+scripts, `--list` audits every call, and a script shared by several DDL registrations is examined once. Wired into
+`lint-static`, the Makefile and `docs/components/lint-gates.md`. Proof: 33 findings on `9594cb3d`, clean on the fix.
+
+## Residual (kept in the dossier, not filed)
+
+The `_packages.md` dossier holds 21 live entries against its stated cap of 12; the classes with no enumerable check
+(conserved quantity, "by construction" consumer rows, informational-field-becomes-load-bearing) are walk-only and
+a later census cannot retire them by gate. P3's gate shape is recorded above for its second sighting.

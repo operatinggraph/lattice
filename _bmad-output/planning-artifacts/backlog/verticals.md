@@ -58,6 +58,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-14 · `cfbc2fa0` · `_packages.md` dossier censused over the vertical packages — 33 unlimited `kv.Links` walks fixed; `lint-links-page-limit` gates it ([census](../../../docs/reviews/verticals-packages-dossier-census-2026-09-14.md)).
 - 2026-09-14 · `0771d77e` · The desk sees a debtor and a charge names its visit — `visitRef`→`forVisit`, a fee-less `settles` refused, `reversesRef` confined, the statement aged per charge, arrears on the picker; live.
 - 2026-09-14 · `7a2809b8` · A follow-up is addressed only by a later visit with its own provider — `followUpReminders` folds `addressedAt` over the patient's visits and gates on it; `hasLaterVisit` carries the same conjuncts, goja-pinned; live.
 - 2026-09-14 · `7a2809b8` · A clinical note needs a held visit — `RecordEncounter` reads `.schedule` + `.status` at every dispatcher and refuses `VisitNotHeld` (cancelled / noShow) and `NotYetStarted`; the phantom 09-15 instance refused live.
@@ -82,6 +83,5 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-09-13 · `8a046814` · The renewal chain asks the tenant for a profile before a signature — a `submitProfile` leg gates `signRenewal`'s `pre`, three `staleUserTasks` arms, the inbox opens the profile form; the refused task signed live.
 - 2026-09-13 · `8a046814` · `SetApplicantProfile`'s descriptor declares `references` as the DDL's string array, not an integer count the script dropped to zero.
 - 2026-09-13 · `b1ad58ae` · A visit is completed or missed only once it has started — `SetAppointmentStatus` + `CorrectAppointmentStatus` refuse `completed`/`noShow` `NotYetStarted` before `startsAt`; the desk's buttons wait; proven live.
-- 2026-09-13 · `b1ad58ae` · A final visit is never moved — `RescheduleAppointment` reads `.status` and refuses `TerminalStatus` before the cell diff; proven live on a cancelled appointment.
 
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*

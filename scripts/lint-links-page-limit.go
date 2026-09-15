@@ -41,6 +41,7 @@
 //     the author chose and can be grepped;
 //   - a function parameter name (`def f(limit): ... kv.Links(h, "r", "out",
 //     None, limit)`) — a helper the caller supplies the bound through.
+//
 // Anything else — a bare call, an arithmetic expression, an attribute lookup —
 // is UNMODELLED: the recogniser cannot resolve it to a number, so it is neither
 // judged clean nor reported as a finding, and is printed only under VERBOSE=1.

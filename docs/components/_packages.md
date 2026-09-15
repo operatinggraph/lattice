@@ -548,6 +548,13 @@ Retired: *a new refusal on an existing op is a claim about EVERY dispatcher* —
 `scripts/` seed / verify envelope's `OptionalReads` to the op's descriptor (twice-seen: wellness `SessionStarted`,
 café `TenancyEnded`, both 2026-09-14); the outcome half stays a walk — a `mustAccepted` caller needs the same skip
 the op now applies (`ensureApprovedTenancy` now skips an ended term), found at the same `grep -rn "<Op>" scripts/`.
+Retired: *a `kv.Links` call with no page limit is charged at the 256-unit default* — `lint-links-page-limit`
+fails any call without a `limit` (33 sites censused 2026-09-14 after the cafe-ledger `arrears_entries` mint). The
+half that stays a walk: the LIMIT is a cardinality claim, and `None, 1` is right only for a relation no op ever
+repoints — `ListLinks` returns tombstoned links in the page and keys sort by target id, so a repointed relation
+(`atStudio`, `ledBy`, `appliesToUnit`, `assignedTo`) pages with the bounded first-live cursor loop; grep the
+relation's `make_link_tombstone` writers before choosing, and price a per-candidate walk as
+`candidates × (1 + limit)` against `DefaultLiveReadBudget`.
 
 - **A live `kv.Read` of a sensitive aspect FAILS, it does not degrade, when its holder is shredded** — the vault
   returns `ErrKeyShredded` and the script dies `ScriptFailed`, so an op that "reads a sibling name if present" is
@@ -633,13 +640,6 @@ the op now applies (`ensureApprovedTenancy` now skips an ended term), found at t
   Charge vector surfaced three read-drift rows every sibling op already carried. Check: every op that calls
   `require_workplace` / `enforce_workplace` has one vector as a non-operator staff actor; an op with the guard and no
   `read <Op> lnk.identity.<id>.worksAt.*` baseline row is the tell.
-- **A `kv.Links` call with no page limit is charged at the 256-unit default against the script live-read budget,
-  however many links the hub actually carries** — `starlark_kv.go` charges the clamped LIMIT, not `len(links)`, so a
-  single-link probe (`postedTo`, `reverses`, `heldFor`) inside a per-candidate loop costs 257 a candidate and turns a
-  long-history account into a permanently *rejected* evaluation (a script error Weaver re-dispatches every window),
-  never the paged `history_too_long` degrade written for it. Minted: cafe-ledger `arrears_entries` (2026-09-13, caught
-  cold as BLOCKING). Check: every `kv.Links` whose relation is single-valued passes `None, 1`; price a per-candidate
-  walk as `candidates × (1 + limit)` against `DefaultLiveReadBudget` at the sweep's page cap.
 - **A new KIND of an existing entry type passes every predicate written over the TYPE — a cap for "a debit" caps
   the new debit too, or admits it, and only a census of that field's comparisons says which.** `RefundCafeCharge`'s
   `reversed_charge` refused `type != "debit"`; the fire that added a `payout` debit left it accepting a payout as
