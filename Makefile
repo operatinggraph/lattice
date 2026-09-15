@@ -173,7 +173,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-derive-reads-bare-vector lint-opmeta-required-fields lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-derive-reads-bare-vector lint-opmeta-required-fields lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps lint-live-read-pinned-mutation
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2438,6 +2438,25 @@ lint-links-page-limit:
 lint-derive-reads-bare-vector:
 	@echo "==> Linting derive_reads ops for a bare-submitter test vector..."
 	go run ./scripts/lint-derive-reads-bare-vector.go
+## lint-live-read-pinned-mutation — a live kv.Read, or a kv.Links(...) page
+## entry's own .key (it carries a .revision just as live, starlark_kv.go:317),
+## followed by a bare update/tombstone on the same key is a lost-update race.
+## applyHydratedRevisions (internal/processor/commit_path.go) conditions a bare
+## mutation on the step-4 hydrated revision only for a key in the hydrated set;
+## a key obtained through a live kv.Read (class (e)/(c), or an unannotated
+## class-(b) read) or a page entry carries no step-4 revision, so a bare
+## update/tombstone on it stays UNCONDITIONED (identity-domain
+## CreateUnclaimedIdentity, 2026-08-15, re-found repeatedly through
+## 2026-09-14). Parses every shipped package script and nested def (the
+## compiled pkgregistry corpus, via go.starlark.net/syntax), resolves each
+## kv.Read's read-posture annotation by the same binding rule
+## lint-conventions.go uses, and fails a live read or page entry reachably
+## followed, in program order, by a bare update/tombstone on the same key —
+## inline or through a mutation helper (no naming convention required).
+## Self-tests on every run. Advisory by default; STRICT=1 exits non-zero.
+lint-live-read-pinned-mutation:
+	@echo "==> Linting live kv.Read calls for a pinned follow-up mutation..."
+	go run ./scripts/lint-live-read-pinned-mutation.go
 
 ## lint-opmeta-required-fields — a payload field a package script refuses
 ## without is declared `required` by the op's InputSchema (or filled by the

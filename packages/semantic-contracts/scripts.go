@@ -444,7 +444,7 @@ def execute(state, op):
                               "document": {"class": link_class, "isDeleted": False,
                                            "sourceVertex": clause_key, "targetVertex": lease_key,
                                            "localName": "governs", "data": {}}})
-            mutations.append({"op": "update", "key": lk.key,
+            mutations.append({"op": "update", "key": lk.key, "expectedRevision": lk.revision,
                               "document": {"class": link_class, "isDeleted": True,
                                            "sourceVertex": clause_key, "targetVertex": lease_key,
                                            "localName": "governs", "data": {}}})

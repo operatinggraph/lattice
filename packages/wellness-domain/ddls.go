@@ -2047,6 +2047,12 @@ def make_link_create_or_revive(key, source, target, cls, local_name):
 def make_tombstone(key):
     return {"op": "tombstone", "key": key}
 
+def make_tombstone_occ(key, expected_revision):
+    # A CAS-guarded tombstone, mirroring make_aspect_upsert_occ /
+    # make_link_revive_occ above: the revision comes from a read this same
+    # call site took, so the retraction and the check are atomic.
+    return {"op": "tombstone", "key": key, "expectedRevision": expected_revision}
+
 def required_string(p, name):
     if not hasattr(p, name):
         fail("InvalidArgument: " + name + ": required")
@@ -2526,15 +2532,16 @@ def release_cells_mutations(studio, sched):
 
 def session_ledby_link(sess_key):
     # A session carries AT MOST ONE LIVE instructor, so this returns its live
-    # (link key, instructor vertex key) or (None, None). ReassignSession's
-    # instructor swap tombstones the current ledBy link and writes a new one
-    # (a REPOINT, not a write-once fact), so a page can hold the tombstone
-    # before the live link -- this pages until it finds one. The target
-    # vertex is what TombstoneSession / ReassignSession need to release or
-    # migrate the instructor's instructorSlotClaim cells; the link key is
-    # what they tombstone to drop the ledBy edge itself.
+    # (link key, instructor vertex key, link revision) or (None, None, None).
+    # ReassignSession's instructor swap tombstones the current ledBy link and
+    # writes a new one (a REPOINT, not a write-once fact), so a page can hold
+    # the tombstone before the live link -- this pages until it finds one.
+    # The target vertex is what TombstoneSession / ReassignSession need to
+    # release or migrate the instructor's instructorSlotClaim cells; the link
+    # key is what they tombstone to drop the ledBy edge itself, and the
+    # revision is what lets that tombstone be CAS-guarded rather than blind.
     if not vertex_live(sess_key):
-        return None, None
+        return None, None, None
     cursor = None
     for _page in range(MAX_LIVE_LINK_PAGES):
         # read-posture: (e) relation=ledBy epoch=none -- bounded, never a
@@ -2542,10 +2549,10 @@ def session_ledby_link(sess_key):
         page, cursor = kv.Links(sess_key, "ledBy", "out", cursor, LIVE_LINK_PAGE_LIMIT)
         for lk in page:
             if not lk.isDeleted:
-                return lk.key, lk.targetVertex
+                return lk.key, lk.targetVertex, lk.revision
         if cursor == None:
             break
-    return None, None
+    return None, None, None
 
 def session_atstudio_link(sess_key):
     # A session carries EXACTLY ONE LIVE studio, so this returns its live
@@ -3057,7 +3064,7 @@ def execute(state, op):
         # instructor-standing auth branch -- an operator call carries no such
         # param at all. Releases that instructor's instructorSlotClaim cells
         # too, the same providerSlotClaim-mirror lock CreateSession claimed.
-        _, cur_instructor = session_ledby_link(sess_key)
+        _, cur_instructor, _ = session_ledby_link(sess_key)
         if cur_instructor != None:
             mutations.extend(release_cells_mutations(cur_instructor, sched))
         events = [{"class": "wellness.sessionCancelled", "data": {"sessionKey": sess_key}}]
@@ -3146,7 +3153,12 @@ def execute(state, op):
                 # enumeration above (data-derived key -- the occurrence is
                 # unknown until it resolves from the link). Already-cancelled
                 # occurrences released their cells when TombstoneSession ran.
-                if not vertex_live(sess_key):
+                # A direct read rather than vertex_live(sess_key), because the
+                # tombstone below needs the revision this read observes to
+                # pin its own CAS -- vertex_live's internal read does not
+                # expose one.
+                sess_doc = kv.Read(sess_key)
+                if sess_doc == None or sess_doc.isDeleted:
                     continue
                 _, occ_id = parts_of(sess_key, "occurrence", "session")
                 # This occurrence's OWN atStudio link to the CONFIRMED studio,
@@ -3178,13 +3190,13 @@ def execute(state, op):
                 # started.
                 if not (submitted < starts_at):
                     continue
-                mutations.append(make_tombstone(sess_key))
+                mutations.append(make_tombstone_occ(sess_key, sess_doc.revision))
                 mutations.extend(release_cells_mutations(studio, sched))
                 # The occurrence's CURRENT instructor, read fresh per
                 # occurrence rather than off the series: ReassignSession subs
                 # one class of a run without touching its siblings, so the
                 # series' original instructor is not who holds these cells.
-                _, cur_instructor = session_ledby_link(sess_key)
+                _, cur_instructor, _ = session_ledby_link(sess_key)
                 if cur_instructor != None:
                     mutations.extend(release_cells_mutations(cur_instructor, sched))
                 cancelled_keys.append(sess_key)
@@ -3450,7 +3462,7 @@ def execute(state, op):
             occ_new_ends = time.rfc3339_add(occ_new_starts, span_dur)
             occ_old = slot_cells(occ["startsAt"], occ["endsAt"])
             occ_new = slot_cells(occ_new_starts, occ_new_ends)
-            _, instructor = session_ledby_link(sess_key)
+            _, instructor, _ = session_ledby_link(sess_key)
             if instructor != None:
                 if instructor not in old_instr_cells:
                     old_instr_cells[instructor] = {}
@@ -3630,7 +3642,7 @@ def execute(state, op):
         # Read the session's CURRENT instructor unconditionally — needed below
         # to migrate instructorSlotClaim cells even on a reschedule-only call
         # that never touches newInstructor/clearInstructor.
-        cur_ledby, old_instructor = session_ledby_link(sess_key)
+        cur_ledby, old_instructor, cur_ledby_revision = session_ledby_link(sess_key)
         if new_instructor != None:
             new_instructor_final = new_instructor
         elif clear_instructor:
@@ -3644,7 +3656,7 @@ def execute(state, op):
         # replacement.
         if new_instructor != None or clear_instructor:
             if cur_ledby != None:
-                mutations.append(make_tombstone(cur_ledby))
+                mutations.append(make_tombstone_occ(cur_ledby, cur_ledby_revision))
             if new_instructor != None:
                 require_live_typed(state, new_instructor, "newInstructor", "instructor")
                 _, new_instr_id = parts_of(new_instructor, "newInstructor", "instructor")
@@ -3754,7 +3766,7 @@ def execute(state, op):
                 wanted_atloc["lnk.session." + sess_id + ".atLocation." + ltype + "." + lid] = loc
             for lkey in prior_atloc:
                 if lkey not in wanted_atloc and not prior_atloc[lkey].isDeleted:
-                    mutations.append(make_tombstone(lkey))
+                    mutations.append(make_tombstone_occ(lkey, prior_atloc[lkey].revision))
             for lkey in wanted_atloc:
                 prior = prior_atloc.get(lkey)
                 if prior == None:

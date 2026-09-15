@@ -372,7 +372,7 @@ def sweep_indexes(hits, subject_key):
             if index_owned_by(idx_vtx, subject_key):
                 mutations.append({"op": "tombstone", "key": lk.sourceVertex,
                                   "expectedRevision": idx_vtx.revision})
-        mutations.append({"op": "tombstone", "key": lk.key})
+        mutations.append({"op": "tombstone", "key": lk.key, "expectedRevision": lk.revision})
     return mutations
 
 def sweep_duplicate_of(hits):
@@ -380,7 +380,7 @@ def sweep_duplicate_of(hits):
     # one belongs to a person nobody is erasing.
     mutations = []
     for lk in hits:
-        mutations.append({"op": "tombstone", "key": lk.key})
+        mutations.append({"op": "tombstone", "key": lk.key, "expectedRevision": lk.revision})
     return mutations
 
 def execute(state, op):

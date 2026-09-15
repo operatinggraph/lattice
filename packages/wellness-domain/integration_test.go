@@ -4100,7 +4100,7 @@ func TestTombstoneSessionSeries_CancelsOnlyUpcomingOccurrences(t *testing.T) {
 }
 
 // TestTombstoneSessionSeries_SkipsAlreadyCancelledOccurrence proves the
-// vertex_live screen on each walked occurrence. An occurrence cancelled
+// liveness screen on each walked occurrence. An occurrence cancelled
 // individually first has already released its cells — and TombstoneSession
 // does not cascade onto its atStudio link or its .schedule, so nothing else in
 // the walk would stop the series op from "releasing" them a second time. By

@@ -477,6 +477,25 @@ jobs:
         # Self-tests on every run and refuses an all-clear over zero
         # governed ops.
         run: STRICT=1 go run ./scripts/lint-derive-reads-bare-vector.go
+      - name: Live-read pinned-mutation lint (a live kv.Read or kv.Links page entry decides a bare update/tombstone on its own key)
+        # applyHydratedRevisions (internal/processor/commit_path.go) conditions
+        # a bare update/tombstone on the step-4 hydrated revision only for a
+        # key in the hydrated set; a key a script obtains through a live
+        # kv.Read — class (e)/(c), or an unannotated class-(b) read — or
+        # through a kv.Links(...) page entry's own .key (it carries a
+        # .revision just as live, starlark_kv.go:317) carries no step-4
+        # revision, so a bare mutation on it stays UNCONDITIONED
+        # (identity-domain CreateUnclaimedIdentity, 2026-08-15, re-found
+        # repeatedly through 2026-09-14). This gate parses every shipped
+        # package script (and every nested def) with go.starlark.net/syntax,
+        # resolves each kv.Read's read-posture annotation by the same binding
+        # rule lint-conventions.go uses, and fails a live read or page entry
+        # followed — reachably, in program order, not merely anywhere in the
+        # same function — by an update/tombstone on the same key (inline or
+        # via a mutation helper, no naming convention required) with no
+        # expectedRevision. Self-tests on every run and refuses an all-clear
+        # over zero examined scripts.
+        run: STRICT=1 go run ./scripts/lint-live-read-pinned-mutation.go
 
       - name: Op-meta required-fields lint (a field the script refuses without is declared required)
         # A DDL script and its OpMetaSpec are two declarations of one op: the

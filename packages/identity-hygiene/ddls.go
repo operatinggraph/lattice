@@ -736,6 +736,11 @@ def execute(state, op):
         idx_vertex_key = lk.sourceVertex
         old_link_key = lk.key
         link_data = lk.data if lk.data != None else {}
+        # occ: live-unpinned the edge is the secondary's own and is genuinely
+        # retiring whoever owns the vertex now, unlike idx_vertex_key's own
+        # repoint below (which races a concurrent re-owner and is pinned on
+        # idx_vtx.revision for exactly that reason) -- deliberate, not an
+        # oversight (see the note a few lines down).
         mutations.append({"op": "update", "key": old_link_key,
             "document": {"class": "indexes", "isDeleted": True, "data": link_data}})
 

@@ -247,7 +247,7 @@ def sweep_inbound(subject_key, hits):
     for lk in hits:
         credential_key = lk.sourceVertex
         mutations.append({"op": "tombstone", "key": credential_index_key(credential_key)})
-        mutations.append({"op": "tombstone", "key": lk.key})
+        mutations.append({"op": "tombstone", "key": lk.key, "expectedRevision": lk.revision})
         events.append({"class": "identity.unbound", "data": {
             "identityKey": subject_key,
             "actorKey": credential_key,
@@ -268,7 +268,7 @@ def sweep_outbound(subject_key, hits):
         mutations.append({"op": "tombstone", "key": credential_index_key(subject_key)})
     for lk in hits:
         owner_key = lk.targetVertex
-        mutations.append({"op": "tombstone", "key": lk.key})
+        mutations.append({"op": "tombstone", "key": lk.key, "expectedRevision": lk.revision})
         rewrite = owner_binding_rewrite(owner_key, subject_key)
         if rewrite != None:
             mutations.append(rewrite)

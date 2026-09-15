@@ -93,7 +93,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "semantic-contracts",
-	Version: "0.5.0",
+	Version: "0.5.1",
 	Description: "LoftSpace 'Executable Paper' reference package (fixed/one-time, conditioned, judgment, " +
 		"recurring monthly — termed to a calendar-month period grid or untermed — and prorated computational " +
 		"clauses, plus self-amendment): the clause vertex type (CreateClause/SupersedeClause/BackfillClauseTerm, " +
