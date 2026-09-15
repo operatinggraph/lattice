@@ -750,6 +750,20 @@ arm, so a widening mirrors the reason and not the shape.
   (`postedTo`, `forPatient`) and read that link — deterministic keys through `derive_reads`, walk-resolved ones as the
   `(e)` follow-up with a `read_drift_baseline` row; and grep the `authContextTarget` branch for every optional field
   the descriptor exposes.
+- **A mirror that drops one of the precedent's write-time branches drops the INVARIANT that branch enforced — and
+  an invariant re-homed onto a sampled evaluator must be proven with events interleaved between the samples.** Café's
+  `post_entry` ends an arrears episode on `.balance → 0`; the wellness mirror has no balance, kept only the stale/carry
+  branch, and "a finished episode's send record dies with it" went with the dropped branch — a pay-to-zero and a fresh
+  charge inside one Weaver dispatch window fused two episodes (a hold on a not-yet-due charge, never reminded). Minted:
+  wellness-ledger `EvaluateWellnessArrears` (2026-09-15), caught cold as BLOCKING. Check: for every precedent branch a
+  mirror omits, list what that branch enforced and name the new site that enforces it; the vector posts two entries
+  between two evaluations, never one entry per evaluation (the shape every green test had).
+- **A declared enumeration hub that NORMALIZES to the real hub's shape passes the read-drift guard without declaring the
+  real hub.** CreateBooking's hold walked `heldFor` from `{payload.booker}`; the descriptor declared `{actor}`, and on
+  the staff leg (booker ≠ actor) `NormalizeEnumeration` collapsed both to `vtx.identity.<id> heldFor in`, so the guard
+  measured nothing. Minted: wellness-domain (2026-09-15), caught cold. Check: a declared hub names the identity the
+  SCRIPT walks from (a payload field when the walk is over a payload-named vertex), and the staff-leg vector resolves the
+  declaration with the payload, not the actor; grep `Hub: "{actor}"` on every op whose script walks from a payload key.
 ## Related contracts
 
 - **Contract #1** §1.3, §1.5 — vertex / aspect / link key shapes the install write set must conform to.

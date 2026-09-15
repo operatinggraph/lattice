@@ -63,9 +63,11 @@ fork — the café mechanism is the ratified pattern, applied to one more ledger
    Lifetime: minted by `EvaluateWellnessArrears`; `post_entry` (every debit/credit) carries + marks `stale` when it
    exists and mints nothing when absent — wellness-ledger stores no balance, so café's legacy branch is the ONLY
    branch here, and the never-evaluated gap (`evaluatedAt = null`) is what first evaluates every account, incl.
-   the ones standing at install; the episode ends (`{evaluatedAt}` alone) when the evaluation finds no open head;
-   `sentAt` is carried across every write of a live episode and dropped only there. Never tombstoned (an account
-   is never tombstoned).
+   the ones standing at install; the episode ends at the evaluation — `{evaluatedAt}` alone when it finds no open
+   head, and (amended at build, 2026-09-15) a recorded `sentAt`/`remindedFor` at or before the head's own `postedAt`
+   belongs to a finished episode and is dropped, since under FIFO the head IS the first charge that took a square
+   account into debt; `post_entry` only carries. A pay-to-zero and a fresh charge inside one dispatch window are
+   therefore two episodes, not one. Never tombstoned (an account is never tombstoned).
 2. **`EvaluateWellnessArrears{accountKey}`** — café's op: paged `postedTo` replay (`ARREARS_PAGE_LIMIT` 50 ×
    `ARREARS_MAX_PAGES` 10, `historyTooLong` degrade recorded, never a refusal), `reverses` netting, FIFO head, a
    **15-day term** (`ARREARS_GRACE_DURATION = "360h"` — the app's `statementGraceDays` is 15; one rule in two
@@ -161,3 +163,31 @@ fork — the café mechanism is the ratified pattern, applied to one more ledger
 7. **Non-goals:** a stored `.balance` on the wellness account; holding promotion of a pre-hold waitlist claim; a
    Facet lens column for the hold; the no-show fee row (this batch's second unit, its own doc); the desk's reminder
    re-send verb; the café mechanism itself.
+
+### Build note (2026-09-15)
+
+Shipped `7507be53` (CI green); brief `72b0e831`. Live on the shared stack (wellness-ledger 0.2.25 + wellness-domain
+0.27.12 diff-applied, `bin/wellness-app` cycled): the seven standing accounts opened the never-evaluated gap and
+`EvaluateWellnessArrears` ran once each — three overdue members stamped `sentAt 16:30:22Z`, the bridge's
+`notification` adapter replied and `.arrearsNotification = {completed, remindedFor, sentAt}` landed on each; two
+accounts armed `freshUntil` at their `dueAt`; two owe nothing. The member `…EjQz9L` ($60, 2 days overdue) reads
+`dueDate / isOverdue / daysOverdue / reminderSentAt` on `/api/ledger` and their `CreateBooking` through the gateway is
+refused `CreditHold: … a reminder went out for on 2026-09-15`. The first Weaver dispatch after install was refused
+`AuthDenied` — the grant's `cap.role-by-operation` row projects a second behind the target's first evaluation — and
+`lattice weaver revoke` + `enable` re-dispatched it (`_packages.md` §5; not a defect of this build).
+
+Deviations from the brief: netting is two hops (`settlesRefund → marker → reverses`), wellness-ledger's own link
+shape; `derive_reads` added to both ledger scripts so an undeclared submitter still hydrates `.arrears` and the
+upsert stays OCC; a `maxretries_evaluation` column per the package's target idiom; `Depends += orchestration-base`
+(the lapse marker's writer). Review classification (one cold pass over the package diff, a lead pass over the app
+diff): **design-gap** — the episode boundary was deferred from café's write-time `.balance → 0` branch to the
+evaluation and the invariant that branch carried (a finished episode's send record dies with it) went with it;
+two entries inside one dispatch window fused two episodes (BLOCKING, caught cold, fixed: the head's `postedAt` is
+the episode start under FIFO and a send at or before it is dropped — three vectors). **implementation-bug** — the
+hold's declared enumeration hub was `{actor}` on a walk the script runs from `{payload.booker}`; the read-drift
+guard passed only because NanoID normalization collapses both to one shape (SHOULD-FIX, fixed: hub =
+`{payload.booker}`). **brief-gap** — the courtesy census missed a cross-app dispatch site (`cmd/clinic-app`'s
+referral booking) and the four `WellnessDebit/CreditAccount` sites the new `InvalidState` reaches; the gate found
+them. **second sighting** of the `_packages.md` class *a confinement guard tested only as the operator has never run*
+(JoinWaitlist's staff leg had no baseline rows) → promoted to a lint gate in the same batch. Adjacent find, fixed in
+the batch: café's `handleLedger` threads the recorded `arrearsDueAt` into its lookup and never renders it.
