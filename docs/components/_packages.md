@@ -598,7 +598,8 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   it (wellness `ReleaseOrphanedBooking`, 2026-09-13); a `payout` debit passed `type != "debit"` as `reversesRef`
   (café `PayoutCafeCredit`, 2026-09-14); `.decision = lost` left `SignLease` keyed on the mutable premise it replaced
   (2026-09-14); a refusal naming a SET (`VisitNotHeld` = cancelled ∪ noShow) left the sibling lens at `<> 'cancelled'`
-  (clinic `RecordEncounter`, 2026-09-14). Check: before closing a guard grep the aspect's writers; a guard that reads
+  (clinic `RecordEncounter`, 2026-09-14); a landlord self grant on the charge left the FE flow's prerequisite
+  `LoftspaceCreateAccount` operator-only (loftspace, 2026-09-15). Check: before closing a guard grep the aspect's writers; a guard that reads
   the premise a recorded fact replaces takes the fact as its own conjunct; for a new classification value grep every
   `data.get("<field>")` comparison in the package and every `status.data.value <>` conjunct in every lens gating on
   that status, in every package anchoring the type, deciding each site; for a link a refund/settlement mint walks,
