@@ -57,6 +57,17 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
 (`agents/fire-brief-template.md`); the item-close review appends new ones (`agents/steward/SKILL.md` §4);
 **capped at 12 one-liners**; an entry retires when a lint/test gate mechanizes it.
 
+- **A new gate is proven by REPLAYING its own minting incidents through it — an exempt family and a site
+  census are claims about the corpus, and the corpus votes.** `lint-refusal-courtesy` (2026-09-15) shipped
+  with `AuthDenied` exempt as "the hat" while every ledger coded its payment cap — the class's founding
+  sighting — as `AuthDenied`, so the gate would not have flagged sighting #1 in any vertical; its site
+  census keyed on op-name literals, so the inbox's `descriptorFor(task.operationName)` dispatcher — a
+  third site for the very op the fire had just fixed — counted as none; and its function-grain put
+  sighting #2's two pickers under one declaration. All three caught cold, none by the 74-vector self-test,
+  which proved the rule and never the rule's premises. Check: before the self-test, run each minting
+  incident's pre-fix state through the gate and require a FAIL at the site the review found; and for every
+  "exempt because X" and "a site is Y", grep the corpus for the counter-example (the exempt code raised
+  for a state; the dispatch with no literal) before the rule is written.
 - **A default-deny gate must key on the HAZARD, not on a proxy for it — and the proxy always looks
   equivalent while you are writing it.** Minted three times in one fire (`op-name`, 2026-08-28), each
   passing its own tests and each failing at the exact site it was written for. Liveness keyed on the
