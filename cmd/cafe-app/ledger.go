@@ -302,11 +302,52 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 		return "", false, 0
 	}
 	due := oldest.AddDate(0, 0, cafeledger.ArrearsGraceDays)
-	if !now.After(due) {
+	// The boundary matches cafe-ledger's own evaluation (`due_at <=
+	// evaluated_at`, packages/cafe-ledger/scripts.go): due AT the instant,
+	// not only past it — so this handler's isOverdue and a concurrent
+	// EvaluateCafeArrears' recorded reminder never disagree at the exact
+	// instant a balance crosses into arrears.
+	if now.Before(due) {
 		return due.Format(time.RFC3339), false, 0
 	}
 	days := int(now.Sub(due).Hours()/24) + 1
 	return due.Format(time.RFC3339), true, days
+}
+
+// recordedOrDerivedDueDate prefers the account's own RECORDED arrears due
+// date (EvaluateCafeArrears' stamp) over deriveStatement's FIFO-derived one
+// — a stamp that names a date reads the recorded one when it exists,
+// mirroring cmd/wellness-app/ledger.go's rule of the same name.
+// deriveStatement's derivation is the fallback for a lease no evaluation has
+// touched yet.
+func recordedOrDerivedDueDate(recorded, derived string) string {
+	if recorded != "" {
+		return recorded
+	}
+	return derived
+}
+
+// computeOverdue reports whether dueDate (RFC3339) has been reached by now,
+// and by how many whole days — the same "reached, then +1" rule
+// deriveStatement applies. Re-derived here, rather than reused from
+// deriveStatement's own return, because the due date actually rendered may
+// be the RECORDED one (recordedOrDerivedDueDate), not deriveStatement's own
+// FIFO computation — isOverdue/daysOverdue must agree with whichever date is
+// shown. A due date that fails to parse fails closed (not overdue), the same
+// posture deriveStatement takes on a malformed postedAt.
+func computeOverdue(dueDate string, now time.Time) (bool, int) {
+	if dueDate == "" {
+		return false, 0
+	}
+	due, err := time.Parse(time.RFC3339, dueDate)
+	if err != nil {
+		return false, 0
+	}
+	if now.Before(due) {
+		return false, 0
+	}
+	days := int(now.Sub(due).Hours()/24) + 1
+	return true, days
 }
 
 // leaseAccountLookup is the join cafe-app needs out of one cafeLeaseAccounts
@@ -444,7 +485,21 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	}
 	get := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
 	rows, balance := computeLedgerHistory(keys, get, leaseAppKey)
-	dueDate, isOverdue, daysOverdue := deriveStatement(rows, balance, time.Now().UTC())
+
+	// A due date (recorded or derived) only means something over an actual
+	// open balance — mirrors deriveStatement's own "nothing to age" case,
+	// and cmd/wellness-app/ledger.go's handleLedger: a lease in CREDIT
+	// (balance <= 0) shows no due date even if the account still carries a
+	// stale recorded one from a since-settled arrears episode.
+	now := time.Now().UTC()
+	var dueDate string
+	var isOverdue bool
+	var daysOverdue int
+	if balance > 0 {
+		derivedDue, _, _ := deriveStatement(rows, balance, now)
+		dueDate = recordedOrDerivedDueDate(acctLookup.ArrearsDueAt, derivedDue)
+		isOverdue, daysOverdue = computeOverdue(dueDate, now)
+	}
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"leaseAppKey":    leaseAppKey,
 		"accountKey":     acctLookup.AccountKey,

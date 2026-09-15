@@ -1348,6 +1348,108 @@ func TestHandleFrontDeskBalances_OverdueOmitPaidAndConfinement(t *testing.T) {
 	}
 }
 
+// TestHandleFrontDeskBalances_RecordedDueDateWins is the front-desk row
+// join: cafeLeaseAccounts' RECORDED arrearsDueAt (EvaluateCafeArrears' own
+// stamp) must win over computeLedgerBalances' FIFO-derived dueDate, exactly
+// as handleLedger's single-lease view does — a lease with an OLD debit (so
+// the FIFO derivation alone would compute one due date) whose account row
+// carries a DIFFERENT recorded due date must render the recorded one, and
+// isOverdue/daysOverdue must be computed off THAT date, not the derived one.
+func TestHandleFrontDeskBalances_RecordedDueDateWins(t *testing.T) {
+	s, cookieFor, staff := staffAtOneBuilding(t)
+	old := time.Now().UTC().AddDate(0, 0, -(cafeledger.ArrearsGraceDays + 5)).Format(time.RFC3339)
+
+	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.mine1", map[string]any{
+		"transactionKey": "vtx.tx.mine1", "accountKey": "vtx.account.mine",
+		"leaseAppKey": "vtx.leaseapp.mine", "type": "debit", "amountCents": 4500.0,
+		"memo": "House tab", "postedAt": old,
+	})
+
+	// The recorded due date is barely overdue (an hour ago, daysOverdue=1)
+	// where the FIFO derivation off the debit above (grace+5 days old) would
+	// compute an overdue date with daysOverdue=6 — the two disagree on BOTH
+	// the date and daysOverdue, so a passing assertion can only be explained
+	// by the recorded value actually winning.
+	recordedDue := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	putJSON(t, s.conn, cafeledger.LeaseAccountsBucket, "vtx.leaseapp.mine", map[string]any{
+		"leaseAppKey": "vtx.leaseapp.mine", "accountKey": "vtx.account.mine",
+		"arrearsDueAt": recordedDue, "arrearsReminderSentAt": "2026-01-01T00:00:00Z",
+	})
+
+	rec := sessionGET(s, s.handleFrontDeskBalances, "/api/frontdesk-balances", cookieFor(staff))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Balances []balanceRow `json:"balances"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var row balanceRow
+	for _, r := range body.Balances {
+		if r.LeaseAppKey == "vtx.leaseapp.mine" {
+			row = r
+		}
+	}
+	if row.LeaseAppKey == "" {
+		t.Fatalf("front-desk balances = %+v, want vtx.leaseapp.mine present", body.Balances)
+	}
+	if row.DueDate != recordedDue {
+		t.Fatalf("dueDate = %q, want the RECORDED %q, not the FIFO-derived date", row.DueDate, recordedDue)
+	}
+	if !row.IsOverdue || row.DaysOverdue != 1 {
+		t.Fatalf("isOverdue/daysOverdue = %v/%d, want true/1 (computed off the RECORDED due date)", row.IsOverdue, row.DaysOverdue)
+	}
+	if row.ReminderSentAt != "2026-01-01T00:00:00Z" {
+		t.Fatalf("reminderSentAt = %q, want the lease-accounts row's own value", row.ReminderSentAt)
+	}
+}
+
+// TestHandleLedger_RecordedDueDateWins is handleLedger's own half of the
+// same join: the resident's single-lease ledger view must also prefer the
+// account's RECORDED arrearsDueAt over deriveStatement's FIFO derivation.
+func TestHandleLedger_RecordedDueDateWins(t *testing.T) {
+	staff, resA := "AAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBB"
+	s, cookieFor := devSessionServer(t, fakeGatewayActor(t, map[string]bool{staff: true}))
+	seedLease(t, s.conn, "vtx.leaseapp.aaa", resA)
+
+	old := time.Now().UTC().AddDate(0, 0, -(cafeledger.ArrearsGraceDays + 5)).Format(time.RFC3339)
+	putJSON(t, s.conn, cafeledger.LedgerHistoryBucket, "vtx.tx.aaa1", map[string]any{
+		"transactionKey": "vtx.tx.aaa1", "accountKey": "vtx.account.aaa",
+		"leaseAppKey": "vtx.leaseapp.aaa", "type": "debit", "amountCents": 4500.0,
+		"memo": "House tab", "postedAt": old,
+	})
+	recordedDue := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	putJSON(t, s.conn, cafeledger.LeaseAccountsBucket, "vtx.leaseapp.aaa", map[string]any{
+		"leaseAppKey": "vtx.leaseapp.aaa", "accountKey": "vtx.account.aaa",
+		"arrearsDueAt": recordedDue, "arrearsReminderSentAt": "2026-01-01T00:00:00Z",
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger?leaseAppKey=vtx.leaseapp.aaa", cookieFor(resA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		DueDate        string `json:"dueDate"`
+		IsOverdue      bool   `json:"isOverdue"`
+		DaysOverdue    int    `json:"daysOverdue"`
+		ReminderSentAt string `json:"reminderSentAt"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.DueDate != recordedDue {
+		t.Fatalf("dueDate = %q, want the RECORDED %q, not the FIFO-derived date", body.DueDate, recordedDue)
+	}
+	if !body.IsOverdue || body.DaysOverdue != 1 {
+		t.Fatalf("isOverdue/daysOverdue = %v/%d, want true/1 (computed off the RECORDED due date)", body.IsOverdue, body.DaysOverdue)
+	}
+	if body.ReminderSentAt != "2026-01-01T00:00:00Z" {
+		t.Fatalf("reminderSentAt = %q, want the lease-accounts row's own value", body.ReminderSentAt)
+	}
+}
+
 // TestFrontDesk_MissingWorkplacesBucket_502 pins the deliberate asymmetry in
 // the front desk's best-effort posture. A missing FRONT-DESK bucket is
 // tolerated — that package is an optional cross-vertical join, so the grid

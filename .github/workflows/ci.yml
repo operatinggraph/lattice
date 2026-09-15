@@ -598,6 +598,23 @@ jobs:
         # the descriptors with go/ast.
         run: STRICT=1 go run ./scripts/lint-refusal-courtesy.go
 
+      - name: Workplace staff-vector lint (a confinement guard tested only as the operator has never run)
+        # actor_holds_operator returns before the worksAt walk, so a suite
+        # whose every vector for a require_workplace/enforce_workplace-
+        # confined op runs as the operator measures none of that op's guard
+        # reads (café Charge, 2026-09-13; wellness JoinWaitlist, 2026-09-15,
+        # commit 7507be53). Parses every shipped package script with
+        # go.starlark.net/syntax for execute()'s op branches that reach
+        # require_workplace/enforce_workplace/clinic-domain's
+        # enforce_workplace_confined (directly or through one level of
+        # same-script helper indirection), then requires a non-operator
+        # staff cap-doc func (Roles not naming the operator role) granting
+        # that op at scope=any somewhere in the package's _test.go files, or
+        # an explicit `// staff-vector: <Op> — <why>` declaration.
+        # Self-tests on every run and replays both minting incidents from
+        # git history.
+        run: STRICT=1 go run ./scripts/lint-workplace-staff-vector.go
+
       - name: Board lint (the backlog is an index, not a journal)
         # Backstop on code commits (board-only commits hit board-lint.yml,
         # which the main paths-ignore skips): fails on an over-budget row, a

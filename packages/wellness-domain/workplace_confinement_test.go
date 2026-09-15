@@ -338,6 +338,75 @@ func TestWorkplace_CreateStudioAcceptsPerTypeClass(t *testing.T) {
 	}
 }
 
+// wcCreateSessionSeriesAs submits CreateSessionSeries as an arbitrary actor,
+// declaring exactly what a staff caller would (every per-occurrence slot
+// cell is derived server-side by the script's own derive_reads, ddls.go, so
+// the dispatcher declares only the studio itself — createSessionSeriesLed's
+// own read posture, integration_test.go).
+func wcCreateSessionSeriesAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer,
+	label, studioKey, actorKey string) (string, processor.MessageOutcome) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	payload, _ := json.Marshal(map[string]any{
+		"studio": studioKey, "name": "Morning Flow", "startsAt": "2026-07-08T09:00:00Z",
+		"endsAt": "2026-07-08T09:30:00Z", "capacity": 20, "intervalDays": 7, "occurrenceCount": 3,
+	})
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateSessionSeries",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-07T12:00:00Z",
+		Class:         "sessionseries",
+		Payload:       payload,
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateSessionSeries", actorKey, wellnessdomain.OpMetas()),
+			Reads: []string{studioKey}},
+	}
+	testutil.PublishOp(t, conn, env)
+	return "vtx.sessionseries." + nanoIDFromRequestID(reqID), testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// TestWorkplace_CreateSessionSeriesConfinedToTheStaffersBuilding mirrors
+// TestWorkplace_CreateStudioConfinedToTheStaffersBuilding: CreateSessionSeries
+// grants frontOfHouse at scope=any (permissions.go) and checks the SAME
+// staff-standing confinement CreateSession already carries, off the studio's
+// own locatedAt link (ddls.go) — an op tested only as the operator has never
+// run this guard.
+func TestWorkplace_CreateSessionSeriesConfinedToTheStaffersBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcseries")
+	wcSeedStaff(t, ctx, conn)
+	capDoc := wcStaffCapDoc()
+	capDoc.PlatformPermissions = append(capDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "CreateSessionSeries", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, capDoc)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcseriesstudioa0001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdwcseriesstudiob0001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+	wfSeedStudioAt(t, ctx, conn, studioB, wcBuildingBKey, wcBuildingBID)
+
+	seriesA, got := wcCreateSessionSeriesAs(t, ctx, conn, cp, cons,
+		"wdwcseriesa000000001", studioA, wcStaffKey)
+	if got != processor.OutcomeAccepted {
+		t.Fatalf("staff CreateSessionSeries at its OWN building = %v, want Accepted "+
+			"(the positive sibling — if this fails the negative below proves nothing)", got)
+	}
+	if !keyExists(t, ctx, conn, seriesA) {
+		t.Fatalf("%s was not written by the accepted CreateSessionSeries", seriesA)
+	}
+
+	seriesB, got := wcCreateSessionSeriesAs(t, ctx, conn, cp, cons,
+		"wdwcseriesb000000001", studioB, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff CreateSessionSeries at ANOTHER building = %v, want Rejected", got)
+	}
+	if keyExists(t, ctx, conn, seriesB) {
+		t.Errorf("the denied cross-building CreateSessionSeries wrote %s; it must be denied before any mutation", seriesB)
+	}
+}
+
 // TestWorkplace_StaffBookAndCancelConfinedToTheirBuilding walks both booking
 // ops over the two-hop resolution (session -atStudio-> studio -locatedAt->
 // location) that carries the confinement.

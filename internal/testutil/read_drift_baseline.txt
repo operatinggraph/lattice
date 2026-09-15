@@ -96,6 +96,11 @@ read	CreateLeaseDocInstance	vtx.leaseapp.<id>.signature
 read	CreateLeaseDocInstance	vtx.leaseapp.<id>.terms
 read	CreateMenuItem	lnk.identity.<id>.worksAt.building.<id>
 read	CreateSession	lnk.identity.<id>.worksAt.building.<id>
+# CreateSessionSeries runs the SAME staff-standing confinement CreateSession
+# does (ddls.go: "checked ONCE — the whole series shares one studio"), same
+# fixture under-declaration the row above records — unexercised by any
+# non-operator test until now.
+read	CreateSessionSeries	lnk.identity.<id>.worksAt.building.<id>
 read	CreateStudio	lnk.identity.<id>.worksAt.building.<id>
 read	CreateStudio	lnk.identity.<id>.worksAt.unit.<id>
 read	CreateUnclaimedIdentity	vtx.identity.<id>.erasureRequested
@@ -172,6 +177,13 @@ read	ReassignSessionSeries	lnk.identity.<id>.worksAt.building.<id>
 # ledBy walk's own far endpoint, admitted as class (e).
 read	ReassignSessionSeries	vtx.studio.<id>.slot<t>
 read	RecordCapabilityProposal	vtx.capabilityproposal.<id>.request
+# RecordEncounter's workplace fallback (its ONLY non-operator grant is
+# `provider`; frontOfHouse is not among its grantees) reuses SetAppointmentStatus's
+# staff-standing confinement and bound-provider binder, same fixture under-
+# declaration the SetAppointmentStatus/CorrectAppointmentStatus rows record —
+# unexercised by any non-operator test until now.
+read	RecordEncounter	lnk.identity.<id>.worksAt.building.<id>
+read	RecordEncounter	lnk.provider.<id>.identifiedBy.identity.<id>
 read	RecordServiceOutcome	lnk.service.<id>.providedBy.serviceprovider.<id>
 read	ReleaseOrphanedBooking	vtx.session.<id>.schedule
 # RefundCafeCharge runs CreditCafeAccount's workplace confinement verbatim (the
@@ -183,6 +195,13 @@ read	RefundCafeCharge	lnk.identity.<id>.worksAt.building.<id>
 read	RefundCafeCharge	lnk.identity.<id>.worksAt.unit.<id>
 read	ReportIssue	lnk.identity.<id>.worksAt.building.<id>
 read	ReportIssue	lnk.identity.<id>.worksAt.unit.<id>
+# RescheduleAppointment reuses SetAppointmentStatus's staff-standing
+# confinement (appointment_sites off the appointment's own withProvider
+# walk) and its bound-provider binder (identifiedBy), same fixture under-
+# declaration the SetAppointmentStatus/CorrectAppointmentStatus rows record —
+# unexercised by any non-operator test until now.
+read	RescheduleAppointment	lnk.identity.<id>.worksAt.building.<id>
+read	RescheduleAppointment	lnk.provider.<id>.identifiedBy.identity.<id>
 read	RescheduleAppointment	vtx.provider.<id>.hours
 read	RescheduleAppointment	vtx.provider.<id>.timeOff
 read	ResolveWorkOrder	lnk.identity.<id>.worksAt.building.<id>
@@ -202,6 +221,17 @@ read	SetAppointmentStatus	lnk.identity.<id>.worksAt.building.<id>
 read	SetAppointmentStatus	lnk.provider.<id>.identifiedBy.identity.<id>
 read	SetBookingAttendance	lnk.identity.<id>.worksAt.building.<id>
 read	SetMenuItemAvailability	lnk.identity.<id>.worksAt.building.<id>
+# SetMenuItemLocation's own staff-standing confinement (require_workplace on
+# the payload's newLocation) reads the caller's worksAt link live, same
+# fixture under-declaration every sibling menu-catalog op's row above records
+# (CreateMenuItem/RetireMenuItem/SetMenuItemAvailability/UpdateMenuItem) —
+# this op simply had no non-operator test exercising it until now.
+read	SetMenuItemLocation	lnk.identity.<id>.worksAt.building.<id>
+# menu_item_served_at's release-old-link follow-up (Contract #2 class (e),
+# the same shape the row below already records for a unit-typed prior
+# location) reads live whichever type the item's CURRENT servedAt happens to
+# be — building here.
+read	SetMenuItemLocation	lnk.menuitem.<id>.servedAt.building.<id>
 read	SetMenuItemLocation	lnk.menuitem.<id>.servedAt.unit.<id>
 read	SetRenewalTerms	lnk.identity.<id>.manages.unit.<id>
 # SetStudioProfile's front-of-house binder is TombstoneStudio's verbatim: the
@@ -292,6 +322,10 @@ walk	CreateLeaseDocInstance	vtx.unit.<id> manages in
 walk	CreateMenuItem	vtx.building.<id> containedIn out
 walk	CreateSession	vtx.building.<id> containedIn out
 walk	CreateSession	vtx.studio.<id> locatedAt out
+# CreateSessionSeries' front-of-house binder walks the studio's rooms and
+# their containment the same way CreateSession's row above does (the shape
+# ReassignSessionSeries' and TombstoneSessionSeries' own rows already name).
+walk	CreateSessionSeries	vtx.building.<id> containedIn out
 walk	CreateSessionSeries	vtx.studio.<id> locatedAt out
 walk	CreateStudio	vtx.building.<id> containedIn out
 walk	CreateStudio	vtx.unit.<id> containedIn out
@@ -377,6 +411,12 @@ walk	ReassignSessionSeries	vtx.building.<id> containedIn out
 # TombstoneSessionSeries's row below, off the same declared partOf walk.
 walk	ReassignSessionSeries	vtx.session.<id> ledBy out
 walk	ReassignSessionSeries	vtx.studio.<id> locatedAt out
+# RecordEncounter's staff-standing confinement resolves the appointment's
+# bound provider's site(s) the same way SetAppointmentStatus's rows do
+# (appointment_sites: withProvider -> practicesAt -> containedIn).
+walk	RecordEncounter	vtx.appointment.<id> withProvider out
+walk	RecordEncounter	vtx.building.<id> containedIn out
+walk	RecordEncounter	vtx.provider.<id> practicesAt out
 walk	RecordServiceOutcome	vtx.service.<id> instanceOf out
 walk	ReleaseOrphanedBooking	vtx.wellnesstransaction.<id> postedTo out
 # Idempotency guard on the no-show-fee charge this op's own `settles in`
@@ -401,6 +441,12 @@ walk	RefundCafeCharge	vtx.leaseapp.<id> appliesToUnit out
 walk	RefundCafeCharge	vtx.unit.<id> containedIn out
 walk	ReportIssue	vtx.building.<id> containedIn out
 walk	ReportIssue	vtx.unit.<id> containedIn out
+# RescheduleAppointment's staff-standing confinement resolves the appointment's
+# bound provider's site(s) the same way SetAppointmentStatus's rows below do
+# (appointment_sites: withProvider -> practicesAt -> containedIn).
+walk	RescheduleAppointment	vtx.appointment.<id> withProvider out
+walk	RescheduleAppointment	vtx.building.<id> containedIn out
+walk	RescheduleAppointment	vtx.provider.<id> practicesAt out
 walk	ResolveWorkOrder	vtx.building.<id> containedIn out
 walk	ResolveWorkOrder	vtx.unit.<id> containedIn out
 walk	ResolveWorkOrder	vtx.workorder.<id> locatedAt out
@@ -439,6 +485,11 @@ walk	SetBookingAttendance	vtx.wellnesstransaction.<id> postedTo out
 walk	SetBookingAttendance	vtx.wellnesstransaction.<id> reverses in
 walk	SetMenuItemAvailability	vtx.building.<id> containedIn out
 walk	SetMenuItemAvailability	vtx.menuitem.<id> servedAt out
+# worksAt_covers' multi-parent containment walk over the payload's
+# newLocation, same shape every sibling menu-catalog op's row above records
+# (CreateMenuItem/RetireMenuItem/SetMenuItemAvailability/UpdateMenuItem) —
+# unexercised by any non-operator test until now.
+walk	SetMenuItemLocation	vtx.building.<id> containedIn out
 walk	SetMenuItemLocation	vtx.menuitem.<id> servedAt out
 walk	SetRenewalTerms	vtx.leaseapp.<id> appliesToUnit out
 walk	SetRenewalTerms	vtx.renewal.<id> renews out

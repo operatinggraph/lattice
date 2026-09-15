@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	cafeledger "github.com/operatinggraph/lattice/packages/cafe-ledger"
 )
 
 // TestReadAllOrFail_FailsLoudOnAnyFetchError proves a KVGet failure on a
@@ -194,6 +196,84 @@ func TestDeriveStatement_PastGraceIsOverdue(t *testing.T) {
 	}
 	if !overdue || days != 14 {
 		t.Errorf("want overdue=true days=14 (Aug 16 -> Aug 29 + 1), got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_ExactInstantBoundaryIsOverdue pins the boundary:
+// cafe-ledger's own EvaluateCafeArrears treats the due instant itself as
+// arrears (`due_at <= evaluated_at`, packages/cafe-ledger/scripts.go), so
+// this handler's isOverdue must agree at the exact instant a balance
+// crosses into arrears, not only once it is strictly past — a concurrent
+// EvaluateCafeArrears run must never disagree with this read at the exact
+// boundary.
+func TestDeriveStatement_ExactInstantBoundaryIsOverdue(t *testing.T) {
+	posted := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	due := posted.AddDate(0, 0, cafeledger.ArrearsGraceDays)
+	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: posted.Format(time.RFC3339)}}
+
+	// One second before the due instant: not yet overdue.
+	gotDue, overdue, days := deriveStatement(rows, 4750, due.Add(-time.Second))
+	if gotDue != due.Format(time.RFC3339) {
+		t.Fatalf("dueDate = %q, want %q", gotDue, due.Format(time.RFC3339))
+	}
+	if overdue || days != 0 {
+		t.Errorf("one second before due: overdue=%v days=%d, want false/0", overdue, days)
+	}
+
+	// AT the due instant: overdue, day 1 — due AT the instant counts.
+	gotDue, overdue, days = deriveStatement(rows, 4750, due)
+	if gotDue != due.Format(time.RFC3339) {
+		t.Fatalf("dueDate = %q, want %q", gotDue, due.Format(time.RFC3339))
+	}
+	if !overdue || days != 1 {
+		t.Errorf("AT the due instant: overdue=%v days=%d, want true/1", overdue, days)
+	}
+}
+
+// TestRecordedOrDerivedDueDate_RecordedWins pins the rule
+// EvaluateCafeArrears' own recorded due date wins over deriveStatement's
+// FIFO-derived one, mirroring cmd/wellness-app/ledger.go's function of the
+// same name.
+func TestRecordedOrDerivedDueDate_RecordedWins(t *testing.T) {
+	got := recordedOrDerivedDueDate("2026-08-01T00:00:00Z", "2026-09-04T00:00:00Z")
+	if got != "2026-08-01T00:00:00Z" {
+		t.Errorf("recordedOrDerivedDueDate(recorded, derived) = %q, want the RECORDED date", got)
+	}
+}
+
+// TestRecordedOrDerivedDueDate_FallsBackToDerived pins the fallback: a lease
+// no EvaluateCafeArrears run has ever touched carries no recorded due date,
+// and deriveStatement's own FIFO computation is what renders.
+func TestRecordedOrDerivedDueDate_FallsBackToDerived(t *testing.T) {
+	got := recordedOrDerivedDueDate("", "2026-09-04T00:00:00Z")
+	if got != "2026-09-04T00:00:00Z" {
+		t.Errorf("recordedOrDerivedDueDate(\"\", derived) = %q, want the DERIVED date", got)
+	}
+}
+
+// TestComputeOverdue_AgreesWithDeriveStatementBoundary pins computeOverdue's
+// own exact-instant boundary — re-derived independently of deriveStatement
+// (isOverdue/daysOverdue must agree with whichever date is actually
+// rendered, which may be the RECORDED one, not deriveStatement's FIFO
+// computation) — against the same due instant deriveStatement computes, plus
+// the empty/malformed fail-closed cases.
+func TestComputeOverdue_AgreesWithDeriveStatementBoundary(t *testing.T) {
+	due := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+
+	if overdue, days := computeOverdue("", due); overdue || days != 0 {
+		t.Errorf("empty dueDate: overdue=%v days=%d, want false/0", overdue, days)
+	}
+	if overdue, days := computeOverdue("not-a-date", due); overdue || days != 0 {
+		t.Errorf("malformed dueDate: overdue=%v days=%d, want false/0 (fails closed)", overdue, days)
+	}
+	if overdue, days := computeOverdue(due.Format(time.RFC3339), due.Add(-time.Second)); overdue || days != 0 {
+		t.Errorf("one second before due: overdue=%v days=%d, want false/0", overdue, days)
+	}
+	if overdue, days := computeOverdue(due.Format(time.RFC3339), due); !overdue || days != 1 {
+		t.Errorf("AT the due instant: overdue=%v days=%d, want true/1", overdue, days)
+	}
+	if overdue, days := computeOverdue(due.Format(time.RFC3339), due.AddDate(0, 0, 13)); !overdue || days != 14 {
+		t.Errorf("13 days past due: overdue=%v days=%d, want true/14", overdue, days)
 	}
 }
 

@@ -382,7 +382,8 @@ func (s *server) handleFrontDeskBalances(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	get := func(key string) ([]byte, bool) { v, ok := values[key]; return v, ok }
-	rows := computeLedgerBalances(keys, get, time.Now().UTC())
+	now := time.Now().UTC()
+	rows := computeLedgerBalances(keys, get, now)
 
 	acctBucket := cafeledger.LeaseAccountsBucket
 	var acctLookup map[string]leaseAccountLookup
@@ -415,7 +416,20 @@ func (s *server) handleFrontDeskBalances(w http.ResponseWriter, r *http.Request)
 		if !visible.admits(row.LeaseAppKey) {
 			continue
 		}
-		row.ReminderSentAt = acctLookup[row.LeaseAppKey].ReminderSentAt
+		lookup := acctLookup[row.LeaseAppKey]
+		// The RECORDED arrears due date (EvaluateCafeArrears' stamp) wins
+		// over computeLedgerBalances' own FIFO-derived one, mirroring
+		// handleLedger and cmd/wellness-app/ledger.go's
+		// handleFrontDeskArrears — only over an actually-open (positive)
+		// balance: a lease computeLedgerBalances kept for its CREDIT (row.
+		// BalanceCents < 0, the Pay-out affordance's own signal) stays "no
+		// due date, never overdue" even if the account still carries a
+		// stale recorded one from a since-settled episode.
+		if row.BalanceCents > 0 {
+			row.DueDate = recordedOrDerivedDueDate(lookup.ArrearsDueAt, row.DueDate)
+			row.IsOverdue, row.DaysOverdue = computeOverdue(row.DueDate, now)
+		}
+		row.ReminderSentAt = lookup.ReminderSentAt
 		filtered = append(filtered, row)
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"balances": filtered})

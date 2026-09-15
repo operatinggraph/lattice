@@ -541,6 +541,22 @@ part 5 (`agents/fire-brief-template.md`), the item-close review appends new ones
 (`agents/steward/SKILL.md` §4). **Capped at 12 one-liners**; an entry RETIRES when a lint/test gate
 mechanizes it (name the gate, strike the entry).
 
+Retired: *a confinement guard tested only as the operator has never run* — `lint-workplace-staff-vector`
+(two sightings: café `Charge`, 2026-09-13; wellness `JoinWaitlist`, 2026-09-15, commit `7507be53`) requires,
+for every op whose script reaches `require_workplace`/`enforce_workplace`/`enforce_workplace_confined` AND
+whose own `pkgmgr.PermissionSpec` grants it at scope=any to a role other than `operator` (an op with no such
+grant is unreachable by any non-operator actor by construction — `actor_holds_operator` exempts the
+operator before the guard ever runs — and is printed `SKIP <pkg> <Op>: operator-only grant`, café
+`DebitAccount` being the corpus's one live instance), a non-operator staff cap-doc func granting it at
+scope=any in the package's own `_test.go` files, or an explicit `// staff-vector: <Op> — <why>`
+declaration. The 2026-09-15 sweep found five live gaps (cafe-domain `SetMenuItemLocation`, clinic-domain
+`RecordEncounter` + `RescheduleAppointment`, wellness-domain `CreateSessionSeries`, plus `DebitAccount`
+before the operator-only refinement showed it needed none) and closed all of them with real staff
+vectors — each surfaced genuine undeclared reads/walks the drift guard had never seen exercised by a
+non-operator actor, fixed by hand in `internal/testutil/read_drift_baseline.txt` alongside the vector.
+STRICT=1 is clean. The walk that stays: the gate proves LISTING — a scope=any grant to a non-operator
+actor exists somewhere in the package — not that a `Test*` function actually SUBMITS the op under that
+grant and asserts on the outcome; a listed-but-unexercised op is invisible to it.
 Retired: *a lens MATCH edit is a corpus edit* — `internal/refractor/*_corpus_census_test.go` (branch decomposition,
 sibling groups, label set, grouping key, walk scope, hop index) fail by lens name on any `Spec` edit; run
 `go test ./internal/refractor/ -run 'Corpus|Census' -count=1` before merge and re-pin deliberately.
@@ -627,12 +643,6 @@ arm, so a widening mirrors the reason and not the shape.
   which `.state` values the script refuses and whether the caller could name themselves.
 - **A convergence gap that re-opens on a recorded clock lapse mints a new instance every window — the retry budget counts failures, not successful cycles, so a demo-cadence constant in a long-lived stack is a runaway.** Minted: lease-signing 2026-09-03 — a five-minute production `bgcheckFreshnessWindow` produced 3,637 background-check instances on one identity in a month (12,281 on seven), each lapse re-opening `missing_bgcheck` and `triggerLoom` minting a successor while the prior instance stayed live; the lens aggregating over them then scanned all N per event and its rebuild could not drain. Check: for every gap whose closing artifact carries a `validUntil`/`freshUntil`, state the window as a vendor-validity policy and price the loop at that cadence over the stack's lifetime; and ask what retires the superseded artifact — an instance nothing tombstones is unbounded growth (`Tombstone*` commands exist for patient/provider/appointment/location, none for a service instance).
  **Second shape (clinic `visitSeriesDue`, 2026-09-13, caught cold as BLOCKING):** a gap that stays OPEN across dispatches with CHANGED params is one stuck episode — the anti-storm mark Acks the re-projected row, the 30-min mark lease reclaims it, and the 3-attempt directOp budget wedges the anchor at the 4th cycle (`GapBudgetExhausted`) even though every dispatch succeeded. Check: for a level-triggered gap over a growing set, prove the FIRST dispatch closes it (aggregate to the run's extreme — `max`, not `min` — and pin a re-projection after the op's write showing the gap shut); a gap that is designed to re-open on the next member needs its own episode boundary, which Weaver does not have.
-- **A confinement guard tested only as the operator has never run** — `actor_holds_operator` returns before the
-  worksAt walk, so a suite whose every vector for an op runs as the operator measures none of that op's guard reads
-  and cannot see a doubled walk on the staff path. Minted: café `Charge` (2026-09-13) — the first staff-confined
-  Charge vector surfaced three read-drift rows every sibling op already carried. Check: every op that calls
-  `require_workplace` / `enforce_workplace` has one vector as a non-operator staff actor; an op with the guard and no
-  `read <Op> lnk.identity.<id>.worksAt.*` baseline row is the tell.
 - **A new KIND of an existing entry type passes every predicate written over the TYPE — a cap for "a debit" caps
   the new debit too, or admits it, and only a census of that field's comparisons says which.** `RefundCafeCharge`'s
   `reversed_charge` refused `type != "debit"`; the fire that added a `payout` debit left it accepting a payout as

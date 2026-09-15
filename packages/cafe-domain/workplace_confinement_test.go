@@ -347,6 +347,7 @@ func wcMenuCapDoc() *processor.CapabilityDoc {
 		processor.PlatformPermission{OperationType: "CreateMenuItem", Scope: "any"},
 		processor.PlatformPermission{OperationType: "RetireMenuItem", Scope: "any"},
 		processor.PlatformPermission{OperationType: "SetMenuItemAvailability", Scope: "any"},
+		processor.PlatformPermission{OperationType: "SetMenuItemLocation", Scope: "any"},
 		processor.PlatformPermission{OperationType: "UpdateMenuItem", Scope: "any"})
 	return doc
 }
@@ -627,6 +628,64 @@ func TestWorkplace_SetMenuItemAvailabilityStaffConfinedToWorkplace(t *testing.T)
 	}
 	if got := wcSubmitSetMenuItemAvailability(t, ctx, conn, cp, cons, "wcsab00000000000002", itemB, wcStaffKey); got != processor.OutcomeRejected {
 		t.Fatalf("staff SetMenuItemAvailability served at ANOTHER building = %v, want Rejected", got)
+	}
+}
+
+// wcSubmitSetMenuItemLocation submits SetMenuItemLocation{menuItemKey,
+// newLocation} as an arbitrary actor on the standing path, declaring exactly
+// what a staff caller would — itemKey and newLocation are both declared
+// Reads (ddls.go's SetMenuItemLocation branch: item_key for vertex_alive,
+// newLocation for require_live_location, mirroring
+// TestSetMenuItemLocation_MovesServedAtLink's own envelope).
+func wcSubmitSetMenuItemLocation(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, itemKey, newLocation, actorKey string) processor.MessageOutcome {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetMenuItemLocation",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-08-05T12:08:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","newLocation":"` + newLocation + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, newLocation},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	return testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// TestWorkplace_SetMenuItemLocationStaffConfinedToWorkplace proves
+// SetMenuItemLocation resolves its confining location from the NEW target
+// alone (permissions.go: "confined to the NEW workplace — the item's own
+// served-at link may already be dead, this op's repair case"), never the
+// item's current servedAt — a staff member may relocate an item TO their own
+// building and is denied relocating one TO another. Mirrors
+// TestWorkplace_SetMenuItemAvailabilityStaffConfinedToWorkplace: an op
+// tested only as the operator has never run this guard.
+func TestWorkplace_SetMenuItemLocationStaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcsetmenuloc")
+	seedWorkplaceTopology(t, ctx, conn)
+
+	// Both items start served at building B — irrelevant to this op's own
+	// confinement, which binds the NEW location the payload names, not
+	// wherever the item happens to be served today; started elsewhere so the
+	// move actually creates a new servedAt link rather than colliding with
+	// an already-live one at the SAME location.
+	itemA := createMenuItem(t, ctx, conn, cp, cons, "wcsmiseeda00000000001", "Latte", 450, wcBuildingBKey)
+	itemB := createMenuItem(t, ctx, conn, cp, cons, "wcsmiseedb00000000001", "Latte", 450, wcBuildingAKey)
+
+	if got := wcSubmitSetMenuItemLocation(t, ctx, conn, cp, cons, "wcsma00000000000001", itemA, wcBuildingAKey, wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff SetMenuItemLocation TO its OWN workplace = %v, want Accepted", got)
+	}
+	if got := wcSubmitSetMenuItemLocation(t, ctx, conn, cp, cons, "wcsmb00000000000002", itemB, wcBuildingBKey, wcStaffKey); got != processor.OutcomeRejected {
+		t.Fatalf("staff SetMenuItemLocation TO ANOTHER building = %v, want Rejected", got)
 	}
 }
 
