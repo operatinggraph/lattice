@@ -94,6 +94,12 @@ Same contract as every dossier: fire briefs copy the applicable entries into par
   `./internal/x.go` or absolutely matched no prefix in `scanSource`, so every prefix-scoped rule reported
   nothing and the run ended "0 issues" — indistinguishable from a clean file. Check: normalize the path
   before the scope tests, and prove a known-bad fixture trips under every spelling a caller might use.
+- **A self-test that replays git history runs against CI's depth-1 checkout, where `git show <old-rev>` fails —
+  and a replay helper that maps "cannot show" to an empty result turns that failure into a FAILED positive check.**
+  `lint-workplace-staff-vector` (2026-09-15): green in every worktree, red in a `--depth 1` clone before its first CI
+  run (caught by cloning `--depth 1` locally, not by CI). Check: gate the replay on `git cat-file -e <rev>^{commit}`
+  and print a SKIP when history is absent; the synthetic vectors are the proof that runs everywhere, and a new
+  gate's admit includes one run in a `git clone --depth 1` of the branch.
 - **A gate's self-test must prove its positive vector reaches the gate.** Shared with the Processor
   dossier, and it is what makes the deny cases here worth anything: pair every "denied" fixture with an
   otherwise-identical annotated one in the same in-scope path, so a case cannot pass because scoping

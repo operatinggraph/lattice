@@ -59,6 +59,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-15 · `006e92e0` · `lint-workplace-staff-vector` — every workplace-confined op has a non-operator staff vector (41 governed; 4 gaps closed with vectors); café statement reads the recorded arrears due date.
 - 2026-09-15 · `0b256550` · The no-show fee is the studio's recorded policy; the button names the amount; waive is a button; live ([design](../../../docs/reviews/wellness-noshow-fee-2026-09-15.md)).
 - 2026-09-15 · `7507be53` · A wellness debtor is reminded once per arrears episode and claims no new seat — `.arrears` + CreditHold on both booking ops; 3 reminded live ([design](../../../docs/reviews/wellness-arrears-reminder-2026-09-15.md)).
 - 2026-09-15 · `56deea3e` · A studio with an upcoming class cannot be retired; the desk may retire one at its own building — `HasUpcomingClasses`, frontOfHouse granted + confined, the card holds Retire; live as the desk.
