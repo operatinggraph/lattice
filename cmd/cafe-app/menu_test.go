@@ -77,6 +77,33 @@ func TestComputeMenu_PropagatesMissingLocation(t *testing.T) {
 	}
 }
 
+// TestComputeMenu_AvailableDefaultsTrueOnMissingField proves a projection row
+// with no available field at all (a row not yet re-projected under the
+// current lens spec) reads as available — the nil-pointer default
+// this plumbing exists to carry, distinct from the lens's own coalesce
+// (lenses.go), which only covers a live .price with no available key.
+func TestComputeMenu_AvailableDefaultsTrueOnMissingField(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"cafe-menu-catalog.a": map[string]any{"menuItemKey": "vtx.menuitem.a", "name": "Croissant", "priceCents": 350},
+	})
+	rows := computeMenu(keys, get, nil)
+	if len(rows) != 1 || !rows[0].Available {
+		t.Fatalf("want Available=true on a row with no available field, got %+v", rows)
+	}
+}
+
+// TestComputeMenu_AvailableFalsePropagates proves an item marked sold out
+// projects Available=false through to the row a picker reads.
+func TestComputeMenu_AvailableFalsePropagates(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"cafe-menu-catalog.a": map[string]any{"menuItemKey": "vtx.menuitem.a", "name": "Latte", "priceCents": 450, "available": false},
+	})
+	rows := computeMenu(keys, get, nil)
+	if len(rows) != 1 || rows[0].Available {
+		t.Fatalf("want Available=false propagated from the projection, got %+v", rows)
+	}
+}
+
 func TestComputeMenu_WorkplaceAdmitFiltersToCoveringLocationsIntersection(t *testing.T) {
 	keys, get := fakeKV(map[string]any{
 		"cafe-menu-catalog.a": map[string]any{

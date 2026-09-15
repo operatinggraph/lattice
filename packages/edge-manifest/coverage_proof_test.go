@@ -266,6 +266,21 @@ func TestEdgeEntityMenuItems_IsBoundedByTheResidenceChain(t *testing.T) {
 	require.Equal(t, "Latte", own["title"], "the item's own .price aspect names it")
 	require.Equal(t, "Unit 1", own["subtitle"], "the serving place names whose menu this is")
 	require.EqualValues(t, 450, own["priceCents"], "priceCents rides along; the renderer formats any *Cents column as money")
+	require.Equal(t, true, own["available"], "an item whose .price carries no available field was never toggled and is offered")
+}
+
+// TestEdgeEntityMenuItems_ProjectsSoldOut proves the desk's sold-out flag
+// reaches the resident's world as a column: an item whose .price carries
+// available:false projects false (the picker drops it, the browse line says
+// so), where a never-toggled item coalesces to true above.
+func TestEdgeEntityMenuItems_ProjectsSoldOut(t *testing.T) {
+	f := emResidentWorld(t)
+	f.aspect(t, "item", "price", "menuItemPrice", map[string]any{"name": "Latte", "priceCents": 450, "available": false})
+
+	rows := emRowsByEntity(f.project(t, emComposedSpec(t, "edgeEntityMenuItems"), f.key("resident")))
+	own, ok := rows[f.ids["item"]]
+	require.True(t, ok, "a sold-out item still projects — the row carries the reason, the picker decides")
+	require.Equal(t, false, own["available"])
 }
 
 // TestEdgeEntityMenuItems_DropsARetiredItem proves the tombstone path needs no

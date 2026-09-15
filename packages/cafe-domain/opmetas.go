@@ -5,11 +5,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // OpMetas declares descriptor-vocabulary metadata (edge-showcase-app-design.md
 // §3.3, edge-manifest Fire 1) for every cafe-domain op a person may trigger —
 // the tab lifecycle (OpenTab, Charge, VoidCharge, Settle) plus the menu
-// catalog (CreateMenuItem, RetireMenuItem, SetMenuItemLocation,
-// UpdateMenuItem) — mirroring clinic-domain's and wellness-domain's adoption.
-// The four catalog ops are staff-standing like VoidCharge (no self-scope
-// grant), so each carries one AuthContext "standing" descriptor and no
-// ownership probe — workplace confinement (ddls.go) is their only guard.
+// catalog (CreateMenuItem, RetireMenuItem, SetMenuItemAvailability,
+// SetMenuItemLocation, UpdateMenuItem) — mirroring clinic-domain's and
+// wellness-domain's adoption. The five catalog ops are staff-standing like
+// VoidCharge (no self-scope grant), so each carries one AuthContext
+// "standing" descriptor and no ownership probe — workplace confinement
+// (ddls.go) is their only guard.
 //
 // Three of the four are consumer-invocable (scope=self); VoidCharge is
 // staff-standing. Charge is BOTH: permissions.go grants it scope=any to
@@ -294,6 +295,36 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "menuItemKey",
 				TargetType:  "menuitem",
 				Reads:       []string{"{payload.menuItemKey}"},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
+			OperationType: "SetMenuItemAvailability",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Take an item off the menu / put it back",
+				Description: "Mark a catalog item sold out for the day, or bring it back.",
+				Icon:        "cafe",
+				Tone:        "primary",
+				SubmitLabel: "Save availability",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of the item to toggle — auto-filled from the item being viewed."},` +
+				`"available":{"type":"boolean","description":"Whether the item can currently be ordered."}},` +
+				`"required":["menuItemKey","available"]}`,
+			FieldDescriptions: map[string]string{
+				"menuItemKey": "The catalog item being toggled — auto-filled by the client from the item being viewed (dispatch.targetField), not user-entered.",
+				"available":   "false takes the item off both pickers and refuses a Charge naming it (ItemUnavailable); true puts it back.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "menuitem",
+				AuthContext: "standing",
+				TargetField: "menuItemKey",
+				TargetType:  "menuitem",
+				Reads:       []string{"{payload.menuItemKey}", "{payload.menuItemKey}.price"},
 				// The operator-role confinement probe (ddls.go
 				// actor_holds_operator, reached through require_workplace).
 				Enumerations: []pkgmgr.EnumerationSpec{

@@ -346,6 +346,7 @@ func wcMenuCapDoc() *processor.CapabilityDoc {
 	doc.PlatformPermissions = append(doc.PlatformPermissions,
 		processor.PlatformPermission{OperationType: "CreateMenuItem", Scope: "any"},
 		processor.PlatformPermission{OperationType: "RetireMenuItem", Scope: "any"},
+		processor.PlatformPermission{OperationType: "SetMenuItemAvailability", Scope: "any"},
 		processor.PlatformPermission{OperationType: "UpdateMenuItem", Scope: "any"})
 	return doc
 }
@@ -443,6 +444,31 @@ func wcSubmitUpdateMenuItem(t *testing.T, ctx context.Context, conn *substrate.C
 		SubmittedAt:   "2026-08-05T12:06:00Z",
 		Class:         "menuitem",
 		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","name":"Latte","priceCents":475}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	return testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// wcSubmitSetMenuItemAvailability submits SetMenuItemAvailability{menuItemKey,
+// available} as an arbitrary actor on the standing path, declaring exactly
+// what a staff caller would.
+func wcSubmitSetMenuItemAvailability(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, itemKey, actorKey string) processor.MessageOutcome {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetMenuItemAvailability",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-08-05T12:07:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","available":false}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{itemKey, itemKey + ".price"},
 			Enumerations: []processor.EnumerationHint{
@@ -577,6 +603,30 @@ func TestWorkplace_UpdateMenuItemStaffConfinedToWorkplace(t *testing.T) {
 	}
 	if got := wcSubmitUpdateMenuItem(t, ctx, conn, cp, cons, "wcumb00000000000002", itemB, wcStaffKey); got != processor.OutcomeRejected {
 		t.Fatalf("staff UpdateMenuItem served at ANOTHER building = %v, want Rejected", got)
+	}
+}
+
+// TestWorkplace_SetMenuItemAvailabilityStaffConfinedToWorkplace proves
+// SetMenuItemAvailability resolves its confining location from the item's
+// OWN servedAt link (never a payload field, which SetMenuItemAvailability
+// carries none of) — a staff member may toggle an item served at their own
+// building and is denied for one served elsewhere. Mirrors
+// TestWorkplace_UpdateMenuItemStaffConfinedToWorkplace: an op tested only as
+// the operator has never run this guard.
+func TestWorkplace_SetMenuItemAvailabilityStaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcsetavail")
+	seedWorkplaceTopology(t, ctx, conn)
+
+	itemA := createMenuItem(t, ctx, conn, cp, cons, "wcsaiseeda00000000001", "Latte", 450, wcBuildingAKey)
+	itemB := createMenuItem(t, ctx, conn, cp, cons, "wcsaiseedb00000000001", "Latte", 450, wcBuildingBKey)
+
+	if got := wcSubmitSetMenuItemAvailability(t, ctx, conn, cp, cons, "wcsaa00000000000001", itemA, wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff SetMenuItemAvailability served at its OWN workplace = %v, want Accepted", got)
+	}
+	if got := wcSubmitSetMenuItemAvailability(t, ctx, conn, cp, cons, "wcsab00000000000002", itemB, wcStaffKey); got != processor.OutcomeRejected {
+		t.Fatalf("staff SetMenuItemAvailability served at ANOTHER building = %v, want Rejected", got)
 	}
 }
 

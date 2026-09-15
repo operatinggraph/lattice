@@ -1238,7 +1238,10 @@ function renderBrowse() {
 // the same `/Cents$/` convention the descriptor form's money input keys on. A
 // projected running total is the whole reason to pick one row over another,
 // and a type-branching renderer is exactly what the one-lens-per-kind design
-// (§3 F2) keeps out of here.
+// (§3 F2) keeps out of here. A row projecting `available: false` (a menu item
+// the desk marked sold out) says so on the same line, the same column-driven
+// way; only a strict false reads as sold out, so a lens that projects no such
+// column offers its rows unchanged.
 function entityMeta(d) {
   const parts = [];
   if (d.subtitle) parts.push(esc(d.subtitle));
@@ -1246,6 +1249,7 @@ function entityMeta(d) {
   for (const [k, v] of Object.entries(d)) {
     if (/Cents$/.test(k) && typeof v === "number") parts.push("$" + (v / 100).toFixed(2));
   }
+  if (d.available === false) parts.push("sold out");
   return parts.join(" &middot; ");
 }
 
@@ -3010,7 +3014,10 @@ function onGlobalClick(e) {
 // instances keep their own manifest namespaces (they predate manifest.ent and
 // carry their own key columns); everything else is a manifest.ent row, so a
 // type the manifest projects becomes pickable with no client change at all —
-// which is the point of the field naming a TYPE rather than a source.
+// which is the point of the field naming a TYPE rather than a source. A
+// manifest.ent row projecting `available: false` is not a candidate: the op it
+// would feed refuses it (a sold-out menu item is ItemUnavailable to Charge), so
+// offering it would only hand the visitor that refusal.
 function entityRefCandidates(type) {
   if (type === "service") {
     return services().map((r) => ({ key: r.data.serviceKey || r.key, label: r.data.name || r.data.templateName || prettify(r.key) }));
@@ -3018,7 +3025,7 @@ function entityRefCandidates(type) {
   if (type === "instance") {
     return instances().map((r) => ({ key: r.data.instanceKey || r.key, label: r.data.name || r.data.templateName || prettify(r.key) }));
   }
-  return entitiesByType(type).map((r) => ({
+  return entitiesByType(type).filter((r) => r.data.available !== false).map((r) => ({
     key: r.data.entityKey,
     label: r.data.title || prettify(r.data.entityKey),
     meta: entityMeta(r.data),

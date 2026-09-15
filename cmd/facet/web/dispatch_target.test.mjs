@@ -253,6 +253,25 @@ test("an entity row's meta line renders a projected *Cents column as money", () 
   assert.equal(entityMeta({}), "");
   // a non-numeric lookalike is not an amount
   assert.equal(entityMeta({ subtitle: "x", someCents: "450" }), "x");
+  // a projected available:false says sold out; absent or true says nothing
+  assert.equal(entityMeta({ subtitle: "Unit 1", priceCents: 450, available: false }), "Unit 1 &middot; $4.50 &middot; sold out");
+  assert.equal(entityMeta({ subtitle: "Unit 1", priceCents: 450, available: true }), "Unit 1 &middot; $4.50");
+  assert.equal(entityMeta({ subtitle: "Unit 1", available: "false" }), "Unit 1");
+});
+
+// The entity-ref picker offers only what the op it feeds would accept: a
+// manifest.ent row projecting available:false (a sold-out menu item) is not
+// a candidate, a row with no such column is.
+test("entityRefCandidates drops a row whose available column is false", () => {
+  const sandbox = loadApp();
+  vm.runInContext(
+    `state.rows.set("manifest.ent.latte", { data: { entityType: "menuitem", entityKey: "vtx.menuitem.AAAAAAAAAAAAAAAAAAAA", title: "Latte", priceCents: 450, available: false }, pending: false });
+     state.rows.set("manifest.ent.scone", { data: { entityType: "menuitem", entityKey: "vtx.menuitem.BBBBBBBBBBBBBBBBBBBB", title: "Scone", priceCents: 300, available: true }, pending: false });
+     state.rows.set("manifest.ent.tea", { data: { entityType: "menuitem", entityKey: "vtx.menuitem.CCCCCCCCCCCCCCCCCCCC", title: "Tea", priceCents: 200 }, pending: false })`,
+    sandbox);
+  // spread into this context: the sandbox's Array prototype is not ours
+  const keys = [...sandbox.entityRefCandidates("menuitem")].map((c) => c.key).sort();
+  assert.deepEqual(keys, ["vtx.menuitem.BBBBBBBBBBBBBBBBBBBB", "vtx.menuitem.CCCCCCCCCCCCCCCCCCCC"]);
 });
 
 test("indefinite article follows the label's leading sound", () => {

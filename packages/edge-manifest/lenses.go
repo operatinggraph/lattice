@@ -1100,7 +1100,11 @@ RETURN
 // price rides as `priceCents` and needs no renderer support: app.js's entityMeta
 // formats any `*Cents` column as money, the same convention the descriptor
 // form's money input keys on. No `startsAt`: a menu item is a thing on a shelf,
-// not a scheduled one.
+// not a scheduled one. `available` is the desk's sold-out-for-the-day flag
+// (cafe-domain's SetMenuItemAvailability, on the same .price aspect), coalesced
+// to true for an item never toggled: the entity-ref picker drops a row whose
+// `available` is false and the browse line says "sold out", so a Facet
+// resident is not offered an item Charge would refuse ItemUnavailable.
 const edgeEntityMenuItemsTail = `
 WITH item, container
 WHERE item.key <> null
@@ -1113,7 +1117,8 @@ RETURN
   "Menu item" AS typeLabel,
   item.price.data.name AS title,
   container.presentation.data.name AS subtitle,
-  item.price.data.priceCents AS priceCents
+  item.price.data.priceCents AS priceCents,
+  coalesce(item.price.data.available, true) AS available
 `
 
 // edgeStaffWorkOrdersTail presents one `manifest.work.<workOrderId>` row per

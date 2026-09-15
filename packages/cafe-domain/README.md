@@ -23,9 +23,9 @@ confinement described below (facet-staff-worlds-design.md §3.5, §9).
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (2) | `tab` (root `{}`, D5, `.status` aspect) · `menuitem` (root `{}`, D5, `.price` aspect) |
-| **Aspect types** (3) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, itemsMemo, openedAt, leaseAppKey, settledAt?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents}` |
+| **Aspect types** (3) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, itemsMemo, openedAt, leaseAppKey, settledAt?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents, available}` |
 | **Links** (3) | `chargedTo` (tab → leaseapp, permanent) · `openFor` (tab → leaseapp, released by `Settle`) · `servedAt` (menuitem → location, permanent — what makes an item reachable) |
-| **Operations** (8) | `OpenTab` · `Charge` · `VoidCharge` · `Settle` · `CreateMenuItem` · `RetireMenuItem` · `SetMenuItemLocation` · `UpdateMenuItem` |
+| **Operations** (9) | `OpenTab` · `Charge` · `VoidCharge` · `Settle` · `CreateMenuItem` · `RetireMenuItem` · `SetMenuItemAvailability` · `SetMenuItemLocation` · `UpdateMenuItem` |
 | **Lenses** (3) | `cafeTabSettlement` (convergence, one row per tab, `missing_account`/`missing_charge`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) · `menuCatalog` (plain projection, one row per live menuitem) → `cafe-menu-catalog` (`nats-kv`) · `cafeLeaseWorkplaces` (one row per lease, `coveringLocations`) → `cafe-lease-workplaces` (`nats-kv`) — the read-side half of workplace confinement |
 | **Weaver playbook** (1) | `cafeTabSettlement` — `missing_account` → `directOp(CreateAccount)` · `missing_charge` → `directOp(DebitAccount)` (both cafe-ledger) |
 
@@ -33,7 +33,7 @@ Grants (`permissions.go`): `OpenTab`/`Charge`/`Settle` grant `operator`+`frontOf
 `consumer` at `scope: self` (a resident may open/self-order/settle their OWN tab, verified via the lease's
 `applicationFor→identity` link). `VoidCharge` grants only `operator`+`frontOfHouse` at `scope: any` — no
 self-service grant, since a POS correction is a staff decision even to reverse a resident's own self-order
-mis-tap. `CreateMenuItem`/`RetireMenuItem`/`SetMenuItemLocation`/`UpdateMenuItem` also grant
+mis-tap. `CreateMenuItem`/`RetireMenuItem`/`SetMenuItemAvailability`/`SetMenuItemLocation`/`UpdateMenuItem` also grant
 `operator`+`frontOfHouse` at `scope: any` (no `consumer` grant — running the catalog is a front-desk beat,
 not a resident one); the workplace confinement (below) is what keeps one building's staff off another's
 menu, not the grant itself.
@@ -87,7 +87,12 @@ locationKey}` (operator-only) mints the item + its `.price` aspect + the `served
 the item's only reachability — the `edgeEntityMenuItems` edge-manifest lens walks a resident's residence
 chain down to items served where they live, so an unlinked item is one no client can offer. `UpdateMenuItem{menuItemKey,
 name, priceCents}` rewrites the item's `.price` aspect in one OCC'd upsert — a rename and a reprice are the
-same act on the same aspect, so one op covers both; both fields are required. `RetireMenuItem`
+same act on the same aspect, so one op covers both; both fields are required, and the aspect's `available`
+is carried through unchanged. `SetMenuItemAvailability{menuItemKey, available}` rewrites the same aspect
+with `name`/`priceCents` carried through — the desk's sold-out-for-the-day toggle; a missing `available`
+field reads as `true` (never toggled). `menuCatalog` projects it (`coalesce(…, true)`), both app pickers
+grey a sold-out item out, and a `Charge` naming one — self-order or POS pick — is refused
+`ItemUnavailable`. `RetireMenuItem`
 tombstones a live item, self-OCC'd. A self-order `Charge` is additionally confined to items served at the
 tab's own building or an ancestor of it (`location_covers`, walking the item's `servedAt` place against the
 tab's lease's `appliesToUnit`) — `servedAt` bounds what a browse walk OFFERS, this bounds what `Charge`

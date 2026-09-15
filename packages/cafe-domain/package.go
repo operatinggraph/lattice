@@ -63,18 +63,23 @@
 //
 //   - The `menuItem` vertex type (DDL `menuItem`) + `menuItemPrice` aspect
 //     type — an operator-only self-order catalog (CreateMenuItem mints an
-//     item + its .price {name, priceCents} aspect + a `servedAt` link to the
+//     item + its .price {name, priceCents, available: true} aspect + a
+//     `servedAt` link to the
 //     place that serves it; RetireMenuItem
-//     tombstones it, self-OCC'd; SetMenuItemLocation relocates a live item
+//     tombstones it, self-OCC'd; SetMenuItemAvailability rewrites the same
+//     .price aspect's available flag — the desk's sold-out-for-the-day
+//     toggle; SetMenuItemLocation relocates a live item
 //     onto a new location, the repair path for one whose place was
 //     tombstoned out from under it). A self-service Charge submits
 //     Charge{tabKey, menuItemKey} instead of a raw amountCents: the amount
 //     is derived from the referenced item's own .price.priceCents, never
 //     trusted from the caller — the catalog bound-Charge gap "Café
-//     self-order" (verticals.md) exists to close. The `menuCatalog` lens
+//     self-order" (verticals.md) exists to close, and rejects
+//     ItemUnavailable if the item's own available flag reads false. The
+//     `menuCatalog` lens
 //     (nats-kv, plain projection) lists every live item for the Resident
 //     view's item picker (P5), flagging `missingLocation` for one whose
-//     place is gone.
+//     place is gone and `available` for one currently sold out.
 //
 // See _bmad-output/implementation-artifacts/cafe-ledger-design.md's "Next"
 // section (Inc 2). Depends lease-signing (the leaseapp a tab is opened
@@ -91,7 +96,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.13.1",
+	Version: "0.14.0",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/Settle/" +
 		"SettleStaleTab/BackfillTabStaleAt, OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement " +
 		"actorAggregate convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching " +
@@ -101,11 +106,12 @@ var Package = pkgmgr.Definition{
 		"directOp(SettleStaleTab); missing_staleat, backfills staleAt on a tab opened before that field shipped, " +
 		"orchestration-internal directOp(BackfillTabStaleAt)) + " +
 		"edge-manifest descriptor metadata (OpenTab/Settle, Fire 5 Inc 4) so the two self-scope ops are " +
-		"Facet-renderable + the menuItem catalog (CreateMenuItem/RetireMenuItem/SetMenuItemLocation/" +
-		"UpdateMenuItem, the " +
+		"Facet-renderable + the menuItem catalog (CreateMenuItem/RetireMenuItem/SetMenuItemAvailability/" +
+		"SetMenuItemLocation/UpdateMenuItem, the " +
 		"menuCatalog lens) a " +
 		"Charge — self-service OR staff POS alike — can bind against by naming menuItemKey, deriving " +
-		"amountCents from a catalog entry rather than trusting a caller-supplied number; a staff Charge with " +
+		"amountCents from a catalog entry rather than trusting a caller-supplied number and rejecting " +
+		"ItemUnavailable if the item is currently marked off the menu; a staff Charge with " +
 		"no menuItemKey still hand-keys amountCents for an off-menu charge the catalog does not cover. Each " +
 		"item carries a servedAt link to the place that serves it, which is what lets a browse lens offer it " +
 		"to a resident who lives there, and which ANY catalog-bound Charge is confined to (the item's " +

@@ -475,6 +475,44 @@ function chargeLinesBlock(lines, memo, voidableTabKey) {
   );
 }
 
+// menuOptions renders a picker's <option>/<optgroup> markup from a catalog
+// row list (/api/menu's own shape — menuItemKey/name/priceCents/available):
+// every available item first (so the default selection a browser picks is
+// always one that can actually be ordered), then every sold-out item as a
+// disabled option inside one "Sold out today" optgroup, labeled " — sold
+// out". Shared by the self-order and POS pickers (renderResident,
+// renderOpenTabCard) so the two forms never drift.
+function menuOptions(items) {
+  const available = items.filter((it) => it.available !== false);
+  const soldOut = items.filter((it) => it.available === false);
+  let html = available
+    .map((it) => '<option value="' + escapeHtml(it.menuItemKey) + '">' + escapeHtml(it.name) + " — " + money(it.priceCents) + "</option>")
+    .join("");
+  if (soldOut.length) {
+    html +=
+      '<optgroup label="Sold out today">' +
+      soldOut
+        .map((it) => '<option value="' + escapeHtml(it.menuItemKey) + '" disabled>' + escapeHtml(it.name) + " — " + money(it.priceCents) + " — sold out</option>")
+        .join("") +
+      "</optgroup>";
+  }
+  return html;
+}
+
+// receiptLines joins a ledger row to the settled tab it came from (by
+// tabKey, keyed into tabByKey from /api/tabs) so a posted charge can show
+// what it was for — {lines, memo} for chargeLinesBlock, or null when there
+// is nothing to join (no tabKey, or the tab hasn't resolved yet: a
+// projection still catching up, or a tab whose row was pruned). The join is
+// by KEY alone, never by row type — a row this shape never carries today
+// (a credit posted from a settled tab) would still join.
+function receiptLines(row, tabByKey) {
+  if (!row || !row.tabKey) return null;
+  const tab = tabByKey[row.tabKey];
+  if (!tab) return null;
+  return { lines: tab.lines || [], memo: tab.itemsMemo || "" };
+}
+
 // parseDollars turns a user-entered dollar string ("4.50") into integer
 // cents, or null when it isn't a positive amount.
 function parseDollars(s) {
@@ -1026,6 +1064,7 @@ function renderCreditHoldPanel(who, balance) {
 
 function renderOpenTabCard(tab, items) {
   const catalog = items || [];
+  const catalogHasAvailable = catalog.some((it) => it.available !== false);
   return (
     '<div class="panel">' +
     "<h2>Open tab</h2>" +
@@ -1035,12 +1074,11 @@ function renderOpenTabCard(tab, items) {
     (catalog.length
       ? '<form id="pos-catalog-form" class="field-row" style="margin-bottom:14px;">' +
         '<select id="pos-catalog-item">' +
-        catalog
-          .map((it) => '<option value="' + escapeHtml(it.menuItemKey) + '">' + escapeHtml(it.name) + " — " + money(it.priceCents) + "</option>")
-          .join("") +
+        menuOptions(catalog) +
         "</select>" +
-        '<button id="pos-catalog-submit" type="submit">Ring Up</button>' +
-        "</form>"
+        (catalogHasAvailable ? '<button id="pos-catalog-submit" type="submit">Ring Up</button>' : "") +
+        "</form>" +
+        (catalogHasAvailable ? "" : '<p class="meta">Nothing on the menu right now.</p>')
       : "") +
     '<form id="charge-form" class="field-row" style="margin-bottom:14px;">' +
     '<input id="charge-amount" type="number" step="0.01" min="0.01" placeholder="Off-menu amount ($)" required />' +
@@ -1504,20 +1542,28 @@ function workplaceLocationKey() {
 // menuCatalog lens's own flag for an item whose servedAt link is gone — the
 // place was retired out from under it) badges the item and offers Relocate
 // instead of Retire being the only aim staff has on it; a live item just
-// shows Retire, same as before.
+// shows Retire, same as before. available (default true) badges a sold-out
+// item and swaps the row's availability button between "Sold out today" and
+// "Back on menu" — the desk's toggle for taking an item off the menu for the
+// day without retiring it.
 function menuItemCard(it) {
+  const available = it.available !== false;
   const badge = it.missingLocation
     ? '<span class="badge" style="background:#b00020;color:#fff;">no location</span>'
     : "";
+  const soldOutBadge = available ? "" : '<span class="badge" style="background:var(--text-dim);color:var(--bg);">sold out</span>';
   const relocate = it.missingLocation
     ? '<button type="button" data-relocate="' + escapeHtml(it.menuItemKey) + '">Relocate here</button>'
     : "";
   return (
     '<div class="card" data-item="' + escapeHtml(it.menuItemKey) + '">' +
-    badge +
+    badge + soldOutBadge +
     '<div class="who" data-field="who">' + escapeHtml(it.name) + "</div>" +
     '<div class="amount" data-field="amount">' + money(it.priceCents) + "</div>" +
     '<div class="card-actions" data-field="actions">' + relocate +
+    '<button type="button" data-availability="' + escapeHtml(it.menuItemKey) +
+    '" data-available="' + (available ? "true" : "false") + '">' +
+    (available ? "Sold out today" : "Back on menu") + "</button>" +
     '<button type="button" data-edit="' + escapeHtml(it.menuItemKey) +
     '" data-name="' + escapeHtml(it.name) + '" data-price-cents="' + (Number(it.priceCents) || 0) + '">Edit</button>' +
     '<button type="button" class="danger" data-retire="' +
@@ -1566,6 +1612,28 @@ async function loadManageMenu() {
   body.innerHTML = items.length
     ? '<div class="grid">' + items.map(menuItemCard).join("") + "</div>"
     : '<div class="empty">No menu items yet — add one above.</div>';
+  body.querySelectorAll("[data-availability]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const menuItemKey = btn.dataset.availability;
+      const current = btn.dataset.available === "true";
+      btn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "SetMenuItemAvailability", class: "menuitem",
+            reads: [menuItemKey, menuItemKey + ".price"],
+            payload: { menuItemKey, available: !current },
+          },
+          "update the item's availability"
+        );
+        toast(current ? "Marked sold out for today." : "Back on the menu.", true);
+        setTimeout(loadManageMenu, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  });
   body.querySelectorAll("[data-retire]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const menuItemKey = btn.dataset.retire;
@@ -1728,18 +1796,18 @@ async function renderResident() {
     );
     if (selfMode) {
       const items = (menu && menu.menu) || [];
+      const itemsHasAvailable = items.some((it) => it.available !== false);
       parts.push(
         '<div class="panel" style="max-width:640px;">' +
         "<h2>Order</h2>" +
         (items.length
           ? '<form id="self-order-form" class="field-row">' +
             '<select id="self-order-item">' +
-            items
-              .map((it) => '<option value="' + escapeHtml(it.menuItemKey) + '">' + escapeHtml(it.name) + " — " + money(it.priceCents) + "</option>")
-              .join("") +
+            menuOptions(items) +
             "</select>" +
-            '<button id="self-order-submit" type="submit">Add to Tab</button>' +
-            "</form>"
+            (itemsHasAvailable ? '<button id="self-order-submit" type="submit">Add to Tab</button>' : "") +
+            "</form>" +
+            (itemsHasAvailable ? "" : '<p class="meta">Nothing on the menu right now.</p>')
           : '<p class="meta">No menu items available yet.</p>') +
         "</div>"
       );
@@ -1773,6 +1841,12 @@ async function renderResident() {
     );
   }
   const rows = ledger.transactions || [];
+  // Every tab this lease has ever held (open, pending, settled) keyed by its
+  // own tabKey — receiptLines joins a ledger row onto the one it names, so a
+  // posted charge can show what it was for. Both the resident and the desk
+  // use renderResident, so one join covers both.
+  const tabByKey = {};
+  (tabs.tabs || []).forEach((t) => { tabByKey[t.tabKey] = t; });
   // A refund's own row names the charge it gives back (reversesKey — the
   // reverses link cafe-ledger writes, projected by cafeLedgerHistory), so the
   // statement can say WHICH charge rather than showing a credit that reads
@@ -1821,6 +1895,7 @@ async function renderResident() {
             // a café purchase), so this predicate already excludes it — a
             // payout is not itself refundable.
             const refundable = !selfMode && r.type === "debit" && !!r.tabKey && remaining > 0;
+            const receipt = receiptLines(r, tabByKey);
             return (
               '<li class="ledger-entry ' + escapeHtml(r.type) + (r.reversesKey ? " refund" : "") + '">' +
               (r.reversesKey ? '<span class="badge-refund">Refund</span>' : "") +
@@ -1846,6 +1921,11 @@ async function renderResident() {
                   escapeHtml(r.transactionKey) + '" data-amount="' + remaining +
                   '" data-posted="' + escapeHtml(r.postedAt || "") +
                   '" data-memo="' + escapeHtml(r.memo || "") + '">Refund</button></span>'
+                : "") +
+              (receipt
+                ? '<details class="receipt"><summary>Receipt</summary>' +
+                  chargeLinesBlock(receipt.lines, receipt.memo, null) +
+                  "</details>"
                 : "") +
               "</li>"
             );

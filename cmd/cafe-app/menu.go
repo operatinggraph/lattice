@@ -15,11 +15,15 @@ import (
 // from its NATS-KV read-model bucket (P5: an application reads the lens
 // projection, never Core KV). servedAt is the item's own serving-location
 // key — empty for an item minted before the column existed or with no
-// servedAt link.
+// servedAt link. available is a pointer because the lens itself already
+// coalesces a missing .price.available field to true (lenses.go), so a nil
+// here means only that the projection row carries no such column (a row
+// not yet re-projected under the current spec), read as available below.
 type menuItemProjection struct {
 	MenuItemKey       string   `json:"menuItemKey"`
 	Name              string   `json:"name"`
 	PriceCents        *float64 `json:"priceCents"`
+	Available         *bool    `json:"available"`
 	ServedAt          string   `json:"servedAt"`
 	CoveringLocations []string `json:"coveringLocations"`
 	MissingLocation   bool     `json:"missingLocation"`
@@ -30,11 +34,14 @@ type menuItemProjection struct {
 // also what the staff Manage Menu grid renders: servedAt/coveringLocations/
 // missingLocation ride along unused by the resident picker so the grid can
 // badge an item that has outlived its place (SetMenuItemLocation's own repair
-// target) without a second projection shape.
+// target) without a second projection shape. Available is never omitempty —
+// false must serialize, or a sold-out item's own picker/card would read as
+// available on the wire.
 type menuItemRow struct {
 	MenuItemKey       string   `json:"menuItemKey"`
 	Name              string   `json:"name"`
 	PriceCents        int64    `json:"priceCents"`
+	Available         bool     `json:"available"`
 	ServedAt          string   `json:"servedAt,omitempty"`
 	CoveringLocations []string `json:"coveringLocations,omitempty"`
 	MissingLocation   bool     `json:"missingLocation,omitempty"`
@@ -69,10 +76,15 @@ func computeMenu(keys []string, get kvGetter, admit func(menuItemProjection) boo
 		if p.PriceCents != nil {
 			price = int64(*p.PriceCents)
 		}
+		available := true
+		if p.Available != nil {
+			available = *p.Available
+		}
 		rows = append(rows, menuItemRow{
 			MenuItemKey:       p.MenuItemKey,
 			Name:              p.Name,
 			PriceCents:        price,
+			Available:         available,
 			ServedAt:          p.ServedAt,
 			CoveringLocations: p.CoveringLocations,
 			MissingLocation:   p.MissingLocation,
@@ -99,6 +111,9 @@ func computeMenu(keys []string, get kvGetter, admit func(menuItemProjection) boo
 // leaseAppKey) or the unscoped operator catalog: both of those need to see
 // every item independently — including a building-level item that shares a
 // name with a unit-level one — so staff can reprice or retire either one.
+// The shadowing ignores Available by design: a unit-level item marked sold
+// out shadows an available building-level namesake, so the picker shows one
+// disabled row rather than quietly substituting the coarser item.
 func dedupeMostSpecific(rows []menuItemRow) []menuItemRow {
 	byName := make(map[string][]menuItemRow, len(rows))
 	for _, r := range rows {

@@ -244,6 +244,11 @@ RETURN
 // claims the new one, same as the OPTIONAL MATCH above. verticals.md "a menu
 // item outlives the place that served it, with no flag and no way back" —
 // SetMenuItemLocation (ddls.go) is the way back.
+//
+// `available` coalesces a missing .price.available field to true (the
+// coalesce precedent below, tabSettlementSpec's own `l` column) — a live
+// item nobody has toggled carries no field, and it projects available
+// rather than an undecided null the picker would have to special-case.
 const menuCatalogSpec = `MATCH (m:menuitem)
 OPTIONAL MATCH (m)-[:servedAt]->(loc)
 RETURN
@@ -251,6 +256,7 @@ RETURN
   m.key AS menuItemKey,
   m.price.data.name AS name,
   m.price.data.priceCents AS priceCents,
+  coalesce(m.price.data.available, true) AS available,
   loc.key AS servedAt,
   (loc.key = null) AS missingLocation,
   [(m)-[:servedAt]->(sloc)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`

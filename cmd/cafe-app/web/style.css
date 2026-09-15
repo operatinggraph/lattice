@@ -232,6 +232,10 @@ button.danger:hover { background: #c94a3f; border-color: #c94a3f; }
 .item-line.pending { font-style: italic; opacity: 0.7; }
 .item-line button { font-size: 11px; padding: 2px 8px; }
 
+.receipt { margin-top: 4px; }
+.receipt summary { cursor: pointer; font-size: 12px; color: var(--text-dim); }
+.receipt .items-list { color: var(--text); font-family: inherit; }
+
 .toast {
   position: fixed;
   bottom: 20px;

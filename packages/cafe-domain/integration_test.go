@@ -91,6 +91,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "BackfillTabStaleAt", Scope: "any"},
 			{OperationType: "CreateMenuItem", Scope: "any"},
 			{OperationType: "RetireMenuItem", Scope: "any"},
+			{OperationType: "SetMenuItemAvailability", Scope: "any"},
 			{OperationType: "SetMenuItemLocation", Scope: "any"},
 			{OperationType: "UpdateMenuItem", Scope: "any"},
 		},
@@ -2929,5 +2930,247 @@ func TestDescriptorDrivenSelfService_OpenSettleReopen(t *testing.T) {
 	guardData, _ := guardDoc["data"].(map[string]any)
 	if got, _ := guardData["tabKey"].(string); got != secondTab {
 		t.Fatalf("guard tabKey = %q, want %q (revived for the reopened tab)", got, secondTab)
+	}
+}
+
+func submitSetMenuItemAvailability(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, itemKey string, available bool) processor.MessageOutcome {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetMenuItemAvailability",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-30T12:20:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","available":` + strconv.FormatBool(available) + `}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	return testutil.DriveOne(t, ctx, cp, cons, "")
+}
+
+// TestSetMenuItemAvailability_FlipsAndPreservesPrice proves the toggle
+// rewrites only available: name and priceCents ride through unchanged, off
+// then on.
+func TestSetMenuItemAvailability_FlipsAndPreservesPrice(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "setavailflip")
+
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNAVLFLPTNLCH")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdavailflipmenu00001", "Latte", 450, locKey)
+
+	if outcome := submitSetMenuItemAvailability(t, ctx, conn, cp, cons, "cdavailflipoff000001", itemKey, false); outcome != processor.OutcomeAccepted {
+		t.Fatalf("SetMenuItemAvailability(false) outcome = %v, want Accepted", outcome)
+	}
+	priceDoc := readDoc(t, ctx, conn, itemKey+".price")
+	priceData, _ := priceDoc["data"].(map[string]any)
+	if got, ok := priceData["available"].(bool); !ok || got != false {
+		t.Fatalf("price.available = %v, want false", priceData["available"])
+	}
+	if got, _ := priceData["name"].(string); got != "Latte" {
+		t.Fatalf("price.name = %q, want Latte (unchanged by the toggle)", got)
+	}
+	if got, _ := priceData["priceCents"].(float64); got != 450 {
+		t.Fatalf("price.priceCents = %v, want 450 (unchanged by the toggle)", got)
+	}
+
+	if outcome := submitSetMenuItemAvailability(t, ctx, conn, cp, cons, "cdavailflipon0000001", itemKey, true); outcome != processor.OutcomeAccepted {
+		t.Fatalf("SetMenuItemAvailability(true) outcome = %v, want Accepted", outcome)
+	}
+	priceDoc = readDoc(t, ctx, conn, itemKey+".price")
+	priceData, _ = priceDoc["data"].(map[string]any)
+	if got, ok := priceData["available"].(bool); !ok || got != true {
+		t.Fatalf("price.available = %v, want true", priceData["available"])
+	}
+}
+
+// TestSetMenuItemAvailability_RefusesNonBool proves the require_bool guard:
+// a non-boolean available is rejected rather than coerced.
+func TestSetMenuItemAvailability_RefusesNonBool(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "setavailbadtype")
+
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNAVLBADTLCTN")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdavailbadtmenu00001", "Latte", 450, locKey)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdavailbadt0000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetMenuItemAvailability",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-30T12:21:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","available":"nope"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("SetMenuItemAvailability with a string available: outcome = %v, want Rejected", outcome)
+	}
+	if reply == nil || reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: available: required boolean") {
+		t.Fatalf("reply = %+v, want the require_bool refusal naming the field", reply)
+	}
+}
+
+// TestUpdateMenuItem_PreservesAvailability proves the carry-through:
+// a reprice of a sold-out item leaves it sold out — UpdateMenuItem rewrites
+// the SAME .price aspect SetMenuItemAvailability does, so a naive rewrite
+// would silently clear the flag.
+func TestUpdateMenuItem_PreservesAvailability(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "updatemenupreserve")
+
+	locKey := seedLocation(t, ctx, conn, "BBCAFEDMNUPDPRSVLCTN")
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdupdprsvmenu000001", "Latte", 450, locKey)
+	if outcome := submitSetMenuItemAvailability(t, ctx, conn, cp, cons, "cdupdprsvoff0000001", itemKey, false); outcome != processor.OutcomeAccepted {
+		t.Fatalf("SetMenuItemAvailability(false) outcome = %v, want Accepted", outcome)
+	}
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdupdprsvreprice0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "UpdateMenuItem",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-30T12:22:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"menuItemKey":"` + itemKey + `","name":"Latte","priceCents":475}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	priceDoc := readDoc(t, ctx, conn, itemKey+".price")
+	priceData, _ := priceDoc["data"].(map[string]any)
+	if got, ok := priceData["available"].(bool); !ok || got != false {
+		t.Fatalf("price.available = %v, want false (a reprice must not clear the sold-out flag)", priceData["available"])
+	}
+	if got, _ := priceData["priceCents"].(float64); got != 475 {
+		t.Fatalf("price.priceCents = %v, want 475", got)
+	}
+}
+
+// TestCharge_RefusesItemUnavailable_SelfOrder proves a self-order Charge
+// naming a sold-out item is refused ItemUnavailable, and accepted again once
+// the item is put back on the menu — both the negative and the positive
+// vector, so the guard is proven to actually gate rather than always deny.
+func TestCharge_RefusesItemUnavailable_SelfOrder(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargeselfunavail")
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNCHGUAVLEASE", domainConsumerID)
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNCHGUAVUNPTH")
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfunavlsetup0001", leaseKey)
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdselfunavlmenu00001", "Latte", 450, unitKey)
+	applicationForLnk := "lnk.leaseapp.BBCAFEDMNCHGUAVLEASE.applicationFor.identity." + domainConsumerID
+
+	if outcome := submitSetMenuItemAvailability(t, ctx, conn, cp, cons, "cdselfunavloff000001", itemKey, false); outcome != processor.OutcomeAccepted {
+		t.Fatalf("SetMenuItemAvailability(false) outcome = %v, want Accepted", outcome)
+	}
+
+	chargeEnv := func(reqID string) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(reqID),
+			Lane:          processor.LaneDefault,
+			OperationType: "Charge",
+			Actor:         domainConsumerKey,
+			SubmittedAt:   "2026-07-30T12:23:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
+			ContextHint: &processor.ContextHint{
+				Reads:         []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+				OptionalReads: []string{applicationForLnk},
+			},
+			AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+		}
+	}
+
+	env := chargeEnv("cdselfunavlchg000001")
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("self-order Charge against a sold-out item outcome = %v, want Rejected", outcome)
+	}
+	if reply == nil || reply.Error == nil || !strings.Contains(reply.Error.Message, "ItemUnavailable") {
+		t.Fatalf("reply = %+v, want an ItemUnavailable rejection", reply)
+	}
+
+	if outcome := submitSetMenuItemAvailability(t, ctx, conn, cp, cons, "cdselfunavlon0000001", itemKey, true); outcome != processor.OutcomeAccepted {
+		t.Fatalf("SetMenuItemAvailability(true) outcome = %v, want Accepted", outcome)
+	}
+	env2 := chargeEnv("cdselfunavlchg000002")
+	testutil.PublishOp(t, conn, env2)
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("self-order Charge against a re-available item outcome = %v, want Accepted", outcome)
+	}
+}
+
+// TestCharge_RefusesItemUnavailable_StaffCatalogPick mirrors
+// TestCharge_RefusesItemUnavailable_SelfOrder on the staff POS leg: a sold-out
+// item is sold out whoever rings it up.
+func TestCharge_RefusesItemUnavailable_StaffCatalogPick(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargestaffunavail")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNSTFUAVLEASE")
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNSTFUAVUNPTH")
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdstaffunavlsetup01", leaseKey)
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdstaffunavlmenu001", "Latte", 450, unitKey)
+
+	if outcome := submitSetMenuItemAvailability(t, ctx, conn, cp, cons, "cdstaffunavloff00001", itemKey, false); outcome != processor.OutcomeAccepted {
+		t.Fatalf("SetMenuItemAvailability(false) outcome = %v, want Accepted", outcome)
+	}
+
+	chargeEnv := func(reqID string) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(reqID),
+			Lane:          processor.LaneDefault,
+			OperationType: "Charge",
+			Actor:         domainActorKey,
+			SubmittedAt:   "2026-07-30T12:24:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
+			ContextHint: &processor.ContextHint{
+				Reads: []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		}
+	}
+
+	env := chargeEnv("cdstaffunavlchg00001")
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("staff Charge against a sold-out item outcome = %v, want Rejected", outcome)
+	}
+	if reply == nil || reply.Error == nil || !strings.Contains(reply.Error.Message, "ItemUnavailable") {
+		t.Fatalf("reply = %+v, want an ItemUnavailable rejection", reply)
+	}
+
+	if outcome := submitSetMenuItemAvailability(t, ctx, conn, cp, cons, "cdstaffunavlon00001", itemKey, true); outcome != processor.OutcomeAccepted {
+		t.Fatalf("SetMenuItemAvailability(true) outcome = %v, want Accepted", outcome)
+	}
+	env2 := chargeEnv("cdstaffunavlchg00002")
+	testutil.PublishOp(t, conn, env2)
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("staff Charge against a re-available item outcome = %v, want Accepted", outcome)
 	}
 }

@@ -882,6 +882,30 @@ func TestMenuCatalog_NoServedAtEmptyCovering(t *testing.T) {
 		"an unlinked item is covered by nobody; the boundary must not read that as unrestricted")
 }
 
+// TestMenuCatalog_AvailableFlag proves menuCatalogSpec's own `available`
+// column: an item whose .price carries available:false projects false, and
+// an item whose .price carries no available field at all (never toggled)
+// projects true — the
+// coalesce default, never toggled means available.
+func TestMenuCatalog_AvailableFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	soldoutKey := f.vtx(t, "soldout", "menuitem")
+	f.aspect(t, "soldout", "price", "menuItemPrice", map[string]any{"name": "Latte", "priceCents": 450.0, "available": false})
+	legacyKey := f.vtx(t, "legacy", "menuitem")
+	f.aspect(t, "legacy", "price", "menuItemPrice", map[string]any{"name": "Muffin", "priceCents": 300.0})
+
+	rows := f.project(t, menuCatalogSpec)
+	byKey := map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["menuItemKey"].(string)] = r.Values["available"]
+	}
+	require.Equal(t, false, byKey[soldoutKey], "an item explicitly marked unavailable projects false")
+	require.Equal(t, true, byKey[legacyKey], "an item with no available field on .price projects true")
+}
+
 // identity seeds a bare vtx.identity vertex — cafeIdentitiesReadSpec's own
 // anchor type, distinct from cdFixture.vtx's tab/leaseapp/unit/location
 // vertices above.

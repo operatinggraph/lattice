@@ -21,7 +21,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // operator-only Charge grant existed to cover.
 //
 // OpenTab, Charge, Settle, and the menu catalog (CreateMenuItem /
-// RetireMenuItem / SetMenuItemLocation / UpdateMenuItem) additionally grant
+// RetireMenuItem / SetMenuItemAvailability / SetMenuItemLocation /
+// UpdateMenuItem) additionally grant
 // `frontOfHouse` at scope=any — the POS beat the package doc above already
 // describes as the trusted-tool app's job, and running the catalog is the
 // same front-desk beat (the shipped Manage Menu tab). Naming the role makes
@@ -106,6 +107,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "RetireMenuItem",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to remove an item from the self-order menu catalog, confined to the item's own served-at workplace.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
+			OperationType: "SetMenuItemAvailability",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to mark a catalog item sold out for the day (or bring it back), confined to the item's own served-at workplace.",
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
