@@ -56,23 +56,26 @@ lnk.cafetransaction.<id>.settles.tab.<id>     (cafetransaction → tab; written 
 ## OCC-conditioned running total, not append-only line items
 
 Unlike `cafe-ledger`'s append-only transaction history, a tab's `.status.totalCents` is a real
-in-progress accumulator (`Charge` adds to it, `VoidCharge` subtracts — clamped at 0 rather than going
-negative) — there is no per-item ledger during the POS session, so the aspect is upserted directly,
-OCC-conditioned on its own current revision (the `providerSlotClaim` precedent): two concurrent
-`Charge`/`VoidCharge` calls racing the same tab must not lose an update, so the loser gets
-`RevisionConflict` and retries, rather than one call silently overwriting the other's total.
-`VoidCharge` is operator/`frontOfHouse` only — no self-service grant, since a POS correction is a
-staff decision even to reverse a resident's own self-order mis-tap. `Settle` freezes `totalCents`,
-flips `value` to `settled`, and stamps `settledAt` — also OCC-conditioned. All three reject a tab that
-is not currently `open` (`TabNotOpen`).
+in-progress accumulator (`Charge` adds to it, `VoidCharge` subtracts a named line's own amount —
+clamped at 0 rather than going negative) — there is no per-item ledger during the POS session, so the
+aspect is upserted directly, OCC-conditioned on its own current revision (the `providerSlotClaim`
+precedent): two concurrent `Charge`/`VoidCharge` calls racing the same tab must not lose an update, so
+the loser gets `RevisionConflict` and retries, rather than one call silently overwriting the other's
+total. `VoidCharge{tabKey, lineId}` is operator/`frontOfHouse` only — no self-service grant, since a
+POS correction is a staff decision even to reverse a resident's own self-order mis-tap; it derives the
+void amount from the named `.status.lines` entry itself, never a caller-supplied `amountCents`, and
+marks that entry `voided: true` in place. `Settle` freezes `totalCents`, flips `value` to `settled`,
+and stamps `settledAt` — also OCC-conditioned. All three reject a tab that is not currently `open`
+(`TabNotOpen`).
 
-Alongside `totalCents`, every `Charge`/qualifying `VoidCharge` also appends a plain-text line to
-`.status.itemsMemo` — a comma-joined running summary (a menu item's own `.price.name`, an off-menu
-`Charge`'s caller-supplied `description` or the `"Off-menu charge"` default, or `"Void correction"`)
-so a tab (open or settled) shows what was actually rung up, not just the sum — the `cafeTabSettlement`
+Alongside `totalCents`, every `Charge` also appends a matching entry to `.status.lines`; `.status.itemsMemo`
+is re-derived from the live (non-voided) lines on every `Charge`/`VoidCharge` — a comma-joined summary (a
+menu item's own `.price.name`, or an off-menu `Charge`'s caller-supplied `description`/`"Off-menu charge"`
+default) so a tab (open or settled) shows what was actually rung up, not just the sum — the `cafeTabSettlement`
 lens projects it verbatim and the Weaver-dispatched `DebitAccount` posts the same string as the
-settled ledger entry's `memo`. It is a summary line, not a structured per-item ledger — see Out of
-scope.
+settled ledger entry's `memo`. The structured itemization lives beside it in `.status.lines` — one
+`{id, description, amountCents, voided, orderedBy}` entry per `Charge`, the receipt's own record — so on
+every tab that can still be voided, `totalCents` equals the sum of its non-voided lines.
 
 ## Self-order menu catalog
 
@@ -131,11 +134,9 @@ never a payload value).
 
 ## Out of scope
 
-- **Structured per-item ledger** — `.status.itemsMemo` is a comma-joined text summary (name only, no
-  per-line price/quantity), built by `Charge`/`VoidCharge` and frozen by `Settle`; it is not a
-  structured array of `{menuItemKey, priceCents, chargedAt}` rows. A future structured itemization
-  (e.g. for a printable receipt) is a distinct extension if the product needs one — the running text
-  summary was the itemization gap verticals.md's Café row asked for.
+- **Per-line quantity / timestamps** — `.status.lines` records one `{id, description, amountCents, voided,
+  orderedBy}` entry per `Charge`; a quantity column or a per-line `chargedAt` is a distinct extension if a
+  printable receipt ever needs one.
 
 One-open-tab-per-lease exclusivity IS built, not out of scope: the `cafeOpenTabGuard` aspect (Inventory
 above) is a per-lease dedup guard `OpenTab` claims and `Settle` releases, rejecting a second concurrent

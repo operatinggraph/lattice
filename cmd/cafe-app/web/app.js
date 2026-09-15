@@ -205,7 +205,7 @@ function chargedToOptionalRead(tabKey, leaseAppKey) {
 // hasn't declared the op yet — a silent failure, so
 // TestKnownCatalogOpsCoversEveryCacheRead (op_catalog_test.go) reads this
 // file and fails the build when an `opCatalogCache.<Op>` read has no entry.
-const KNOWN_CATALOG_OPS = ["VoidCharge", "CreditCafeAccount", "RefundCafeCharge", "PayoutCafeCredit"];
+const KNOWN_CATALOG_OPS = ["CreditCafeAccount", "RefundCafeCharge", "PayoutCafeCredit"];
 let opCatalogPromise = null;
 let opCatalogCache = null;
 async function loadOpCatalog() {
@@ -892,16 +892,6 @@ async function renderPos() {
       btn.disabled = false;
     }
   });
-  // Wired AFTER settle-btn's own listener, and not awaited: this function's
-  // own catalog/module load is the slow part, and Settle Tab must not sit
-  // inert (rendered enabled, non-functional) while it's in flight. Safe to
-  // fire-and-forget — wireVoidChargeForm resolves its own #void-form/
-  // #void-fields/#void-submit elements before its first await, so a second
-  // concurrent renderPos (e.g. the #pos-lease change handler firing while a
-  // pending setTimeout(renderPos, 700) is still in flight) leaves it
-  // operating on its own already-captured, still-live DOM nodes rather than
-  // a stale reference.
-  wireVoidChargeForm(open.tabKey);
 }
 
 function renderOpenTabForm() {
@@ -937,97 +927,9 @@ function renderOpenTabCard(tab, items) {
     '<input id="charge-desc" type="text" placeholder="Description (optional)" />' +
     '<button id="charge-submit" type="submit">Add Charge</button>' +
     "</form>" +
-    '<form id="void-form" class="field-row" style="margin-bottom:14px;">' +
-    '<div id="void-fields" style="flex:1"></div>' +
-    '<button type="submit" id="void-submit" class="ghost" disabled>Void</button>' +
-    "</form>" +
     '<div class="panel-actions"><button id="settle-btn" class="danger">Settle Tab</button></div>' +
     "</div>"
   );
-}
-
-// wireVoidChargeForm mounts VoidCharge's descriptor form into the POS tab
-// panel's #void-form and wires its submit (the surrounding <form> + a
-// type="submit" button, not a bare click handler, so the ordinary
-// type-amount-then-Enter POS gesture keeps working — renderOpForm itself
-// only ever appends field <div>s into the mount it's given, never its own
-// <form> wrapper, so wrapping #void-fields in one here is safe). VoidCharge
-// is staff-standing (AuthContext "standing" — packages/cafe-domain/
-// opmetas.go — no self-scope grant at all, no ownership probe declared), so
-// this needs no context.me/selfVoice wiring: a POS correction is always a
-// staff decision, the same straightforward standing-authContext shape
-// SetInstructorProfile's own edit form uses in wellness-app.
-//
-// Only the amount-based void (payload {tabKey, amountCents}, the old
-// #void-form) migrates. The per-line "Void" button rendered on each charge
-// line (chargeLinesBlock's data-void-line buttons, wired separately above)
-// submits {tabKey, lineId} — a shape VoidCharge's own InputSchema does not
-// declare at all (it names tabKey/amountCents only) — the same "one-click
-// list-row action, parameter already known, no dedicated form to migrate"
-// category as RetireMenuItem/RemoveProviderSite/TombstoneStudio, so it stays
-// hand-built (and, not coincidentally, already follows the
-// success-leaves-it-disabled pattern below).
-//
-// A load/render failure renders its message INLINE into #void-fields rather
-// than toasting: this function reruns on every renderPos (POS tab render),
-// including the setTimeout(renderPos, 700) re-render after a successful
-// Charge/Settle, so a toast here would silently stomp the just-shown green
-// success toast 700ms later on a catalog outage.
-async function wireVoidChargeForm(tabKey) {
-  const form = document.getElementById("void-form");
-  const mount = document.getElementById("void-fields");
-  const btn = document.getElementById("void-submit");
-  if (!form || !mount || !btn) return;
-  btn.disabled = true;
-  await loadOpCatalogQuiet();
-  let renderOpForm;
-  try {
-    ({ renderOpForm } = await loadDescriptorform());
-  } catch (e) {
-    mount.innerHTML = '<p class="meta">Void form unavailable — ' + escapeHtml(e.message) + "</p>";
-    return;
-  }
-  const row = opCatalogCache && opCatalogCache.VoidCharge;
-  const handle = row && renderOpForm(row, { target: tabKey }, mount);
-  if (!handle) {
-    mount.innerHTML = '<p class="meta">The void form is unavailable.</p>';
-    return;
-  }
-  btn.textContent = handle.descriptor.submitLabel;
-  btn.disabled = false;
-  form.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    btn.disabled = true;
-    let envelope, reveal;
-    try {
-      ({ envelope, reveal } = await handle.submit());
-    } catch (e) {
-      toast(e.message || String(e), false);
-      btn.disabled = false;
-      return;
-    }
-    // Left disabled on success rather than re-enabled in a `finally`: the
-    // amount field lives inside the descriptor-owned mount, which this
-    // function does not clear on success (unlike the old hand-built
-    // #void-amount input's own input.value = ""), so a re-enabled button
-    // would let a staffer double-click inside the 700ms setTimeout(renderPos,
-    // 700) window and resubmit the SAME {tabKey, amountCents} envelope —
-    // VoidCharge's amount branch has no dedup/idempotency key, so it just
-    // subtracts again. renderPos's own re-render 700ms later mounts a fresh
-    // form with a fresh (disabled-until-loaded) button, the same pattern the
-    // adjacent per-line void button and every other POS submit above already
-    // use.
-    try {
-      const amountCents = envelope.payload && envelope.payload.amountCents;
-      const reply = await submitCatalogOp(envelope, "void the charge");
-      revealCeremonySecret(reveal, reply);
-      toast("Voided" + (amountCents ? " " + money(amountCents) : "") + ".", true);
-      setTimeout(renderPos, 700);
-    } catch (e) {
-      toast(e.message, false);
-      btn.disabled = false;
-    }
-  });
 }
 
 // ---- Front Desk view (staff only) --------------------------------------
@@ -2062,11 +1964,11 @@ async function renderResident() {
 // A VISIBLE mount, unlike the payment form's detached one, because there is
 // nothing already typed for a detached mount to assemble from: a refund is
 // often only part of a charge, and its memo is written for the resident to
-// read on their own statement, so both are the staffer's to set. That makes
-// this the wireVoidChargeForm shape rather than the record-payment-form one,
-// including its inline failure rendering — this runs on every renderResident,
-// the 700ms re-render after a successful submit included, so a toast on a
-// catalog outage would stomp the green success toast still on screen.
+// read on their own statement, so both are the staffer's to set. A load or
+// render failure renders its message INLINE into the mount rather than
+// toasting — this runs on every renderResident, the 700ms re-render after a
+// successful submit included, so a toast on a catalog outage would stomp the
+// green success toast still on screen.
 //
 // RefundCafeCharge is staff-standing: packages/cafe-ledger grants it to
 // operator/frontOfHouse at scope=any and to nobody at scope=self, and its
@@ -2151,13 +2053,13 @@ async function wireRefundCharge(accountKey, onDone) {
       document.getElementById("refund-cancel").addEventListener("click", () => { host.innerHTML = ""; });
       document.getElementById("refund-form").addEventListener("submit", async (ev) => {
         ev.preventDefault();
-        // Left disabled on success rather than re-enabled in a finally, the
-        // same reason wireVoidChargeForm leaves its own: the amount lives
-        // inside the descriptor-owned mount this function does not clear, so a
-        // re-enabled button would let a double-click inside the 700ms
-        // re-render window post a SECOND refund for the same amount. The
-        // cumulative cap catches the ones that would overshoot the charge, but
-        // a half-refund submitted twice is exactly at the cap and would land.
+        // Left disabled on success rather than re-enabled in a finally: the
+        // amount lives inside the descriptor-owned mount this function does
+        // not clear, so a re-enabled button would let a double-click inside
+        // the 700ms re-render window post a SECOND refund for the same
+        // amount. The cumulative cap catches the ones that would overshoot
+        // the charge, but a half-refund submitted twice is exactly at the
+        // cap and would land.
         submitBtn.disabled = true;
         try {
           const { envelope, reveal } = await handle.submit();

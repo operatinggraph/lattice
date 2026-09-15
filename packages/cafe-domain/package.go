@@ -91,7 +91,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.12.6",
+	Version: "0.13.0",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/Settle/" +
 		"SettleStaleTab/BackfillTabStaleAt, OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement " +
 		"actorAggregate convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching " +
@@ -112,9 +112,11 @@ var Package = pkgmgr.Definition{
 		"servedAt place must cover the tab's own lease-unit, or an ancestor of it, or the charge is denied); " +
 		"the menuCatalog lens projects that same servedAt key per item, so a picker can offer only what the " +
 		"confined Charge would accept. " +
-		"VoidCharge corrects a mis-tapped charge (operator/frontOfHouse " +
-		"only, no self-service grant). Every Charge/qualifying VoidCharge also appends a line to " +
-		"the tab's own .status.itemsMemo (a comma-joined running summary) — the cafeTabSettlement " +
+		"VoidCharge{tabKey, lineId} corrects a mis-tapped charge (operator/frontOfHouse " +
+		"only, no self-service grant) by voiding one specific .status.lines entry by its id, " +
+		"deriving the amount from the line itself rather than trusting a caller-supplied " +
+		"amountCents. .status.itemsMemo is re-derived from the tab's live (non-voided) lines on " +
+		"every Charge/VoidCharge (a comma-joined running summary) — the cafeTabSettlement " +
 		"lens projects it, so a tab shows what was actually rung up (not just totalCents) and the " +
 		"Weaver-dispatched DebitAccount posts the same string as the settled ledger entry's memo. " +
 		"cafeIdentitiesRead's authz_anchors also fan out over every " +

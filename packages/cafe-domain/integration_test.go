@@ -603,15 +603,18 @@ func TestCharge_RejectsNonPositiveAmount(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
-func TestVoidCharge_SubtractsFromTotalCents(t *testing.T) {
+// TestVoidCharge_RejectsAmountOnly proves the amount-only form is retired:
+// VoidCharge without lineId is rejected outright, and the tab's .status
+// (totalCents, lines, itemsMemo) is left exactly as it was.
+func TestVoidCharge_RejectsAmountOnly(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
-	cp, cons := newDomainPipeline(t, ctx, conn, "voidsub")
+	cp, cons := newDomainPipeline(t, ctx, conn, "voidamountonly")
 
-	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVSUBLEASEHJ")
-	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvoi00000001", leaseKey)
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVAQLEASEHJK")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvao00000001", leaseKey)
 
 	chargeEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdchargevoid000000001"),
+		RequestID:     testutil.GenReqID("cdchargevao0000000001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "Charge",
 		Actor:         domainActorKey,
@@ -628,8 +631,11 @@ func TestVoidCharge_SubtractsFromTotalCents(t *testing.T) {
 	testutil.PublishOp(t, conn, chargeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
+	beforeDoc := readDoc(t, ctx, conn, tabKey+".status")
+	beforeData, _ := beforeDoc["data"].(map[string]any)
+
 	voidEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdvoidchgone00000001"),
+		RequestID:     testutil.GenReqID("cdvoidvao0000000001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "VoidCharge",
 		Actor:         domainActorKey,
@@ -644,74 +650,20 @@ func TestVoidCharge_SubtractsFromTotalCents(t *testing.T) {
 		},
 	}
 	testutil.PublishOp(t, conn, voidEnv)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 
-	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
-	statusData, _ := statusDoc["data"].(map[string]any)
-	if got, _ := statusData["totalCents"].(float64); got != 500 {
-		t.Fatalf("status.totalCents = %v, want 500 (850-350)", got)
+	afterDoc := readDoc(t, ctx, conn, tabKey+".status")
+	afterData, _ := afterDoc["data"].(map[string]any)
+	if got, want := afterData["totalCents"].(float64), beforeData["totalCents"].(float64); got != want {
+		t.Fatalf("status.totalCents after rejected amount-only void = %v, want unchanged %v", got, want)
 	}
-	if got, _ := statusData["value"].(string); got != "open" {
-		t.Fatalf("status.value = %q, want open (voiding does not close the tab)", got)
+	if got, want := afterData["itemsMemo"].(string), beforeData["itemsMemo"].(string); got != want {
+		t.Fatalf("status.itemsMemo after rejected amount-only void = %q, want unchanged %q", got, want)
 	}
-	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Void correction"; got != want {
-		t.Fatalf("status.itemsMemo = %q, want %q (a real void appends a correction line)", got, want)
-	}
-}
-
-// TestVoidCharge_ClampsAtZero proves an over-void — subtracting more than the
-// tab's current running total — corrects cleanly to 0 rather than rejecting
-// or going negative (verticals.md — "decrement not below 0").
-func TestVoidCharge_ClampsAtZero(t *testing.T) {
-	ctx, conn := setupDomainEnv(t)
-	cp, cons := newDomainPipeline(t, ctx, conn, "voidclamp")
-
-	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNCLAMPLEASEH")
-	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabclm00000001", leaseKey)
-
-	chargeEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdchargeclamp0000001"),
-		Lane:          processor.LaneDefault,
-		OperationType: "Charge",
-		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-22T12:05:00Z",
-		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":300}`),
-		ContextHint: &processor.ContextHint{
-			Reads: []string{tabKey, tabKey + ".status"},
-			Enumerations: []processor.EnumerationHint{
-				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
-			},
-		},
-	}
-	testutil.PublishOp(t, conn, chargeEnv)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
-
-	voidEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdvoidclampbig000001"),
-		Lane:          processor.LaneDefault,
-		OperationType: "VoidCharge",
-		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-22T12:06:00Z",
-		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":9000}`),
-		ContextHint: &processor.ContextHint{
-			Reads: []string{tabKey, tabKey + ".status"},
-			Enumerations: []processor.EnumerationHint{
-				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
-			},
-		},
-	}
-	testutil.PublishOp(t, conn, voidEnv)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
-
-	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
-	statusData, _ := statusDoc["data"].(map[string]any)
-	if got, _ := statusData["totalCents"].(float64); got != 0 {
-		t.Fatalf("status.totalCents = %v, want 0 (clamped, not negative)", got)
-	}
-	if got, want := statusData["itemsMemo"].(string), "Off-menu charge, Void correction"; got != want {
-		t.Fatalf("status.itemsMemo = %q, want %q (a clamped void still actually reduced the total)", got, want)
+	beforeLines, _ := beforeData["lines"].([]any)
+	afterLines, _ := afterData["lines"].([]any)
+	if len(afterLines) != len(beforeLines) {
+		t.Fatalf("status.lines has %d entries after rejected amount-only void, want unchanged %d", len(afterLines), len(beforeLines))
 	}
 }
 
@@ -920,107 +872,47 @@ func TestChargeVoidSettleItemsMemo_ProjectsLiveNonVoidedLines(t *testing.T) {
 	}
 }
 
-// TestVoidChargeSettle_LegacyNoLines_PreservesMemoThroughBoth proves the
-// legacy no-lines fallback items_memo_from_lines falls back to: a tab whose
-// .status predates .status.lines entirely (seeded directly, the same
-// schema-gap shape TestSettle_BackfillsChargedToWhenMissing models) keeps its
-// existing itemsMemo verbatim through both VoidCharge — which still appends
-// the bare "Void correction", since nothing else on this tab records the
-// correction — and Settle, which freezes whatever memo it inherits, having no
-// lines to project from.
-func TestVoidChargeSettle_LegacyNoLines_PreservesMemoThroughBoth(t *testing.T) {
+// TestVoidCharge_ByLineId_TotalEqualsLiveLines proves the core invariant a
+// lineId-only VoidCharge is meant to hold: on a tab charged for a menu item
+// and an off-menu item, voiding one by lineId leaves totalCents equal to the
+// sum of the non-voided lines' own amountCents, and itemsMemo naming only
+// the surviving line.
+func TestVoidCharge_ByLineId_TotalEqualsLiveLines(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
-	cp, cons := newDomainPipeline(t, ctx, conn, "legacynolines")
+	cp, cons := newDomainPipeline(t, ctx, conn, "voidlinetotal")
 
-	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNLGNLLEASEHJ")
-	tabKey := "vtx.tab.BBCAFEDMNLGNLTABHJKM"
-	tabID := tabKey[len("vtx.tab."):]
-	leaseID := leaseKey[len("vtx.leaseapp."):]
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVLTLEASEHJK")
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEDMNVLTUNTPHJKM")
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvlt00000001", leaseKey)
+	itemKey := createMenuItem(t, ctx, conn, cp, cons, "cdvltmenu0000000001", "Latte", 450, unitKey)
 
-	seedVertex(t, ctx, conn, tabKey, "tab", map[string]any{})
-	seedAspect(t, ctx, conn, tabKey, "status", "tabStatus", map[string]any{
-		"value": "open", "totalCents": 500.0, "itemsMemo": "Muffin",
-		"openedAt": "2026-07-20T10:00:00Z", "leaseAppKey": leaseKey,
-	})
-	seedLink(t, ctx, conn, "lnk.tab."+tabID+".chargedTo.leaseapp."+leaseID, tabKey, leaseKey, "chargedTo", "chargedTo")
-	seedLink(t, ctx, conn, "lnk.tab."+tabID+".openFor.leaseapp."+leaseID, tabKey, leaseKey, "openFor", "openFor")
-	seedAspect(t, ctx, conn, leaseKey, "cafeOpenTab", "cafeOpenTabGuard", map[string]any{"tabKey": tabKey})
-
-	voidEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdlgnlvoid0000000001"),
-		Lane:          processor.LaneDefault,
-		OperationType: "VoidCharge",
-		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-22T12:06:00Z",
-		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":200}`),
-		ContextHint: &processor.ContextHint{
-			Reads: []string{tabKey, tabKey + ".status"},
-			Enumerations: []processor.EnumerationHint{
-				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
-			},
-		},
-	}
-	testutil.PublishOp(t, conn, voidEnv)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
-
-	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
-	statusData, _ := statusDoc["data"].(map[string]any)
-	if got, want := statusData["itemsMemo"].(string), "Muffin, Void correction"; got != want {
-		t.Fatalf("status.itemsMemo after VoidCharge = %q, want %q (legacy no-lines fallback still appends)", got, want)
-	}
-	if got, want := statusData["totalCents"].(float64), float64(300); got != want {
-		t.Fatalf("status.totalCents = %v, want %v (500-200)", got, want)
-	}
-
-	settleEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdlgnlsettle000001"),
-		Lane:          processor.LaneDefault,
-		OperationType: "Settle",
-		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-22T13:00:00Z",
-		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
-		ContextHint: &processor.ContextHint{
-			Reads: []string{tabKey, tabKey + ".status"},
-			Enumerations: []processor.EnumerationHint{
-				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
-				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
-			},
-		},
-	}
-	testutil.PublishOp(t, conn, settleEnv)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
-
-	settledDoc := readDoc(t, ctx, conn, tabKey+".status")
-	settledData, _ := settledDoc["data"].(map[string]any)
-	if got, _ := settledData["value"].(string); got != "settled" {
-		t.Fatalf("status.value = %q, want settled", got)
-	}
-	if got, want := settledData["itemsMemo"].(string), "Muffin, Void correction"; got != want {
-		t.Fatalf("status.itemsMemo after Settle = %q, want %q (frozen verbatim — no lines to project from)", got, want)
-	}
-}
-
-// TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched proves the
-// no-lineId form (a correction predating itemized lines, or an off-menu
-// adjustment with no line to reference) still works exactly as before and
-// never writes to .status.lines.
-func TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched(t *testing.T) {
-	ctx, conn := setupDomainEnv(t)
-	cp, cons := newDomainPipeline(t, ctx, conn, "voidlegacy")
-
-	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVLGYLEASEHJ")
-	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvlg00000001", leaseKey)
-
-	chargeEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdvlgcharge0000000001"),
+	menuChargeEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdvltchargeone000001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "Charge",
 		Actor:         domainActorKey,
 		SubmittedAt:   "2026-07-22T12:05:00Z",
 		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":850}`),
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","menuItemKey":"` + itemKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status", itemKey, itemKey + ".price"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, menuChargeEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	offMenuChargeEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdvltchargetwo000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:06:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":300,"description":"Late fee"}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
@@ -1028,17 +920,17 @@ func TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched(t *testing.T) {
 			},
 		},
 	}
-	testutil.PublishOp(t, conn, chargeEnv)
+	testutil.PublishOp(t, conn, offMenuChargeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	voidEnv := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdvoidlegacy00000001"),
+		RequestID:     testutil.GenReqID("cdvltvoidline000001"),
 		Lane:          processor.LaneDefault,
 		OperationType: "VoidCharge",
 		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-22T12:06:00Z",
+		SubmittedAt:   "2026-07-22T12:07:00Z",
 		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":350}`),
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-1"}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{
@@ -1051,38 +943,24 @@ func TestVoidCharge_LegacyAmountOnly_LeavesLinesUntouched(t *testing.T) {
 
 	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
 	statusData, _ := statusDoc["data"].(map[string]any)
-	if got, want := statusData["totalCents"].(float64), float64(500); got != want {
-		t.Fatalf("status.totalCents = %v, want %v (850-350)", got, want)
-	}
 	lines, _ := statusData["lines"].([]any)
-	if len(lines) != 1 {
-		t.Fatalf("status.lines has %d entries, want 1 (the original Charge only — legacy void touches no line)", len(lines))
+	var liveTotal float64
+	for _, l := range lines {
+		line, _ := l.(map[string]any)
+		if voided, _ := line["voided"].(bool); !voided {
+			amt, _ := line["amountCents"].(float64)
+			liveTotal += amt
+		}
 	}
-	line, _ := lines[0].(map[string]any)
-	if got := line["voided"].(bool); got {
-		t.Fatalf("lines[0].voided = %v, want false (a legacy amount-only void never marks a line)", got)
+	if got, want := statusData["totalCents"].(float64), liveTotal; got != want {
+		t.Fatalf("status.totalCents = %v, want %v (== the sum of non-voided lines' amountCents)", got, want)
 	}
-}
-
-func TestVoidCharge_RejectsNonPositiveAmount(t *testing.T) {
-	ctx, conn := setupDomainEnv(t)
-	cp, cons := newDomainPipeline(t, ctx, conn, "voidbadamt")
-
-	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVBADLEASEHJ")
-	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvba00000001", leaseKey)
-
-	env := &processor.OperationEnvelope{
-		RequestID:     testutil.GenReqID("cdvoidbadamt000000001"),
-		Lane:          processor.LaneDefault,
-		OperationType: "VoidCharge",
-		Actor:         domainActorKey,
-		SubmittedAt:   "2026-07-22T12:05:00Z",
-		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":0}`),
-		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	if got, want := statusData["totalCents"].(float64), float64(300); got != want {
+		t.Fatalf("status.totalCents = %v, want %v (450+300 minus the voided 450 line)", got, want)
 	}
-	testutil.PublishOp(t, conn, env)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+	if got, want := statusData["itemsMemo"].(string), "Late fee"; got != want {
+		t.Fatalf("status.itemsMemo = %q, want %q (only the live line named, the voided Latte dropped out)", got, want)
+	}
 }
 
 // TestVoidCharge_RejectsAfterSettle proves a settled tab's total is frozen —
@@ -1093,6 +971,24 @@ func TestVoidCharge_RejectsAfterSettle(t *testing.T) {
 
 	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNVASLEASEHJK")
 	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabvas00000001", leaseKey)
+
+	chargeEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdchargevas0000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "Charge",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-22T12:05:00Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":500}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	testutil.PublishOp(t, conn, chargeEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 
 	settleEnv := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("cdsettlevas000000001"),
@@ -1120,7 +1016,7 @@ func TestVoidCharge_RejectsAfterSettle(t *testing.T) {
 		Actor:         domainActorKey,
 		SubmittedAt:   "2026-07-22T13:05:00Z",
 		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":500}`),
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-1"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
 	}
 	testutil.PublishOp(t, conn, voidEnv)
@@ -1165,7 +1061,7 @@ func TestVoidCharge_RejectsForConsumer(t *testing.T) {
 		Actor:         domainConsumerKey,
 		SubmittedAt:   "2026-07-22T12:05:00Z",
 		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":100}`),
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-1"}`),
 		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
 		AuthContext:   &processor.AuthContext{Target: domainConsumerKey},
 	}
