@@ -84,12 +84,5 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-09-14 · `b56bc0f0` · The lease is signed on the applicant's terms — `.tenancy` derives from `.terms` (listing fallback, malformed terms refused) and records `rentAmount`; both cards state what the signature commits to; Priya approved live.
 - 2026-09-14 · `b56bc0f0` · A lease that ends frees its unit — `tenancyEnd` records `endedAt = leaseEnd` via `EndTenancy` at the recorded lapse and relists; an ended tenancy is terminal in every consumer; proven through the real Weaver e2e.
 - 2026-09-14 · `b56bc0f0` · A renewed tenant's home states the current lease — both application read lenses + `renewalsRead` project the tenancy, rendered by UTC calendar date; Jordan Ellis reads $2,125 · ends 2027-09-06 live.
-- 2026-09-14 · `1402d742` · The desk sees what the café sold today — a Today panel folded from `/api/tabs` (tabs settled on the local day, gross, by item, voids, unitemized remainder), goja-pinned incl. the DST day; live.
-- 2026-09-14 · `1402d742` · A moved-out resident's lease stops taking house tabs — `OpenTab` refuses `TenancyEnded` at `.tenancy.leaseEnd`; the POS picker says so first via `frontDeskLeaseDetails`; an open tab charges until the 24 h stale-settle.
-- 2026-09-14 · `1b7b255a` · A class that ran is a record — `TombstoneSession` refuses `SessionStarted` once `startsAt <= submittedAt`, the desk hides "Call off this class" on history, the seed's litter reaper keeps started litter; refused live.
-- 2026-09-14 · `1b7b255a` · The desk sees a debtor before booking them — "owes $X · N days overdue" on the member picker, guest typeahead and roster card from `/api/frontdesk-arrears`; an overdue booking asks first; live.
-- 2026-09-14 · `1b7b255a` · A booking click holds "Booked" until the lens has the row — `awaitProjectedBooking` polls ≈31 s past the 24 s `wellnessBookings` lag, schedule + both desk paths; live.
-- 2026-09-14 · `50987c67` · A credit says why it was posted — `CreditCafeAccount` gains `reason` (payment|waiver, waiver staff-only, capped at owed), the lens projects it, the desk writes off from the arrears row; proven live.
-- 2026-09-14 · `50987c67` · Cash handed back is its own debit — `PayoutCafeCredit` pays out a credit (confined, never self-scoped, never refundable); credit may never exceed cash paid in (`cashCents`); Riley Chen paid out live.
 
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*

@@ -2,6 +2,13 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-14 · `1402d742` · The desk sees what the café sold today — a Today panel folded from `/api/tabs` (tabs settled on the local day, gross, by item, voids, unitemized remainder), goja-pinned incl. the DST day; live.
+- 2026-09-14 · `1402d742` · A moved-out resident's lease stops taking house tabs — `OpenTab` refuses `TenancyEnded` at `.tenancy.leaseEnd`; the POS picker says so first via `frontDeskLeaseDetails`; an open tab charges until the 24 h stale-settle.
+- 2026-09-14 · `1b7b255a` · A class that ran is a record — `TombstoneSession` refuses `SessionStarted` once `startsAt <= submittedAt`, the desk hides "Call off this class" on history, the seed's litter reaper keeps started litter; refused live.
+- 2026-09-14 · `1b7b255a` · The desk sees a debtor before booking them — "owes $X · N days overdue" on the member picker, guest typeahead and roster card from `/api/frontdesk-arrears`; an overdue booking asks first; live.
+- 2026-09-14 · `1b7b255a` · A booking click holds "Booked" until the lens has the row — `awaitProjectedBooking` polls ≈31 s past the 24 s `wellnessBookings` lag, schedule + both desk paths; live.
+- 2026-09-14 · `50987c67` · A credit says why it was posted — `CreditCafeAccount` gains `reason` (payment|waiver, waiver staff-only, capped at owed), the lens projects it, the desk writes off from the arrears row; proven live.
+- 2026-09-14 · `50987c67` · Cash handed back is its own debit — `PayoutCafeCredit` pays out a credit (confined, never self-scoped, never refundable); credit may never exceed cash paid in (`cashCents`); Riley Chen paid out live.
 - 2026-09-13 · `5e6e08a0` · A reversal is aged against the charge it reverses — a `reversesKey` credit retires its debit before the FIFO, lockstep across both app statements and café's `arrears_head`; orphan double refund closed; live.
 - 2026-09-13 · `bd07bed1` · A patient's late cancel owes the no-show fee and the desk's correction bills it — a 24h self-path clock, the correction carries the fee, the ledger bills the fee's presence; proven live incl. the waiver reversal.
 - 2026-09-13 · `a2724692` · A recurring visit is credited by a booked visit, never by the clock — the gap opens only on a qualifying visit, the advance re-anchors on it (`StaleRow`+OCC), the Book calendar carries the due floor; proven live.
