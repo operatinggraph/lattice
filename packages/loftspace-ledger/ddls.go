@@ -93,16 +93,28 @@ func transactionDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "transaction",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"DebitAccount", "CreditAccount"},
+		PermittedCommands: []string{"DebitAccount", "CreditAccount", "LoftspaceRecordCharge"},
 		Description: "Ledger transaction DDL. Vertex shape: vtx.transaction.<NanoID>, class=transaction, root data = {} " +
 			"(minimal, D5 — the entry detail is a .entry aspect). DebitAccount{accountKey, amountCents, memo?, clauseRef?, " +
-			"period?} records a charge (rent, a late fee, a deposit); CreditAccount{accountKey, amountCents, memo?} " +
+			"period?} records a charge (rent, a late fee, a deposit) — the orchestrated shape, operator-only, that " +
+			"Weaver's clauseSatisfaction playbook dispatches with a clauseRef; LoftspaceRecordCharge{accountKey, " +
+			"amountCents, memo?} records the same debit entry as a person's manual charge (no clauseRef/period — a " +
+			"vertical-unique name because operationType is a global namespace and cafe-ledger admits its own " +
+			"DebitAccount); CreditAccount{accountKey, amountCents, memo?} " +
 			"records a payment received. Each mints a fresh vtx.transaction.<NanoID> + a .entry aspect {type " +
 			"(debit|credit), amountCents, memo?, postedAt, periodStart?, periodEnd?, dueAt?} + the postedTo link (transaction→account, the transaction " +
 			"is the later-arriving vertex so it is the source — Contract #1 §1.1). The ledger is APPEND-ONLY — no " +
 			"balance is stored or mutated on the account; the ledgerHistory lens derives a balance by summing " +
 			"entries, so concurrent debits/credits never race a read-modify-write. Requires the accountKey be a " +
-			"live account and amountCents be a positive number. DebitAccount's optional clauseRef (the " +
+			"live account and amountCents be a positive number. LoftspaceRecordCharge and CreditAccount carry a " +
+			"consumer scope=self grant beside the operator's scope=any; a self-scoped submit (authContext.target " +
+			"present) is bound to the account's OWN heldFor→leaseapp topology, never the payload, along one of two " +
+			"paths tried in order: the RESIDENT (the lease's applicationFor link resolves to the caller) may " +
+			"CreditAccount only, capped at the account's recomputed outstanding balance (NoBalanceToPay / " +
+			"PaymentExceedsBalance; a resident charge is refused AuthDenied); otherwise the LANDLORD (the caller " +
+			"manages the unit the lease appliesToUnit) may LoftspaceRecordCharge and CreditAccount, uncapped — the " +
+			"landlord is the creditor. A caller holding neither link is refused AuthDenied without the unit being " +
+			"named. DebitAccount has no self grant, so a self-scoped DebitAccount never reaches the script. DebitAccount's optional clauseRef (the " +
 			"semantic-contracts Executable Paper consumer, Contract #10 §10.8's canonical directOp target) " +
 			"additionally validates the clause is live, DERIVES the authoritative amountCents from the clause's " +
 			"own .terms aspect (rejecting AmountMismatch if the payload's amountCents disagrees — money is " +

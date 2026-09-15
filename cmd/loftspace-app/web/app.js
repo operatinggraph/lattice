@@ -3363,7 +3363,13 @@ async function openTaskKeyFor(operationName, scopedTo) {
 // leaseAppKey only — the guard aspect that enforces one-account-per-lease
 // doesn't exist yet on this (first-ever) call, and the Processor hard-rejects
 // a contextHint.reads key that doesn't exist (HydrationMiss), so declaring it
-// here would make account-opening impossible rather than idempotent.
+// here would make account-opening impossible rather than idempotent. The op
+// goes out with landlordSubmit()'s authContext (target = the signed-in
+// landlord), the shape the package's consumer scope=self grant authorizes;
+// the account script then proves the landlord manages the unit the lease's
+// own appliesToUnit link names (a server-side follow-up read off that link,
+// so no optionalReads is declared); a staff session sends no target and is
+// bound by its workplace instead.
 // refusal-courtesy: LoftspaceCreateAccount/AccountAlreadyExists: none — a concurrent first-open race is recovered by re-fetching the ledger (below) rather than a preemptive courtesy.
 async function openLedgerAccount(leaseAppKey) {
   const reply = await submitOp({
@@ -3371,7 +3377,7 @@ async function openLedgerAccount(leaseAppKey) {
     class: "account",
     reads: [leaseAppKey],
     payload: { leaseAppKey },
-  });
+  }, landlordSubmit());
   if (reply && reply.status === "accepted" && reply.primaryKey) {
     return reply.primaryKey;
   }
@@ -3605,14 +3611,22 @@ async function refreshStatementBody(body, leaseAppKey) {
 
 // renderLedgerRecordForm builds the landlord's inline "record a charge or
 // payment" controls: an amount (dollars) + optional memo, posting
-// DebitAccount/CreditAccount against the lease's ledger account, opening the
+// LoftspaceRecordCharge/CreditAccount against the lease's ledger account
+// (LoftspaceRecordCharge is the person's manual charge; DebitAccount is the
+// clause-authorized one Weaver dispatches and no screen offers), opening the
 // account first (openLedgerAccount) if this is its first-ever charge or
 // payment (accountKey empty) so a landlord never has to take a separate
-// "set up the ledger" step.
+// "set up the ledger" step. Both ops go out with landlordSubmit()'s
+// authContext (target = the signed-in landlord), the shape the package's
+// consumer scope=self grants authorize; the script then proves the landlord
+// manages the unit the account's lease sits on, off the account's own
+// heldFor→appliesToUnit→manages topology (nothing here is trusted
+// client-side, and the manages link is a server-side follow-up read off
+// that walk, so no optionalReads is declared).
 // refusal-courtesy: CreditAccount/AmountMismatch, InvalidState, TermExhausted: unreachable — CreditAccount's post_entry call hardcodes allow_clause_ref=False (loftspace-ledger/scripts.go), so the clauseRef branch never runs for any CreditAccount dispatch.
-// refusal-courtesy: DebitAccount/AmountMismatch, InvalidState, TermExhausted: unreachable — this form's payload never sets clauseRef; the clause branch only runs for a clauseRef-carrying dispatch (Weaver's clauseSatisfaction playbook), never a landlord's manual charge.
-// refusal-courtesy: CreditAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — submit() posts CreditAccount/DebitAccount via opOrThrow with no authContext at all, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, loftspace-ledger/scripts.go) only runs when a target is present
-// refusal-courtesy: DebitAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — same as CreditAccount above: no authContext is ever attached here, and a debit with a target would fail AuthDenied before reaching these codes' block regardless
+// refusal-courtesy: LoftspaceRecordCharge/AmountMismatch, InvalidState, TermExhausted: unreachable — LoftspaceRecordCharge's post_entry call hardcodes allow_clause_ref=False (loftspace-ledger/scripts.go), so the clauseRef branch never runs for it; the clause branch belongs to DebitAccount, Weaver's clauseSatisfaction dispatch.
+// refusal-courtesy: CreditAccount/NoBalanceToPay, PaymentExceedsBalance: none — reachable only when the acting landlord is ALSO the lease's applicant (the script's resident proof answers first and caps the credit at the balance); the landlord branch has no cap, and the toast names the balance the resident branch reports.
+// refusal-courtesy: LoftspaceRecordCharge/NoBalanceToPay, PaymentExceedsBalance: unreachable — a debit never enters the balance block: the resident branch refuses it AuthDenied before the block, the landlord branch has no cap.
 function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
   const form = document.createElement("div");
   form.className = "ledger-record-form";
@@ -3649,7 +3663,8 @@ function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
           reads: [accountKey],
           payload: { accountKey, amountCents: cents, memo: memo.value.trim() || undefined },
         },
-        what
+        what,
+        landlordSubmit()
       );
       toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", "ok");
       body.dataset.loaded = "";
@@ -3660,7 +3675,7 @@ function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
       charge.disabled = payment.disabled = false;
     }
   };
-  charge.addEventListener("click", () => submit("DebitAccount", "record the charge"));
+  charge.addEventListener("click", () => submit("LoftspaceRecordCharge", "record the charge"));
   payment.addEventListener("click", () => submit("CreditAccount", "record the payment"));
 
   form.append(amount, memo, charge, payment);

@@ -15,11 +15,17 @@ onto a running stack).
 | **Vertex types** (2) | `account` (root `{}`, D5) · `transaction` (root `{}`, D5, `.entry` aspect) |
 | **Aspect types** (1) | `ledgerAccountGuard` — `vtx.leaseapp.<id>.ledgerAccount`, the per-lease create-only uniqueness guard |
 | **Links** (2) | `heldFor` (account → leaseapp) · `postedTo` (transaction → account) |
-| **Operations** (3) | `LoftspaceCreateAccount` · `DebitAccount` · `CreditAccount` |
+| **Operations** (4) | `LoftspaceCreateAccount` · `DebitAccount` · `LoftspaceRecordCharge` · `CreditAccount` |
 | **Projection lenses** (2) | `ledgerHistory` (one row per transaction) → `loftspace-ledger-history` · `leaseAccounts` (lease → account key lookup) → `loftspace-lease-accounts` (both `nats-kv`, `full` engine) |
 
-`DebitAccount`/`CreditAccount` are granted to `operator` only at `scope: any` (`permissions.go`) —
-the trusted single-identity model. `LoftspaceCreateAccount` also grants `frontOfHouse`,
+`DebitAccount` — the clause-authorized charge Weaver's `clauseSatisfaction` playbook dispatches — is
+granted to `operator` only at `scope: any`; `LoftspaceRecordCharge` (a person's manual charge, never
+clause-authorized) and `CreditAccount` additionally grant `consumer` at `scope: self`, proven in
+`scripts.go` off the account's own `heldFor` topology: the lease's `applicationFor` holder (the resident)
+may credit only, capped at the outstanding balance; the holder of a `manages` link to the lease's
+`appliesToUnit` unit (the landlord) may charge and credit, uncapped — the operationType is a global
+namespace, so the landlord's charge carries a vertical-unique name rather than a self grant on the
+`DebitAccount` name `cafe-ledger` also admits (`permissions.go`). `LoftspaceCreateAccount` also grants `frontOfHouse`,
 **workplace-confined** to the lease's own building (`scripts.go`'s `require_workplace` on the
 lease's `appliesToUnit` topology — unlike `clinic-ledger`'s identical create op, a leaseapp sits at
 a unit, so this one cannot be granted unconfined) — the front desk opens a lease's ledger account
@@ -51,7 +57,7 @@ for why the account carries its own id rather than the lease's.
 
 ## Append-only ledger + the clause seam
 
-`DebitAccount`/`CreditAccount` each mint a fresh `vtx.transaction.<id>` with a `.entry` aspect and
+`DebitAccount`/`LoftspaceRecordCharge`/`CreditAccount` each mint a fresh `vtx.transaction.<id>` with a `.entry` aspect and
 the `postedTo` link back to the account — no balance field is ever written or mutated; the
 `ledgerHistory` lens derives a balance by summing `amountCents` (positive for debit, negative for
 credit) client-side, so concurrent debits/credits never race a read-modify-write.

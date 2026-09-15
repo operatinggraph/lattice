@@ -196,10 +196,10 @@ def workplace_exempt():
     return op.authTargetValidated or actor_holds_operator(op.actor)
 
 def require_workplace(location_keys, what):
-    # Binds the STANDING path only (operator/frontOfHouse via scope=any).
-    # LoftspaceCreateAccount declares no scope=self grant, so
-    # op.authTargetValidated is never legitimately true here -- this is
-    # belt-and-suspenders with workplace_exempt's own check, not a live branch.
+    # Binds the STANDING path only (operator/frontOfHouse via scope=any). The
+    # validated scope=self path -- a landlord opening the account of a lease
+    # on a unit they manage (permissions.go) -- returns early here and is
+    # bound by require_manages instead, the guard that can see it.
     if op.authTargetValidated:
         return
     enforce_workplace(location_keys, what)
@@ -255,6 +255,44 @@ def lease_unit(lease_key):
         return None
     return unit
 
+def require_manages(unit_key, what):
+    # The landlord ownership probe -- the scope=self counterpart to
+    # require_workplace above, binding the path that guard deliberately cannot
+    # see. A signed-in landlord holds no worksAt link and authorizes via a
+    # scope=self grant, so what confines them is their own management link to
+    # the unit the lease under the write applies to. Mirrors lease-signing's
+    # DecideLeaseApplication probe.
+    #
+    # It binds the platform-VALIDATED self path and only that path, which is why
+    # it keys on authTargetValidated rather than on the raw target's presence:
+    # a scope=any holder (operator/frontOfHouse) whose client happens to send
+    # its own key is authorized by step 3 on the standing grant WITHOUT
+    # inspecting the target, so narrowing it here would confine an unconfined
+    # actor to whatever it happens to manage; a task grant also validates a
+    # target, but its target is the task's resource, not an identity, so the
+    # equality with op.actor excludes it. A scope=self caller cannot escape:
+    # step 3 denies scope=self outright when the target is absent and when
+    # target != actor, so reaching this op on that grant means both hold.
+    #
+    # authcontext-target: (ownership) the target is used only as op.actor's own
+    # key, on a path the platform already proved equal to the actor, and the
+    # authority it buys is then proven by the manages LINK read below.
+    if not op.authTargetValidated or op.authContextTarget != op.actor:
+        return
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    if unit_key == None:
+        fail("AuthDenied: no unit resolves for this lease, so no management link can authorize it; " + what)
+    _, unit_id = parts_of(unit_key, "unit", "unit")
+    # read-posture: (e) per-candidate follow-up read off the appliesToUnit
+    # enumeration in lease_unit (data-derived key -- the unit is not knowable
+    # until the lease's own link resolves, so it cannot be pre-declared).
+    lnk = kv.Read("lnk.identity." + actor_id + ".manages.unit." + unit_id)
+    if lnk == None or lnk.isDeleted:
+        # The unit key is deliberately NOT named: the caller reached here with a
+        # lease key it already holds, and echoing the unit that lease sits on
+        # would turn a denial into a lookup for a resource it does not manage.
+        fail("AuthDenied: " + op.actor + " does not manage the unit this lease is on; " + what)
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -267,21 +305,32 @@ def execute(state, op):
         if not vertex_alive(state, lease_key):
             fail("UnknownLeaseApplication: " + lease_key)
 
-        # Staff-standing confinement: the location comes from the LEASE's own
-        # appliesToUnit topology, never from the payload, so it cannot be
-        # forged. Mirrors DecideLeaseApplication/CreditCafeAccount -- a
-        # leaseapp sits at a building, unlike clinic/wellness's practice-wide
-        # patient/member, so (unlike those two packages' CreateAccount) this
-        # one cannot be granted unconfined.
-        # workplace-exempt: (no-validated-path) LoftspaceCreateAccount
-        # declares one scope=any grant, to [operator, frontOfHouse]
-        # (permissions.go), and no package mints a task forOperation it -- so
-        # op.authTargetValidated is never legitimately true and only an
-        # operator reaches the exemption. The frontOfHouse half is bound by
-        # require_workplace instead. Adding a scope=self grant, or a task,
-        # makes this claim false and needs a matching exemption here.
+        # Confinement: whichever path authorized this write, it is bound to
+        # the LEASE's own appliesToUnit topology, never a payload field, so
+        # the unit cannot be forged. Staff on the standing path must worksAt
+        # a location covering it (mirrors DecideLeaseApplication /
+        # CreditCafeAccount -- a leaseapp sits at a building, unlike
+        # clinic/wellness's practice-wide patient/member, so this create op
+        # cannot be granted unconfined); a landlord on the validated
+        # scope=self path must manage it. The walk is unconditional because
+        # both guards consume it and each binds the path the other cannot
+        # see; an operator pays one bounded link enumeration.
+        account_unit = lease_unit(lease_key)
+        # workplace-exempt: (ownership-bound) require_manages IS the ownership
+        # proof for the scope=self grant (permissions.go): it requires the
+        # acting landlord to manage the unit the lease's own link names, so
+        # the validated self path never reaches the write unconfined. A task
+        # grant would also set authTargetValidated and pass require_manages's
+        # self-action early return; no package mints a task forOperation this
+        # op -- add a resource bind here before any does.
+        require_manages(account_unit, "cannot open ledger account for lease " + lease_key)
+        # workplace-exempt: (ownership-bound) require_manages above binds the
+        # scope=self path to this same unit; re-stated because the
+        # intervening statement puts the pre-gate out of annotation range.
         if not workplace_exempt():
-            require_workplace([lease_unit(lease_key)],
+            # workplace-exempt: (ownership-bound) same discharge as the
+            # pre-gate above.
+            require_workplace([account_unit],
                                "cannot open ledger account for lease " + lease_key)
 
         # One account per lease, guarded by a deterministic aspect on the
@@ -331,16 +380,24 @@ def execute(state, op):
     fail("aspect-type DDL: not an operation handler: " + op.operationType)
 `
 
-// transactionDDLScript handles DebitAccount and CreditAccount. Each mints a
-// fresh transaction vertex + a .entry aspect + the postedTo link to the
-// account. The ledger is append-only: no aspect on the account is read or
+// transactionDDLScript handles DebitAccount, LoftspaceRecordCharge and
+// CreditAccount. Each mints a fresh transaction vertex + a .entry aspect +
+// the postedTo link to the account. The ledger is append-only: no aspect on the account is read or
 // mutated here, so concurrent debits/credits against the same account never
 // race a read-modify-write — the balance is derived by the ledgerHistory lens
 // summing entries.
 //
+// A self-scoped submit (authContext.target present) is bound to the account's
+// own heldFor topology along one of two paths, resident first: the lease's
+// applicationFor holder may credit only, capped at the outstanding balance;
+// otherwise the holder of a manages link to the lease's appliesToUnit unit
+// (the landlord) may debit and credit, uncapped. lease_unit / vertex_live are
+// this program's own copies of the account script's walk (Starlark has no
+// cross-program import; vertex_live is S10-pinned byte-identical).
+//
 // The clauseValidUntil computation (Fire V3) is pure arithmetic on the op's
 // own posted_at (time.rfc3339_add), so post_entry stays read-free for that
-// leg exactly as before.
+// leg.
 var transactionDDLScript = fmt.Sprintf(`
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
@@ -406,12 +463,57 @@ def vertex_alive(state, key):
         return False
     return True
 
-# Self-credit balance-verification budget (post_entry's authContextTarget
-# branch): 10 pages of 50 postedTo entries covers many years of a monthly
-# rent history; an account that exceeds it fails the self-credit closed
-# rather than trust a partial sum.
+# Self-credit balance-verification budget (post_entry's resident branch):
+# 10 pages of 50 postedTo entries covers many years of a monthly rent
+# history; an account that exceeds it fails the self-credit closed rather
+# than trust a partial sum.
 SELF_CREDIT_PAGE_LIMIT = 50
 SELF_CREDIT_MAX_PAGES = 10
+# A page of one is not enough for a REPOINTED single-valued relation: ListLinks
+# returns tombstoned links in the page too, keys sort by target id, and a
+# repoint tombstones the old key and writes a new one -- so the live link can
+# sort behind its own tombstoned predecessor. lease-signing's
+# ReassignLeaseUnit repoints appliesToUnit; every reader of it pages until it
+# finds the live one.
+LIVE_LINK_PAGE_LIMIT = 8
+MAX_LIVE_LINK_PAGES = 4
+
+def vertex_live(key):
+    # Is this vertex present AND not tombstoned? Distinct from
+    # vertex_alive(state, key): lease_unit's hop is DATA-derived (resolved
+    # from a link mid-walk), so unknowable client-side and undeclarable --
+    # only a live read can see it.
+    if key == None:
+        return False
+    # read-posture: (e) one bounded read; the key is data-derived, resolved
+    # from a kv.Links enumeration mid-walk.
+    node = kv.Read(key)
+    return node != None and not node.isDeleted
+
+def lease_unit(lease_key):
+    # A lease's location is its unit, one platform-written hop away
+    # (appliesToUnit, required at CreateLeaseApplication). Here the lease
+    # itself was resolved from the account's OWN heldFor link (post_entry),
+    # so the whole chain account -> lease -> unit is data-derived and none of
+    # it can be pre-declared or forged from the payload.
+    # A leaseapp carries exactly one LIVE appliesToUnit link, but
+    # ReassignLeaseUnit (lease-signing) repoints it (tombstone old, create
+    # new), and a page can hold the tombstone before the live link, so this
+    # pages until it finds one rather than trusting the first page.
+    cursor = None
+    unit = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=appliesToUnit epoch=none -- bounded,
+        # never a keyspace scan.
+        page, cursor = kv.Links(lease_key, "appliesToUnit", "out", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if not lk.isDeleted:
+                unit = lk.targetVertex
+        if unit != None or cursor == None:
+            break
+    if not vertex_live(unit):
+        return None
+    return unit
 
 def period_index(valid_from, due):
     # The index k of the calendar-month period of a termed clause that a
@@ -447,29 +549,40 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
         fail("InvalidArgument: amountCents: required positive number")
     memo = optional_string(p, "memo")
 
-    # Resident-self ownership + amount trust (CreditAccount only —
-    # permissions.go grants no self-scope DebitAccount): the mere PRESENCE of
+    # Self-scoped ownership + amount trust: the mere PRESENCE of
     # authContextTarget selects this branch, same idiom as cafe-domain's
-    # Charge/Settle — it does not change what grant actually authorized the
-    # op (a scope=any operator submit never attaches a target), it only ever
-    # narrows behavior.
+    # Charge/Settle -- it does not change what grant actually authorized the
+    # op, it only ever narrows behavior: a scope=any holder (operator) whose
+    # client sends a target is pushed onto the proofs below and confined by
+    # them to the leases it holds or manages -- narrower, never wider -- and
+    # the shipped FE (loftspace-app's landlordSubmit) attaches one only from
+    # the landlord console. Two populations hold the consumer scope=self grants
+    # (permissions.go) and are told apart from the account's OWN topology,
+    # never the payload: the RESIDENT (the lease's applicationFor link) may
+    # credit only, capped at what is owed; the LANDLORD (a manages link to
+    # the unit the lease appliesToUnit) may debit and credit, uncapped --
+    # the landlord is the creditor, so the amount is their own receivable.
+    # The resident proof answers first: a landlord who tenants their own
+    # unit is a resident.
     # authcontext-target: (selector) a branch selector, not a confinement
     # exemption -- so it reads the raw target (did the caller declare a self
     # target at all) rather than authTargetValidated. Safe because presence
-    # only pushes the caller onto the STRICTER branch below (the ownership +
-    # amount proofs), never grants anything a scope=any submit would not
-    # already.
+    # only pushes the caller onto the STRICTER branch below (the ownership
+    # proofs, and the resident's amount proof), never grants anything a
+    # scope=any submit would not already.
     if op.authContextTarget != "":
-        if entry_type != "credit":
-            fail("AuthDenied: a resident may only credit (pay down) their own account, not charge it")
         # authcontext-target: (ownership) the value derives an identity whose
-        # ownership of the account's own lease is then proven by the
-        # applicationFor link read below -- a forged target only fails closed.
-        # The lease is recovered from the account's OWN heldFor topology,
-        # never the payload, so a forged claim only fails closed.
+        # standing behind the account's own lease is then proven by a link
+        # read below -- applicationFor (resident) or manages on the lease's
+        # unit (landlord); a forged target only fails closed. The lease is
+        # recovered from the account's OWN heldFor topology, never the
+        # payload, so a forged claim only fails closed.
         _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
         # read-posture: (e) relation=heldFor epoch=none -- an account carries
-        # exactly one heldFor link, so this is never a keyspace scan.
+        # exactly one heldFor link, so this is never a keyspace scan. A page of
+        # one is exact here, unlike the LIVE_LINK paging appliesToUnit needs:
+        # heldFor is written once at LoftspaceCreateAccount and never
+        # repointed or tombstoned, so no tombstone can sort ahead of it.
         held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
         lease_key = None
         for lk in held_for_page:
@@ -477,56 +590,86 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
                 lease_key = lk.targetVertex
         if lease_key == None:
             fail("AuthDenied: account " + acct_key + " carries no live lease")
+        # The lease VERTEX itself: WithdrawLeaseApplication tombstones the
+        # leaseapp without cascading to its links, so applicationFor and
+        # appliesToUnit dangle live off a dead lease -- neither proof below
+        # may transit one (lease-signing's leaseapp_unit live-checks the
+        # application first for the same reason).
+        # read-posture: (e) per-candidate follow-up read off the heldFor
+        # enumeration above (data-derived key, via vertex_live).
+        if not vertex_live(lease_key):
+            fail("AuthDenied: account " + acct_key + " carries no live lease")
         _, lease_id = parts_of(lease_key, "heldFor target", "leaseapp")
         # read-posture: (e) per-candidate follow-up read off the enumeration
         # above -- the lease id is data-derived, unknowable client-side.
         application_for = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id)
-        if application_for == None or application_for.isDeleted:
-            fail("AuthDenied: a resident may only pay down their own lease's account")
+        if application_for != None and not application_for.isDeleted:
+            # RESIDENT: credit only, never a charge on their own lease.
+            if entry_type != "credit":
+                fail("AuthDenied: a resident may only credit (pay down) their own account, not charge it")
 
-        # Amount trust: nothing on this platform verifies a self-submitted
-        # payment actually happened (no payment-rail integration — out of
-        # scope for a reference vertical, package doc), so an unbounded
-        # self-credit would let a resident forgive their own debt for free.
-        # The outstanding balance is recomputed from the account's OWN
-        # postedTo transaction history (never trusted from the payload),
-        # paginated + bounded exactly like the workplace-confinement walks
-        # above (worksAt_covers, this file's account DDL): an account whose
-        # history exhausts the page budget fails closed (denies) rather than
-        # trusts a partial sum. A self-credit may never exceed what is
-        # actually owed.
-        owed_cents = 0
-        cursor = None
-        budget_exhausted = True
-        for _page in range(SELF_CREDIT_MAX_PAGES):
-            # read-posture: (e) relation=postedTo epoch=none -- bounded by the
-            # page budget; exhausting it below fails closed.
-            page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
-            for lk in page:
-                if lk.isDeleted:
-                    continue
+            # Amount trust: nothing on this platform verifies a self-submitted
+            # payment actually happened (no payment-rail integration -- out of
+            # scope for a reference vertical, package doc), so an unbounded
+            # self-credit would let a resident forgive their own debt for free.
+            # The outstanding balance is recomputed from the account's OWN
+            # postedTo transaction history (never trusted from the payload),
+            # paginated + bounded exactly like the workplace-confinement walks
+            # in this file's account DDL (worksAt_covers): an account whose
+            # history exhausts the page budget fails closed (denies) rather
+            # than trusts a partial sum. A self-credit may never exceed what is
+            # actually owed.
+            owed_cents = 0
+            cursor = None
+            budget_exhausted = True
+            for _page in range(SELF_CREDIT_MAX_PAGES):
+                # read-posture: (e) relation=postedTo epoch=none -- bounded by the
+                # page budget; exhausting it below fails closed.
+                page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
+                for lk in page:
+                    if lk.isDeleted:
+                        continue
+                    # read-posture: (e) per-candidate follow-up read off the
+                    # enumeration above -- each transaction's own .entry aspect,
+                    # data-derived and unknowable client-side.
+                    tx_entry = kv.Read(lk.sourceVertex + ".entry")
+                    if tx_entry == None or tx_entry.isDeleted:
+                        continue
+                    tx_amount = tx_entry.data.get("amountCents")
+                    if tx_amount == None:
+                        continue
+                    if tx_entry.data.get("type") == "debit":
+                        owed_cents += tx_amount
+                    elif tx_entry.data.get("type") == "credit":
+                        owed_cents -= tx_amount
+                if cursor == None:
+                    budget_exhausted = False
+                    break
+            if budget_exhausted:
+                fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
+            if owed_cents <= 0:
+                fail("NoBalanceToPay: account " + acct_key + " has no outstanding balance to pay")
+            if amount_cents > owed_cents:
+                fail("PaymentExceedsBalance: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
+        else:
+            # LANDLORD: the lease's unit resolves from the lease's own
+            # appliesToUnit link (paged, live-checked), and the caller must
+            # manage it. Both directions are allowed and neither is capped.
+            unit_key = lease_unit(lease_key)
+            manages = None
+            if unit_key != None:
+                _, unit_id = parts_of(unit_key, "unit", "unit")
                 # read-posture: (e) per-candidate follow-up read off the
-                # enumeration above -- each transaction's own .entry aspect,
-                # data-derived and unknowable client-side.
-                tx_entry = kv.Read(lk.sourceVertex + ".entry")
-                if tx_entry == None or tx_entry.isDeleted:
-                    continue
-                tx_amount = tx_entry.data.get("amountCents")
-                if tx_amount == None:
-                    continue
-                if tx_entry.data.get("type") == "debit":
-                    owed_cents += tx_amount
-                elif tx_entry.data.get("type") == "credit":
-                    owed_cents -= tx_amount
-            if cursor == None:
-                budget_exhausted = False
-                break
-        if budget_exhausted:
-            fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
-        if owed_cents <= 0:
-            fail("NoBalanceToPay: account " + acct_key + " has no outstanding balance to pay")
-        if amount_cents > owed_cents:
-            fail("PaymentExceedsBalance: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
+                # appliesToUnit enumeration in lease_unit (data-derived key --
+                # the unit is not knowable until the lease's own link
+                # resolves, so it cannot be pre-declared).
+                manages = kv.Read("lnk.identity." + target_identity_id + ".manages.unit." + unit_id)
+            if manages == None or manages.isDeleted:
+                # The unit key is deliberately NOT named: the caller reached
+                # here with an account key it already holds, and echoing the
+                # unit that account's lease sits on would turn a denial into
+                # a lookup for a resource it does not own.
+                fail("AuthDenied: " + op.actor + " neither holds nor manages the lease this account is held for; a self-scoped entry is the resident's payment or the landlord's charge or payment on a unit they manage")
 
     # clauseRef (DebitAccount only — the semantic-contracts Executable Paper
     # consumer, Contract #10 §10.8): the clause this charge is authorized by.
@@ -722,16 +865,28 @@ def execute(state, op):
     ot = op.operationType
 
     if ot == "DebitAccount":
-        # workplace-exempt: (ownership-bound) post_entry's own authContextTarget
-        # branch fails closed for a debit (permissions.go grants no self-scope
-        # DebitAccount) -- only CreditAccount's branch below ever reaches the
-        # ownership proof.
+        # workplace-exempt: (ownership-bound) DebitAccount declares one
+        # scope=any grant, to [operator] (permissions.go) -- the orchestrated,
+        # clause-authorized charge -- so post_entry's self-scoped branch is
+        # unreachable on the grant side (step 3 denies scope=self outright);
+        # were a target ever to reach it, that branch still fails closed for
+        # a resident and demands the landlord's manages link otherwise.
         return post_entry(state, op, "debit", "account.debited", True)
+
+    if ot == "LoftspaceRecordCharge":
+        # workplace-exempt: (ownership-bound) post_entry proves ownership itself --
+        # a self-scoped charge is allowed only on the landlord path, once the
+        # account's heldFor lease's appliesToUnit unit carries a manages link
+        # from op.authContextTarget; the resident path (applicationFor) refuses
+        # a charge outright. Never clause-authorized (allow_clause_ref False).
+        return post_entry(state, op, "debit", "account.debited", False)
 
     if ot == "CreditAccount":
         # workplace-exempt: (ownership-bound) post_entry proves ownership itself --
         # a self-scoped credit is allowed only once the account's heldFor lease's
-        # applicationFor link resolves to op.authContextTarget.
+        # applicationFor link resolves to op.authContextTarget (resident, capped
+        # at the balance) or its appliesToUnit unit carries a manages link from
+        # it (landlord, uncapped).
         return post_entry(state, op, "credit", "account.credited", False)
 
     fail("transaction DDL: unknown operationType: " + ot)

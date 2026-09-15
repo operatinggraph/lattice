@@ -105,6 +105,13 @@ read	CreateStudio	lnk.identity.<id>.worksAt.building.<id>
 read	CreateStudio	lnk.identity.<id>.worksAt.unit.<id>
 read	CreateUnclaimedIdentity	vtx.identity.<id>.erasureRequested
 read	CreateUnclaimedIdentity	vtx.identity.<id>.piiKey
+# loftspace-ledger's CreditAccount / LoftspaceRecordCharge self-scope proofs
+# (category 3): the account's OWN heldFor walk resolves the lease, whose
+# applicationFor (resident) and appliesToUnit -> manages (landlord) links are
+# then read off it -- link-shaped follow-ups chained off a value only the walk
+# resolves, so no dispatcher can name them up front. The unit vertex read
+# between them is vertex-rooted and admitted by the guard itself.
+read	CreditAccount	lnk.identity.<id>.manages.unit.<id>
 read	CreditAccount	lnk.leaseapp.<id>.applicationFor.identity.<id>
 read	CreditCafeAccount	lnk.identity.<id>.worksAt.building.<id>
 read	CreditCafeAccount	lnk.identity.<id>.worksAt.floor.<id>
@@ -121,8 +128,16 @@ read	EndVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 # no dispatcher can name the key up front; only a non-operator JoinWaitlist
 # vector (the credit-hold staff leg) reaches it.
 read	JoinWaitlist	lnk.identity.<id>.worksAt.building.<id>
+# LoftspaceCreateAccount's landlord probe (require_manages): the manages link
+# is keyed by the unit the lease's own appliesToUnit walk resolves -- the
+# same link-shaped follow-up DecideLeaseApplication's row above carries.
+read	LoftspaceCreateAccount	lnk.identity.<id>.manages.unit.<id>
 read	LoftspaceCreateAccount	lnk.identity.<id>.worksAt.building.<id>
 read	LoftspaceCreateAccount	lnk.identity.<id>.worksAt.unit.<id>
+# LoftspaceRecordCharge's self-scope proofs: the same two link-shaped
+# follow-ups CreditAccount's rows above carry, off the same heldFor walk.
+read	LoftspaceRecordCharge	lnk.identity.<id>.manages.unit.<id>
+read	LoftspaceRecordCharge	lnk.leaseapp.<id>.applicationFor.identity.<id>
 read	MergeIdentity	lnk.identityindex.<id>.indexes.identity.<id>
 read	MergeIdentity	vtx.credentialindex.<id>
 read	OpenTab	lnk.identity.<id>.worksAt.building.<id>
@@ -331,6 +346,11 @@ walk	CreateStudio	vtx.building.<id> containedIn out
 walk	CreateStudio	vtx.unit.<id> containedIn out
 walk	CreditAccount	vtx.account.<id> heldFor out
 walk	CreditAccount	vtx.account.<id> postedTo in
+# The lease hub of the landlord self-scope proof (CreditAccount /
+# LoftspaceRecordCharge, loftspace-ledger) is resolved by the heldFor walk
+# above, so its appliesToUnit enumeration is link-discovered and undeclarable
+# by any dispatcher.
+walk	CreditAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	CreditCafeAccount	vtx.building.<id> containedIn out
 walk	CreditCafeAccount	vtx.cafeaccount.<id> heldFor out
 walk	CreditCafeAccount	vtx.cafeaccount.<id> postedTo in
@@ -382,6 +402,8 @@ walk	JoinWaitlist	vtx.studio.<id> locatedAt out
 walk	LoftspaceCreateAccount	vtx.building.<id> containedIn out
 walk	LoftspaceCreateAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	LoftspaceCreateAccount	vtx.unit.<id> containedIn out
+walk	LoftspaceRecordCharge	vtx.account.<id> heldFor out
+walk	LoftspaceRecordCharge	vtx.leaseapp.<id> appliesToUnit out
 walk	MarkPastDueNoShow	vtx.appointment.<id> forPatient out
 walk	MarkPastDueNoShow	vtx.appointment.<id> withProvider out
 walk	OpenTab	vtx.building.<id> containedIn out

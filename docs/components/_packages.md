@@ -62,7 +62,7 @@ Installed packages:
   vertex type.
 - `loftspace-ledger` + `semantic-contracts` — the append-only lease ledger
   (`account` / `transaction`, `LoftspaceCreateAccount` / `DebitAccount` /
-  `CreditAccount`, the `ledgerHistory` / `leaseAccounts` Lenses) and the
+  `LoftspaceRecordCharge` / `CreditAccount`, the `ledgerHistory` / `leaseAccounts` Lenses) and the
   Executable Paper package that bills it: a `clause` vertex per provision
   (`CreateClause` / `SupersedeClause` / `InspectPremises` / `BackfillClauseTerm`),
   the `clauseSatisfaction` convergence target (one `DebitAccount` per period,

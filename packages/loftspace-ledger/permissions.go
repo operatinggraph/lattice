@@ -6,40 +6,73 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // Grant matrix:
 //
-//	LoftspaceCreateAccount → operator, frontOfHouse (workplace-confined)
+//	LoftspaceCreateAccount → operator, frontOfHouse (workplace-confined), consumer (scope=self — landlord, see below)
 //	DebitAccount           → operator
-//	CreditAccount          → operator, consumer (scope=self — see below)
+//	LoftspaceRecordCharge  → operator, consumer (scope=self — landlord only, see below)
+//	CreditAccount          → operator, consumer (scope=self — resident or landlord, see below)
 //
-// DebitAccount stays orchestrator-submitted (the same operator-grant idiom
-// lease-signing uses): charging rent is a landlord act, not a resident's to
-// self-serve. LoftspaceCreateAccount also grants front-of-house staff:
-// loftspace-app's billing view can only ever show "no account yet" until some
-// caller opens the lease's ledger account, and that caller is meant to be the
-// browser, the same as lease-signing's DecideLeaseApplication front-desk
-// grant. Unlike clinic-ledger's / wellness-ledger's identical create op —
+// DebitAccount is the ORCHESTRATED charge: the operator, and Weaver's
+// clauseSatisfaction playbook (packages/semantic-contracts, Contract #10
+// §10.8's canonical directOp) carrying a clauseRef that binds the amount to
+// the clause's own terms. It stays operator-only. LoftspaceRecordCharge is a
+// PERSON's manual charge on a lease account — the same append-only debit
+// entry, never a clauseRef — submitted by the operator or by a landlord who
+// manages the lease's unit (the scope=self grant). The two are distinct
+// operationTypes rather than one op with two grants because operationType is
+// a global namespace (the LoftspaceCreateAccount paragraph below): cafe-ledger
+// admits its own DebitAccount, so a consumer grant on that name would reach
+// the café script too (lint-package-standard S9).
+//
+// LoftspaceCreateAccount also grants front-of-house staff: loftspace-app's
+// billing view can only ever show "no account yet" until some caller opens
+// the lease's ledger account, and that caller is meant to be the browser,
+// the same as lease-signing's DecideLeaseApplication front-desk grant.
+// Unlike clinic-ledger's / wellness-ledger's identical create op —
 // unconfined because a patient/member carries no building — a leaseapp sits
 // at a unit, so the frontOfHouse grant here is workplace-confined in
 // scripts.go's execute() (require_workplace on the lease's appliesToUnit
 // topology), mirroring DecideLeaseApplication / cafe-ledger's
-// CreditCafeAccount.
+// CreditCafeAccount. Its scope=self grant is the landlord's: loftspace-app's
+// landlord form opens the account itself on a lease's first-ever charge or
+// payment, and a landlord holds no worksAt link, so the account script binds
+// that path with the same manages probe as DecideLeaseApplication
+// (require_manages on the lease's appliesToUnit unit).
 //
-// CreditAccount's scope=self grant (a tenant paying down what they owe) is
-// the one direction cafe-domain's Settle/Charge idiom does NOT already cover:
+// The transaction ops' two scope=self grants serve two populations that share the `consumer`
+// role, and scripts.go's post_entry tells them apart from the account's OWN
+// topology (heldFor→leaseapp), never from the payload: the RESIDENT holds
+// the lease's applicationFor link; the LANDLORD holds a manages link to the
+// unit the lease appliesToUnit. The resident proof is tried first — a
+// landlord who tenants their own unit is a resident.
+//
+// The resident may credit, never debit, and the credit is capped.
+// CreditAccount's resident path (a tenant paying down what they owe) is the
+// one direction cafe-domain's Settle/Charge idiom does NOT already cover:
 // café's own resident self-service deliberately excludes crediting the
 // account (a payment is a front-desk act there — cash/card at the counter,
 // so the amount is staff-witnessed). A rent portal is a different real-world
 // shape (self-pay is the norm), so this package grants it, but the platform
 // has no payment-rail integration to witness the money — the amount itself
 // is the attack surface a resident's own submit fully controls, not just
-// which account it targets. scripts.go's post_entry therefore does BOTH: the
-// ownership proof café's idiom already has (the account's OWN
-// heldFor→leaseapp→applicationFor topology, never the payload, resolves the
-// lease and binds it to the caller's identity) AND an amount proof café's
-// idiom does not need (self-Charge/Settle bind the amount to a trusted
-// catalog/tab total instead) — a self-credit may never exceed the account's
-// own recomputed outstanding balance, paginated + bounded, failing closed if
-// the history is too large to verify. DebitAccount gets no matching
-// self-scope grant — a resident may pay down a balance, never charge one.
+// which account it targets. post_entry therefore does BOTH: the ownership
+// proof café's idiom already has (the account's OWN
+// heldFor→leaseapp→applicationFor topology resolves the lease and binds it
+// to the caller's identity) AND an amount proof café's idiom does not need
+// (self-Charge/Settle bind the amount to a trusted catalog/tab total
+// instead) — a self-credit may never exceed the account's own recomputed
+// outstanding balance, paginated + bounded, failing closed if the history is
+// too large to verify. A resident holding a LoftspaceRecordCharge self grant
+// is still refused by the script: a resident pays down a balance, never
+// charges one.
+//
+// The landlord may debit AND credit, uncapped. The landlord is the lease's
+// creditor — a repair charge or a month's rent is their own receivable, and
+// a cheque received or rent forgiven is their own money to record — so
+// neither direction has an amount to distrust; what the landlord path proves
+// is only that the account's lease sits on a unit they manage
+// (heldFor→appliesToUnit→manages), the same management link that confines
+// lease-signing's DecideLeaseApplication and loftspace-domain's
+// SetListingStatus self paths.
 //
 // Named LoftspaceCreateAccount rather than the bare CreateAccount this op
 // used before: a standing grant matches on operationType STRING EQUALITY
@@ -54,6 +87,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // and are renamed alongside this package: scripts/seed-showcase.go and
 // packages/semantic-contracts (its own CreateClause/DebitAccount tests open
 // a lease account first) — a straight rename, not an additive alias.
+// LoftspaceRecordCharge is the same rule applied where a rename is NOT
+// possible: DebitAccount's name is Contract #10 §10.8's literal and Weaver's
+// clause-billing dispatch, so the person-facing charge gets its own
+// vertical-unique name and DebitAccount keeps the orchestrated one.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -63,9 +100,15 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
+			OperationType: "LoftspaceCreateAccount",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to open the ledger account of a lease on a unit they MANAGE — the landlord's first-ever charge or payment opens it. scripts.go's account script proves the manages link off the lease's own appliesToUnit unit (require_manages); no other consumer reaches the write.",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
 			OperationType: "DebitAccount",
 			Scope:         "any",
-			Note:          "Grants the operator the right to submit DebitAccount (records a charge — rent, a late fee, a deposit).",
+			Note:          "Grants the operator the right to submit DebitAccount (records a charge — rent, a late fee, a deposit; the clause-authorized shape Weaver's clauseSatisfaction playbook dispatches; a person's manual charge is LoftspaceRecordCharge).",
 			GrantsTo:      []string{"operator"},
 		},
 		{
@@ -77,7 +120,19 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "CreditAccount",
 			Scope:         "self",
-			Note:          "Grants a consumer the right to credit (pay down) THEIR OWN lease's ledger account — the account's heldFor lease's applicationFor link must resolve to the caller's identity (scripts.go). No matching DebitAccount grant: a resident pays down a balance, never charges one.",
+			Note:          "Grants a consumer the right to record a payment on a lease's ledger account they stand behind: a resident paying down THEIR OWN lease (the account's heldFor lease's applicationFor link resolves to the caller — capped at the outstanding balance), or a landlord recording a payment received on a lease of a unit they MANAGE (heldFor→appliesToUnit→manages — uncapped, it is their own receivable). scripts.go.",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "LoftspaceRecordCharge",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit LoftspaceRecordCharge (a person's manual charge on a lease's ledger account — rent, a late fee, a repair; never clause-authorized).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "LoftspaceRecordCharge",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to record a charge on the ledger account of a lease on a unit they MANAGE — a landlord's own receivable. scripts.go proves it off the account's own heldFor→appliesToUnit→manages topology; a resident (applicationFor) holding this grant is still refused.",
 			GrantsTo:      []string{"consumer"},
 		},
 	}
