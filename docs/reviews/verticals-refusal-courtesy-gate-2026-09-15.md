@@ -103,6 +103,61 @@ twin; (6) precedent may carry debt — `submissionContext` counts comments, this
 **Non-goals.** No new courtesy mechanism in Facet beyond the `available` column pattern; no OpMetaSpec schema
 field; no descriptor-driven migration of hand-built forms; no change to `lint-app-op-descriptors`' R1/R2.
 
-## Census
+## Census (`--list` at build, base `32df5620`)
 
-*(filled at build — the `--list` population on `main` and what the declarations found.)*
+**Population (before the review's recode).** 83 scripts examined; **49 governed ops · 180 (op, code) pairs · 62 JS sites · 49 Facet sites**;
+every described op (117) was found in a dispatch block; 0 unmodelled `fail(` sites once parameter-carried codes
+were resolved (the brief's "0 non-literal" count was wrong — `claim_cell(…, conflict_code, …)` and
+`require_unclaimed_identity(…, code)` carry the code as a parameter, hiding `SlotConflict`, `PatientDoubleBook`,
+`StudioConflict`, `InstructorConflict`, `BookerConflict`, `IdentityNotUnclaimed` — exactly the sibling shape — until
+the closure bound the literal at the call site). Per client: café 13 sites · clinic 18 · loftspace 18 · wellness 13.
+Declaration lines authored: 271 (`none` 126 · `hide` 64 · `unreachable` 45 · `cap` 14 · `drop` 10 · `disable` 7 ·
+`see` 5 · `prefill` 0 · `confirm` 0; a line may group several codes). Two refinements the census forced on the gate: an op's codes are scoped to
+the DESCRIBING package's scripts (`DebitAccount` is dispatched by both ledgers; loftspace-app must not inherit
+cafe-ledger's codes), and Facet's verbs gained `cap` (the generic form renders `min=`/`max=` from the schema).
+
+**Siblings found without their sibling's courtesy — fixed in the fire.**
+
+| Op / code | Site without the courtesy | The sibling that had it | Fix |
+|---|---|---|---|
+| `OpenTab` / `LeaseNotApproved` | café `renderResident` (self-service Open Tab) | POS `fillLeaseSelect` disables the lease | `residentOpenTabAllowed` hides the button behind an "awaiting landlord approval" panel; goja-pinned |
+| `OpenTab` / `TenancyEnded` | café `renderResident` — the state was not resident-readable (`/api/frontdesk-lease-details` is staff-only) | POS picker disables on `leaseEnd` | `cafeLeaseWorkplaces` projects `leaseEnd` (cafe-domain 0.15.0), joined server-side onto `/api/residents`; the same gate hides on the UTC calendar day; goja-pinned incl. the boundary |
+| `SetBookingAttendance` / `InvalidState` (waitlisted) | wellness `rosterCard` offered Attended / No-show on a waitlisted row | the `forfeited` exclusion beside it | gate is `markable && !forfeited && !waitlisted`; goja-pinned |
+| `SignRenewal` / `TenancyEnded` | loftspace `renderRenewalCard` — `renewalsReadSpec` did not carry the tenancy end | the applications surface's `decisionOffered` on `tenancyEndedAt` | `renewalsReadSpec` projects `tenancyEndedAt` (lease-signing 0.39.0); `renewalReady` requires it unset and the card says "Lease ended …"; goja-pinned |
+| `VerifyGuarantor` · `SignRenewal` / `ApplicantMismatch`, `LeaseAppMismatch` (Facet) | Facet offered both ops and would have submitted the literal `{context.leaseApp}` — the staff app's row vocabulary, which `substituteTemplate` has no case for | the staff catalog form fills them from its row | `opButton` refuses to offer an op whose contextParam head it cannot resolve (`unrecognisedContextTemplate`); node-pinned |
+
+**The cold review's two blockers, both the gate's own blind spots — fixed in the fire.**
+
+| Finding | What it hid | Fix |
+|---|---|---|
+| The gate exempted its own founding sighting: every ledger's payment cap was coded `AuthDenied` ("no outstanding balance to pay", "a payment of $X exceeds…"), which the exempt family reads as the hat | the 2026-09-05 café cap, in all four verticals | recoded to state codes `NoBalanceToPay` / `PaymentExceedsBalance` / `WriteOffExceedsBalance` (cafe-ledger 0.6.3, clinic-ledger 0.5.3, loftspace-ledger 0.7.2, wellness-ledger 0.2.24); the census closes at 52 ops · 203 pairs · 84 JS sites · 52 Facet sites · 326 declaration lines; declared at every site; wellness's own-payment field gained `max` (its café/loftspace siblings had it); clinic's patient own-payment leg gained `selfPayCapMessage` before dispatch (goja-pinned) |
+| A generic dispatcher is invisible to the site scanner: loftspace's inbox completes a task by `descriptorFor(task.operationName)` — a third site for `SignRenewal` the census counted as two | after `EndTenancy` the renewal card hid Sign (this fire's fix) while the inbox still offered Complete → raw `TenancyEnded`; `RenewalNotOpen` after `CancelRenewal` the same | gate rule: a function resolving a catalog row from a non-literal (`descriptorFor(x)`, `…atalog[x]`) must carry `// refusal-courtesy-dispatches: Op, …` and is then a site for each (4 live: `openComplete`, `submitComplete`, `openRenewalAction`, wellness `submitBillingEntry`); `taskDisposition` closes a renewal-class task whose row is ended / no longer open (`renewalTaskStale`, goja-pinned) and `openCatalogComplete` re-checks before mounting |
+
+Also from the review: unmodelled `fail(` sites are now findings (a format-string leftmost literal is unmodelled, not
+exempt); Facet's head match is exact (`{actorKey}` is not `{actor}`) and an optional marker does not soften a foreign
+head; five clauses corrected to the verb their mechanism is (`disable` not `hide` for `cancelDisabled`; `cap` where
+the schema bounds the control; `hide` via `unrecognisedContextTemplate` for `{context.*}` ops); the refund form's
+amount control gained `max` so its `cap` clause is true.
+
+Also: `CreateLeaseApplication`'s `leaseTermMonths` / `requestedRent` gained `"minimum":1` (the hand-built form had
+`min="1"`; Facet's generic form now renders the same bound) — the `cap` Facet's declaration names.
+
+**Declared `none` — no client can read the state (honest, not a gap between siblings).** Cross-actor races
+(`DuplicateApplication`, `BookerConflict`, `AccountAlreadyExists`, `OpenTabAlreadyExists`), clock-relative codes a
+lens cannot project without `$now` (`SessionInPast`, `SessionStarted`, `ScheduleInPast`), and codes on state no
+read model projects (`RefundExceedsPaid`'s `cashCents`; a renewal's signature / guarantor state on Facet's row).
+
+**Facet gap that is a design question, not a lens column.** Facet's entity-ref picker has ONE op-agnostic
+courtesy column (`available`). `CreateBooking` refuses `SessionFull` while `JoinWaitlist` REQUIRES a full session,
+so a per-op candidate filter is needed to give either op its courtesy without breaking the other — a descriptor
+vocabulary extension (FORK-1 territory), filed as a `📐` row on the board with the absent pattern named.
+
+**Review classification (close pass).** design-gap ×2 in the gate itself, both caught cold (an exempt family is a
+claim about the corpus's coding discipline — the corpus falsified it; a site census over literals is a claim that
+every dispatcher names its op — the generic dispatcher didn't) → the dossier's new entry; brief-gap ×3 (the "0
+non-literal" premise; the site-of-`/api/residents` premise — it reads lease-signing's `leaseApplicationComplete`;
+a lens-column edit's proof list omitted `internal/refractor`'s corpus census, which the retired `_packages.md`
+class names); design-gap ×1 (Facet per-op candidate filter, filed); convention ×3 (a builder's DIFF_BASE proof of
+"no version bump needed" compared committed ranges and missed its own uncommitted edit — the local-mode run is the
+proof; four history-narrating comments; line-number pointers in clauses stale within the same diff — clauses name
+functions). Residual stated: wellness's `renderMyBalance` cap is DOM-bound and unpinned, as café's own is.
