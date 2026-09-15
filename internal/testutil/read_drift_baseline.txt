@@ -109,6 +109,13 @@ read	DecideLeaseApplication	lnk.identity.<id>.manages.unit.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.worksAt.building.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.worksAt.unit.<id>
 read	EndVisitSeries	lnk.identity.<id>.worksAt.building.<id>
+# JoinWaitlist runs CreateBooking's staff-standing confinement verbatim
+# (prepare_booking_common -> require_workplace, packages/wellness-domain/
+# ddls.go), so it inherits the same undeclarable worksAt follow-up: the
+# building is discovered by the session's own atStudio -> locatedAt walk, so
+# no dispatcher can name the key up front; only a non-operator JoinWaitlist
+# vector (the credit-hold staff leg) reaches it.
+read	JoinWaitlist	lnk.identity.<id>.worksAt.building.<id>
 read	LoftspaceCreateAccount	lnk.identity.<id>.worksAt.building.<id>
 read	LoftspaceCreateAccount	lnk.identity.<id>.worksAt.unit.<id>
 read	MergeIdentity	lnk.identityindex.<id>.indexes.identity.<id>
@@ -313,6 +320,26 @@ walk	EndVisitSeries	vtx.visitseries.<id> withProvider out
 # .entry read this target's own doc comment (targets.go) already carries —
 # no dispatcher can name it up front.
 walk	EvaluateCafeArrears	vtx.cafetransaction.<id> reverses out
+# arrears_entries (packages/wellness-ledger/scripts.go) follows the same
+# netting hops off each CREDIT its bounded postedTo replay discovers, and in
+# this ledger the charge a refund gives back is TWO hops away: the refund
+# credit's settlesRefund link names wellness-domain's wellnessrefund marker,
+# and the marker's reverses link names the charge (the booking is tombstoned
+# by the time the refund posts, which is why the marker exists). Both hubs
+# only exist once the postedTo walk — and then the settlesRefund hop — has
+# resolved them, so no dispatcher can name either up front.
+walk	EvaluateWellnessArrears	vtx.wellnessrefund.<id> reverses out
+walk	EvaluateWellnessArrears	vtx.wellnesstransaction.<id> settlesRefund out
+# JoinWaitlist's share of CreateBooking's confinement walk (see the read row
+# above): session_locations resolves the studio off the session's atStudio
+# link and the building off the studio's locatedAt link, worksAt_covers then
+# climbs containedIn from that building, and the tombstoned-studio fallback
+# reads the session's own atLocation snapshot — every hub past the session is
+# link-discovered, and the four are one chain, left undeclared as one piece.
+walk	JoinWaitlist	vtx.building.<id> containedIn out
+walk	JoinWaitlist	vtx.session.<id> atLocation out
+walk	JoinWaitlist	vtx.session.<id> atStudio out
+walk	JoinWaitlist	vtx.studio.<id> locatedAt out
 walk	LoftspaceCreateAccount	vtx.building.<id> containedIn out
 walk	LoftspaceCreateAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	LoftspaceCreateAccount	vtx.unit.<id> containedIn out

@@ -45,7 +45,7 @@ const (
 )
 
 // domainConsumerCapDoc grants the consumer role's scope=self CreateBooking /
-// CancelBooking permissions — the real-actor-write-auth-e2e self-service
+// JoinWaitlist / CancelBooking permissions — the real-actor-write-auth-e2e self-service
 // caller, mirrors clinic-domain's clConsumerCapDoc.
 func domainConsumerCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
@@ -58,6 +58,7 @@ func domainConsumerCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreateBooking", Scope: "self"},
+			{OperationType: "JoinWaitlist", Scope: "self"},
 			{OperationType: "CancelBooking", Scope: "self"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
@@ -378,6 +379,22 @@ func createSessionPriced(t *testing.T, ctx context.Context, conn *substrate.Conn
 	return "vtx.session." + nanoIDFromRequestID(reqID), outcome
 }
 
+// bookingEnumerations resolves the enumerations CreateBooking / JoinWaitlist
+// declare (opmetas.go) into the hints an envelope carries: the actor-templated
+// ones through testutil.DeclaredEnumerations, and the one hub that helper
+// cannot resolve — `{payload.booker}`, the credit hold's heldFor in-walk off
+// the member being booked — from the payload the caller holds. The skipped
+// set is asserted exactly, so a template the descriptor gains that this
+// helper does not resolve fails here rather than retiring a walk silently.
+func bookingEnumerations(t *testing.T, opType, actorKey, bookerKey string) []processor.EnumerationHint {
+	t.Helper()
+	hints, skipped := testutil.DeclaredEnumerationsWithSkips(opType, actorKey, wellnessdomain.OpMetas())
+	if len(skipped) != 1 || skipped[0] != "{payload.booker}" {
+		t.Fatalf("%s declares enumeration hubs this helper does not resolve: %v (want exactly {payload.booker})", opType, skipped)
+	}
+	return append(hints, processor.EnumerationHint{Hub: bookerKey, Relation: "heldFor", Direction: "in"})
+}
+
 func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, sessionKey, bookerKey, leaseAppKey string) (string, processor.MessageOutcome) {
 	t.Helper()
 	reqID := testutil.GenReqID(label)
@@ -417,7 +434,7 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainActorKey, wellnessdomain.OpMetas()), Reads: reads, OptionalReads: optionalReads},
+		ContextHint:   &processor.ContextHint{Enumerations: bookingEnumerations(t, "CreateBooking", domainActorKey, bookerKey), Reads: reads, OptionalReads: optionalReads},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
@@ -456,7 +473,7 @@ func joinWaitlist(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("JoinWaitlist", domainActorKey, wellnessdomain.OpMetas()), Reads: reads, OptionalReads: optionalReads},
+		ContextHint:   &processor.ContextHint{Enumerations: bookingEnumerations(t, "JoinWaitlist", domainActorKey, bookerKey), Reads: reads, OptionalReads: optionalReads},
 	}
 	testutil.PublishOp(t, conn, env)
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
@@ -1429,7 +1446,7 @@ func bookingEntryReply(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 		Class:         "booking",
 		Payload:       payload,
 		ContextHint: &processor.ContextHint{
-			Enumerations:  testutil.DeclaredEnumerations(opType, domainActorKey, wellnessdomain.OpMetas()),
+			Enumerations:  bookingEnumerations(t, opType, domainActorKey, bookerKey),
 			Reads:         []string{sessionKey, sessionKey + ".schedule", bookerKey},
 			OptionalReads: optionalReads,
 		},
@@ -1518,7 +1535,7 @@ func TestCreateBooking_RejectsPastSession(t *testing.T) {
 		SubmittedAt:   "2026-07-08T10:00:00Z", // after the 09:00 start
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainActorKey, wellnessdomain.OpMetas()),
+		ContextHint: &processor.ContextHint{Enumerations: bookingEnumerations(t, "CreateBooking", domainActorKey, lateBookerKey),
 			Reads: []string{sessionKey, sessionKey + ".schedule", lateBookerKey},
 			OptionalReads: append(append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+lateBookerID),
 				wdSlotClaimKeys(t, lateBookerKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
@@ -2699,7 +2716,7 @@ func TestCreateBooking_ConsumerSelfScope_Allowed(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainConsumerKey, wellnessdomain.OpMetas()),
+		ContextHint: &processor.ContextHint{Enumerations: bookingEnumerations(t, "CreateBooking", domainConsumerKey, domainConsumerKey),
 			Reads: []string{sessionKey, sessionKey + ".schedule", domainConsumerKey},
 			OptionalReads: append(append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+domainConsumerID),
 				wdSlotClaimKeys(t, domainConsumerKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
@@ -2740,7 +2757,7 @@ func TestCreateBooking_ConsumerSelfScope_RejectedForOtherBooker(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainConsumerKey, wellnessdomain.OpMetas()),
+		ContextHint: &processor.ContextHint{Enumerations: bookingEnumerations(t, "CreateBooking", domainConsumerKey, otherBookerKey),
 			Reads: []string{sessionKey, sessionKey + ".schedule", otherBookerKey},
 			OptionalReads: append(append(wdSeatKeys(sessionKey, 20), sessionKey+".bkr"+otherBookerID),
 				wdSlotClaimKeys(t, otherBookerKey, "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z")...),
@@ -3842,7 +3859,7 @@ func TestCreateBooking_RejectsBookerAcrossOverlappingSessions(t *testing.T) {
 		SubmittedAt:   "2026-07-07T12:00:00Z",
 		Class:         "booking",
 		Payload:       payload,
-		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", domainActorKey, wellnessdomain.OpMetas()),
+		ContextHint: &processor.ContextHint{Enumerations: bookingEnumerations(t, "CreateBooking", domainActorKey, booker),
 			Reads:         []string{sessionB, sessionB + ".schedule", booker},
 			OptionalReads: append(wdSeatKeys(sessionB, 20), wdSlotClaimKeys(t, booker, "2026-07-08T09:15:00Z", "2026-07-08T09:45:00Z")...),
 		},

@@ -196,6 +196,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"visitSeriesRead":                   {"p", 0},
 	"visitSeriesSiteBackfill":           {"p", 0},
 	"wellnessBookers":                   {"p", 0},
+	"wellnessArrearsReminders":          {"p", 0},
 	"wellnessBookingReminders":          {"p", 0},
 	"wellnessBookings":                  {"p", 0},
 	"wellnessClassPriceSettlement":      {"key(accountKey entityKey identityKey priceCents sessionName status) p", 0},

@@ -11,6 +11,21 @@ import (
 	wellnessledger "github.com/operatinggraph/lattice/packages/wellness-ledger"
 )
 
+// TestArrearsGraceDays_MatchesStatementGraceDays pins the one rule in two
+// languages: wellness-ledger's Starlark evaluation ages a balance by
+// ArrearsGraceDays (packages/wellness-ledger/scripts.go), and this app's own
+// deriveStatement (the fallback for an account no evaluation has touched
+// yet) ages it by statementGraceDays. A due date the FE reads as "recorded"
+// on one render and "derived" on the next — the account's evaluation has not
+// caught up yet — must not silently jump because the two numbers drifted
+// apart.
+func TestArrearsGraceDays_MatchesStatementGraceDays(t *testing.T) {
+	if wellnessledger.ArrearsGraceDays != statementGraceDays {
+		t.Fatalf("wellnessledger.ArrearsGraceDays = %d, statementGraceDays = %d — one rule, two languages, must agree",
+			wellnessledger.ArrearsGraceDays, statementGraceDays)
+	}
+}
+
 // TestReadAllOrFail_FailsLoudOnAnyFetchError proves a KVGet failure on a
 // listed key aborts the whole read instead of silently vanishing the row —
 // the bug that let a transient fetch failure produce a wrong balance.
@@ -70,6 +85,41 @@ func TestDeriveStatement_PastGraceIsOverdue(t *testing.T) {
 	}
 	if !overdue || days != 14 {
 		t.Errorf("want overdue=true days=14 (Aug 16 -> Aug 29 + 1), got overdue=%v days=%d", overdue, days)
+	}
+}
+
+// TestDeriveStatement_ExactInstantIsOverdue pins the boundary against
+// wellness-ledger's own evaluation (`due_at <= evaluated_at`,
+// packages/wellness-ledger/scripts.go): a balance is due AT the due instant,
+// not only strictly past it. A one-tick-earlier `now` must still read as
+// not overdue — the boundary moved, not disappeared.
+func TestDeriveStatement_ExactInstantIsOverdue(t *testing.T) {
+	rows := []ledgerEntryRow{{Type: "debit", AmountCents: 4750, PostedAt: "2026-08-01T00:00:00Z"}}
+	due := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, statementGraceDays)
+
+	if got, overdue, days := deriveStatement(rows, 4750, due); got != due.Format(time.RFC3339) || !overdue || days != 1 {
+		t.Errorf("at the exact due instant: due=%q overdue=%v days=%d, want due=%q overdue=true days=1",
+			got, overdue, days, due.Format(time.RFC3339))
+	}
+	if _, overdue, days := deriveStatement(rows, 4750, due.Add(-time.Second)); overdue || days != 0 {
+		t.Errorf("one second before the due instant: overdue=%v days=%d, want overdue=false days=0", overdue, days)
+	}
+}
+
+// TestComputeOverdue_ExactInstantIsOverdue is computeOverdue's own copy of
+// the same boundary — it re-derives isOverdue/daysOverdue independently of
+// deriveStatement whenever a RECORDED dueDate is rendered instead of the
+// derived one (recordedOrDerivedDueDate), so it must agree at the boundary
+// too.
+func TestComputeOverdue_ExactInstantIsOverdue(t *testing.T) {
+	due := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	dueDate := due.Format(time.RFC3339)
+
+	if overdue, days := computeOverdue(dueDate, due); !overdue || days != 1 {
+		t.Errorf("at the exact due instant: overdue=%v days=%d, want overdue=true days=1", overdue, days)
+	}
+	if overdue, days := computeOverdue(dueDate, due.Add(-time.Second)); overdue || days != 0 {
+		t.Errorf("one second before the due instant: overdue=%v days=%d, want overdue=false days=0", overdue, days)
 	}
 }
 
@@ -262,6 +312,21 @@ func seedLedgerAccount(t *testing.T, s *server, identityKey, accountKey string) 
 	})
 }
 
+// seedLedgerAccountWithArrears seeds one wellnessMemberAccounts row carrying
+// the three RECORDED arrears columns (EvaluateWellnessArrears' stamp) —
+// dueAt/remindedFor/sentAt each pass through as "" when the caller has
+// nothing to record for that column yet.
+func seedLedgerAccountWithArrears(t *testing.T, s *server, identityKey, accountKey, dueAt, remindedFor, sentAt string) {
+	t.Helper()
+	putJSON(t, s.conn, wellnessledger.MemberAccountsBucket, identityKey, map[string]any{
+		"identityKey":           identityKey,
+		"accountKey":            accountKey,
+		"arrearsDueAt":          dueAt,
+		"arrearsRemindedFor":    remindedFor,
+		"arrearsReminderSentAt": sentAt,
+	})
+}
+
 // seedLedgerTransaction seeds one wellnessLedgerHistory row for identityKey.
 func seedLedgerTransaction(t *testing.T, s *server, transactionKey, accountKey, identityKey, txType string, amountCents float64) {
 	t.Helper()
@@ -276,17 +341,25 @@ func seedLedgerTransaction(t *testing.T, s *server, transactionKey, accountKey, 
 }
 
 func decodeLedger(t *testing.T, rec *httptest.ResponseRecorder) struct {
-	IdentityKey  string           `json:"identityKey"`
-	AccountKey   string           `json:"accountKey"`
-	Transactions []ledgerEntryRow `json:"transactions"`
-	BalanceCents int64            `json:"balanceCents"`
+	IdentityKey    string           `json:"identityKey"`
+	AccountKey     string           `json:"accountKey"`
+	Transactions   []ledgerEntryRow `json:"transactions"`
+	BalanceCents   int64            `json:"balanceCents"`
+	DueDate        string           `json:"dueDate"`
+	IsOverdue      bool             `json:"isOverdue"`
+	DaysOverdue    int              `json:"daysOverdue"`
+	ReminderSentAt string           `json:"reminderSentAt"`
 } {
 	t.Helper()
 	var body struct {
-		IdentityKey  string           `json:"identityKey"`
-		AccountKey   string           `json:"accountKey"`
-		Transactions []ledgerEntryRow `json:"transactions"`
-		BalanceCents int64            `json:"balanceCents"`
+		IdentityKey    string           `json:"identityKey"`
+		AccountKey     string           `json:"accountKey"`
+		Transactions   []ledgerEntryRow `json:"transactions"`
+		BalanceCents   int64            `json:"balanceCents"`
+		DueDate        string           `json:"dueDate"`
+		IsOverdue      bool             `json:"isOverdue"`
+		DaysOverdue    int              `json:"daysOverdue"`
+		ReminderSentAt string           `json:"reminderSentAt"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode ledger: %v (body=%s)", err, rec.Body.String())
@@ -390,6 +463,123 @@ func TestHandleLedger_MemberWithNoAccountSeesEmpty(t *testing.T) {
 	}
 	if len(body.Transactions) != 0 || body.BalanceCents != 0 {
 		t.Errorf("got transactions=%+v balanceCents=%d, want empty/zero", body.Transactions, body.BalanceCents)
+	}
+}
+
+// ---- GET /api/ledger: dueDate/isOverdue/daysOverdue/reminderSentAt ----
+
+// A member whose account has never been evaluated (no wellnessMemberAccounts
+// row's arrears columns recorded — the common case for most of this suite's
+// fixtures) falls back to deriveStatement's own FIFO-derived due date.
+func TestHandleLedger_NoRecordedArrearsFallsBackToDerivedDueDate(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	identityA := "vtx.identity." + memberA
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+	seedLedgerAccount(t, s, identityA, "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa")
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "debit", "amountCents": 4500.0, "postedAt": old,
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger", cookieFor(memberA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeLedger(t, rec)
+	if body.DueDate == "" {
+		t.Fatal("dueDate = \"\", want deriveStatement's own FIFO-derived date (no recorded arrearsDueAt)")
+	}
+	if !body.IsOverdue || body.DaysOverdue < 1 {
+		t.Errorf("got isOverdue=%v daysOverdue=%d, want overdue (debit is %d+5 days old)", body.IsOverdue, body.DaysOverdue, statementGraceDays)
+	}
+	if body.ReminderSentAt != "" {
+		t.Errorf("reminderSentAt = %q, want empty (nothing recorded)", body.ReminderSentAt)
+	}
+}
+
+// The RECORDED arrearsDueAt wins over deriveStatement's own derivation when
+// the account carries one — even a recorded date that disagrees with what
+// the FIFO walk over this request's own ledger rows would compute (verdict
+// item 4: "a stamp that names a date reads the recorded one when it
+// exists").
+func TestHandleLedger_RecordedDueDateWinsOverDerived(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	identityA := "vtx.identity." + memberA
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+	recordedDue := time.Now().UTC().AddDate(0, 0, -40).Format(time.RFC3339)
+	seedLedgerAccountWithArrears(t, s, identityA, "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa", recordedDue, recordedDue, "")
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "debit", "amountCents": 4500.0, "postedAt": old,
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger", cookieFor(memberA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeLedger(t, rec)
+	if body.DueDate != recordedDue {
+		t.Errorf("dueDate = %q, want the RECORDED arrearsDueAt %q (deriveStatement's own FIFO date must not win)", body.DueDate, recordedDue)
+	}
+	if !body.IsOverdue {
+		t.Error("isOverdue = false, want true — recomputed against the recorded due date, which is well past grace")
+	}
+}
+
+// The threaded reminderSentAt equals its source at the producer (standing
+// checklist #3): the value the response carries is exactly the string the
+// wellnessMemberAccounts row recorded, byte for byte, never reformatted or
+// substituted for another column.
+func TestHandleLedger_ReminderSentAtThreadsFromProducer(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	identityA := "vtx.identity." + memberA
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+	const sentAt = "2026-08-12T03:04:05Z"
+	seedLedgerAccountWithArrears(t, s, identityA, "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa", old, old, sentAt)
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "debit", "amountCents": 4500.0, "postedAt": old,
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger", cookieFor(memberA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeLedger(t, rec)
+	if body.ReminderSentAt != sentAt {
+		t.Errorf("reminderSentAt = %q, want the producer's own recorded stamp %q verbatim", body.ReminderSentAt, sentAt)
+	}
+}
+
+// A paid-off balance ages nothing, even carrying a stale recorded
+// arrearsDueAt from before the payment — mirrors deriveStatement's own
+// "nothing to age" case, applied to whichever dueDate would otherwise be
+// chosen.
+func TestHandleLedger_PaidBalanceCarriesNoDueDateEvenWithStaleRecordedOne(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	identityA := "vtx.identity." + memberA
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+	seedLedgerAccountWithArrears(t, s, identityA, "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa", old, old, "")
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "debit", "amountCents": 4500.0, "postedAt": old,
+	})
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.bbbbbbbbbbbbbbbbbbbb", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.bbbbbbbbbbbbbbbbbbbb", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "credit", "amountCents": 4500.0, "postedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+
+	rec := sessionGET(s, s.handleLedger, "/api/ledger", cookieFor(memberA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeLedger(t, rec)
+	if body.BalanceCents != 0 {
+		t.Fatalf("balanceCents = %d, want 0 (fully paid)", body.BalanceCents)
+	}
+	if body.DueDate != "" || body.IsOverdue || body.DaysOverdue != 0 {
+		t.Errorf("got dueDate=%q isOverdue=%v daysOverdue=%d, want none of them (a paid balance has nothing to age)",
+			body.DueDate, body.IsOverdue, body.DaysOverdue)
 	}
 }
 
@@ -728,5 +918,76 @@ func TestHandleFrontDeskArrears_SortsWorstFirst(t *testing.T) {
 	}
 	if rows[2].IdentityKey != identityNotOverdue {
 		t.Fatalf("rows[2] = %+v, want the not-yet-overdue member last", rows[2])
+	}
+}
+
+// TestHandleFrontDeskArrears_RecordedDueDateAndReminderSentAt proves the
+// grid joins each covered debtor's RECORDED arrears columns off the
+// wellnessMemberAccounts row (the member-accounts read this handler gains,
+// verdict item 4) — the recorded dueAt wins over the FIFO-derived one, and
+// reminderSentAt threads through so the picker/roster badges can tell a
+// reminded hold from a merely-overdue balance.
+func TestHandleFrontDeskArrears_RecordedDueDateAndReminderSentAt(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+	recordedDue := time.Now().UTC().AddDate(0, 0, -40).Format(time.RFC3339)
+	const sentAt = "2026-08-12T03:04:05Z"
+
+	seedMember(t, s.conn, leaseHere, memberA)
+	identityA := "vtx.identity." + memberA
+	seedLedgerAccountWithArrears(t, s, identityA, "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa", recordedDue, recordedDue, sentAt)
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "debit", "amountCents": 4500.0, "postedAt": old,
+	})
+
+	rec := sessionGET(s, s.handleFrontDeskArrears, "/api/frontdesk-arrears", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rows := decodeArrears(t, rec)
+	if len(rows) != 1 || rows[0].IdentityKey != identityA {
+		t.Fatalf("arrears = %+v, want exactly memberA", rows)
+	}
+	row := rows[0]
+	if row.DueDate != recordedDue {
+		t.Errorf("dueDate = %q, want the RECORDED arrearsDueAt %q", row.DueDate, recordedDue)
+	}
+	if row.ReminderSentAt != sentAt {
+		t.Errorf("reminderSentAt = %q, want the producer's own recorded stamp %q verbatim", row.ReminderSentAt, sentAt)
+	}
+	if !row.IsOverdue {
+		t.Error("isOverdue = false, want true — recomputed against the recorded due date")
+	}
+}
+
+// A covered member with no wellnessMemberAccounts row at all (no evaluation
+// has ever run for them) still gets a row, falling back to
+// computeLedgerBalances' own derived due date with no reminderSentAt — the
+// absence-tolerant read lookupMemberArrears documents.
+func TestHandleFrontDeskArrears_NoMemberAccountsRowFallsBackToDerived(t *testing.T) {
+	s, cookieFor := devSessionServer(t)
+	old := time.Now().UTC().AddDate(0, 0, -(statementGraceDays + 5)).Format(time.RFC3339)
+
+	seedMember(t, s.conn, leaseHere, memberA)
+	identityA := "vtx.identity." + memberA
+	putJSON(t, s.conn, wellnessledger.LedgerHistoryBucket, "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"transactionKey": "vtx.wellnesstransaction.aaaaaaaaaaaaaaaaaaaa", "accountKey": "vtx.wellnessaccount.aaaaaaaaaaaaaaaaaaaa",
+		"identityKey": identityA, "type": "debit", "amountCents": 4500.0, "postedAt": old,
+	})
+
+	rec := sessionGET(s, s.handleFrontDeskArrears, "/api/frontdesk-arrears", cookieFor(staffSubj))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rows := decodeArrears(t, rec)
+	if len(rows) != 1 {
+		t.Fatalf("arrears = %+v, want exactly memberA", rows)
+	}
+	if rows[0].DueDate == "" || !rows[0].IsOverdue {
+		t.Errorf("got %+v, want the derived due date (no recorded row) and isOverdue=true", rows[0])
+	}
+	if rows[0].ReminderSentAt != "" {
+		t.Errorf("reminderSentAt = %q, want empty (nothing recorded)", rows[0].ReminderSentAt)
 	}
 }

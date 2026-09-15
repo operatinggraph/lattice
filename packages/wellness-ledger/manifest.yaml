@@ -1,5 +1,5 @@
 name: wellness-ledger
-version: 0.2.24
+version: 0.2.25
 description: |
   Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount,
   independently-minted id, one per member identity via a .wellnessLedgerAccount
@@ -22,17 +22,33 @@ description: |
   balance, never waive it — reason:"waiver" is rejected server-side for a
   self-scoped submit), ownership + amount proven server-side against the
   account's own heldFor->identity topology and postedTo history.
-  Depends wellness-domain.
+  Also ships the arrears reminder: the account's .arrears episode aspect
+  (minted by evaluation; every posted entry marks it stale, since no balance
+  is stored) + the wellnessArrearsReminders weaver-target convergence lens,
+  whose playbook dispatches EvaluateWellnessArrears — that op ages the
+  account with the same FIFO the member's statement runs and fires ONE
+  external.notification per arrears episode to the bridge's "notification"
+  adapter, keyed on (accountKey, dueAt). RecordWellnessArrearsReminderNotification
+  records the outcome; wellnessMemberAccounts projects the due date and
+  reminder timestamp for the statement and the desk.
+  Depends wellness-domain + orchestration-base.
 depends:
   - wellness-domain
+  - orchestration-base
 declares:
   ddls:
     - canonicalName: wellnessaccount
       class: meta.ddl.vertexType
     - canonicalName: wellnessLedgerAccountGuard
       class: meta.ddl.aspectType
+    - canonicalName: wellnessAccountArrears
+      class: meta.ddl.aspectType
     - canonicalName: wellnesstransaction
       class: meta.ddl.vertexType
+    - canonicalName: wellnessArrearsNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: wellnessAccountArrearsNotification
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: wellnessLedgerHistory
       adapter: nats-kv
@@ -54,10 +70,16 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: wellnessArrearsReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   opMetas:
     - operationType: WellnessCreateAccount
     - operationType: WellnessDebitAccount
     - operationType: WellnessCreditAccount
+    - operationType: EvaluateWellnessArrears
+    - operationType: RecordWellnessArrearsReminderNotification
   permissions:
     - operationType: WellnessCreateAccount
       scope: any
@@ -74,6 +96,12 @@ declares:
     - operationType: WellnessCreditAccount
       scope: self
       grantsTo: [consumer]
+    - operationType: EvaluateWellnessArrears
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordWellnessArrearsReminderNotification
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: wellnessNoShowSettlement
       lensRef: wellnessNoShowSettlement
@@ -81,3 +109,5 @@ declares:
       lensRef: wellnessClassPriceSettlement
     - targetId: wellnessRefundSettlement
       lensRef: wellnessRefundSettlement
+    - targetId: wellnessArrearsReminders
+      lensRef: wellnessArrearsReminders

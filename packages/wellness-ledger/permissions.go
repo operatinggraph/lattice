@@ -46,8 +46,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // references the bare "DebitAccount"/"CreditAccount" names in this package
 // (no seed script, only this package's own targets.go Weaver dispatch), so
 // this is a straight rename, not an additive alias.
+//
+// EvaluateWellnessArrears and the arrears notification replyOp are the two ops
+// no human path reaches. Both grant `operator` at scope=any — the
+// operator-grant idiom every engine-submitted op uses — and neither is callable
+// from a console: WEAVER's dispatch actor submits the first (and the script
+// refuses every other actor outright, since the account it names ends up in a
+// message a member actually receives), the BRIDGE's service actor the second.
+// Granting them to `operator` is what authorizes those two engines, and
+// deliberately mints no consoleOperator or frontOfHouse counterpart — there is
+// no desk workflow that runs either one by hand.
 func Permissions() []pkgmgr.PermissionSpec {
-	return []pkgmgr.PermissionSpec{
+	return append([]pkgmgr.PermissionSpec{
 		{
 			OperationType: "WellnessCreateAccount",
 			Scope:         "any",
@@ -78,5 +88,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants a member the right to credit (pay down) THEIR OWN account — the account's heldFor identity link must resolve to the caller's identity (scripts.go). No matching WellnessDebitAccount grant: a member pays down a balance, never charges one.",
 			GrantsTo:      []string{"consumer"},
 		},
-	}
+		{
+			OperationType: arrearsOp,
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit EvaluateWellnessArrears (ages a member's account and sends the one arrears reminder per episode). Dispatched by WEAVER's wellnessArrearsReminders playbook — the script refuses every actor but Weaver's dispatch actor, because the account named on the payload is forwarded into a message a member receives. Not a console operation: no consoleOperator grant is minted for it.",
+			GrantsTo:      []string{"operator"},
+		},
+	}, notificationPermissions()...)
 }

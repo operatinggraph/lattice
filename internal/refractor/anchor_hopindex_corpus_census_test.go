@@ -180,6 +180,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"unroutedTasks":                     hopIndexed,
 	"visitSeriesDue":                    hopIndexed,
 	"visitSeriesSiteBackfill":           hopIndexed,
+	"wellnessArrearsReminders":          hopIndexed,
 	"wellnessBookingReminders":          hopIndexed,
 	"wellnessClassPriceSettlement":      hopIndexed,
 	"wellnessNoShowSettlement":          hopIndexed,

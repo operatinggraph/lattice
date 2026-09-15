@@ -66,9 +66,72 @@ type ledgerEntryRow struct {
 // lens. Unlike ledgerHistory (keyed by transaction), this lens is keyed by the
 // identity itself (memberAccountsSpec, packages/wellness-ledger/lenses.go), so
 // resolving one member's account is a single scoped KVGet, never a bucket scan.
+// The three arrears columns come straight off the account's own `.arrears`
+// aspect (memberAccountsSpec's own doc comment) — null for a member with no
+// account, or one nothing has yet evaluated.
 type memberAccountProjection struct {
-	IdentityKey string `json:"identityKey"`
-	AccountKey  string `json:"accountKey"`
+	IdentityKey           string `json:"identityKey"`
+	AccountKey            string `json:"accountKey"`
+	ArrearsDueAt          string `json:"arrearsDueAt"`
+	ArrearsRemindedFor    string `json:"arrearsRemindedFor"`
+	ArrearsReminderSentAt string `json:"arrearsReminderSentAt"`
+}
+
+// lookupMemberArrears reads one identity's wellnessMemberAccounts row —
+// absent (no row at all, or the Refractor hasn't caught up) is the normal
+// "nothing recorded yet" case and comes back as the zero value, not an
+// error; only a real fetch fault is.
+func lookupMemberArrears(ctx context.Context, conn *substrate.Conn, identityKey string) (memberAccountProjection, error) {
+	entry, err := conn.KVGet(ctx, wellnessledger.MemberAccountsBucket, identityKey)
+	switch {
+	case err == nil:
+		var acct memberAccountProjection
+		if json.Unmarshal(entry.Value, &acct) != nil {
+			return memberAccountProjection{}, nil
+		}
+		return acct, nil
+	case errors.Is(err, substrate.ErrKeyNotFound):
+		return memberAccountProjection{}, nil
+	default:
+		return memberAccountProjection{}, err
+	}
+}
+
+// recordedOrDerivedDueDate prefers the account's own RECORDED arrears due
+// date (EvaluateWellnessArrears' stamp) over deriveStatement's FIFO-derived
+// one — a stamp that names a date reads the recorded one when it exists
+// (wellness-arrears-reminder-2026-09-15.md verdict item 4). deriveStatement's
+// derivation is the fallback for an account no evaluation has touched yet.
+func recordedOrDerivedDueDate(recorded, derived string) string {
+	if recorded != "" {
+		return recorded
+	}
+	return derived
+}
+
+// computeOverdue reports whether dueDate (RFC3339) has been reached by now,
+// and by how many whole days — the same "reached, then +1" rule
+// deriveStatement applies. Re-derived here, rather than reused from
+// deriveStatement's own return, because the due date actually rendered may
+// be the RECORDED one (recordedOrDerivedDueDate), not deriveStatement's own
+// FIFO computation — isOverdue/daysOverdue must agree with whichever date is
+// shown. A due date that fails to parse fails closed (not overdue), the same
+// posture deriveStatement takes on a malformed postedAt.
+func computeOverdue(dueDate string, now time.Time) (bool, int) {
+	if dueDate == "" {
+		return false, 0
+	}
+	due, err := time.Parse(time.RFC3339, dueDate)
+	if err != nil {
+		return false, 0
+	}
+	// Same boundary as deriveStatement's own (`due_at <= evaluated_at`,
+	// packages/wellness-ledger/scripts.go): due AT the instant counts.
+	if now.Before(due) {
+		return false, 0
+	}
+	days := int(now.Sub(due).Hours()/24) + 1
+	return true, days
 }
 
 // computeLedgerHistory filters the wellnessLedgerHistory lens rows to one
@@ -144,11 +207,12 @@ func sumBalance(rows []ledgerEntryRow) int64 {
 // member's own ledger view, but for every member the front desk is confined
 // to instead of the one identityKey a member names.
 type balanceRow struct {
-	IdentityKey  string `json:"identityKey"`
-	BalanceCents int64  `json:"balanceCents"`
-	DueDate      string `json:"dueDate"`
-	IsOverdue    bool   `json:"isOverdue"`
-	DaysOverdue  int    `json:"daysOverdue"`
+	IdentityKey    string `json:"identityKey"`
+	BalanceCents   int64  `json:"balanceCents"`
+	DueDate        string `json:"dueDate"`
+	IsOverdue      bool   `json:"isOverdue"`
+	DaysOverdue    int    `json:"daysOverdue"`
+	ReminderSentAt string `json:"reminderSentAt,omitempty"`
 }
 
 // computeLedgerBalances groups the wellnessLedgerHistory lens rows by
@@ -298,7 +362,12 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 		return "", false, 0
 	}
 	due := oldest.AddDate(0, 0, statementGraceDays)
-	if !now.After(due) {
+	// The boundary matches wellness-ledger's own evaluation (`due_at <=
+	// evaluated_at`, packages/wellness-ledger/scripts.go): due AT the
+	// instant, not only past it — so this handler's isOverdue and a
+	// concurrent EvaluateWellnessArrears' recorded reminder never disagree
+	// at the exact instant a balance crosses into arrears.
+	if now.Before(due) {
 		return due.Format(time.RFC3339), false, 0
 	}
 	days := int(now.Sub(due).Hours()/24) + 1
@@ -404,22 +473,13 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		identityKey = target
 	}
 
-	var accountKey string
-	entry, err := conn.KVGet(ctx, wellnessledger.MemberAccountsBucket, identityKey)
-	switch {
-	case err == nil:
-		var acct memberAccountProjection
-		if json.Unmarshal(entry.Value, &acct) == nil {
-			accountKey = acct.AccountKey
-		}
-	case errors.Is(err, substrate.ErrKeyNotFound):
-		// No row yet — this identity has never booked, or the Refractor
-		// hasn't caught up; accountKey stays empty, not an error.
-	default:
+	acct, err := lookupMemberArrears(ctx, conn, identityKey)
+	if err != nil {
 		s.writeError(w, http.StatusBadGateway,
 			"read "+wellnessledger.MemberAccountsBucket+": "+err.Error()+" (is wellness-ledger installed and the Refractor projecting?)")
 		return
 	}
+	accountKey := acct.AccountKey
 
 	bucket := wellnessledger.LedgerHistoryBucket
 	keys, err := conn.KVListKeys(ctx, bucket)
@@ -442,11 +502,31 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	}
 	get := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
 	rows, balance := computeLedgerHistory(keys, get, identityKey)
+
+	// A due date (recorded or derived) only means something over an actual
+	// open balance — mirrors deriveStatement's own "nothing to age" case,
+	// applied whichever dueDate ends up rendered. reminderSentAt threads
+	// through unconditionally: it is the account's own recorded SEND INTENT,
+	// unrelated to whatever this request's own balance recomputation finds.
+	now := time.Now().UTC()
+	var dueDate string
+	var isOverdue bool
+	var daysOverdue int
+	if balance > 0 {
+		derivedDue, _, _ := deriveStatement(rows, balance, now)
+		dueDate = recordedOrDerivedDueDate(acct.ArrearsDueAt, derivedDue)
+		isOverdue, daysOverdue = computeOverdue(dueDate, now)
+	}
+
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"identityKey":  identityKey,
-		"accountKey":   accountKey,
-		"transactions": rows,
-		"balanceCents": balance,
+		"identityKey":    identityKey,
+		"accountKey":     accountKey,
+		"transactions":   rows,
+		"balanceCents":   balance,
+		"dueDate":        dueDate,
+		"isOverdue":      isOverdue,
+		"daysOverdue":    daysOverdue,
+		"reminderSentAt": acct.ArrearsReminderSentAt,
 	})
 }
 
@@ -524,12 +604,28 @@ func (s *server) handleFrontDeskArrears(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	get := func(key string) ([]byte, bool) { v, ok := values[key]; return v, ok }
-	rows := computeLedgerBalances(keys, get, time.Now().UTC())
+	now := time.Now().UTC()
+	rows := computeLedgerBalances(keys, get, now)
 	filtered := make([]balanceRow, 0, len(rows))
 	for _, row := range rows {
-		if covered[row.IdentityKey] {
-			filtered = append(filtered, row)
+		if !covered[row.IdentityKey] {
+			continue
 		}
+		// The RECORDED arrears columns (EvaluateWellnessArrears' stamp) win
+		// over computeLedgerBalances' own FIFO-derived dueDate when the
+		// account carries one — recordedOrDerivedDueDate's rule, applied per
+		// row here since computeLedgerBalances has no lens read of its own.
+		acct, err := lookupMemberArrears(ctx, conn, row.IdentityKey)
+		if err != nil {
+			s.logger.Error("read member arrears for front-desk grid", "identityKey", row.IdentityKey, "error", err)
+			s.writeError(w, http.StatusBadGateway,
+				"read "+wellnessledger.MemberAccountsBucket+": "+err.Error()+" (is wellness-ledger installed and the Refractor projecting?)")
+			return
+		}
+		row.DueDate = recordedOrDerivedDueDate(acct.ArrearsDueAt, row.DueDate)
+		row.IsOverdue, row.DaysOverdue = computeOverdue(row.DueDate, now)
+		row.ReminderSentAt = acct.ArrearsReminderSentAt
+		filtered = append(filtered, row)
 	}
 	sort.Slice(filtered, func(i, j int) bool {
 		if filtered[i].IsOverdue != filtered[j].IsOverdue {

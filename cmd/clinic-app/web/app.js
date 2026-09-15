@@ -6054,6 +6054,7 @@ async function submitWellnessBooking(ev) {
   // refusal-courtesy: CreateBooking/SessionTooLong: unreachable — slot_cells recomputes cells from the session's own persisted .schedule (packages/wellness-domain/ddls.go), which CreateSession/CreateSessionSeries already validated ≤96 cells before it could exist.
   // refusal-courtesy: CreateBooking/ProtectedBooker: unreachable — ctx.identityKey comes from identityKeyForPatient(a.patientKey), always a real patient's own linked identity (the clinicPatientsRead roster's identifiedBy walk), never a kernel identity.
   // refusal-courtesy: CreateBooking/BookerConflict, DoubleBooked, InvalidState: none — the referral picker (openWellnessBooking) reads no cross-check against the booker's other wellness bookings or this session's own booker guard.
+  // refusal-courtesy: CreateBooking/CreditHold: none — this referral flow never reads the patient's linked identity's wellness-ledger account (no /api/ledger call reaches wellness's own ledger from here), so it has no way to know a credit hold exists before submitting.
   ev.preventDefault();
   const ctx = state.wellnessBooking;
   if (!ctx) {

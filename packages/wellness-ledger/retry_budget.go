@@ -31,3 +31,16 @@ const maxPriceChargeRetries = 3
 // minted at most once per cancelled booking (CancelBooking, wellness-domain),
 // so there is no "later" refund to reuse the budget.
 const maxRefundRetries = 3
+
+// maxArrearsEvaluationRetries caps how many times Weaver auto-dispatches
+// EvaluateWellnessArrears for one account's open missing_evaluation gap before
+// it stops and leaves the gap violating for operator attention (Contract #10
+// §10.3): the lens projects it as the constant maxretries_evaluation column on
+// every wellnessArrearsReminders row, the same budget-per-target idiom the
+// three settlement targets above establish. The count is deleted when the gap
+// closes (the evaluation stamps remindedFor = dueAt, or the recomputation
+// clears stale), so a later episode — or a later stale mark — starts a fresh
+// budget; an evaluation that cannot succeed at all records historyTooLong,
+// which closes the gap by suppression rather than spending the budget on a
+// doomed loop.
+const maxArrearsEvaluationRetries = 3

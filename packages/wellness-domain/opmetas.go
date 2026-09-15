@@ -172,6 +172,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): SessionInPast: none — edgeEntitySessions projects no column reflecting a session's start time against the clock (a lens projects recorded facts, never a clock comparison); Facet's generic form offers the op on a past session.
 			// refusal-courtesy(facet): DoubleBooked: none — same lens, same gap: no column reflects whether the viewing actor already holds a claim on this session.
 			// refusal-courtesy(facet): ProtectedBooker, BookerConflict: none — both are properties of the ACTOR (a kernel identity, or a conflicting claim on another session), not of the session row being browsed; no entity lens column could express either.
+			// refusal-courtesy(facet): CreditHold: none — a hold is a property of the ACTOR (their ledger account's recorded reminder), not of the session row being browsed; no entity lens column could express it.
 			// refusal-courtesy(facet): SessionTooLong: none — the session's span is fixed at CreateSession/CreateSessionSeries mint time (enforced there); Facet supplies no span here, only the session being viewed.
 			// refusal-courtesy(facet): InvalidState: none — a missing schedule aspect on the session is a read-model correctness fault, not a state Facet's generic form could gate.
 			Presentation: &pkgmgr.OpPresentationSpec{
@@ -239,9 +240,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 				// The operator-role confinement probe: the workplace-exempt
 				// short-circuit walks the actor's own holdsRole links to test
-				// for the operator role (actor_holds_operator).
+				// for the operator role (actor_holds_operator). The credit hold
+				// walks the BOOKER's heldFor in-links to the wellness-ledger
+				// account (wellness_account_for_booker): the hub is the identity
+				// the payload names, which on this self-anchored dispatch is the
+				// actor (ContextParams binds booker to {actor}) and on a staff
+				// submission is the member being booked, never the staffer. The
+				// account's .arrears follow-up read is class (e) off that walk,
+				// undeclarable up front.
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+					{Hub: "{payload.booker}", Relation: "heldFor", Direction: "in"},
 				},
 			},
 		},
@@ -256,6 +265,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): SessionInPast, WaitlistFull: none — edgeEntitySessions projects no column reflecting a session's start time against the clock (a lens projects recorded facts, never a clock comparison) or its waitlist occupancy (`full` is the seat count alone); Facet's generic form offers the op on a past or waitlist-saturated full session.
 			// refusal-courtesy(facet): DoubleBooked: none — same lens, same gap: no column reflects whether the viewing actor already holds a claim on this session.
 			// refusal-courtesy(facet): ProtectedBooker, BookerConflict: none — both are properties of the ACTOR, not of the session row being browsed; no entity lens column could express either.
+			// refusal-courtesy(facet): CreditHold: none — a hold is a property of the ACTOR (their ledger account's recorded reminder), not of the session row being browsed; no entity lens column could express it.
 			// refusal-courtesy(facet): SessionTooLong: none — the session's span is fixed at CreateSession/CreateSessionSeries mint time; Facet supplies no span here, only the session being viewed.
 			// refusal-courtesy(facet): InvalidState: none — a missing schedule aspect on the session is a read-model correctness fault, not a state Facet's generic form could gate.
 			Presentation: &pkgmgr.OpPresentationSpec{
@@ -297,9 +307,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 				// The operator-role confinement probe: the workplace-exempt
 				// short-circuit walks the actor's own holdsRole links to test
-				// for the operator role (actor_holds_operator).
+				// for the operator role (actor_holds_operator). The credit hold
+				// walks the BOOKER's heldFor in-links to the wellness-ledger
+				// account (wellness_account_for_booker): the hub is the identity
+				// the payload names, which on this self-anchored dispatch is the
+				// actor (ContextParams binds booker to {actor}) and on a staff
+				// submission is the member being booked, never the staffer. The
+				// account's .arrears follow-up read is class (e) off that walk,
+				// undeclarable up front.
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+					{Hub: "{payload.booker}", Relation: "heldFor", Direction: "in"},
 				},
 			},
 		},

@@ -36,13 +36,34 @@
 //     the operator/frontOfHouse scope=any grant may waive — a self-scoped
 //     member credit is rejected.
 //
+//   - The `wellnessAccountArrears` aspect type (DDL `wellnessAccountArrears`) —
+//     vtx.wellnessaccount.<NanoID>.arrears = {evaluatedAt, dueAt?, remindedFor?,
+//     sentAt?, stale?, historyTooLong?}, the account's arrears-episode state.
+//     Minted and rewritten by EvaluateWellnessArrears; every posted entry
+//     marks it stale where it exists (with no stored balance an entry cannot
+//     tell an episode opening from one continuing) and mints nothing where it
+//     does not.
+//
 //   - The `wellnessLedgerHistory` lens (one row per transaction) the
 //     billing-history FE reads (P5).
 //
 //   - The `wellnessMemberAccounts` lens (one row per member identity,
 //     accountKey null until one is opened) — the FE's only way to resolve a
 //     member's account key, since it can no longer be derived from
-//     identityKey.
+//     identityKey — projecting the account's arrears due date, reminded-for
+//     date and reminder timestamp beside it for the statement and the desk.
+//
+//   - The `wellnessArrearsReminders` weaver-target lens + its §10.8 playbook
+//     (targets.go) — the cafe-ledger arrears mechanism applied to this
+//     ledger: one row per account, freshUntil = the recorded dueAt arms
+//     Weaver's @at, the fired timer's recorded lapse (and a stale mark, and a
+//     never-evaluated account) opens missing_evaluation, and the playbook
+//     dispatches directOp(EvaluateWellnessArrears), which ages the account
+//     with the same FIFO the member's statement runs, stamps .arrears, and
+//     fires ONE external.notification per arrears episode to the bridge's
+//     "notification" adapter, keyed on (accountKey, dueAt).
+//     `RecordWellnessArrearsReminderNotification` records the outcome as an
+//     idempotent overwrite (notifications.go).
 //
 //   - The `wellnessNoShowSettlement` actorAggregate lens + its Weaver playbook
 //     (targets.go): a noShow booking carrying a noShowFeeCents (set by
@@ -92,7 +113,9 @@
 //
 // Depends wellness-domain (WellnessDebitAccount's optional bookingRef validates
 // against wellness-domain's booking vertex type; the wellnessNoShowSettlement
-// lens walks a booking's bookedBy link).
+// lens walks a booking's bookedBy link) and orchestration-base (MarkExpired
+// and the freshnessExpiry marker the arrears @at firing writes onto the
+// account).
 package wellnessledger
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -100,7 +123,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.24",
+	Version: "0.2.25",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via postedTo, WellnessDebitAccount " +
@@ -113,8 +136,15 @@ var Package = pkgmgr.Definition{
 		"auto-charges the no-show fee) + the wellnessClassPriceSettlement Weaver playbook (same lazy account-open relay, " +
 		"then auto-charges the class price, unconditional on attendance) + the wellnessRefundSettlement Weaver playbook " +
 		"(reverses a class-price charge already posted before its booking was cancelled, anchored on wellness-domain's " +
-		"wellnessrefund marker vertex rather than the already-tombstoned booking). Depends wellness-domain.",
-	Depends:       []string{"wellness-domain"},
+		"wellnessrefund marker vertex rather than the already-tombstoned booking). " +
+		"Also ships the arrears reminder: the account's .arrears episode aspect (minted by evaluation; every posted " +
+		"entry marks it stale, since no balance is stored) + the wellnessArrearsReminders weaver-target convergence " +
+		"lens, whose §10.8 playbook dispatches EvaluateWellnessArrears — that op ages the account with the same FIFO " +
+		"the member's statement runs and fires ONE external.notification per arrears episode to the bridge's " +
+		"\"notification\" adapter, keyed on (accountKey, dueAt). RecordWellnessArrearsReminderNotification records " +
+		"the outcome; wellnessMemberAccounts projects the due date and reminder timestamp for the statement and the " +
+		"desk. Depends wellness-domain + orchestration-base.",
+	Depends:       []string{"wellness-domain", "orchestration-base"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),
 	Permissions:   Permissions(),

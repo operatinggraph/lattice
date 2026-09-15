@@ -7,15 +7,17 @@ import (
 	"github.com/dop251/goja"
 )
 
-// TestArrearsBadgeText_RendersOwedAndOverdue proves arrearsBadgeText's four
+// TestArrearsBadgeText_RendersOwedAndOverdue proves arrearsBadgeText's
 // shapes against the shipped source: nothing owed says nothing, a balance
-// alone says only what is owed, and an overdue balance appends the
+// alone says only what is owed, an overdue balance appends the
 // day/days-overdue clause in the singular exactly at daysOverdue == 1 — the
 // same singular/plural rule arrearsLine already applies to a due-date banner,
 // now on the booking pickers and roster cards that flag a debtor before the
-// desk books them.
+// desk books them — and a reminded episode appends "credit hold" via
+// bookingGate, whatever isOverdue says (a part-payment can move the balance
+// back inside its term while the episode's reminder still stands).
 func TestArrearsBadgeText_RendersOwedAndOverdue(t *testing.T) {
-	vm := webHelperVM(t, "money", "arrearsBadgeText")
+	vm := webHelperVM(t, "money", "bookingGate", "arrearsBadgeText")
 	fn, ok := goja.AssertFunction(vm.Get("arrearsBadgeText"))
 	if !ok {
 		t.Fatal("arrearsBadgeText is not a function after evaluating its declaration")
@@ -54,6 +56,16 @@ func TestArrearsBadgeText_RendersOwedAndOverdue(t *testing.T) {
 			"balance owed, overdue, singular day",
 			map[string]any{"balanceCents": 6000, "isOverdue": true, "daysOverdue": 1},
 			"owes $60.00 · 1 day overdue",
+		},
+		{
+			"balance owed, overdue, reminded — credit hold",
+			map[string]any{"balanceCents": 6000, "isOverdue": true, "daysOverdue": 3, "reminderSentAt": "2026-08-12T00:00:00Z"},
+			"owes $60.00 · 3 days overdue · credit hold",
+		},
+		{
+			"balance owed, reminded but back inside its term — hold stands, no overdue clause",
+			map[string]any{"balanceCents": 975, "isOverdue": false, "reminderSentAt": "2026-08-12T00:00:00Z"},
+			"owes $9.75 · credit hold",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

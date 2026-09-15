@@ -48,6 +48,15 @@ const ClassPriceSettlementTarget = "wellnessClassPriceSettlement"
 // doc comment, ddls.go).
 const RefundSettlementTarget = "wellnessRefundSettlement"
 
+// ArrearsRemindersTarget is the §10.8 TargetID == the wellnessArrearsReminders
+// lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads, and
+// the key the freshnessExpiry marker records this target's own fired timer
+// under.
+const ArrearsRemindersTarget = "wellnessArrearsReminders"
+
+// arrearsOp is the Weaver-dispatched arrears evaluation (accountDDLScript).
+const arrearsOp = "EvaluateWellnessArrears"
+
 // Lenses returns the package's Lens declarations: wellnessLedgerHistory (one
 // row per posted transaction, flattening the .entry aspect + the account/
 // identity it posted to into a query-optimized read-model row — the FE
@@ -64,7 +73,10 @@ const RefundSettlementTarget = "wellnessRefundSettlement"
 // wellnessRefundSettlement (the missing_refund convergence lens — reverses a
 // class-price charge already posted before its booking was cancelled,
 // anchored on wellness-domain's wellnessrefund marker vertex rather than the
-// booking, which is already tombstoned by the time the marker exists).
+// booking, which is already tombstoned by the time the marker exists), and wellnessArrearsReminders
+// (the one-row-per-account arrears convergence lens whose playbook
+// dispatches EvaluateWellnessArrears — the cafeArrearsReminders mechanism
+// applied to this ledger).
 // Prefixed like the package's DDLs (ddls.go): a Lens canonicalName is global
 // across every installed package, and loftspace-ledger already owns the bare
 // `ledgerHistory` name.
@@ -137,8 +149,133 @@ func Lenses() []pkgmgr.LensSpec {
 				Freshness:        "auto",
 			},
 		},
+		{
+			CanonicalName:  ArrearsRemindersTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           arrearsRemindersSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "wellnessaccount",
+				OutputKeyPattern: ArrearsRemindersTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_evaluation", "entityKey", "freshUntil", "dueAt", "remindedFor", "reminderSentAt", "stale", "historyTooLong", "evaluatedAt", "maxretries_evaluation"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+			},
+		},
 	}
 }
+
+// arrearsRemindersSpec is the one-row-per-account arrears convergence cypher —
+// cafe-ledger's cafeArrearsRemindersSpec applied to a wellnessaccount, minus
+// the heldFor hop (the identity the reminder addresses is the op's to resolve
+// from state, never a row column: a Params entry bound to an optional hop is a
+// dispatch refusal on every row where the hop misses). freshUntil arms
+// Weaver's @at temporal timer (internal/weaver/temporal.go) at a deadline, the
+// fired timer's MarkExpired records that lapse under THIS target's own
+// byTarget key on the account, and the recorded lapse — not a clock — is what
+// opens the gap.
+//
+// The lifecycle of one arrears episode, on a ledger that stores no balance:
+//
+//   - An account nothing has ever evaluated projects evaluatedAt = null and is
+//     violating from its first projection — which is exactly how every such
+//     account, with charges or without, gets its first evaluation: one op
+//     each, then quiet.
+//   - EvaluateWellnessArrears replays the account's own history, and where a
+//     charge is open stamps .arrears.dueAt = that charge's postedAt + the
+//     ledger's net term (a RECORDED time fact, written by the op). While no
+//     timer has fired at that deadline the row projects freshUntil = dueAt →
+//     Weaver arms an @at there. missing_evaluation is false.
+//   - At dueAt the @at fires → MarkExpired's freshnessExpiry marker on this
+//     account records the fired instant under this target's key AND
+//     re-projects the row → the recorded lapse now reaches dueAt →
+//     missing_evaluation flips true and freshUntil goes null (a one-shot
+//     wake-up, not re-armed).
+//   - Weaver dispatches directOp(EvaluateWellnessArrears) — driven by the
+//     violating row, not by a timer. The op recomputes the FIFO head and
+//     stamps .arrears.remindedFor = the due date it reminded for, alongside
+//     the notification it fires → re-projection → remindedFor = dueAt →
+//     missing_evaluation false, freshUntil null. Converged, and no second
+//     reminder for this episode however many times the row is re-evaluated.
+//   - EVERY posted entry marks .arrears.stale (post_entry cannot see a
+//     balance, so it cannot tell a clearing payment from a partial one or a
+//     new charge from one queued behind the head), which opens the gap
+//     directly (no timer involved) so the evaluation recomputes. Its rewrite
+//     drops stale; a recomputed dueAt later than the recorded lapse re-arms
+//     freshUntil with no clearing write at all, and a history that nets to
+//     nothing owed rewrites .arrears to {evaluatedAt} alone: no dueAt, so no
+//     timer and no gap, and nothing of the finished episode survives to make
+//     the NEXT charge look already reminded. Where the next charge posted
+//     BEFORE that evaluation ran, the op finds a head newer than the recorded
+//     send and drops the send record itself, so the row re-arms for the new
+//     episode with remindedFor absent.
+//   - A new episode's dueAt is necessarily later than any instant already
+//     recorded in the marker (its charge posts after the last episode's
+//     ended, and both add the same term), so the permanent marker never
+//     poisons it.
+//   - An account whose transaction history outran the op's replay budget
+//     carries historyTooLong, and it suppresses BOTH the gap and the timer.
+//     That pairing is the point: the op cannot compute a head for such an
+//     account, so a gap that stayed open would have Weaver re-dispatch the
+//     same doomed evaluation on every window with nothing sent and nothing
+//     said, and a timer armed at a dueAt no evaluation could confirm would
+//     fire against a head nobody knows. Quiet, but VISIBLE — the row stays in
+//     the weaver-targets bucket carrying the flag, which is the operator's
+//     signal. The next posted entry drops the flag (post_entry's carry) and
+//     sets stale, buying exactly one more attempt.
+//
+// missing_evaluation's third arm carries no `dueAt <> null` conjunct. It
+// would be dead: the arm's own byTarget >= dueAt comparison is already false
+// on a null dueAt (a null operand makes the range test false, never true), so
+// nothing reaches that arm without a recorded due date. freshUntil KEEPS its
+// null test — there the comparison it guards is negated, and NOT(false) is
+// true.
+//
+// The lens reads NO clock. Both operands of every comparison are stored graph
+// data, so the row is a pure function of the subgraph and two projections at
+// different wall-clock instants over the same graph agree.
+//
+// One row per anchor, no walk at all. dueAt, remindedFor, reminderSentAt,
+// stale, historyTooLong and evaluatedAt are INFORMATIONAL columns (operator
+// observability); only entityKey + freshUntil + the two bools are load-bearing
+// for Weaver's dispatch and temporal lanes, and maxretries_evaluation is the
+// retry cap the other three targets in this package declare the same way
+// (retry_budget.go).
+//
+// Built with fmt.Sprintf so the target id comes from the constant the
+// WeaverTargetSpec uses. The cypher has no negated relationship pattern at
+// all, only scalar NOT comparisons, and carries no literal '%' of its own.
+var arrearsRemindersSpec = fmt.Sprintf(`MATCH (a:wellnessaccount {key: $actorKey})
+RETURN
+  a.key AS actorKey,
+  a.key AS entityKey,
+  a.arrears.data.dueAt AS dueAt,
+  a.arrears.data.remindedFor AS remindedFor,
+  a.arrears.data.sentAt AS reminderSentAt,
+  a.arrears.data.stale AS stale,
+  a.arrears.data.historyTooLong AS historyTooLong,
+  a.arrears.data.evaluatedAt AS evaluatedAt,
+  CASE WHEN (a.arrears.data.dueAt <> null) AND (a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND NOT (a.arrears.data.stale = true) AND NOT (a.arrears.data.historyTooLong = true) AND NOT (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.dueAt) THEN a.arrears.data.dueAt ELSE null END AS freshUntil,
+  (
+    NOT (a.arrears.data.historyTooLong = true)
+    AND (
+      (a.arrears.data.evaluatedAt = null)
+      OR (a.arrears.data.stale = true)
+      OR ((a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.dueAt))
+    )
+  ) AS missing_evaluation,
+  (
+    NOT (a.arrears.data.historyTooLong = true)
+    AND (
+      (a.arrears.data.evaluatedAt = null)
+      OR (a.arrears.data.stale = true)
+      OR ((a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.dueAt))
+    )
+  ) AS violating,
+  %[2]d AS maxretries_evaluation`, ArrearsRemindersTarget, maxArrearsEvaluationRetries)
 
 // noShowSettlementSpec is the one-row-per-booking convergence cypher: a
 // noShow booking carrying a positive noShowFeeCents needs its charge posted
@@ -450,10 +587,23 @@ RETURN
 // (cmd/wellness-app/ledger.go's KVGet(MemberAccountsBucket, identityKey)):
 // id.key was always the row's key, and still is — only which vertex the
 // engine anchors the evaluation on moved.
+//
+// The three arrears columns come off the account's own .arrears aspect and
+// are INFORMATIONAL — this lens drives no convergence. They are here because
+// the front-desk arrears grid and the member's statement both need to say
+// WHEN a balance fell due and WHEN a reminder went out, and this is already
+// the per-member row both read. arrearsReminderSentAt is the op's recorded
+// SEND INTENT (.arrears.sentAt, stamped on the commit that emitted the outbox
+// event); the adapter's delivery outcome is .arrearsNotification, which this
+// lens does not project. They are null for a member with no account, and for
+// an account nothing has yet evaluated.
 const memberAccountsSpec = `MATCH (id:identity)<-[:bookedBy]-(bk:booking)
 WITH DISTINCT id
 OPTIONAL MATCH (id)<-[:heldFor]-(a:wellnessaccount)
 RETURN
   id.key AS key,
   id.key AS identityKey,
-  a.key AS accountKey`
+  a.key AS accountKey,
+  a.arrears.data.dueAt AS arrearsDueAt,
+  a.arrears.data.remindedFor AS arrearsRemindedFor,
+  a.arrears.data.sentAt AS arrearsReminderSentAt`

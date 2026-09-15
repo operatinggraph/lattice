@@ -885,7 +885,13 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"MAX_WAITLIST_SIZE=200 is exhausted) and mints .status {value: waitlisted, rate, waitlistSlot, " +
 			"className, classStartsAt} — a caller may hold at most one LIVE claim per " +
 			"session regardless of which state it is in, since both ops claim the identical sessionBookerClaim " +
-			"guard (DoubleBooked either way). CancelBooking, beyond releasing the cancelling booking's own seat, " +
+			"guard (DoubleBooked either way). Both refuse CreditHold when the booker's wellness-ledger account carries " +
+			"an arrears episode a reminder has gone out for (.arrears.sentAt present, class wellnessAccountArrears — " +
+			"the account resolved from the booker's own heldFor in-link, never the payload; a wrong-class document is " +
+			"InvalidState): a reminded debtor claims no new seat, booked or waitlisted, on any leg, until the balance " +
+			"is paid or written off. dueAt alone (overdue, not yet reminded) is not a hold, and neither is a member with " +
+			"no account. The hold answers after the workplace confinement and before the schedule read, so a staffer " +
+			"elsewhere learns nothing and a held member gets no capacity oracle. CancelBooking, beyond releasing the cancelling booking's own seat, " +
 			"now ALSO runs find_promotion_candidate — a bounded kv.Links walk over the session's inbound " +
 			"forSession links picking the live waitlisted booking with the LOWEST waitlistSlot — and if one is " +
 			"found, hands it the just-freed seat directly (an OCC upsert of ITS OWN .status to " +
@@ -1021,7 +1027,8 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "CreateBooking — standard rate",
 				Payload: map[string]any{"session": "vtx.session.<NanoID>", "booker": "vtx.identity.<NanoID>"},
-				ExpectedOutcome: "Validates the session + booker are alive/typed, claims the first free seat " +
+				ExpectedOutcome: "Validates the session + booker are alive/typed, refuses CreditHold if the booker's wellness " +
+					"account carries a reminded arrears episode (.arrears.sentAt), claims the first free seat " +
 					"(SessionFull if none), and commits vtx.booking.<NanoID> (root {}) + .status {value: booked, " +
 					"rate: standard, seat, className, classStartsAt} + forSession + bookedBy links. Returns primaryKey.",
 			},
@@ -1039,7 +1046,8 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "JoinWaitlist — a full class",
 				Payload: map[string]any{"session": "vtx.session.<NanoID>", "booker": "vtx.identity.<NanoID>"},
-				ExpectedOutcome: "Same session/booker/rate validation as CreateBooking, but claims the first free " +
+				ExpectedOutcome: "Same session/booker/rate validation as CreateBooking (the CreditHold refusal included — " +
+					"a reminded debtor may not queue for a seat either), but claims the first free " +
 					"vtx.session.<s>.wl<n> slot instead of a seat (WaitlistFull once MAX_WAITLIST_SIZE=200 is " +
 					"exhausted) and commits vtx.booking.<NanoID> (root {}) + .status {value: waitlisted, " +
 					"rate: standard, waitlistSlot, className, classStartsAt} + forSession + bookedBy links. Rejected DoubleBooked if the " +
@@ -4621,13 +4629,87 @@ def session_locations(session_key):
             break
     return out
 
+def wellness_account_for_booker(booker_key):
+    # The wellness-ledger account held for this member, or None where no
+    # live one exists -- a member nothing has ever charged (the settlement
+    # playbooks open the account lazily on the first priced booking or
+    # no-show) owes nothing and cannot be on hold. The account is resolved
+    # from the GRAPH, never from the payload: wellness-ledger's
+    # WellnessCreateAccount is what writes the heldFor link (wellnessaccount
+    # -> identity), so the caller has no field to omit or forge that would
+    # reach a different account. The identity carries at most one live
+    # wellnessaccount (wellness-ledger's wellnessLedgerAccountGuard is a
+    # create-only per-member guard) but other verticals' ledgers anchor
+    # their accounts on other holder types, never on the bare identity, so
+    # the type filter below is defence in depth rather than a live
+    # disambiguation. Paged with the bounded first-live cursor loop
+    # (LIVE_LINK_PAGE_LIMIT x MAX_LIVE_LINK_PAGES = 32 links): a page can
+    # hold a tombstoned link ahead of the live one. The bound exceeds what
+    # the heldFor->identity writer can ever put on one member -- one link,
+    # never tombstoned -- so running out of pages cannot happen here and the
+    # final None below is unreachable; a copy of this walk into a relation
+    # with wider fan-in must fail closed on exhaustion the way
+    # actor_holds_operator does, not answer "no account".
+    cursor = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=heldFor epoch=none -- an identity carries
+        # at most one live heldFor in-link from a wellnessaccount, so this is
+        # never a keyspace scan. An account created concurrently with this
+        # booking has no arrears episode yet and so nothing to hold on.
+        page, cursor = kv.Links(booker_key, "heldFor", "in", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            if lk.sourceVertex.startswith("vtx.wellnessaccount."):
+                return lk.sourceVertex
+        if cursor == None:
+            return None
+    return None
+
+def require_no_credit_hold(booker_key):
+    # The credit hold: a member whose wellness account carries an arrears
+    # episode a reminder has already gone out for claims no new seat.
+    # wellness-ledger's EvaluateWellnessArrears writes .arrears.sentAt on the
+    # commit that emits the reminder's outbox event -- the SEND INTENT; the
+    # adapter's delivery outcome lands on .arrearsNotification, which this
+    # guard does not read -- and carries it across every write of the same
+    # episode, dropping it only when the evaluation finds the balance back at
+    # zero (the episode ends). So sentAt present means exactly "this member
+    # was reminded and still owes", while dueAt alone (overdue, not yet
+    # reminded) or a bare {evaluatedAt} (nothing owed) is not a hold. The
+    # rule holds on EVERY leg -- staff standing and member self alike --
+    # because the debt is the member's, not the caller's, and it binds both
+    # writers of a new claim on a session (CreateBooking and JoinWaitlist,
+    # through this shared preamble): a waitlisted claim is seated later with
+    # no further gate, so a hold on the booking alone would be a side door
+    # through the waitlist. The state is reached by the walk above rather
+    # than a caller-declared read: a hold that rested on the submitter's
+    # declaration would be a hold the submitter could decline to declare.
+    acct_key = wellness_account_for_booker(booker_key)
+    if acct_key == None:
+        return
+    # read-posture: (e) per-candidate follow-up read off the enumeration
+    # above -- the account is unknown until the heldFor walk resolves it, so
+    # its .arrears key is data-derived and undeclarable client-side.
+    arrears = kv.Read(acct_key + ".arrears")
+    if arrears == None or arrears.isDeleted:
+        return
+    # The CLASS, not just the key: wellness-ledger is the sole writer of a
+    # .arrears aspect and writes exactly this class, so a document of any
+    # other class here is a fault to refuse, never state to decide a hold on.
+    if not hasattr(arrears, "class") or getattr(arrears, "class") != "wellnessAccountArrears":
+        fail("InvalidState: this member's wellness account arrears aspect is not a wellnessAccountArrears")
+    sent_at = arrears.data.get("sentAt")
+    if sent_at != None:
+        fail("CreditHold: this member owes a balance a reminder went out for on " + str(sent_at)[:10] + "; it must be paid or written off before a new class is booked")
+
 def prepare_booking_common(state, op, p):
     # Shared CreateBooking / JoinWaitlist validation + guard/rate computation
     # — both mint a booking vertex anchored to a session, differing only in
     # which claim dimension (seat vs waitlist slot) they occupy. Factored so
-    # the self-scope check, workplace confinement, past-class guard,
-    # double-book guard and resident-rate lookup can never drift between the
-    # two entry points. Returns (session, sess_id, booker, booker_id, sched,
+    # the self-scope check, workplace confinement, credit hold, past-class
+    # guard, double-book guard and resident-rate lookup can never drift
+    # between the two entry points. Returns (session, sess_id, booker, booker_id, sched,
     # rate, lease_key, booker_guard_mut) — capacity is deliberately NOT read
     # here: only CreateBooking needs it (to bound claim_first_free_seat),
     # JoinWaitlist's own claim dimension has no capacity ceiling.
@@ -4667,6 +4749,14 @@ def prepare_booking_common(state, op, p):
     # so an exempted caller is booking for itself.
     if not workplace_exempt():
         require_workplace(session_locations(session), "cannot book a seat on " + session)
+
+    # The credit hold, in ORACLE order: after the workplace confinement, so a
+    # staffer at another building learns nothing about a member's debt from a
+    # refusal they were never entitled to reach; before the schedule read, so
+    # a held member's request never gets as far as a capacity or start-time
+    # answer that would leak which classes still have room. Both legs pass
+    # through here -- the debt is the member's whoever submits.
+    require_no_credit_hold(booker)
 
     # read-posture: (a) declared reads at CreateBooking/JoinWaitlist dispatch.
     sched = kv.Read(session + ".schedule")

@@ -3,25 +3,29 @@ package wellnessledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `wellnessaccount`
-// (WellnessCreateAccount), `wellnesstransaction` (WellnessDebitAccount, WellnessCreditAccount), and
-// the `wellnessLedgerAccountGuard` aspect-type declaration (the
-// identity-anchored uniqueness guard WellnessCreateAccount writes). Vertical-prefixed:
-// a DDL canonicalName is global across every installed package
-// (internal/pkgmgr/installer.go checkCanonicalNameCollision), and
+// (WellnessCreateAccount, EvaluateWellnessArrears), `wellnesstransaction`
+// (WellnessDebitAccount, WellnessCreditAccount), the
+// `wellnessLedgerAccountGuard` aspect-type declaration (the identity-anchored
+// uniqueness guard WellnessCreateAccount writes), the `wellnessAccountArrears`
+// aspect-type declaration (the account's arrears-episode state), and the
+// notification-outcome DDL pair (notifications.go) the bridge replies onto.
+// Vertical-prefixed: a DDL canonicalName is global across every installed
+// package (internal/pkgmgr/installer.go checkCanonicalNameCollision), and
 // loftspace-ledger already owns the bare `account` / `transaction` names.
 func DDLs() []pkgmgr.DDLSpec {
-	return []pkgmgr.DDLSpec{
+	return append([]pkgmgr.DDLSpec{
 		accountDDL(),
 		accountGuardAspectTypeDDL(),
+		accountArrearsAspectTypeDDL(),
 		transactionDDL(),
-	}
+	}, notificationDDLs()...)
 }
 
 func accountDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "wellnessaccount",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"WellnessCreateAccount"},
+		PermittedCommands: []string{"WellnessCreateAccount", arrearsOp},
 		Description: "Ledger account DDL. Vertex shape: vtx.wellnessaccount.<NanoID>, class=wellnessaccount, root data = {} " +
 			"(minimal, D5 — the balance is LENS-derived by summing transactions, never stored). WellnessCreateAccount{identityKey} " +
 			"mints the account under its OWN independently-generated NanoID (never reused from the identity — Core KV " +
@@ -29,17 +33,59 @@ func accountDDL() pkgmgr.DDLSpec {
 			"enforced by a deterministic create-only guard aspect on the IDENTITY (identityKey+\".wellnessLedgerAccount\", " +
 			"wellnessLedgerAccountGuard DDL) instead: a second WellnessCreateAccount for the same identity conflicts on that " +
 			"already-existing aspect key. Writes the heldFor link (account→identity, the account is the later-arriving " +
-			"vertex so it is the source — Contract #1 §1.1). Requires the identityKey be a live identity (no orphan accounts).",
+			"vertex so it is the source — Contract #1 §1.1). Requires the identityKey be a live identity (no orphan accounts). " +
+			"EvaluateWellnessArrears{accountKey} is the second operation on this DDL, dispatched by " +
+			"Weaver's wellnessArrearsReminders playbook rather than by a person: it replays the account's own postedTo " +
+			"history under a bounded budget, ages it with the same FIFO the member's statement runs (a refund credit " +
+			"retires the charge its wellnessrefund marker reverses; every other credit offsets the oldest still-open " +
+			"charge first; an unapplied credit carries forward as surplus), and records the resulting due date — the " +
+			"oldest open charge's postedAt plus the package's net term — on the account's .arrears aspect " +
+			"(wellnessAccountArrears DDL). Once that date has passed the evaluation records remindedFor = that date, " +
+			"and where NO reminder has yet gone out in this arrears episode (sentAt ABSENT) the same commit also " +
+			"stamps sentAt and fires an external.notification to the bridge's \"notification\" adapter keyed on " +
+			"(accountKey, dueAt). The send condition is sentAt's absence, not remindedFor's value: the unit is the " +
+			"EPISODE — from the charge that took the account from square to owing until the balance returns to zero — " +
+			"and a partial payment moves the head from one overdue charge to the next without starting a new episode, " +
+			"so exactly ONE notification goes out per episode however often the evaluation is re-dispatched, " +
+			"redelivered, or re-run over a moved head. A history that nets to nothing owed rewrites the aspect to " +
+			"{evaluatedAt} alone — this evaluation is the ONLY thing that ends an episode, since the ledger stores " +
+			"no balance for a posted entry to see reach zero — and where a payment to zero and a fresh charge both " +
+			"posted before it ran, the recorded send predates the new head (a reminder only ever goes out for a " +
+			"head a whole term old), so the evaluation drops remindedFor/sentAt as the finished episode's and the " +
+			"new one is reminded for on its own merits. An account whose history outruns the replay budget " +
+			"is not refused: the evaluation DEGRADES, recording historyTooLong (carrying dueAt/remindedFor/sentAt " +
+			"as they stood, clearing stale) and sending nothing, which holds the row quiet and visible rather than " +
+			"re-dispatching a doomed evaluation on every window; the next posted entry clears the flag and buys one " +
+			"more attempt. The member the notification addresses is resolved LIVE off the account's own heldFor " +
+			"out-link, never from the payload; an account with no live heldFor identity is still evaluated (the " +
+			"arrears fact is about the account), and the notification's params carry an identityKey only where " +
+			"one resolves. Restricted to Weaver's dispatch actor: the account it names is forwarded into a " +
+			"message a member actually receives.",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of the member this account is for (WellnessCreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per member) is enforced via the identity's .wellnessLedgerAccount guard aspect, not the account's own id."}},` +
-			`"required":["identityKey"]}`,
+			`{"identityKey":{"type":"string","description":"vtx.identity.<NanoID> of the member this account is for (WellnessCreateAccount; required there, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per member) is enforced via the identity's .wellnessLedgerAccount guard aspect, not the account's own id."},` +
+			`"accountKey":{"type":"string","description":"EvaluateWellnessArrears only: vtx.wellnessaccount.<NanoID> of the account whose arrears are being aged (required there, validated alive)."}},` +
+			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> of the created account (the operation's principal key) — the caller must read this from the ACCEPTED reply, since the id can no longer be derived from identityKey."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> — the created account on WellnessCreateAccount (the caller must read it from the ACCEPTED reply, since the id can no longer be derived from identityKey), or the evaluated account on EvaluateWellnessArrears."}}}`,
 		FieldDescription: map[string]string{
-			"identityKey": "Full vtx.identity.<NanoID> key of the member the account is opened for. WellnessCreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the identity's .wellnessLedgerAccount guard aspect (one account per member) and the heldFor link (account→identity).",
+			"identityKey": "WellnessCreateAccount only, and required there. Full vtx.identity.<NanoID> key of the member the account is opened for. WellnessCreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the identity's .wellnessLedgerAccount guard aspect (one account per member) and the heldFor link (account→identity). EvaluateWellnessArrears takes no identityKey field: the identity is resolved live off that same heldFor link, and carried into the notification params only where one resolves.",
+			"accountKey":  "EvaluateWellnessArrears only, and required there. Full vtx.wellnessaccount.<NanoID> key of the account to age. Validated alive; its postedTo history is replayed under a bounded budget and the FIFO-oldest open charge's due date is recorded on the account's .arrears aspect.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:    "EvaluateWellnessArrears — age a member's account and remind once it is overdue",
+				Payload: map[string]any{"accountKey": "vtx.wellnessaccount.<NanoID>"},
+				ExpectedOutcome: "Validates the account is alive, replays its postedTo history under the evaluation budget and ages it " +
+					"FIFO. Writes vtx.wellnessaccount.<NanoID>.arrears = {evaluatedAt, dueAt?, remindedFor?, sentAt?} — {evaluatedAt} " +
+					"alone when nothing is owed. When the oldest open charge's due date has passed it stamps remindedFor = " +
+					"that date, and where no reminder has yet gone out in this episode (sentAt absent) ALSO stamps sentAt and " +
+					"emits external.notification keyed <accountKey>:<dueAt>, with an identityKey in its params only where " +
+					"the account's own heldFor link resolves to a live identity. A re-run recomputes the head, finds sentAt " +
+					"already recorded, and sends nothing. A history past the replay budget records historyTooLong instead, " +
+					"carrying what was already recorded and sending nothing. Rejects AuthDenied for any actor but Weaver's " +
+					"dispatch actor and UnknownAccount for an absent or tombstoned account.",
+			},
 			{
 				Name:    "WellnessCreateAccount — open the ledger account for a member",
 				Payload: map[string]any{"identityKey": "vtx.identity.<NanoID>"},
@@ -91,9 +137,102 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
-// aspectDeclarationOnlyScript is the declaration-only Starlark for
-// wellnessLedgerAccountGuard — written by WellnessCreateAccount's own op handler,
-// never dispatched as an operation in its own right.
+// accountArrearsAspectTypeDDL declares the .arrears aspect (class
+// wellnessAccountArrears) on the ACCOUNT — the arrears-episode state the
+// wellnessArrearsReminders convergence lens reads, and the marker that records
+// which episode a reminder has already gone out for.
+//
+// Its LIFETIME, end to end. There is none at WellnessCreateAccount: a brand-new
+// account owes nothing, and its missing evaluatedAt is exactly what opens the
+// convergence gap once, so the first evaluation writes the aspect. From there
+// TWO kinds of writer maintain it, each conditioned on one hydrated revision
+// (the key is declared optionalReads by both DDLs' derive_reads and by every
+// dispatcher, so a bare update is auto-conditioned and retry-eligible rather
+// than last-write-wins):
+//
+//   - EvaluateWellnessArrears recomputes the head from the account's own
+//     history and rewrites the aspect outright — {dueAt, evaluatedAt} plus the
+//     episode's send record while a charge is open, {evaluatedAt} alone once
+//     the history nets to nothing owed. An episode ends ONLY in this op (this
+//     ledger stores no balance for a posted entry to see reach zero), in one
+//     of two ways: the history nets to nothing owed, or the head it finds
+//     posted at or after the recorded sentAt — a payment to zero and a fresh
+//     charge both posted before the evaluation ran, so the send belongs to
+//     the finished episode and is dropped with its remindedFor. stale is never
+//     carried across an evaluation, and neither is historyTooLong. It carries
+//     sentAt forward for as long as the episode runs: that field, not
+//     remindedFor, is what says a reminder has already gone out for THIS
+//     episode, so a head that a partial payment moved to another overdue
+//     charge is recorded (remindedFor) without sending again.
+//   - The one evaluation that does NOT recompute is the degraded one: an
+//     account whose postedTo history outran the replay budget records
+//     historyTooLong, carrying dueAt/remindedFor/sentAt untouched and dropping
+//     stale, and sends nothing. The flag suppresses both the convergence gap
+//     and the timer, so the row goes quiet rather than re-dispatching a doomed
+//     evaluation on every window; it is dropped by the next posted entry's
+//     carry, which buys exactly one more attempt.
+//   - EVERY WellnessDebitAccount / WellnessCreditAccount against an account
+//     that carries the aspect marks it stale (carrying every other field, the
+//     send record included): with no balance to reason from, an entry can
+//     tell neither an episode opening from one continuing nor a clearing
+//     payment from a partial one, so it asks for the recomputation and never
+//     guesses. Against an account with no aspect it writes nothing — such an
+//     account is already opening the never-evaluated gap.
+//
+// Non-sensitive: dates and two booleans on a vtx.wellnessaccount (not an
+// identity), no money and no PII. Declaration-only: written by the three ops
+// above, never dispatched as an operation in its own right. Never tombstoned
+// (an account is never tombstoned).
+func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "wellnessAccountArrears",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"WellnessDebitAccount", "WellnessCreditAccount", arrearsOp},
+		Description: "Per-account arrears-episode aspect. Stored as vtx.wellnessaccount.<NanoID>.arrears " +
+			"(class wellnessAccountArrears) = {evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?, historyTooLong?}. Non-sensitive. " +
+			"dueAt is the FIFO-oldest still-open charge's postedAt plus the ledger's net term — a RECORDED time " +
+			"fact, written by the op, never a clock a lens reads. remindedFor names the dueAt the evaluation has " +
+			"acknowledged as passed — it is what closes the convergence gap; sentAt is the instant the reminder's " +
+			"outbox event was committed (the SEND INTENT — the adapter's delivery outcome is .arrearsNotification), " +
+			"and its ABSENCE is the send condition, which is what makes the notification once-per-EPISODE rather " +
+			"than once-per-head or once-per-convergence-window. historyTooLong means the account's history outran the " +
+			"evaluation's replay budget, so no head could be computed: it suppresses both the gap and the timer (the " +
+			"row stays visible but quiet for an operator) and is dropped by the next posted entry, which buys one " +
+			"further attempt. stale means what is recorded may no longer describe the account — EVERY posted entry " +
+			"sets it, because this ledger stores no balance for an entry to reason from — and is a request for a " +
+			"fresh EvaluateWellnessArrears, which rewrites the aspect and so never carries it forward. Written by " +
+			"WellnessDebitAccount / WellnessCreditAccount (mark stale; mint nothing where absent) and " +
+			"EvaluateWellnessArrears (recomputes the head; ends the episode at {evaluatedAt} alone when nothing is " +
+			"owed, and drops a send record that predates the head it finds — the boundary between an episode paid " +
+			"off and the next one opened before any evaluation ran). Read by the wellnessArrearsReminders " +
+			"convergence lens and projected for the front desk and the " +
+			"member's statement by wellnessMemberAccounts. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"evaluatedAt":{"type":"string"},"dueAt":{"type":"string"},"remindedFor":{"type":"string"},"sentAt":{"type":"string"},"stale":{"type":"boolean"},"historyTooLong":{"type":"boolean"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"evaluatedAt":    "RFC3339 instant (canonical UTC) the arrears state was last written by an evaluation. Its ABSENCE is what opens the convergence gap for an account nothing has ever evaluated.",
+			"dueAt":          "RFC3339 instant (canonical UTC) the FIFO-oldest still-open charge falls overdue: that charge's own postedAt plus the ledger's net term. Absent when the account owes nothing.",
+			"remindedFor":    "The dueAt the last evaluation acknowledged as passed. Equal to dueAt closes the convergence gap; different (or absent) leaves it open for a recorded lapse to re-open.",
+			"sentAt":         "RFC3339 instant (canonical UTC) the reminder's outbox event was committed for this arrears episode — the send intent the front-desk grid and the member's statement show, and the fact a booking hold reads. Its ABSENCE is what lets the next passed deadline send; it is carried across every write of a live episode and dropped only by the evaluation that finds the episode over: no open charge, or a head that posted at or after this instant (the balance returned to zero and a new charge opened a fresh episode before an evaluation ran).",
+			"stale":          "True when what is recorded may no longer describe the account — every posted entry sets it, since the ledger stores no balance to reason from. Opens the convergence gap; cleared by the evaluation that recomputes the head.",
+			"historyTooLong": "True when the account's postedTo history outran the evaluation's bounded replay budget, so no FIFO head could be computed. Suppresses BOTH the convergence gap and the freshness timer — the row stays in the read model for an operator to see, without re-dispatching an evaluation that cannot succeed. Dropped by the next posted entry (which also marks the state stale), buying exactly one more attempt.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "account arrears aspect — overdue, reminded once",
+				Payload:         map[string]any{"evaluatedAt": "2026-08-22T09:00:00Z", "dueAt": "2026-08-06T14:20:00Z", "remindedFor": "2026-08-06T14:20:00Z", "sentAt": "2026-08-22T09:00:00Z"},
+				ExpectedOutcome: "Stored as vtx.wellnessaccount.<NanoID>.arrears; written by EvaluateWellnessArrears on the commit that also emitted the notification. remindedFor = dueAt closes the gap, so no second reminder goes out for this episode.",
+			},
+		},
+	}
+}
+
+// aspectDeclarationOnlyScript is the declaration-only Starlark for the
+// package's aspect-type DDLs — wellnessLedgerAccountGuard, wellnessAccountArrears
+// and wellnessAccountArrearsNotification are written by the account, transaction
+// and notification ops' own handlers, never dispatched as operations in their
+// own right.
 const aspectDeclarationOnlyScript = `
 def execute(state, op):
     fail("aspect-type DDL: not an operation handler: " + op.operationType)
@@ -136,7 +275,13 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"class price or no-show fee reversed by wellnessRefundSettlement) — all three reduce the derived balance identically, but the " +
 			"wellnessLedgerHistory lens projects reason so a reader never mistakes a refund or a waiver for a fresh payment. " +
 			"reason:\"waiver\" and reason:\"refund\" are both rejected on a self-scoped (member) credit — post_entry's own " +
-			"authContextTarget branch — since a member may pay down their own balance but never forgive or refund it.",
+			"authContextTarget branch — since a member may pay down their own balance but never forgive or refund it. " +
+			"Every entry, debit or credit, ALSO marks the account's .arrears episode state (wellnessAccountArrears DDL) " +
+			"stale where it exists — carrying every other field, the episode's send record included — and mints " +
+			"nothing where it does not: with no stored balance an entry cannot tell an episode opening from one " +
+			"continuing, so it asks EvaluateWellnessArrears to recompute rather than guess. The write is a bare update " +
+			"auto-conditioned on the revision the key hydrated at, and the DDL's own derive_reads hydrates it " +
+			"whatever the submitter declared.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"accountKey":{"type":"string","description":"vtx.wellnessaccount.<NanoID> the transaction posts to (WellnessDebitAccount/WellnessCreditAccount; required, validated alive)."},` +

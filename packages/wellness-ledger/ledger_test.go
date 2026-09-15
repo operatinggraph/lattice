@@ -50,6 +50,17 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "WellnessCreateAccount", Scope: "any"},
 			{OperationType: "WellnessDebitAccount", Scope: "any"},
 			{OperationType: "WellnessCreditAccount", Scope: "any"},
+			// Deliberately the SAME grant Weaver holds for EvaluateWellnessArrears
+			// (arrearsWeaverCapDoc, arrears_test.go). That is what makes the
+			// forged-send vector attributable: the refusal can only come from the
+			// script's own actor guard, never from a missing or narrower grant.
+			{OperationType: "EvaluateWellnessArrears", Scope: "any"},
+			// The bridge's service actor is operator-equivalent, and this stands
+			// in for it: the replyOp is granted to operator/Scope:"any" by the
+			// package (notifications.go), so step 3 authorizes any operator that
+			// submits it. Everything that constrains WHAT such a submission can
+			// touch lives in the script's own validation of externalRef.
+			{OperationType: "RecordWellnessArrearsReminderNotification", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -84,6 +95,7 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install wellness-ledger: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, ledgerCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, arrearsWeaverCapDoc())
 	// The operator grant is only half the claim — the workplace-confinement
 	// guard reads the holdsRole LINK to decide whether its caller is root, not
 	// the cap doc's Roles (mirrors wellness-domain's own fixture).
@@ -412,6 +424,20 @@ func createSession(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 // to the session's capacity, the booker's own double-book guard, and the
 // booker's slot cells over the session's window are all optionalReads
 // (claim_first_free_seat / bookerSlotClaim, ddls.go).
+// bookingEnumerations resolves CreateBooking's declared enumerations
+// (wellness-domain opmetas.go) for an envelope this package submits as the
+// operator: the {actor} hubs through testutil.DeclaredEnumerations, and the
+// {payload.booker} hub — the credit hold's heldFor in-walk off the member —
+// from the booker the caller names.
+func bookingEnumerations(t *testing.T, bookerKey string) []processor.EnumerationHint {
+	t.Helper()
+	hints, skipped := testutil.DeclaredEnumerationsWithSkips("CreateBooking", ledgerActorKey, wellnessdomain.OpMetas())
+	if len(skipped) != 1 || skipped[0] != "{payload.booker}" {
+		t.Fatalf("CreateBooking declares enumeration hubs this helper does not resolve: %v (want exactly {payload.booker})", skipped)
+	}
+	return append(hints, processor.EnumerationHint{Hub: bookerKey, Relation: "heldFor", Direction: "in"})
+}
+
 func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, sessionKey, bookerKey string) string {
 	t.Helper()
 	reqID := testutil.GenReqID(label)
@@ -440,7 +466,11 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		SubmittedAt:   "2026-06-25T13:00:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"session":"` + sessionKey + `","booker":"` + bookerKey + `"}`),
-		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CreateBooking", ledgerActorKey, wellnessdomain.OpMetas()),
+		// The credit hold's heldFor in-walk is templated on {payload.booker},
+		// which DeclaredEnumerations cannot resolve; it is added from the
+		// payload here, and the skipped set is pinned so a new template
+		// cannot retire a walk silently.
+		ContextHint: &processor.ContextHint{Enumerations: bookingEnumerations(t, bookerKey),
 			Reads:         []string{sessionKey, sessionKey + ".schedule", bookerKey},
 			OptionalReads: optionalReads,
 		},

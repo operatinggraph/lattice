@@ -5,12 +5,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract
 // #10 §10.8): NoShowSettlementTarget's and ClassPriceSettlementTarget's two
 // independent missing_account/missing_charge (resp. missing_price_charge)
-// gaps each, plus RefundSettlementTarget's single missing_refund gap —
-// mirroring clinic-domain/clinic-ledger's identical shape but self-contained
-// inside wellness-ledger — it already depends on wellness-domain (for
+// gaps each, RefundSettlementTarget's single missing_refund gap — mirroring
+// clinic-domain/clinic-ledger's identical shape but self-contained inside
+// wellness-ledger — it already depends on wellness-domain (for
 // bookingRef/priceBookingRef/refundRef validation) and can read
 // booking/session/wellnessrefund data directly, so no separate domain-side
-// package or cross-package dependency is needed.
+// package or cross-package dependency is needed — and ArrearsRemindersTarget's
+// single missing_evaluation gap (the cafe-ledger arrears mechanism).
 //
 //   - NoShowSettlementTarget's missing_account → directOp(WellnessCreateAccount),
 //     opening the booker's account lazily on first no-show rather than
@@ -40,6 +41,43 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     because its minting op already resolved a live accountKey off the
 //     original charge's postedTo link before minting it — unlike the two
 //     targets above, there is no "account might not exist yet" case here.
+//   - ArrearsRemindersTarget's missing_evaluation → directOp
+//     (EvaluateWellnessArrears) over the account. The op recomputes the
+//     FIFO-oldest open charge, rewrites .arrears, and — where the recomputed
+//     due date has passed and nothing has gone out for it — fires the
+//     notification. Whichever of the three ways the gap opened (never
+//     evaluated, marked stale by a posted entry, or a timer fired at a due
+//     date nothing was reminded for), the remediation is the same
+//     recomputation, which is why this target carries ONE gap rather than
+//     three. Params{accountKey: row.entityKey} names only the anchor's own
+//     key: the member the reminder addresses is NOT routed through Params —
+//     an optional-hop column is null on every row where the hop misses, and
+//     the strategist refuses to dispatch any row whose Params reference a
+//     null column (internal/weaver/strategist.go), which would silently
+//     starve exactly the accounts most worth aging. The op resolves the
+//     identity itself, live, off the account's own heldFor out-link.
+//     Reads[row.entityKey] routes the account ROOT (the liveness guard's
+//     hydration); OptionalReads[row.entityKey.arrears] routes the account's
+//     own arrears state — absence-tolerant because no account carries the
+//     aspect until an evaluation has run on it, and a required read's
+//     absence would HydrationMiss the very first evaluation of each one.
+//     That declaration is what auto-conditions the op's own .arrears write on
+//     the revision it was hydrated at (Contract #3 §3.2); the account DDL's
+//     derive_reads returns the same key whatever a dispatcher declares, so
+//     this states the read set and that guarantees it. Enumerations declares
+//     the bounded postedTo replay the op runs to recompute the head and the
+//     heldFor walk that resolves the identity — both nameable up front off
+//     the row's own account; the per-transaction .entry reads and the
+//     per-credit settlesRefund → reverses hops the replay discovers are not,
+//     which is exactly the class-(e) split (read_drift_baseline.txt carries
+//     the two link-discovered walks).
+//
+// The three settlement dispatches of WellnessDebitAccount / WellnessCreditAccount
+// each declare OptionalReads[row.accountKey.arrears] beside their Reads: every
+// posted entry marks the account's recorded arrears state stale (post_entry,
+// scripts.go), and that write is a bare update auto-conditioned only for a key
+// the dispatch hydrated. The transaction DDL's own derive_reads guarantees the
+// key whatever a dispatcher declares; the declaration here documents it.
 //
 // A booking re-marked away from noShow (SetBookingAttendance is re-markable,
 // unlike clinic's terminal appointment status) drops noShowFeeCents from its
@@ -92,7 +130,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// ('No-show fee', never a vtx.* key), and declaring it here
 					// fails step4 hydrate the same way clinic-ledger's identical
 					// gap already hit (see clinic-ledger/targets.go's doc comment).
-					Reads: []string{"row.accountKey", "row.bookingKey"},
+					Reads:         []string{"row.accountKey", "row.bookingKey"},
+					OptionalReads: []string{"row.accountKey.arrears"},
 				},
 			},
 		},
@@ -132,7 +171,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// step4 hydrate the same way clinic-ledger's identical memo
 					// field already hit (see clinic-ledger/targets.go's doc
 					// comment, and this file's own missing_charge gap above).
-					Reads: []string{"row.accountKey", "row.bookingKey"},
+					Reads:         []string{"row.accountKey", "row.bookingKey"},
+					OptionalReads: []string{"row.accountKey.arrears"},
 				},
 			},
 		},
@@ -161,7 +201,33 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.amountCents", "refundRef": "row.refundKey", "memo": "row.memo", "reason": "refund"},
 					// memo excluded from Reads deliberately — same rationale as
 					// NoShowSettlementTarget's gap above.
-					Reads: []string{"row.accountKey", "row.refundKey"},
+					Reads:         []string{"row.accountKey", "row.refundKey"},
+					OptionalReads: []string{"row.accountKey.arrears"},
+				},
+			},
+		},
+		{
+			TargetID: ArrearsRemindersTarget,
+			Description: "A member who owes money on their wellness account past the net term is reminded once, " +
+				"about the charge that has actually been sitting unpaid the longest. Paying it off ends the " +
+				"episode; a new charge after that starts a fresh one.",
+			LensRef: ArrearsRemindersTarget,
+			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_evaluation": {
+					Action:    "directOp",
+					Operation: arrearsOp,
+					// EvaluateWellnessArrears is unique to this package's
+					// wellnessaccount vertexType DDL, but pinned regardless — the
+					// same defensive shape the three targets above use, and the
+					// operationType namespace is global (permissions.go).
+					Class:         "wellnessaccount",
+					Params:        map[string]string{"accountKey": "row.entityKey"},
+					Reads:         []string{"row.entityKey"},
+					OptionalReads: []string{"row.entityKey.arrears"},
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "row.entityKey", Relation: "postedTo", Direction: "in"},
+						{Hub: "row.entityKey", Relation: "heldFor", Direction: "out"},
+					},
 				},
 			},
 		},

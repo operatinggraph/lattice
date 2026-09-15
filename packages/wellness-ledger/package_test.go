@@ -32,33 +32,33 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // this test rather than reaching an install, where the same change is a silent
 // capability or read-model shift.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 3; got != want {
+	if got, want := len(Package.DDLs), 6; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 5; got != want {
+	if got, want := len(Package.Permissions), 7; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 5; got != want {
+	if got, want := len(Package.Lenses), 6; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 3; got != want {
+	if got, want := len(Package.WeaverTargets), 4; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 3; got != want {
+	if got, want := len(Package.OpMetas), 5; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
-	wantDDLs := []string{"wellnessaccount", "wellnessLedgerAccountGuard", "wellnesstransaction"}
+	wantDDLs := []string{"wellnessaccount", "wellnessLedgerAccountGuard", "wellnessAccountArrears", "wellnesstransaction", "wellnessArrearsNotificationOp", "wellnessAccountArrearsNotification"}
 	for i, d := range Package.DDLs {
 		if i < len(wantDDLs) && d.CanonicalName != wantDDLs[i] {
 			t.Errorf("DDLs[%d]: got %q, want %q", i, d.CanonicalName, wantDDLs[i])
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"WellnessCreateAccount", "any"}, {"WellnessCreateAccount", "self"}, {"WellnessDebitAccount", "any"}, {"WellnessCreditAccount", "any"}, {"WellnessCreditAccount", "self"}}
+	wantPerms := []struct{ op, scope string }{{"WellnessCreateAccount", "any"}, {"WellnessCreateAccount", "self"}, {"WellnessDebitAccount", "any"}, {"WellnessCreditAccount", "any"}, {"WellnessCreditAccount", "self"}, {"EvaluateWellnessArrears", "any"}, {"RecordWellnessArrearsReminderNotification", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break
@@ -69,14 +69,14 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantLenses := []string{"wellnessLedgerHistory", "wellnessMemberAccounts", "wellnessNoShowSettlement", "wellnessClassPriceSettlement", "wellnessRefundSettlement"}
+	wantLenses := []string{"wellnessLedgerHistory", "wellnessMemberAccounts", "wellnessNoShowSettlement", "wellnessClassPriceSettlement", "wellnessRefundSettlement", "wellnessArrearsReminders"}
 	for i, d := range Package.Lenses {
 		if i < len(wantLenses) && d.CanonicalName != wantLenses[i] {
 			t.Errorf("Lenses[%d]: got %q, want %q", i, d.CanonicalName, wantLenses[i])
 		}
 	}
 
-	wantTargets := []string{"wellnessNoShowSettlement", "wellnessClassPriceSettlement", "wellnessRefundSettlement"}
+	wantTargets := []string{"wellnessNoShowSettlement", "wellnessClassPriceSettlement", "wellnessRefundSettlement", "wellnessArrearsReminders"}
 	for i, d := range Package.WeaverTargets {
 		if i < len(wantTargets) && d.TargetID != wantTargets[i] {
 			t.Errorf("WeaverTargets[%d]: got %q, want %q", i, d.TargetID, wantTargets[i])
@@ -130,4 +130,38 @@ func TestPackage_RefundSettlementPostsRefundReason(t *testing.T) {
 		return
 	}
 	t.Fatalf("%s target not found in Package.WeaverTargets", RefundSettlementTarget)
+}
+
+// TestPackage_ArrearsRemindersParamsNameOnlyTheAnchor pins the one dispatch
+// shape the arrears playbook may take: Params names the row's own entityKey
+// and nothing reached by a walk. The member the reminder addresses is an
+// OPTIONAL hop off the account (heldFor), and Weaver's strategist refuses to
+// dispatch any row whose Params reference a null column — so routing the
+// identity through Params would silently starve every account whose hop
+// misses, exactly the accounts most worth aging. The op resolves it from
+// state instead (scripts.go identity_for_account).
+func TestPackage_ArrearsRemindersParamsNameOnlyTheAnchor(t *testing.T) {
+	for _, target := range Package.WeaverTargets {
+		if target.TargetID != ArrearsRemindersTarget {
+			continue
+		}
+		gap, ok := target.Gaps["missing_evaluation"]
+		if !ok {
+			t.Fatalf("%s target: no missing_evaluation gap declared", ArrearsRemindersTarget)
+		}
+		if got, want := gap.Operation, arrearsOp; got != want {
+			t.Fatalf("%s target: missing_evaluation dispatches %q, want %q", ArrearsRemindersTarget, got, want)
+		}
+		if got, want := len(gap.Params), 1; got != want {
+			t.Fatalf("%s target: missing_evaluation Params = %v, want exactly {accountKey: row.entityKey}", ArrearsRemindersTarget, gap.Params)
+		}
+		if got, want := gap.Params["accountKey"], "row.entityKey"; got != want {
+			t.Fatalf("%s target: Params[\"accountKey\"] = %q, want %q — the anchor's own key, never a walked column", ArrearsRemindersTarget, got, want)
+		}
+		if got, want := gap.OptionalReads, []string{"row.entityKey.arrears"}; len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("%s target: OptionalReads = %v, want %v (absence-tolerant: no account carries the aspect before its first evaluation)", ArrearsRemindersTarget, got, want)
+		}
+		return
+	}
+	t.Fatalf("%s target not found in Package.WeaverTargets", ArrearsRemindersTarget)
 }

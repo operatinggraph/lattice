@@ -23,8 +23,25 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // charge, the one shape post_entry (scripts.go) requires a non-blank memo for.
 // Its schema therefore lists memo as required: a descriptor that let the field
 // go empty would render a form whose submission the op refuses.
+//
+// The WellnessDebitAccount and WellnessCreditAccount dispatches ALSO declare
+// the account's own .arrears aspect in OptionalReads: post_entry (scripts.go)
+// marks it stale on every posted entry, and that write is a bare update
+// auto-conditioned on the step-4 hydrated revision only for a key the dispatch
+// hydrated (Contract #3 §3.2). Absence-tolerant, because no account carries
+// the aspect until an evaluation has run on it. The declaration DOCUMENTS that
+// read set; the transaction DDL's own derive_reads GUARANTEES it for a
+// submitter that omitted it.
+//
+// EvaluateWellnessArrears and the arrears notification replyOp carry a bare
+// OpMetaSpec — no Presentation, no Dispatch — for discoverability alone, parity
+// with wellness-reminders' own reminder + replyOp metas. Neither has a form to
+// render: Weaver's actuator resolves the first from the §10.8 playbook and the
+// bridge resolves the second from the event body, so neither reads a
+// descriptor. The S1 gate does not ask them for one either — both are granted
+// to `operator` alone.
 func OpMetas() []pkgmgr.OpMetaSpec {
-	return []pkgmgr.OpMetaSpec{
+	return append([]pkgmgr.OpMetaSpec{
 		{
 			OperationType: "WellnessCreateAccount",
 			// refusal-courtesy(facet): AccountAlreadyExists: none — no identity/member entity lens projects whether a wellnessaccount already exists for this identity; a re-submission returns AccountAlreadyExists cleanly (idempotent, the same steady state wellness-app's own ensureLedgerAccount swallows).
@@ -74,8 +91,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "accountKey",
 				TargetType:  "wellnessaccount",
 				Reads:       []string{"{payload.accountKey}"},
+				// The account's own arrears episode state post_entry marks stale
+				// (absence-tolerant: absent until the first evaluation).
+				OptionalReads: []string{"{payload.accountKey}.arrears"},
 			},
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — AuthContext "standing" means Facet never attaches a target to this dispatch, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, scripts.go) only runs when a target is present
+			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column
 		},
 		{
 			OperationType: "WellnessCreditAccount",
@@ -102,8 +123,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "accountKey",
 				TargetType:  "wellnessaccount",
 				Reads:       []string{"{payload.accountKey}"},
+				// The account's own arrears episode state post_entry marks stale
+				// (absence-tolerant: absent until the first evaluation).
+				OptionalReads: []string{"{payload.accountKey}.arrears"},
 			},
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — AuthContext "standing" means Facet never attaches a target to this dispatch, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, scripts.go) only runs when a target is present
+			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column
 		},
-	}
+		{OperationType: arrearsOp},
+	}, notificationOpMetas()...)
 }

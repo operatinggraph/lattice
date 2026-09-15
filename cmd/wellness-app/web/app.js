@@ -483,13 +483,55 @@ function priceLabel(cents) {
   return cents > 0 ? money(cents) : "Free";
 }
 
-// ledgerBalanceLine mirrors cafe-app's own helper of the same name — the
-// owed/credit/paid-in-full split, never a raw signed cents value.
-function ledgerBalanceLine(balanceCents) {
-  const cents = balanceCents || 0;
-  if (cents > 0) return "Balance owed: " + money(cents);
+// statementLine renders a /api/ledger response's balanceCents plus its
+// dueDate/isOverdue/daysOverdue/reminderSentAt fields (cmd/wellness-app/
+// ledger.go's handleLedger) — the owed/credit/paid-in-full split cafe-app's
+// own ledgerBalanceLine gives, plus, once something is owed, the aging
+// state: a due date, how many days overdue, and whether a reminder has gone
+// out for the current arrears episode. The reminder clause stands on its
+// own, never gated on isOverdue: a part-payment can move the balance back
+// inside its term while the episode's reminder — and the booking hold it
+// carries — still stands (CreditHold binds on reminderSentAt alone,
+// whatever isOverdue says, packages/wellness-domain/ddls.go). Every date
+// renders from the same UTC calendar-day slice the op's own refusal text
+// uses (sentAt.slice(0, 10)) — never a locale rendering, which can name a
+// different day depending on the reader's time zone. The reminder clause
+// never promises the hold lifts the instant the balance is paid: post_entry
+// carries the recorded .arrears.sentAt forward (stale) on every write, and
+// only the NEXT EvaluateWellnessArrears evaluation clears it — a
+// dispatch-latency window, usually seconds to under a minute, not
+// immediate. Plain text: every call site assigns the result to
+// .textContent, never innerHTML.
+function statementLine(data) {
+  const cents = (data && data.balanceCents) || 0;
   if (cents < 0) return "Credit balance: " + money(-cents);
-  return "Balance: $0.00 (paid in full)";
+  if (cents === 0) return "Balance: $0.00 (paid in full)";
+  let line = "Balance owed: " + money(cents);
+  if (data.dueDate) line += " · due " + data.dueDate.slice(0, 10);
+  if (data.isOverdue) {
+    const days = Number(data.daysOverdue) || 0;
+    line += " · " + days + (days === 1 ? " day" : " days") + " overdue";
+  }
+  if (data.reminderSentAt) {
+    line += " · a reminder was sent " + data.reminderSentAt.slice(0, 10) +
+      " — booking is on hold; paying it off lifts the hold once the next arrears check runs (usually within a minute)";
+  }
+  return line;
+}
+
+// bookingGate mirrors cafe-app's own openTabGate for a wellness member's
+// ledger/arrears row: "hold" when a reminder has gone out for the current
+// arrears episode (reminderSentAt) — CreateBooking/JoinWaitlist refuse
+// CreditHold on exactly this condition, whatever isOverdue says, since a
+// part-payment can move the balance back inside its term while the
+// episode's reminder still stands and the op holds until it clears;
+// "confirm" when overdue but not yet reminded — the desk's existing
+// ask-first courtesy, unchanged by this fire; "open" otherwise (no row, in
+// term, in credit).
+function bookingGate(ledger) {
+  if (ledger && ledger.reminderSentAt) return "hold";
+  if (ledger && ledger.isOverdue) return "confirm";
+  return "open";
 }
 
 // ensureLedgerAccount best-effort opens a member's wellness ledger account
@@ -849,6 +891,8 @@ async function loadSchedule() {
 // refusal-courtesy: JoinWaitlist/SessionTooLong: none — same gap as CreateBooking's SessionTooLong above.
 // refusal-courtesy: CreateBooking/InvalidState: none — a missing schedule aspect on the session being viewed is a read-model correctness fault, not a choice this form's controls could gate.
 // refusal-courtesy: JoinWaitlist/InvalidState: none — same gap as CreateBooking's InvalidState above.
+// refusal-courtesy: CreateBooking/CreditHold: hide — renderSchedule loads the signed-in member's own /api/ledger and passes bookingGate(myBalanceCache) into scheduleGroups/scheduleCard, which replaces the Book/Join waitlist button with an on-hold note once the gate is "hold"; the note says the hold lifts once the next arrears check runs (usually within a minute), never that paying clears it immediately — the recorded reminder is carried forward (stale) until the next EvaluateWellnessArrears evaluation.
+// refusal-courtesy: JoinWaitlist/CreditHold: hide — same gate and copy as CreateBooking's CreditHold above; scheduleCard serves both ops from one card.
 async function renderSchedule() {
   const grid = document.getElementById("schedule-grid");
   const summary = document.getElementById("schedule-summary");
@@ -897,7 +941,17 @@ async function renderSchedule() {
     // Affordance only — worst case the button offers a class CreateBooking /
     // JoinWaitlist will still correctly refuse.
   }
-  grid.innerHTML = scheduleGroups(sessions, myStatusBySession, residency.approved);
+  // The signed-in member's own arrears gate (CreditHold) — refreshed on
+  // every Schedule render, the same self /api/ledger renderMyBalance loads,
+  // so a payment made on My Classes lifts a hold here without a full page
+  // reload. Best-effort like the bookings fetch above: a failed read leaves
+  // the gate "open" and CreateBooking/JoinWaitlist still correctly refuse.
+  try {
+    myBalanceCache = await appGet("/api/ledger");
+  } catch (_) {
+    myBalanceCache = null;
+  }
+  grid.innerHTML = scheduleGroups(sessions, myStatusBySession, residency.approved, bookingGate(myBalanceCache), myBalanceCache);
   sessions.forEach((se) => {
     const btn = document.getElementById("book-" + domId(se.sessionKey));
     if (!btn) return;
@@ -1001,7 +1055,7 @@ function seriesCountKey(se) {
 // rather than one flat pile of cards. hasApprovedLease is the viewer's own
 // residency, passed down so every card prices at the rate this viewer will be
 // charged.
-function scheduleGroups(sessions, myStatusBySession, hasApprovedLease) {
+function scheduleGroups(sessions, myStatusBySession, hasApprovedLease, gate, ledger) {
   const seriesCounts = upcomingSeriesCounts(sessions);
   let html = "";
   let lastDay = null;
@@ -1011,7 +1065,7 @@ function scheduleGroups(sessions, myStatusBySession, hasApprovedLease) {
       html += '<div class="day-header">' + esc(fmtDay(se.startsAt)) + "</div>";
       lastDay = day;
     }
-    html += scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease);
+    html += scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease, gate, ledger);
   }
   return html;
 }
@@ -1050,18 +1104,32 @@ function cardPriceLabel(se, hasApprovedLease) {
 // The price is the one THIS viewer will be charged (cardPriceLabel), not the
 // walk-in sticker: an approved-lease member books at the resident rate, and a
 // card quoting the walk-in price to them is a promise the seat then breaks.
-function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease) {
+//
+// `gate` is the signed-in member's own bookingGate(myBalanceCache) — a
+// "hold" replaces the Book/Join waitlist button with an on-hold note instead
+// of offering a control CreateBooking/JoinWaitlist would only refuse
+// CreditHold. It never touches a claim the member already holds (alreadyBooked
+// / alreadyWaitlisted win first): a hold blocks a NEW claim, not the seat this
+// member is already sitting in, the same way promotion of a pre-hold
+// waitlist claim is not a leg CreditHold gates (wellness-arrears-reminder-
+// 2026-09-15.md grounding). `gate === "confirm"` (overdue, not yet reminded)
+// is a no-op here — the self leg carries no client-side confirm today, only
+// the desk's assisted-booking path does.
+function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease, gate, ledger) {
   const id = domId(se.sessionKey);
   const full = se.bookedCount >= se.capacity;
   const started = !!(se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
   const myStatus = myStatusBySession && myStatusBySession.get(se.sessionKey);
   const alreadyBooked = myStatus === "booked";
   const alreadyWaitlisted = myStatus === "waitlisted";
+  const held = gate === "hold" && !alreadyBooked && !alreadyWaitlisted;
   let action, label, disabled;
   if (alreadyBooked) {
     action = "book"; label = "Booked"; disabled = true;
   } else if (alreadyWaitlisted) {
     action = "waitlist"; label = "Waitlisted"; disabled = true;
+  } else if (held) {
+    action = "book"; label = ""; disabled = true;
   } else if (started) {
     action = "book"; label = "Started"; disabled = true;
   } else if (full) {
@@ -1077,6 +1145,16 @@ function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease) {
   // whatever THIS list can see.
   const upcoming = se.seriesKey && seriesCounts ? seriesCounts.get(seriesCountKey(se)) || 0 : 0;
   const series = upcoming > 0 ? '<div class="meta">' + esc("Recurring · " + upcoming + " upcoming") + "</div>" : "";
+  // The on-hold note replaces the button entirely rather than disabling it —
+  // there is nothing left to click, only the balance to pay off (My Classes).
+  // It never promises the hold lifts the instant the balance is paid: the
+  // recorded reminder is carried forward (stale) until the NEXT arrears
+  // evaluation clears it, a dispatch-latency window (statementLine's own
+  // doc comment).
+  const control = held
+    ? '<p class="meta">On hold — ' + esc(money(ledger && ledger.balanceCents)) +
+      " owed. Pay it on My Classes — the hold lifts once the next arrears check runs (usually within a minute).</p>"
+    : '<button id="book-' + id + '" data-action="' + action + '"' + (disabled ? " disabled" : "") + ">" + esc(label) + "</button>";
   return (
     '<div class="card">' +
     '<span class="badge ' + (full ? "settled" : "open") + '">' + (Number(se.bookedCount) || 0) + " / " + (Number(se.capacity) || 0) + " seats</span>" +
@@ -1087,7 +1165,7 @@ function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease) {
     '<div class="meta">' + esc(fmtTime(se.startsAt) + " – " + fmtTime(se.endsAt)) + "</div>" +
     '<div class="meta">' + esc(cardPriceLabel(se, hasApprovedLease)) + "</div>" +
     '<div class="field-row">' +
-    '<button id="book-' + id + '" data-action="' + action + '"' + (disabled ? " disabled" : "") + ">" + label + "</button>" +
+    control +
     "</div>" +
     "</div>"
   );
@@ -1168,7 +1246,7 @@ async function renderMyBalance() {
       payForm.hidden = true;
       return;
     }
-    el.textContent = ledgerBalanceLine(data.balanceCents);
+    el.textContent = statementLine(data);
     // Pay balance only offered while something is actually owed (a positive
     // balance) — WellnessCreditAccount's self-scope grant lets a member pay
     // DOWN a debt, never accrue a credit past $0, and the op itself rejects
@@ -1229,6 +1307,7 @@ let myBalanceCache = null;
 // self-pay (submitLedgerEntry, asSelf).
 // refusal-courtesy: WellnessCreditAccount/NoBalanceToPay: hide — renderMyBalance hides #myclasses-pay-form (payForm.hidden) whenever data.balanceCents is not > 0
 // refusal-courtesy: WellnessCreditAccount/PaymentExceedsBalance: cap — renderMyBalance sets #myclasses-pay-amount's max/value to the balance just shown
+// refusal-courtesy: WellnessCreditAccount/InvalidState: none — the account's arrears aspect carrying the wrong class is a data-integrity fault (post_entry, packages/wellness-ledger/scripts.go), not a state this form's controls could gate.
 async function submitMyPayment() {
   const amountInput = document.getElementById("myclasses-pay-amount");
   const btn = document.getElementById("myclasses-pay-submit");
@@ -1644,6 +1723,57 @@ async function renderRoster() {
   await renderReassignControl(se, generation);
 }
 
+// bookHoldNote renders the front desk's on-hold note for a held picker
+// selection — mirrors cafe-app's renderCreditHoldPanel, condensed to the
+// picker's one line: who, what they owe, and that a payment or write-off
+// (the roster billing panel just below) is what lifts it. The reminder date
+// renders from the same UTC calendar-day slice the op's own refusal text
+// uses (sentAt.slice(0, 10)), never a locale rendering. Never promises the
+// hold lifts the instant the balance clears: the recorded reminder is
+// carried forward (stale) until the NEXT EvaluateWellnessArrears evaluation
+// runs — a dispatch-latency window, usually seconds to under a minute.
+function bookHoldNote(who, ledger) {
+  const days = Number(ledger.daysOverdue) || 0;
+  return esc(who) + " owes " + esc(money(ledger.balanceCents)) +
+    (ledger.isOverdue ? " · " + days + (days === 1 ? " day" : " days") + " overdue" : "") +
+    " · reminder sent " + esc((ledger.reminderSentAt || "").slice(0, 10)) +
+    " — pay or write off the balance below; the hold lifts once the next arrears check runs (usually within a minute).";
+}
+
+// updateBookMemberHold hides the member picker's Book button and shows an
+// on-hold note in its place once the currently-selected option's own
+// bookingGate reads "hold" — bookMemberIn's own CreditHold declaration
+// covers both pickers. Called on every picker render (renderBookMember) and
+// on the select's own change event.
+function updateBookMemberHold() {
+  const select = document.getElementById("roster-book-member");
+  const submit = document.getElementById("roster-book-submit");
+  const note = document.getElementById("roster-book-hold");
+  if (!select || !submit || !note) return;
+  const bookerKey = (select.value || "").split("|")[0];
+  const ledger = bookerKey ? rosterArrears.get(bookerKey) : null;
+  const held = !!ledger && bookingGate(ledger) === "hold";
+  submit.hidden = held;
+  note.hidden = !held;
+  note.innerHTML = held ? bookHoldNote(nameForIdentity(idOf(bookerKey)), ledger) : "";
+}
+
+// updateBookGuestHold is updateBookMemberHold's guest-picker twin — same
+// bookMemberIn CreditHold declaration, called after every guest search
+// (searchGuests) and on the select's own change event.
+function updateBookGuestHold() {
+  const select = document.getElementById("roster-book-guest");
+  const submit = document.getElementById("roster-book-guest-submit");
+  const note = document.getElementById("roster-book-guest-hold");
+  if (!select || !submit || !note) return;
+  const guestKey = select.value || "";
+  const ledger = guestKey ? rosterArrears.get(guestKey) : null;
+  const held = !!ledger && bookingGate(ledger) === "hold";
+  submit.hidden = held;
+  note.hidden = !held;
+  note.innerHTML = held ? bookHoldNote(nameForIdentity(idOf(guestKey)), ledger) : "";
+}
+
 // renderBookMember shows the front desk's book-a-member control (and the
 // book-a-guest control beside it) for the selected class, and hides both for
 // everyone else. The picker offers the members this staffer's workplace
@@ -1724,18 +1854,21 @@ async function renderBookMember(se, bookings, generation) {
     }
   }
   document.getElementById("roster-book-submit").disabled = false;
+  updateBookMemberHold();
   resetGuestPicker();
   form.hidden = false;
 }
 
 // resetGuestPicker clears the guest typeahead's search box and matched
 // options together, so a stale name from the class the staffer just
-// navigated away from never lingers next to the newer class's roster.
+// navigated away from never lingers next to the newer class's roster. Also
+// resets the guest hold note — an empty picker holds nobody.
 function resetGuestPicker() {
   const search = document.getElementById("guest-search");
   if (search) search.value = "";
   const select = document.getElementById("roster-book-guest");
   if (select) select.innerHTML = "";
+  updateBookGuestHold();
 }
 
 // bookGuest is the front desk's walk-in path: CreateBooking's booker field
@@ -1754,8 +1887,11 @@ async function bookGuest() {
   const sessionKey = document.getElementById("roster-session").value;
   const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
   if (!guestKey || !se) return;
-  // Courtesy only — same posture as bookSelectedMember's own confirm above.
   const arrears = rosterArrears.get(guestKey);
+  // updateBookGuestHold already hides this button under a hold; belt-and-
+  // suspenders, same posture as bookSelectedMember's own guard above.
+  if (bookingGate(arrears) === "hold") return;
+  // Courtesy only — same posture as bookSelectedMember's own confirm above.
   const overdueDays = arrears ? Number(arrears.daysOverdue) || 0 : 0;
   if (
     arrears && arrears.isOverdue &&
@@ -1820,6 +1956,7 @@ async function searchGuests(q) {
   if (!select) return;
   if (!q) {
     select.innerHTML = "";
+    updateBookGuestHold();
     return;
   }
   let results = [];
@@ -1835,6 +1972,7 @@ async function searchGuests(q) {
     opt.value = "";
     opt.textContent = "(no matches)";
     select.appendChild(opt);
+    updateBookGuestHold();
     return;
   }
   for (const g of results) {
@@ -1856,6 +1994,7 @@ async function searchGuests(q) {
   // land on the first bookable match instead.
   const firstFree = Array.from(select.options).find((o) => !o.disabled);
   if (firstFree) select.value = firstFree.value;
+  updateBookGuestHold();
 }
 
 function openNewGuest() {
@@ -2001,10 +2140,15 @@ async function bookSelectedMember() {
   const se = (staffSessionsCache || []).find((x) => x.sessionKey === sessionKey);
   if (!value || !se) return;
   const [bookerKey, leaseAppKey] = value.split("|");
-  // Courtesy only — CreateBooking enforces nothing about arrears, whoever
-  // submits. Asked before the button is disabled so declining leaves the
-  // form exactly as it was, the same posture as the late-cancel confirm.
   const arrears = rosterArrears.get(bookerKey);
+  // updateBookMemberHold already hides this button under a hold; this is
+  // belt-and-suspenders against a click that lands between the picker's own
+  // selection change and its handler running.
+  if (bookingGate(arrears) === "hold") return;
+  // Courtesy only — CreateBooking enforces nothing about the overdue-but-
+  // unreminded case, whoever submits. Asked before the button is disabled so
+  // declining leaves the form exactly as it was, the same posture as the
+  // late-cancel confirm.
   const overdueDays = arrears ? Number(arrears.daysOverdue) || 0 : 0;
   if (
     arrears && arrears.isOverdue &&
@@ -2050,6 +2194,7 @@ async function bookSelectedMember() {
 // refusal-courtesy: CreateBooking/BookerConflict: none — neither picker cross-checks a booker's OTHER sessions for a time overlap; only the same-session DoubleBooked case above is excluded.
 // refusal-courtesy: CreateBooking/SessionTooLong: none — the class's span is fixed at CreateSession/CreateSessionSeries mint time; this call supplies no span, only the session being booked into.
 // refusal-courtesy: CreateBooking/InvalidState: none — a missing schedule aspect on the session is a read-model correctness fault, not a choice either picker's own state could gate.
+// refusal-courtesy: CreateBooking/CreditHold: hide — updateBookMemberHold/updateBookGuestHold hide #roster-book-submit / #roster-book-guest-submit and show a #roster-book-hold / #roster-book-guest-hold note whenever bookingGate(rosterArrears.get(the selected booker/guest key)) is "hold", called on every picker render and on the select's own change event; bookSelectedMember/bookGuest also bail before ever calling this function if the selection is held. bookHoldNote's copy says the hold lifts once the next arrears check runs (usually within a minute), never that a payment clears it immediately.
 async function bookMemberIn(se, bookerKey, leaseAppKey) {
   const optionalReads = seatKeys(se.sessionKey, se.capacity);
   optionalReads.push(se.sessionKey + ".bkr" + idOf(bookerKey));
@@ -2955,7 +3100,7 @@ function attendanceActions(b) {
 
 // ---- Roster billing (front desk records a charge/payment) --------------
 //
-// A member's balance panel (My Classes) has stood since ledgerBalanceLine
+// A member's balance panel (My Classes) has stood since statementLine
 // shipped, but nothing let anyone settle it — WellnessDebitAccount/
 // WellnessCreditAccount were operator-only. Both now grant frontOfHouse
 // unconfined (packages/wellness-ledger/permissions.go), so this panel lives
@@ -3023,12 +3168,18 @@ async function loadRosterBilling() {
 // (cmd/wellness-app/ledger.go's deriveStatement) as an overdue banner or a
 // neutral due-by note — wellness has no existing due-date renderer, so this
 // mirrors cafe-app's statementLine() rather than duplicating a due-date
-// format ad hoc.
+// format ad hoc. An overdue row also says whether the arrears reminder has
+// gone out (row.reminderSentAt), rendered from the same UTC calendar-day
+// slice the op's own refusal text uses (sentAt.slice(0, 10)) — the vertical-
+// apps dossier's "two courtesy surfaces name the same instant", never a
+// locale rendering that can name a different day depending on the reader's
+// time zone.
 function arrearsLine(row) {
   const due = row.dueDate ? new Date(row.dueDate).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "?";
   if (row.isOverdue) {
     const days = Number(row.daysOverdue) || 0;
-    return '<span class="arrears-overdue">OVERDUE — ' + days + (days === 1 ? " day" : " days") + "</span>";
+    const reminder = row.reminderSentAt ? "reminder sent " + row.reminderSentAt.slice(0, 10) : "no reminder sent yet";
+    return '<span class="arrears-overdue">OVERDUE — ' + days + (days === 1 ? " day" : " days") + " · " + esc(reminder) + "</span>";
   }
   return "Due " + due;
 }
@@ -3036,7 +3187,12 @@ function arrearsLine(row) {
 // arrearsBadgeText renders the same frontdesk-arrears row as the short "owes
 // $60.00 · 3 days overdue" the booking pickers and roster cards append beside
 // a debtor's name — "" for no balance owed, the common case, so a caller can
-// append the result unconditionally.
+// append the result unconditionally. Once a reminder has gone out for the
+// current episode (bookingGate(row) === "hold"), the badge also says
+// "credit hold" — the desk's own warning that CreateBooking will refuse this
+// member before it even tries, whatever isOverdue says (a part-payment can
+// move the balance back inside its term while the episode's reminder still
+// stands).
 function arrearsBadgeText(row) {
   if (!row || !(Number(row.balanceCents) > 0)) return "";
   let text = "owes " + money(row.balanceCents);
@@ -3044,6 +3200,7 @@ function arrearsBadgeText(row) {
     const days = Number(row.daysOverdue) || 0;
     text += " · " + days + (days === 1 ? " day" : " days") + " overdue";
   }
+  if (bookingGate(row) === "hold") text += " · credit hold";
   return text;
 }
 
@@ -3120,7 +3277,7 @@ function renderBillingBody(data) {
   const balanceEl = document.getElementById("billing-balance");
   const list = document.getElementById("billing-list");
   const empty = document.getElementById("billing-empty");
-  balanceEl.textContent = ledgerBalanceLine(data.balanceCents);
+  balanceEl.textContent = statementLine(data);
   const txs = data.transactions || [];
   list.innerHTML = "";
   if (!txs.length) {
@@ -3166,6 +3323,8 @@ function renderBillingBody(data) {
 // refusal-courtesy-dispatches: WellnessDebitAccount, WellnessCreditAccount
 // refusal-courtesy: WellnessDebitAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — both ops are AuthContext "standing" here (no context.me/selfVoice, per the doc comment above), so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, packages/wellness-ledger/scripts.go) only runs when a target is present
 // refusal-courtesy: WellnessCreditAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — same as WellnessDebitAccount above: this front-desk site never attaches a target, so is_self_pay is always false regardless of entry_type
+// refusal-courtesy: WellnessDebitAccount/InvalidState: none — the account's arrears aspect carrying the wrong class is a data-integrity fault (post_entry, packages/wellness-ledger/scripts.go), not a state this form's controls could gate.
+// refusal-courtesy: WellnessCreditAccount/InvalidState: none — same as WellnessDebitAccount's InvalidState above: post_entry is shared by both entry types.
 async function submitBillingEntry(opType, what, reason) {
   const memberKey = document.getElementById("billing-member").value;
   if (!memberKey) {
@@ -3836,6 +3995,8 @@ async function createSession(studioKey, els) {
 
 // refusal-courtesy: WellnessCreditAccount/NoBalanceToPay, PaymentExceedsBalance: see submitMyPayment
 // refusal-courtesy: WellnessDebitAccount/NoBalanceToPay, PaymentExceedsBalance: see submitBillingEntry
+// refusal-courtesy: WellnessCreditAccount/InvalidState: see submitMyPayment
+// refusal-courtesy: WellnessDebitAccount/InvalidState: see submitBillingEntry
 // init wires billing-payment/billing-waive to submitBillingEntry("WellnessCreditAccount", ...) too — that leg's own courtesy (or lack of it) is submitBillingEntry's declaration, not repeated here since both legs' codes are unreachable there regardless of which button dispatched them.
 function init() {
   document.querySelectorAll(".tab").forEach((b) => {
@@ -3857,7 +4018,9 @@ function init() {
     loadRoster();
   });
   document.getElementById("roster-book-submit").addEventListener("click", bookSelectedMember);
+  document.getElementById("roster-book-member").addEventListener("change", updateBookMemberHold);
   document.getElementById("roster-book-guest-submit").addEventListener("click", bookGuest);
+  document.getElementById("roster-book-guest").addEventListener("change", updateBookGuestHold);
   wireGuestSearch();
   document.getElementById("new-guest").addEventListener("click", openNewGuest);
   document.getElementById("guest-cancel").addEventListener("click", closeNewGuest);
