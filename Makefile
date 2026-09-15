@@ -173,7 +173,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-opmeta-required-fields lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-opmeta-required-fields lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2394,6 +2394,23 @@ lint-flag-consumer-census:
 lint-link-target-count:
 	@echo "==> Linting link-target counts for liveness screening..."
 	go run ./scripts/lint-link-target-count.go
+
+## lint-links-page-limit — every kv.Links(...) call states a page limit.
+## starlark_kv.go charges the CLAMPED limit (default 256) against the script's
+## live-read budget, not len(the links returned), so a 3-arg call costs 257
+## units however many links the hub carries; inside a per-candidate loop that
+## turns a long-history hub into a permanently rejected evaluation, re-
+## dispatched by Weaver forever (cafe-ledger arrears_entries, live,
+## 2026-09-13). Parses every shipped package script (the compiled pkgregistry
+## corpus, via go.starlark.net/syntax) and fails a kv.Links call with no 5th
+## positional argument or `limit=` keyword, or one passing a bare literal at
+## or above starlark_kv.go's own defaultLinkPageLimit (256) — a named module
+## constant resolving that high is exempt, since naming it is itself the
+## "state a real number" this rule chases. Self-tests on every run. Advisory
+## by default; STRICT=1 exits non-zero.
+lint-links-page-limit:
+	@echo "==> Linting kv.Links calls for an explicit page limit..."
+	go run ./scripts/lint-links-page-limit.go
 
 ## lint-opmeta-required-fields — a payload field a package script refuses
 ## without is declared `required` by the op's InputSchema (or filled by the

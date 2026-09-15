@@ -437,6 +437,21 @@ jobs:
         # all-clear over zero examined scripts.
         run: STRICT=1 go run ./scripts/lint-link-target-count.go
 
+      - name: Links page-limit lint (every kv.Links(...) call states a page limit)
+        # starlark_kv.go charges the CLAMPED limit (default 256) against the
+        # script's live-read budget, not len(the links returned), so a
+        # kv.Links call with no limit argument costs 257 units however many
+        # links the hub actually carries; inside a per-candidate loop that
+        # turns a long-history hub into a permanently rejected evaluation,
+        # re-dispatched by Weaver on the same schedule forever (cafe-ledger
+        # arrears_entries, live, 2026-09-13). This gate parses every shipped
+        # package script with go.starlark.net/syntax and fails a kv.Links
+        # call with no 5th positional argument or `limit=` keyword, or one
+        # passing a bare literal at or above starlark_kv.go's own
+        # defaultLinkPageLimit (256). Self-tests on every run and refuses an
+        # all-clear over zero examined scripts.
+        run: STRICT=1 go run ./scripts/lint-links-page-limit.go
+
       - name: Op-meta required-fields lint (a field the script refuses without is declared required)
         # A DDL script and its OpMetaSpec are two declarations of one op: the
         # script refuses at commit, the descriptor is what every

@@ -496,6 +496,11 @@ WORKPLACE_PARENT_PAGE_LIMIT = 20
 MAX_PARENT_PAGES = 4
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
+# A provider practises at a handful of sites at most, but ALL of them are the
+# confining/candidate set (sites_for_provider), so this walks every page
+# rather than stopping at the first.
+PROVIDER_SITE_PAGE_LIMIT = 20
+MAX_PROVIDER_SITE_PAGES = 4
 
 def actor_holds_operator(actor_key):
     # Root is proven from the GRAPH, mirroring the kernel's own root-grant lens
@@ -663,44 +668,53 @@ def sites_for_provider(provider):
     # otherwise still hand back the sites it no longer practises at.
     if not vertex_live(provider):
         return []
-    # read-posture: (e) relation=practicesAt epoch=none (a site assigned
-    # concurrently with this write can only WIDEN the confining set, never narrow
-    # it, so the confined branch stays the safe one) — a per-candidate follow-up
-    # enumeration off the provider (data-derived hub); a provider practises at a
-    # handful of sites at most.
-    spage, _ = kv.Links(provider, "practicesAt", "out")
+    # A provider practises at a handful of sites at most, but ALL of them are
+    # the candidate set (see below), so this walks every page rather than
+    # stopping at the first.
+    cursor = None
     sites = []
-    for lk in spage:
-        # The LINK: RemoveProviderSite tombstones it rather than deleting it, so
-        # a withdrawn assignment must be skipped explicitly.
-        if lk.isDeleted:
-            continue
-        # The link's TARGET BUILDING, which is where this diverges from
-        # clinic-domain's same-named helper — deliberately, and it is the tighter
-        # side of the divergence its own doc records ("this walk additionally
-        # drops a tombstoned BUILDING, which sites_for_provider does not").
-        # TombstoneLocation soft-deletes a building with no cascade onto
-        # practicesAt, so a decommissioned site otherwise stays in this list.
-        #
-        # It is load-bearing here in a way it is not for a pure confinement
-        # helper, because this list is ALSO the whitelist SetVisitSeriesSite
-        # validates its caller-chosen site against and the candidate set
-        # BackfillVisitSeriesSite picks its exactly-one site from. A dead
-        # building left in it would be settable — and an atSite link pointing at
-        # a tombstoned building is worse than none at all: the read model's own
-        # atSite comprehension drops a tombstoned vertex, so the link confers NO
-        # workplace anchor (the exact stranding this whole mechanism exists to
-        # prevent), while series_site() sees a LIVE LINK and makes both site ops
-        # permanently no-op, and the missing_series_site gap cannot re-open
-        # either, since its own OPTIONAL MATCH drops the dead target the same
-        # way. Unrecoverable, from one write. So the read happens here, once, in
-        # the single place both ops derive their sites from.
-        #
-        # Bounded: one vertex_live read per surviving link, off an enumeration
-        # already bounded to a provider's handful of sites.
-        if not vertex_live(lk.targetVertex):
-            continue
-        sites.append(lk.targetVertex)
+    for _page in range(MAX_PROVIDER_SITE_PAGES):
+        # read-posture: (e) relation=practicesAt epoch=none (a site assigned
+        # concurrently with this write can only WIDEN the confining set, never
+        # narrow it, so the confined branch stays the safe one) — bounded,
+        # never a keyspace scan.
+        spage, cursor = kv.Links(provider, "practicesAt", "out", cursor, PROVIDER_SITE_PAGE_LIMIT)
+        for lk in spage:
+            # The LINK: RemoveProviderSite tombstones it rather than deleting
+            # it, so a withdrawn assignment must be skipped explicitly.
+            if lk.isDeleted:
+                continue
+            # The link's TARGET BUILDING, which is where this diverges from
+            # clinic-domain's same-named helper — deliberately, and it is the
+            # tighter side of the divergence its own doc records ("this walk
+            # additionally drops a tombstoned BUILDING, which sites_for_provider
+            # does not"). TombstoneLocation soft-deletes a building with no
+            # cascade onto practicesAt, so a decommissioned site otherwise
+            # stays in this list.
+            #
+            # It is load-bearing here in a way it is not for a pure
+            # confinement helper, because this list is ALSO the whitelist
+            # SetVisitSeriesSite validates its caller-chosen site against and
+            # the candidate set BackfillVisitSeriesSite picks its exactly-one
+            # site from. A dead building left in it would be settable — and an
+            # atSite link pointing at a tombstoned building is worse than none
+            # at all: the read model's own atSite comprehension drops a
+            # tombstoned vertex, so the link confers NO workplace anchor (the
+            # exact stranding this whole mechanism exists to prevent), while
+            # series_site() sees a LIVE LINK and makes both site ops
+            # permanently no-op, and the missing_series_site gap cannot re-open
+            # either, since its own OPTIONAL MATCH drops the dead target the
+            # same way. Unrecoverable, from one write. So the read happens
+            # here, once, in the single place both ops derive their sites
+            # from.
+            #
+            # Bounded: one vertex_live read per surviving link, off an
+            # enumeration already bounded to a provider's handful of sites.
+            if not vertex_live(lk.targetVertex):
+                continue
+            sites.append(lk.targetVertex)
+        if cursor == None:
+            break
     return sites
 
 def series_provider(series_key):
@@ -709,7 +723,7 @@ def series_provider(series_key):
     # appointment_provider. StartVisitSeries writes exactly one withProvider link
     # (deterministic key), so this never fans out.
     # read-posture: (e) relation=withProvider epoch=none.
-    ppage, _ = kv.Links(series_key, "withProvider", "out")
+    ppage, _ = kv.Links(series_key, "withProvider", "out", None, 1)
     provider = None
     for lk in ppage:
         if not lk.isDeleted:
@@ -728,7 +742,7 @@ def series_site(series_key):
     # read-posture: (e) relation=atSite epoch=none — a series carries at most one
     # atSite link, so this is a single bounded enumeration off the series key the
     # caller has already proven alive, never a keyspace scan.
-    apage, _ = kv.Links(series_key, "atSite", "out")
+    apage, _ = kv.Links(series_key, "atSite", "out", None, 1)
     for lk in apage:
         if not lk.isDeleted:
             return lk.targetVertex

@@ -317,7 +317,7 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refu
         # fails closed.
         # read-posture: (e) relation=heldFor epoch=none -- an account carries
         # exactly one heldFor link, so this is never a keyspace scan.
-        held_for_page, _ = kv.Links(acct_key, "heldFor", "out")
+        held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
         held_identity_key = None
         for lk in held_for_page:
             if not lk.isDeleted:

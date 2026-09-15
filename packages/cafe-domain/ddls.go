@@ -594,6 +594,14 @@ WORKPLACE_PARENT_PAGE_LIMIT = 20
 MAX_PARENT_PAGES = 4
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
+# A page of one is not enough for a REPOINTED single-valued relation: ListLinks
+# returns tombstoned links in the page too, keys sort by target id, and a
+# repoint tombstones the old key and writes a new one -- so the live link can
+# sort behind its own tombstoned predecessor. lease-signing's
+# ReassignLeaseUnit repoints appliesToUnit; every reader of it pages until it
+# finds the live one.
+LIVE_LINK_PAGE_LIMIT = 8
+MAX_LIVE_LINK_PAGES = 4
 
 def actor_holds_operator(actor_key):
     # Resolved from the GRAPH, not from a compile-time constant: the primordial
@@ -884,14 +892,21 @@ def leaseapp_unit(lease_key, memo=None):
         if memo != None:
             memo[lease_key] = None
         return None
-    # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp carries
-    # exactly one appliesToUnit link (required at CreateLeaseApplication), so
-    # this is never a keyspace scan.
-    page, _ = kv.Links(lease_key, "appliesToUnit", "out")
+    # A leaseapp carries exactly one LIVE appliesToUnit link, but
+    # ReassignLeaseUnit (lease-signing) repoints it (tombstone old, create
+    # new), and a page can hold the tombstone before the live link, so this
+    # pages until it finds one rather than trusting the first page.
+    cursor = None
     unit = None
-    for lk in page:
-        if not lk.isDeleted:
-            unit = lk.targetVertex
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=appliesToUnit epoch=none -- bounded,
+        # never a keyspace scan.
+        page, cursor = kv.Links(lease_key, "appliesToUnit", "out", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if not lk.isDeleted:
+                unit = lk.targetVertex
+        if unit != None or cursor == None:
+            break
     # The unit VERTEX. require_workplace's own walk re-reads it, so this is
     # belt-and-braces here -- but the resolvers are what the next author copies,
     # and lease-signing's copy feeds require_manages, which does not.

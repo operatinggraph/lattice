@@ -105,6 +105,14 @@ WORKPLACE_PARENT_PAGE_LIMIT = 20
 MAX_PARENT_PAGES = 4
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
+# A page of one is not enough for a REPOINTED single-valued relation: ListLinks
+# returns tombstoned links in the page too, keys sort by target id, and a
+# repoint tombstones the old key and writes a new one -- so the live link can
+# sort behind its own tombstoned predecessor. lease-signing's
+# ReassignLeaseUnit repoints appliesToUnit; every reader of it pages until it
+# finds the live one.
+LIVE_LINK_PAGE_LIMIT = 8
+MAX_LIVE_LINK_PAGES = 4
 
 def actor_holds_operator(actor_key):
     # Resolved from the GRAPH, not a compile-time constant (see lease-signing's
@@ -228,14 +236,21 @@ def lease_unit(lease_key):
     # OWN leaseAppKey (already validated alive above), not via an
     # account-side heldFor hop, since at LoftspaceCreateAccount time the
     # account does not exist yet to hold one.
-    # read-posture: (e) relation=appliesToUnit epoch=none -- a leaseapp
-    # carries exactly one appliesToUnit link, so this is never a keyspace
-    # scan.
-    page, _ = kv.Links(lease_key, "appliesToUnit", "out")
+    # A leaseapp carries exactly one LIVE appliesToUnit link, but
+    # ReassignLeaseUnit (lease-signing) repoints it (tombstone old, create
+    # new), and a page can hold the tombstone before the live link, so this
+    # pages until it finds one rather than trusting the first page.
+    cursor = None
     unit = None
-    for lk in page:
-        if not lk.isDeleted:
-            unit = lk.targetVertex
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=appliesToUnit epoch=none -- bounded,
+        # never a keyspace scan.
+        page, cursor = kv.Links(lease_key, "appliesToUnit", "out", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if not lk.isDeleted:
+                unit = lk.targetVertex
+        if unit != None or cursor == None:
+            break
     if not vertex_live(unit):
         return None
     return unit
@@ -455,7 +470,7 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
         _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
         # read-posture: (e) relation=heldFor epoch=none -- an account carries
         # exactly one heldFor link, so this is never a keyspace scan.
-        held_for_page, _ = kv.Links(acct_key, "heldFor", "out")
+        held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
         lease_key = None
         for lk in held_for_page:
             if not lk.isDeleted:

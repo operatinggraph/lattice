@@ -2465,6 +2465,11 @@ WORKPLACE_PARENT_PAGE_LIMIT = 20
 MAX_PARENT_PAGES = 4
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
+# A provider practises at a handful of sites at most, but ALL of them are the
+# confining set (sites_for_provider), so this walks every page rather than
+# stopping at the first.
+PROVIDER_SITE_PAGE_LIMIT = 20
+MAX_PROVIDER_SITE_PAGES = 4
 
 def actor_holds_operator(actor_key):
     # Resolved from the GRAPH, not from a compile-time constant: the primordial
@@ -2690,7 +2695,7 @@ def appointment_provider(appt_id):
     # can resolve the same provider without a second read.
     # read-posture: (e) relation=withProvider epoch=none -- an appointment
     # carries exactly one withProvider link, so this is never a keyspace scan.
-    ppage, _ = kv.Links("vtx.appointment." + appt_id, "withProvider", "out")
+    ppage, _ = kv.Links("vtx.appointment." + appt_id, "withProvider", "out", None, 1)
     provider = None
     for lk in ppage:
         if not lk.isDeleted:
@@ -2703,7 +2708,7 @@ def appointment_patient(appt_id):
     # caller is Weaver's directOp dispatch, never a human).
     # read-posture: (e) relation=forPatient epoch=none -- an appointment carries
     # exactly one forPatient link, so this is never a keyspace scan.
-    ppage, _ = kv.Links("vtx.appointment." + appt_id, "forPatient", "out")
+    ppage, _ = kv.Links("vtx.appointment." + appt_id, "forPatient", "out", None, 1)
     patient = None
     for lk in ppage:
         if not lk.isDeleted:
@@ -2752,18 +2757,23 @@ def sites_for_provider(provider):
     # otherwise still hand back the sites it no longer practises at.
     if not vertex_live(provider):
         return []
-    # read-posture: (e) relation=practicesAt epoch=none (a site assigned
-    # concurrently with this write can only WIDEN the confining set, never
-    # narrow it, so the confined branch stays the safe one) -- a per-candidate
-    # follow-up enumeration off the provider resolved above (data-derived hub);
-    # a provider practises at a handful of sites at most. ALL of them are
-    # returned: staff at any one of a provider's sites are equally entitled to
-    # that provider's appointments.
-    spage, _ = kv.Links(provider, "practicesAt", "out")
+    # A provider practises at a handful of sites at most, but ALL of them are
+    # the confining set (staff at any one of a provider's sites are equally
+    # entitled to that provider's appointments), so this walks every page
+    # rather than stopping at the first.
+    cursor = None
     sites = []
-    for lk in spage:
-        if not lk.isDeleted:
-            sites.append(lk.targetVertex)
+    for _page in range(MAX_PROVIDER_SITE_PAGES):
+        # read-posture: (e) relation=practicesAt epoch=none (a site assigned
+        # concurrently with this write can only WIDEN the confining set, never
+        # narrow it, so the confined branch stays the safe one) -- bounded,
+        # never a keyspace scan.
+        spage, cursor = kv.Links(provider, "practicesAt", "out", cursor, PROVIDER_SITE_PAGE_LIMIT)
+        for lk in spage:
+            if not lk.isDeleted:
+                sites.append(lk.targetVertex)
+        if cursor == None:
+            break
     return sites
 
 def appointment_sites(appt_id, provider):
@@ -2786,7 +2796,7 @@ def appointment_sites(appt_id, provider):
     # at most one atSite link per appointment, so this is a single bounded
     # enumeration off the appointment key already proven alive by the caller,
     # never a keyspace scan.
-    apage, _ = kv.Links("vtx.appointment." + appt_id, "atSite", "out")
+    apage, _ = kv.Links("vtx.appointment." + appt_id, "atSite", "out", None, 1)
     for lk in apage:
         if not lk.isDeleted:
             return [lk.targetVertex]
@@ -3384,7 +3394,7 @@ def execute(state, op):
             # read-posture: (e) relation=applicationFor epoch=none (a lease
             # created concurrently with this appointment is not a race this
             # check needs to close — the silent fall-through is always safe)
-            applicant_page, _ = kv.Links(lease_key, "applicationFor", "out")
+            applicant_page, _ = kv.Links(lease_key, "applicationFor", "out", None, 1)
             applicant_id = None
             for lk in applicant_page:
                 if not lk.isDeleted:
@@ -3951,7 +3961,7 @@ def execute(state, op):
         # at most one atSite link (CreateAppointment/this op each write it at
         # most once), so this is a single bounded enumeration off the
         # appointment key already proven alive above, never a keyspace scan.
-        apage, _ = kv.Links(appt_key, "atSite", "out")
+        apage, _ = kv.Links(appt_key, "atSite", "out", None, 1)
         for lk in apage:
             if not lk.isDeleted:
                 return {"mutations": [], "events": [], "response": {}}
@@ -4037,7 +4047,7 @@ def execute(state, op):
         # BackfillAppointmentSite/this op each write it at most once), so this
         # is a single bounded enumeration off the appointment key already
         # proven alive above, never a keyspace scan.
-        apage, _ = kv.Links(appt_key, "atSite", "out")
+        apage, _ = kv.Links(appt_key, "atSite", "out", None, 1)
         for lk in apage:
             if not lk.isDeleted:
                 return {"mutations": [], "events": [], "response": {}}

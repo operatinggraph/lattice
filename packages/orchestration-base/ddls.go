@@ -257,6 +257,15 @@ def vertex_alive(state, key):
         return False
     return True
 
+# A page of one is not enough for a REPOINTED single-valued relation:
+# ListLinks returns tombstoned links in the page too, keys sort by target id,
+# and a repoint tombstones the old key and writes a new one -- so the live
+# link can sort behind its own tombstoned predecessor. ReAssignTask repoints
+# assignedTo; exactly one of assignedTo/queuedFor is live on an open task at
+# any time (FR28), so both readers page until they find the live link.
+LIVE_LINK_PAGE_LIMIT = 8
+MAX_LIVE_LINK_PAGES = 4
+
 def execute(state, op):
     ot = op.operationType
     p = op.payload
@@ -417,18 +426,25 @@ def execute(state, op):
         # Resolve the task's current queuedFor link via the sanctioned
         # bounded op-time enumeration (Contract #2 §2.5.1) -- an open task
         # carries AT MOST one outgoing queuedFor link (the §10.1 "exactly
-        # one assignment link" invariant), so this is never a keyspace scan,
-        # and it is NOT a declared contextHint.reads key: the caller cannot
-        # know the role in advance, and the link may legitimately already be
-        # gone (claimed by someone else, or never queued).
-        # read-posture: (e) relation=queuedFor epoch=task root (the claim's
-        # own OCC-asserted update below — every queuedFor mutator commits
-        # through the task root, so concurrent claimers serialise on it)
-        queued_page, _ = kv.Links(task_key, "queuedFor", "out")
+        # one assignment link" invariant), and it is NOT a declared
+        # contextHint.reads key: the caller cannot know the role in advance,
+        # and the link may legitimately already be gone (claimed by someone
+        # else, or never queued). Paged rather than trusting the first page,
+        # matching assignedTo's own reader: a page can hold a tombstone
+        # before the link this is actually looking for.
+        cursor = None
         queued_link = None
-        for lk in queued_page:
-            if not lk.isDeleted:
-                queued_link = lk
+        for _page in range(MAX_LIVE_LINK_PAGES):
+            # read-posture: (e) relation=queuedFor epoch=task root (the
+            # claim's own OCC-asserted update below — every queuedFor mutator
+            # commits through the task root, so concurrent claimers
+            # serialise on it)
+            queued_page, cursor = kv.Links(task_key, "queuedFor", "out", cursor, LIVE_LINK_PAGE_LIMIT)
+            for lk in queued_page:
+                if not lk.isDeleted:
+                    queued_link = lk
+            if queued_link != None or cursor == None:
+                break
         if queued_link == None:
             # Not currently queued: either already claimed, or never queued.
             # A re-claim by the SAME actor (their own assignedTo already
@@ -599,16 +615,21 @@ def find_assigned_link(state, task_id):
     return None
 
 def task_assignee(task_key):
-    # The task's own assignedTo link, via the sanctioned bounded op-time
-    # enumeration (Contract #2 §2.5.1) -- an open task carries AT MOST one
-    # (the §10.1 "exactly one assignment link" invariant), same idiom
-    # ClaimTask's queuedFor lookup uses. Not a declared contextHint.reads key:
-    # the assignee is unknown to the caller until this resolves.
-    # read-posture: (e) relation=assignedTo epoch=task root
-    page, _ = kv.Links(task_key, "assignedTo", "out")
-    for lk in page:
-        if not lk.isDeleted:
-            return lk.targetVertex
+    # The task's own LIVE assignedTo link, via the sanctioned bounded op-time
+    # enumeration (Contract #2 §2.5.1), same idiom ClaimTask's queuedFor
+    # lookup uses. Not a declared contextHint.reads key: the assignee is
+    # unknown to the caller until this resolves. ReAssignTask repoints this
+    # link (tombstone old, create new), so a page can hold the tombstone
+    # before the live link; this pages until it finds one.
+    cursor = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=assignedTo epoch=task root
+        page, cursor = kv.Links(task_key, "assignedTo", "out", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if not lk.isDeleted:
+                return lk.targetVertex
+        if cursor == None:
+            break
     return None
 
 def transition_task(state, op, p, target_status, event_class, enforce_self_assignee):

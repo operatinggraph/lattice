@@ -345,7 +345,7 @@ def held_for_patient_id(acct_key):
     # ownership proof and the visitRef patient check.
     # read-posture: (e) relation=heldFor epoch=none -- an account carries
     # exactly one heldFor link, so this is never a keyspace scan.
-    held_for_page, _ = kv.Links(acct_key, "heldFor", "out")
+    held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
     patient_key = None
     for lk in held_for_page:
         if not lk.isDeleted:

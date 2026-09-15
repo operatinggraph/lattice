@@ -106,34 +106,51 @@ def family_of(p):
         fail("InvalidArgument: params.family: must be docGen")
     return "docGen"
 
+LIVE_LINK_PAGE_LIMIT = 8
+MAX_LIVE_LINK_PAGES = 4
+
 def live_link_target(hub_key, relation):
     # The subject's single outbound <relation> link target, enumerated via the
     # sanctioned bounded kv.Links (Contract #2 §2.5.1). A leaseapp carries
-    # exactly one live applicationFor / appliesToUnit link, so the first live
-    # entry resolves it; absent -> None (the doc omits what the graph lacks).
-    # read-posture: (e) relation=applicationFor|appliesToUnit epoch=none
-    # (read-only field resolution: the document snapshots then-current state;
-    # a concurrent link change lands in the next generation)
-    page, _ = kv.Links(hub_key, relation, "out")
-    for l in page:
-        if not l.isDeleted:
-            return l.targetVertex
+    # exactly one LIVE applicationFor / appliesToUnit link, but
+    # ReassignLeaseUnit repoints appliesToUnit (tombstone old, create new) —
+    # a page can hold the tombstone before the live link — so this pages
+    # until it finds one; absent -> None (the doc omits what the graph
+    # lacks).
+    cursor = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=applicationFor|appliesToUnit epoch=none
+        # (read-only field resolution: the document snapshots then-current
+        # state; a concurrent link change lands in the next generation)
+        page, cursor = kv.Links(hub_key, relation, "out", cursor, LIVE_LINK_PAGE_LIMIT)
+        for l in page:
+            if not l.isDeleted:
+                return l.targetVertex
+        if cursor == None:
+            break
     return None
 
 def live_link_source(hub_key, relation):
     # The counterpart of live_link_target for links where the subject is the
     # TARGET: a unit's inbound "manages" links (loftspace-domain/ownership.go
     # — source = landlord identity, target = unit; a flat co-management set
-    # with no primary). The first live entry resolves a representative
-    # landlord party; absent -> None (an unmanaged unit names no landlord).
-    # Unlike the tenant's display name, the resolved value here is a bare
-    # identity KEY — not a sensitive aspect — so no egress-declaration path is
-    # needed (contrast the tenantName comment below).
-    # read-posture: (e) relation=manages epoch=none
-    page, _ = kv.Links(hub_key, relation, "in")
-    for l in page:
-        if not l.isDeleted:
-            return l.sourceVertex
+    # with no primary, and RemoveUnitOwner tombstones a manages link rather
+    # than deleting it, so a page can hold a tombstone before the live
+    # source). The first live entry
+    # resolves a representative landlord party; absent -> None (an unmanaged
+    # unit names no landlord). Unlike the tenant's display name, the resolved
+    # value here is a bare identity KEY — not a sensitive aspect — so no
+    # egress-declaration path is needed (contrast the tenantName comment
+    # below).
+    cursor = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=manages epoch=none
+        page, cursor = kv.Links(hub_key, relation, "in", cursor, LIVE_LINK_PAGE_LIMIT)
+        for l in page:
+            if not l.isDeleted:
+                return l.sourceVertex
+        if cursor == None:
+            break
     return None
 
 def aspect_data(key):

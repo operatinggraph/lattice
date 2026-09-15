@@ -2168,6 +2168,20 @@ WORKPLACE_PARENT_PAGE_LIMIT = 20
 MAX_PARENT_PAGES = 4
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
+# A page of one is not enough for a REPOINTED single-valued relation:
+# ListLinks returns tombstoned links in the page too, keys sort by target id,
+# and a repoint tombstones the old key and writes a new one -- so the live
+# link can sort behind its own tombstoned predecessor. ReassignSession
+# repoints both atStudio (a studio move) and ledBy (an instructor swap); both
+# readers page until they find the live link.
+LIVE_LINK_PAGE_LIMIT = 8
+MAX_LIVE_LINK_PAGES = 4
+# A session's atLocation snapshot names every room its studio sits at, a
+# handful at most, and ReassignSession needs the FULL set (live and
+# tombstoned) to decide revive/create/tombstone per room, so this walks every
+# page rather than stopping at the first.
+ATLOCATION_PAGE_LIMIT = 20
+MAX_ATLOCATION_PAGES = 4
 
 def actor_holds_operator(actor_key):
     # Resolved from the GRAPH, not from a compile-time constant: the primordial
@@ -2381,9 +2395,10 @@ def studio_locations(studio_key):
     # its old building.
     if not vertex_live(studio_key):
         return []
-    # read-posture: (e) relation=locatedAt epoch=none -- a studio sits at a
-    # handful of locations at most, so this is never a keyspace scan.
-    page, _ = kv.Links(studio_key, "locatedAt", "out")
+    # read-posture: (e) relation=locatedAt epoch=none -- CreateStudio writes
+    # at most ONE locatedAt link and no op repoints or adds to it, so a page
+    # of one is the whole set; the list shape is the consumer's contract.
+    page, _ = kv.Links(studio_key, "locatedAt", "out", None, 1)
     locs = []
     for lk in page:
         if not lk.isDeleted:
@@ -2510,43 +2525,53 @@ def release_cells_mutations(studio, sched):
     return out
 
 def session_ledby_link(sess_key):
-    # A session carries AT MOST ONE instructor (CreateSession/ReassignSession
-    # write exactly one ledBy link), so this returns its live (link key,
-    # instructor vertex key) or (None, None) -- the same bounded, known-hub
-    # enumeration idiom studio_locations already uses in this file for a
-    # studio's locatedAt links. The target vertex is what TombstoneSession /
-    # ReassignSession need to release or migrate the instructor's
-    # instructorSlotClaim cells; the link key is what they tombstone to drop
-    # the ledBy edge itself.
+    # A session carries AT MOST ONE LIVE instructor, so this returns its live
+    # (link key, instructor vertex key) or (None, None). ReassignSession's
+    # instructor swap tombstones the current ledBy link and writes a new one
+    # (a REPOINT, not a write-once fact), so a page can hold the tombstone
+    # before the live link -- this pages until it finds one. The target
+    # vertex is what TombstoneSession / ReassignSession need to release or
+    # migrate the instructor's instructorSlotClaim cells; the link key is
+    # what they tombstone to drop the ledBy edge itself.
     if not vertex_live(sess_key):
         return None, None
-    # read-posture: (e) relation=ledBy epoch=none -- a session leads to at
-    # most one instructor, never a keyspace scan.
-    page, _ = kv.Links(sess_key, "ledBy", "out")
-    for lk in page:
-        if not lk.isDeleted:
-            return lk.key, lk.targetVertex
+    cursor = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=ledBy epoch=none -- bounded, never a
+        # keyspace scan.
+        page, cursor = kv.Links(sess_key, "ledBy", "out", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if not lk.isDeleted:
+                return lk.key, lk.targetVertex
+        if cursor == None:
+            break
     return None, None
 
 def session_atstudio_link(sess_key):
-    # A session carries EXACTLY ONE studio (CreateSession writes the one
-    # atStudio link at mint time; nothing else ever writes a second one), so
-    # this returns its live (link key, studio vertex key) or (None, None) --
-    # the same bounded, known-hub idiom session_ledby_link uses just above.
-    # This is what lets ReassignSession's operator-repair path (below) name
-    # the CURRENT studio server-side when the studio is already tombstoned:
-    # TombstoneStudio never cascades onto this link (package.go's "no
-    # cascade" doctrine), so the link survives even though wellnessSessionsSpec's
-    # OPTIONAL MATCH on a live :studio vertex (lenses.go) can no longer hand
-    # the FE that key back to round-trip as the studio confirmation param.
+    # A session carries EXACTLY ONE LIVE studio, so this returns its live
+    # (link key, studio vertex key) or (None, None) -- the same bounded,
+    # known-hub idiom session_ledby_link uses just above. ReassignSession's
+    # studio move tombstones the current atStudio link and writes a new one
+    # (a REPOINT), so a page can hold the tombstone before the live link;
+    # this pages until it finds one. This is what lets ReassignSession's
+    # operator-repair path (below) name the CURRENT studio server-side when
+    # the studio is already tombstoned: TombstoneStudio never cascades onto
+    # this link (package.go's "no cascade" doctrine), so the link survives
+    # even though wellnessSessionsSpec's OPTIONAL MATCH on a live :studio
+    # vertex (lenses.go) can no longer hand the FE that key back to
+    # round-trip as the studio confirmation param.
     if not vertex_live(sess_key):
         return None, None
-    # read-posture: (e) relation=atStudio epoch=none -- a session sits at
-    # exactly one studio, never a keyspace scan.
-    page, _ = kv.Links(sess_key, "atStudio", "out")
-    for lk in page:
-        if not lk.isDeleted:
-            return lk.key, lk.targetVertex
+    cursor = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=atStudio epoch=none -- bounded, never a
+        # keyspace scan.
+        page, cursor = kv.Links(sess_key, "atStudio", "out", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if not lk.isDeleted:
+                return lk.key, lk.targetVertex
+        if cursor == None:
+            break
     return None, None
 
 def session_atlocation_links(sess_key):
@@ -2556,15 +2581,21 @@ def session_atlocation_links(sess_key):
     # move BACK to a room the class already sat in must revive the dead link
     # rather than CreateOnly-collide on it. Carrying each link's revision out
     # of this one enumeration is what lets that revive happen with no
-    # per-location point read behind it.
-    # read-posture: (e) relation=atLocation epoch=none -- a session snapshots
-    # at most one link per location its studio sits at, a handful at most, off
-    # the session key the caller has already proved alive; never a keyspace
-    # scan.
-    page, _ = kv.Links(sess_key, "atLocation", "out")
+    # per-location point read behind it. This needs the FULL set (live and
+    # tombstoned both), so it walks every page rather than stopping at the
+    # first.
+    cursor = None
     out = {}
-    for lk in page:
-        out[lk.key] = lk
+    for _page in range(MAX_ATLOCATION_PAGES):
+        # read-posture: (e) relation=atLocation epoch=none -- a session
+        # snapshots at most one link per location its studio sits at, a
+        # handful at most, off the session key the caller has already
+        # proved alive; bounded, never a keyspace scan.
+        page, cursor = kv.Links(sess_key, "atLocation", "out", cursor, ATLOCATION_PAGE_LIMIT)
+        for lk in page:
+            out[lk.key] = lk
+        if cursor == None:
+            break
     return out
 
 def derive_reads(op):
@@ -2949,13 +2980,17 @@ def execute(state, op):
                 _, confine_studio = session_atstudio_link(sess_key)
                 confine_locs = studio_locations(confine_studio)
                 if not confine_locs:
-                    # read-posture: (e) relation=atLocation epoch=none -- a
-                    # session carries at most a handful of atLocation
-                    # snapshot links, never a keyspace scan.
-                    aloc_page, _ = kv.Links(sess_key, "atLocation", "out")
-                    for lk in aloc_page:
-                        if not lk.isDeleted:
-                            confine_locs.append(lk.targetVertex)
+                    aloc_cursor = None
+                    for _page in range(MAX_ATLOCATION_PAGES):
+                        # read-posture: (e) relation=atLocation epoch=none --
+                        # a session carries at most a handful of atLocation
+                        # snapshot links, bounded, never a keyspace scan.
+                        aloc_page, aloc_cursor = kv.Links(sess_key, "atLocation", "out", aloc_cursor, ATLOCATION_PAGE_LIMIT)
+                        for lk in aloc_page:
+                            if not lk.isDeleted:
+                                confine_locs.append(lk.targetVertex)
+                        if aloc_cursor == None:
+                            break
                 enforce_workplace(confine_locs, "cannot cancel session " + sess_key)
 
         # The session's studio, needed below to release its held cells. Verified
@@ -4161,6 +4196,19 @@ WORKPLACE_PARENT_PAGE_LIMIT = 20
 MAX_PARENT_PAGES = 4
 WORKPLACE_MAX_DEPTH = 8
 WORKPLACE_MAX_NODES = 64
+# A page of one is not enough for a REPOINTED single-valued relation:
+# ListLinks returns tombstoned links in the page too, keys sort by target id,
+# and a repoint tombstones the old key and writes a new one -- so the live
+# link can sort behind its own tombstoned predecessor. ReassignSession
+# repoints atStudio on a studio move; session_studio pages until it finds the
+# live link.
+LIVE_LINK_PAGE_LIMIT = 8
+MAX_LIVE_LINK_PAGES = 4
+# A session's atLocation snapshot names every room its studio sits at, a
+# handful at most, and this walks the FULL live set (session_locations), so
+# it pages through every page rather than stopping at the first.
+ATLOCATION_PAGE_LIMIT = 20
+MAX_ATLOCATION_PAGES = 4
 
 def worksAt_covers(actor_id, location_key):
     # Answers "does this actor worksAt this location, or any LIVE location that
@@ -4343,9 +4391,10 @@ def studio_locations(studio_key):
     # conferring its old building.
     if not vertex_live(studio_key):
         return []
-    # read-posture: (e) relation=locatedAt epoch=none -- a studio sits at a
-    # handful of locations at most, so this is never a keyspace scan.
-    page, _ = kv.Links(studio_key, "locatedAt", "out")
+    # read-posture: (e) relation=locatedAt epoch=none -- CreateStudio writes
+    # at most ONE locatedAt link and no op repoints or adds to it, so a page
+    # of one is the whole set; the list shape is the consumer's contract.
+    page, _ = kv.Links(studio_key, "locatedAt", "out", None, 1)
     locs = []
     for lk in page:
         if not lk.isDeleted:
@@ -4353,17 +4402,24 @@ def studio_locations(studio_key):
     return locs
 
 def session_studio(session_key):
-    # The session's OWN studio, resolved from the graph (never a
+    # The session's OWN LIVE studio, resolved from the graph (never a
     # caller-supplied payload field -- a caller cannot forge which studio it
     # is writing against). Factored out of session_locations below, mirroring
     # clinic-domain's appointment_provider / appointment_sites split.
-    # read-posture: (e) relation=atStudio epoch=none -- CreateSession writes
-    # exactly one atStudio link per session, so this resolves a single studio.
-    page, _ = kv.Links(session_key, "atStudio", "out")
+    # ReassignSession's studio move tombstones the current atStudio link and
+    # writes a new one (a REPOINT), so a page can hold the tombstone before
+    # the live link; this pages until it finds one.
+    cursor = None
     studio = None
-    for lk in page:
-        if not lk.isDeleted:
-            studio = lk.targetVertex
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=atStudio epoch=none -- bounded, never a
+        # keyspace scan.
+        page, cursor = kv.Links(session_key, "atStudio", "out", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if not lk.isDeleted:
+                studio = lk.targetVertex
+        if studio != None or cursor == None:
+            break
     return studio
 
 def session_locations(session_key):
@@ -4388,15 +4444,21 @@ def session_locations(session_key):
     # location when the snapshot was last taken has no atLocation link and is
     # denied here, the same way a studio with no location confers no workplace
     # to begin with.
-    # read-posture: (e) relation=atLocation epoch=none -- the snapshot holds at
-    # most one link per location the session's studio sits at, a single bounded
-    # enumeration off the session key already proven alive by the caller, never
-    # a keyspace scan.
-    apage, _ = kv.Links(session_key, "atLocation", "out")
+    # The snapshot holds at most one link per location the session's studio
+    # sits at, a handful at most, but ALL of them are the answer, so this
+    # walks every page rather than stopping at the first.
+    cursor = None
     out = []
-    for lk in apage:
-        if not lk.isDeleted:
-            out.append(lk.targetVertex)
+    for _page in range(MAX_ATLOCATION_PAGES):
+        # read-posture: (e) relation=atLocation epoch=none -- bounded, off
+        # the session key already proven alive by the caller, never a
+        # keyspace scan.
+        apage, cursor = kv.Links(session_key, "atLocation", "out", cursor, ATLOCATION_PAGE_LIMIT)
+        for lk in apage:
+            if not lk.isDeleted:
+                out.append(lk.targetVertex)
+        if cursor == None:
+            break
     return out
 
 def prepare_booking_common(state, op, p):

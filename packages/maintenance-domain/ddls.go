@@ -478,7 +478,7 @@ def workorder_location(work_order_key):
     # read-posture: (e) relation=locatedAt epoch=none -- a work order carries
     # exactly one locatedAt link (required at ReportIssue), so this is never a
     # keyspace scan.
-    page, _ = kv.Links(work_order_key, "locatedAt", "out")
+    page, _ = kv.Links(work_order_key, "locatedAt", "out", None, 1)
     loc = None
     for lk in page:
         if not lk.isDeleted:
