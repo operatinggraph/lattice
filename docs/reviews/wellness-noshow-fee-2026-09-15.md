@@ -37,8 +37,8 @@ fee-free. Winston-adjudicated (implementation-level; no contract surface, no for
 ## Verdict — *the fee is the studio's recorded policy, the button says the amount, and "no fee" is a button*
 
 1. **`studioProfile.noShowFeeCents`** — optional non-negative integer cents. Written by `CreateStudio` (new optional
-   param) and by **`SetStudioProfile{studioKey, name?, noShowFeeCents?}`** (new op; mirrors `SetInstructorProfile`'s
-   shape; granted operator + frontOfHouse confined by the studio's `locatedAt`, the confinement `TombstoneStudio`
+   param) and by **`SetStudioProfile{studioKey, name?, noShowFeeCents?}`** (new op; a merge-update, amended at build — the
+   descriptor vocabulary cannot pre-fill an editable field; granted operator + frontOfHouse confined by the studio's `locatedAt`, the confinement `TombstoneStudio`
    shipped at `56deea3e`). A profile with no `noShowFeeCents` means "no policy recorded".
 2. **`SetBookingAttendance` resolves the fee from the studio.** With `noShowFeeCents` absent from the payload and
    `status = noShow`: `session_studio(session)` → `(e)` read `.studioProfile` → `noShowFeeCents` if present, else
@@ -97,3 +97,23 @@ fee-free. Winston-adjudicated (implementation-level; no contract surface, no for
 6. **Adjacent finds:** none.
 7. **Non-goals:** capping an explicit payload fee above the policy (staff-trusted today; not the filed harm); a
    per-class fee; Facet showing the studio amount (no session-row column carries it; the enum label names the rule).
+
+### Build note (2026-09-15)
+
+Shipped `0b256550` (CI green); brief `9c6c67a5`. Live on the shared stack (wellness-domain 0.27.13 + wellness-reminders
+0.3.7 diff-applied, `bin/wellness-app` cycled): `SetStudioProfile{noShowFeeCents: 1000}` on Riverside Movement Studio
+committed as the operator and `/api/studios` reads `noShowFeeCents: 1000` off `wellnessStudios`. The fee resolution
+itself (policy / zero / none → 2500 / explicit override / malformed refused, across a moved class) is proven by the
+package vectors and the reviewer's mutants rather than by billing a live member — a no-show mark needs a started
+class, which cannot be called off afterwards, and the demo stack keeps no probe litter.
+
+Deviations from the brief: `SetStudioProfile` is a merge-update, not `SetInstructorProfile`'s wholesale replacement
+(the descriptor vocabulary cannot pre-fill an editable field, so a fee-only form would re-type or blank the name);
+the aspect's local name is `.profile` (class `studioProfile`); `lint-app-op-descriptors`' wellness ceiling 15 → 16
+with the reason recorded beside it. Review classification (one cold pass over the package diff, a lead pass over the
+app diff): **test-gap** — `session_studio`'s isDeleted-skip was unpinned by the whole package (the move vector had the
+tombstone sorting first, so last-wins still landed live); fixed with the reverse-ordered vector. **implementation-bug**
+— the absent-profile refusal's text and its Facet courtesy described an inverted mechanism (an undeclared read finds
+the profile; a declared read of an absent key faults `HydrationMiss` before the branch); fixed. **convention** — two
+narrating comments; fixed. Two nits (a non-string `name` silently dropped; a rename carrying a malformed stored policy)
+fixed. Adjacent finds: none.
