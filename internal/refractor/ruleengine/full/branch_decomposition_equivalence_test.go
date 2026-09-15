@@ -30,6 +30,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	edgemanifest "github.com/operatinggraph/lattice/packages/edge-manifest"
 )
 
 // withoutBranchDecomposition returns a shallow copy of cr with the branch
@@ -66,6 +67,25 @@ func corpusSpec(t testing.TB, canonicalName string) string {
 		}
 	}
 	t.Fatalf("no installed lens is named %q", canonicalName)
+	return ""
+}
+
+// manifestBranchSpec returns one composed walk branch of an edge-manifest
+// multi-walk lens, through the production compiler — the same
+// `<name>#<i>` cypher the corpus census pins, read from the package rather
+// than copied here.
+func manifestBranchSpec(t testing.TB, canonicalName string, branch int) string {
+	t.Helper()
+	expanded, err := edgemanifest.Package.ExpandReadGrantWalks()
+	require.NoError(t, err, "the shipped edge-manifest package must expand cleanly")
+	for _, l := range expanded.Lenses {
+		if l.CanonicalName != canonicalName {
+			continue
+		}
+		require.Greaterf(t, len(l.SpecBranches), branch, "%s has %d composed branch(es), no branch %d", canonicalName, len(l.SpecBranches), branch)
+		return l.SpecBranches[branch]
+	}
+	t.Fatalf("no composed edge-manifest lens is named %q", canonicalName)
 	return ""
 }
 
@@ -735,6 +755,41 @@ func seedBranchCorpus(t testing.TB, reg *fixtureRegistry, adjKV, coreKV *substra
 	})
 	putEdge(t, reg, adjKV, "forSession", wlWaiting, wlSession)
 
+	// edgeEntitySessions decomposes because its shared tail aggregates the
+	// session's seat-holding bookings into `full` (one count(DISTINCT CASE …)
+	// over the forSession-in walk). Each of its two walks must reach ONE
+	// session whose `full` can read true only if the branch bound the seated
+	// booking: a studio at the actor's home (the residence walk) hosting a
+	// capacity-1 class the actor also leads through a bound instructor (the
+	// provider walk), with the seat held and a member waiting. wlSession stays
+	// off the studio so each walk projects exactly one row. Always seeded.
+	fullStudio := name("fullstudio")
+	putVertex(t, reg, coreKV, fullStudio, "studio", nil)
+	putAspect(t, reg, coreKV, fullStudio, "profile", map[string]any{"name": "Studio A"})
+	putEdge(t, reg, adjKV, "locatedAt", fullStudio, home)
+	fullSession := name("fullsession")
+	putVertex(t, reg, coreKV, fullSession, "session", nil)
+	putAspect(t, reg, coreKV, fullSession, "schedule", map[string]any{
+		"name": "Power Hour", "startsAt": future, "endsAt": future, "capacity": 1.0,
+	})
+	putEdge(t, reg, adjKV, "atStudio", fullSession, fullStudio)
+	fullInstr := name("fullinstr")
+	putVertex(t, reg, coreKV, fullInstr, "instructor", nil)
+	putEdge(t, reg, adjKV, "identifiedBy", fullInstr, actor)
+	putEdge(t, reg, adjKV, "ledBy", fullSession, fullInstr)
+	fullSeated := name("fullseated")
+	putVertex(t, reg, coreKV, fullSeated, "booking", nil)
+	putAspect(t, reg, coreKV, fullSeated, "status", map[string]any{
+		"value": "booked", "rate": "standard", "seat": 1.0, "session": vtxKey(reg, fullSession),
+	})
+	putEdge(t, reg, adjKV, "forSession", fullSeated, fullSession)
+	fullWaiting := name("fullwaiting")
+	putVertex(t, reg, coreKV, fullWaiting, "booking", nil)
+	putAspect(t, reg, coreKV, fullWaiting, "status", map[string]any{
+		"value": "waitlisted", "rate": "standard", "waitlistSlot": 1.0, "session": vtxKey(reg, fullSession),
+	})
+	putEdge(t, reg, adjKV, "forSession", fullWaiting, fullSession)
+
 	return branchCorpus{
 		actorKey:            vtxKey(reg, actor),
 		leaseAppKey:         vtxKey(reg, app),
@@ -1071,6 +1126,22 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 				return intCol(row, "seatedCount") + intCol(row, "waitlistedCount")
 			}},
 
+		// edgeEntitySessions' two walks share one tail, so each composed branch
+		// is its own differential. The deferred subtree is the forSession-in
+		// booking walk behind `full`; the corpus's capacity-1 class holds one
+		// seat, so `full` true is the witness that the branch bound it — a fold
+		// that dropped the branch would count zero seats and read false.
+		{name: "edgeEntitySessions#0", spec: manifestBranchSpec(t, "edgeEntitySessions", 0), anchor: c.actorKey, rows: 1,
+			evidence: func(t *testing.T, row map[string]any) {
+				boolEvidence(t, row, "full", true, "forSession booking")
+			},
+			content: func(row map[string]any) int { return boolsTrue(row, "full") }},
+		{name: "edgeEntitySessions#1", spec: manifestBranchSpec(t, "edgeEntitySessions", 1), anchor: c.actorKey, rows: 1,
+			evidence: func(t *testing.T, row map[string]any) {
+				boolEvidence(t, row, "full", true, "forSession booking")
+			},
+			content: func(row map[string]any) int { return boolsTrue(row, "full") }},
+
 		// The UNANCHORED read lenses: they bind every vertex of their head's type
 		// in the KV rather than one, which is the multi-base-row shape the
 		// anchored lenses above cannot reach.
@@ -1234,6 +1305,7 @@ func TestBranchDecomposition_EveryDecomposingCorpusLensReachesADifferential(t *t
 		"applicantOnboarding",
 		"capabilityEphemeral", "capabilityRoles", "capabilityServiceAccess",
 		"clinicNoShowSettlement", "clinicPatientsRead",
+		"edgeEntitySessions#0", "edgeEntitySessions#1",
 		"edgeIdentity", "edgeManifestProviderReadGrants", "edgeManifestReadGrants",
 		"edgeManifestStaffReadGrants", "edgeManifestTaskReadGrants", "identityAnchors", "identityErasureResidue",
 		"landlordLeaseApplicationsRead", "leaseApplicationComplete", "leaseApplicationsRead",

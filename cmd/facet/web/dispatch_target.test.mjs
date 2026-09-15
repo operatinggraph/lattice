@@ -257,6 +257,11 @@ test("an entity row's meta line renders a projected *Cents column as money", () 
   assert.equal(entityMeta({ subtitle: "Unit 1", priceCents: 450, available: false }), "Unit 1 &middot; $4.50 &middot; sold out");
   assert.equal(entityMeta({ subtitle: "Unit 1", priceCents: 450, available: true }), "Unit 1 &middot; $4.50");
   assert.equal(entityMeta({ subtitle: "Unit 1", available: "false" }), "Unit 1");
+  // a projected full:true says full (the column Book / Join waitlist swap on);
+  // absent, false, or a string lookalike says nothing
+  assert.equal(entityMeta({ subtitle: "Studio A", full: true }), "Studio A &middot; full");
+  assert.equal(entityMeta({ subtitle: "Studio A", full: false }), "Studio A");
+  assert.equal(entityMeta({ subtitle: "Studio A", full: "true" }), "Studio A");
 });
 
 // The entity-ref picker offers only what the op it feeds would accept: a

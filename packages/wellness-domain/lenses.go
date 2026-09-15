@@ -386,10 +386,13 @@ RETURN
 // original intent would show a reader the series as authored rather than the
 // occurrence as it now stands.
 //
-// bookedCount is DELIBERATELY not projected here — the lens engine has no
-// aggregate COUNT; a consuming FE derives it client-side from
-// wellnessBookings, the same client-side aggregation idiom
-// cmd/cafe-app's computeTabs already uses (see wellness-vertical-design.md).
+// bookedCount is not projected here: cmd/wellness-app derives it from
+// wellnessBookings (sessions.go's countBookingsBySession — a booking holds a
+// seat unless waitlisted or forfeited), the same client-side aggregation idiom
+// cmd/cafe-app's computeTabs uses (see wellness-vertical-design.md). The one
+// read model that folds that tally into the graph is edge-manifest's
+// edgeEntitySessions, whose `full` column counts it against capacity for
+// CreateBooking / JoinWaitlist's VisibleWhen (opmetas.go).
 //
 // coveringLocations is the read-side half of workplace confinement
 // (facet-staff-worlds-design.md §9): every location that COVERS this session —

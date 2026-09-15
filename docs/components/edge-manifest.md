@@ -60,7 +60,7 @@ already have on the nats-kv side).
 | `edgeCatalog` | `manifest.op.<opMetaId>` | op metas reachable via a reachable service template's `permitsOperation` link; carries `viaServices`, the list of service keys that permit it — **or** via a held role's `grantedBy` permission → `forOperation` (the role-standing-grant catalog path, a second `Walk` in the `edgeManifestStaff` domain; see below) — **or** via a task `assignedTo` the actor, over the task's own `forOperation` (the own-task catalog path, a third `Walk` in the `edgeManifestTask` domain; see below) |
 | `edgeTasks` | `manifest.task.<taskId>` | open tasks directly `assignedTo` the actor |
 | `edgeInstances` | `manifest.inst.<instId>` | service instances `providedTo` the actor ("my orders") |
-| `edgeEntitySessions` | `manifest.ent.<sessionId>` | wellness class sessions reachable via residence → the studio's `locatedAt` place (`entityType: "session"`, a `dispatch.targetType: "session"` browse target) — **or** via the actor's own bound instructor's `ledBy`-inverse sessions (the provider-hat "my classes to teach" path, a second `Walk` in the `edgeManifestProvider` domain; see below) |
+| `edgeEntitySessions` | `manifest.ent.<sessionId>` | wellness class sessions reachable via residence → the studio's `locatedAt` place (`entityType: "session"`, a `dispatch.targetType: "session"` browse target; carries `full` — seat-holding `forSession` bookings ≥ `.schedule.capacity` — the column `CreateBooking`/`JoinWaitlist` gate on) — **or** via the actor's own bound instructor's `ledBy`-inverse sessions (the provider-hat "my classes to teach" path, a second `Walk` in the `edgeManifestProvider` domain; see below) |
 | `edgeEntityProviders` | `manifest.ent.<providerId>` | clinic providers `practicesAt` a reachable location (`entityType: "provider"`) |
 | `edgeEntityBookings` | `manifest.ent.<bookingId>` | wellness bookings the actor themself made (`bookedBy`, NOT residence-scoped — inherently private) |
 | `edgeEntityTabs` | `manifest.ent.<tabId>` | the actor's own OPEN café tabs, via their lease's `openFor` link (inherently private) |
@@ -150,7 +150,10 @@ which both a `duplicate` (an earlier submission claimed that requestId, so the e
 secret's hash never landed) and the Gateway's status-less reply-timeout `202` satisfy without the write
 being confirmed. `dispatchVisibleWhen` (`{field, equals}`, nullable) gates
 OFFERING an op against the resolved target row's state — the state-machine-pair seam (pause/resume)
-that previously forced clients to branch by op name. `dispatchEnumerations` (a nullable array of
+that previously forced clients to branch by op name; evaluated fail-closed (no row, or a row without
+the column, offers nothing), so a `field` on a `manifest.ent` target must be a column every lens
+stamping that `entityType` projects (`lint-manifest-entity-type`'s VISIBLE-WHEN rule; the first such
+pair is wellness `CreateBooking` / `JoinWaitlist` on `edgeEntitySessions`' `full`). `dispatchEnumerations` (a nullable array of
 `{hub, relation, direction}`) carries the Contract #2 §2.5 class-(e) `kv.Links` walks the op's script
 runs, for the client to resolve and put on the envelope's `contextHint.enumerations`: the hub is a
 whole-key template in the same vocabulary `dispatchReads` uses, narrowed to what a descriptor-driven

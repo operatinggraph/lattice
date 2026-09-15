@@ -486,6 +486,106 @@ func TestEdgeEntitySessions_ProviderBranchProjectsTheLeadingInstructorKey(t *tes
 	require.Equal(t, f.key("instr"), row["instructorKey"])
 }
 
+// ---- edgeEntitySessions.full: the seat state Book / Join waitlist gate on ----
+//
+// `full` is what wellness-domain's CreateBooking (VisibleWhen full=false) and
+// JoinWaitlist (VisibleWhen full=true) read on the row; the column's rule is
+// cmd/wellness-app's countBookingsBySession — a live forSession booking holds
+// a seat unless waitlisted or forfeited — compared against the schedule's
+// capacity. Each vector below is one boundary of that rule; a hand-listed
+// population exempts its next member, so the set names every branch the CASE
+// carries: no bookings, below capacity, exactly at capacity, the two excluded
+// statuses beside a status-less booking, a tombstoned booking, and a session
+// with no capacity.
+
+func emSessionFull(t *testing.T, f *emFixture, branch int, actor string) any {
+	t.Helper()
+	rows := emRowsByEntity(f.project(t, emComposedSpecBranch(t, "edgeEntitySessions", branch), f.key(actor)))
+	row, ok := rows[f.ids["sess"]]
+	require.True(t, ok, "the session must project")
+	return row["full"]
+}
+
+func emSeedBooking(t *testing.T, f *emFixture, name, status string) {
+	t.Helper()
+	f.vtx(t, name, "booking")
+	if status != "" {
+		f.aspect(t, name, "status", "bookingStatus", map[string]any{"value": status})
+	}
+	f.edge(t, "forSession", name, "sess")
+}
+
+func TestEdgeEntitySessions_FullIsFalseWithNoBookings(t *testing.T) {
+	f := emResidentWorld(t)
+	f.aspect(t, "sess", "schedule", "wellnessSessionSchedule", map[string]any{"name": "Flow", "capacity": 2})
+	require.Equal(t, false, emSessionFull(t, f, 0, "resident"))
+}
+
+func TestEdgeEntitySessions_FullIsFalseBelowCapacity(t *testing.T) {
+	f := emResidentWorld(t)
+	f.aspect(t, "sess", "schedule", "wellnessSessionSchedule", map[string]any{"name": "Flow", "capacity": 2})
+	emSeedBooking(t, f, "b1", "booked")
+	require.Equal(t, false, emSessionFull(t, f, 0, "resident"))
+}
+
+func TestEdgeEntitySessions_FullIsTrueAtCapacity(t *testing.T) {
+	f := emResidentWorld(t)
+	f.aspect(t, "sess", "schedule", "wellnessSessionSchedule", map[string]any{"name": "Flow", "capacity": 2})
+	emSeedBooking(t, f, "b1", "booked")
+	emSeedBooking(t, f, "b2", "attended")
+	require.Equal(t, true, emSessionFull(t, f, 0, "resident"))
+}
+
+// A waitlisted or forfeited booking holds no seat and must not fill the class;
+// a booking with no status aspect at all is counted — the filter is on the
+// value, never on the aspect's presence (the same negated-equality reasoning
+// edgeEntityBookingsTail's forfeited filter documents).
+func TestEdgeEntitySessions_FullIgnoresWaitlistedAndForfeitedButCountsStatusless(t *testing.T) {
+	f := emResidentWorld(t)
+	f.aspect(t, "sess", "schedule", "wellnessSessionSchedule", map[string]any{"name": "Flow", "capacity": 2})
+	emSeedBooking(t, f, "w1", "waitlisted")
+	emSeedBooking(t, f, "f1", "forfeited")
+	emSeedBooking(t, f, "b1", "booked")
+	require.Equal(t, false, emSessionFull(t, f, 0, "resident"), "one seat of two is held")
+	emSeedBooking(t, f, "s1", "")
+	require.Equal(t, true, emSessionFull(t, f, 0, "resident"), "a status-less booking holds the second seat")
+}
+
+// An early cancel tombstones the booking vertex (wellness-domain CancelBooking);
+// the engine's liveness filter must free that seat, not the CASE.
+func TestEdgeEntitySessions_FullFreesATombstonedBookingsSeat(t *testing.T) {
+	f := emResidentWorld(t)
+	f.aspect(t, "sess", "schedule", "wellnessSessionSchedule", map[string]any{"name": "Flow", "capacity": 1})
+	emSeedBooking(t, f, "b1", "booked")
+	require.Equal(t, true, emSessionFull(t, f, 0, "resident"))
+	f.tombstone(t, "b1")
+	require.Equal(t, false, emSessionFull(t, f, 0, "resident"))
+}
+
+// A session carrying no capacity is a read-model fault (CreateSession requires
+// 1..200); the comparison against null answers false, so the row offers Book
+// and the script refuses on its own — never silently full.
+func TestEdgeEntitySessions_FullIsFalseWithoutCapacity(t *testing.T) {
+	f := emResidentWorld(t)
+	f.aspect(t, "sess", "schedule", "wellnessSessionSchedule", map[string]any{"name": "Flow"})
+	emSeedBooking(t, f, "b1", "booked")
+	require.Equal(t, false, emSessionFull(t, f, 0, "resident"))
+}
+
+// The provider-path walk shares the tail, so an instructor viewing their own
+// led session reads the same seat state a resident does.
+func TestEdgeEntitySessions_ProviderBranchProjectsFull(t *testing.T) {
+	f := newEmFixture(t)
+	f.vtx(t, "teacher", "identity")
+	f.vtx(t, "instr", "instructor")
+	f.vtx(t, "sess", "session")
+	f.aspect(t, "sess", "schedule", "wellnessSessionSchedule", map[string]any{"name": "Evening Flow", "startsAt": "2026-08-01T18:00:00Z", "capacity": 1})
+	f.edge(t, "identifiedBy", "instr", "teacher")
+	f.edge(t, "ledBy", "sess", "instr")
+	emSeedBooking(t, f, "b1", "booked")
+	require.Equal(t, true, emSessionFull(t, f, 1, "teacher"))
+}
+
 // TestEdgeEntityBookings_ProjectsItsSessionsInstructorKey — a booking's row
 // carries its session's ledBy instructor one hop further out (the same
 // column SetBookingAttendance's {me.instructor} needs proof against), via

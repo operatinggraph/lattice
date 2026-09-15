@@ -881,10 +881,24 @@ RETURN
 // against `{me.instructor}`, so an op that administers "the session I lead"
 // isn't offered against a session somebody else leads merely because both
 // share the entityType.
+//
+// `full` is the seat state CreateBooking / JoinWaitlist gate on
+// (wellness-domain opmetas.go: `Dispatch.VisibleWhen{Field: "full"}`, false
+// offers Book, true offers Join waitlist): the session's seat-holding bookings
+// — every live `forSession` booking except a `waitlisted` or `forfeited` one,
+// the tally cmd/wellness-app's countBookingsBySession keeps client-side —
+// counted against `.schedule.capacity`. The negated-equality form keeps a
+// booking with no status aspect counted (compareAny answers false on nil, so
+// only the negation turns that into "keep" — edgeEntityBookingsTail's
+// forfeited filter, same reasoning). A booking write reaches this row through
+// provenance: the OPTIONAL MATCH reads it, so the personal delta admits the
+// session's key (personal_delta_exactness_corpus_census_test.go).
 const edgeSessionsTail = `
 OPTIONAL MATCH (sess)-[:atStudio]->(studio:studio)
 OPTIONAL MATCH (sess)-[:ledBy]->(instr:instructor)
-WITH sess, studio, instr
+OPTIONAL MATCH (sess)<-[:forSession]-(bk:booking)
+WITH sess, studio, instr,
+  count(DISTINCT CASE WHEN NOT (bk.status.data.value = 'waitlisted') AND NOT (bk.status.data.value = 'forfeited') THEN bk.key ELSE null END) AS seatsHeld
 WHERE sess.key <> null
 RETURN
   sess.key AS anchor,
@@ -897,7 +911,8 @@ RETURN
   studio.profile.data.name AS subtitle,
   studio.key AS studioKey,
   sess.schedule.data.startsAt AS startsAt,
-  instr.key AS instructorKey
+  instr.key AS instructorKey,
+  (seatsHeld >= sess.schedule.data.capacity) AS full
 `
 
 // edgeStaffPanesTail projects one `manifest.pane.<paneMetaId>` row per pane

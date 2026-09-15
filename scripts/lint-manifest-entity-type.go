@@ -13,7 +13,7 @@
 // reaches the row, and op-attach breaks for that one entity kind alone,
 // discoverable only by clicking through Facet's UI.
 //
-// Two rules, over every lens edge-manifest declares (pkgregistry.Lookup
+// Three rules, over every lens edge-manifest declares (pkgregistry.Lookup
 // returns the RAW pre-expansion Definition — Go has already resolved every
 // named Chain constant by the time Lenses() runs, so a Walk's Chain entries
 // here are the walk's own MATCH pattern verbatim, not a string to re-derive):
@@ -33,6 +33,21 @@
 //     only as a lens pattern label or a subtypeOf ancestor, never as a live
 //     vertex's own type segment — so stamping one as entityType would desync
 //     from entityKey's real runtime type by construction, not by accident.
+//   - VISIBLE-WHEN — an op meta anywhere in the corpus whose
+//     `Dispatch.VisibleWhen` gates a `TargetType` some edge-manifest lens
+//     stamps as entityType must name a Field EVERY such lens projects
+//     (`AS <Field>` in its Spec). The renderer evaluates the condition
+//     fail-closed (cmd/facet/web/app.js opVisibleForRow: no column, no
+//     offer — pkgmgr.OpDispatchSpec.VisibleWhen's own rule), so a Field a
+//     lens does not project withholds the op from every row of that entity
+//     kind silently, and a state-machine PAIR gated on one column (wellness
+//     CreateBooking / JoinWaitlist on `full`) loses both halves at once. The
+//     pairing is the same kind of promise as PAIRING above — a package's
+//     declaration against another package's projection, compared by a
+//     renderer with no compiler between them. An op whose TargetType no
+//     manifest.ent lens stamps (identity-domain's four, offered from pane
+//     rows) is outside this rule: a pane section's column list is its own
+//     read-surface decision, and a Field it omits is a deliberate withhold.
 //
 // An `AS entityType` occurrence this gate cannot pair with a `<var>.key AS
 // entityKey` in the one shape the corpus uses, or whose entityKey variable it
@@ -50,6 +65,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/pkgregistry"
@@ -81,11 +97,13 @@ func main() {
 	for _, lens := range def.Lenses {
 		issues = append(issues, checkLens(lens, abstractTypes)...)
 	}
+	issues = append(issues, checkVisibleWhenColumns(def)...)
 	sort.Strings(issues)
 
 	if len(issues) == 0 {
 		fmt.Printf("lint-manifest-entity-type: 0 issues — every entityType literal in %s matches its "+
-			"entityKey's own vertex-type label and names no abstract type\n", targetPackage)
+			"entityKey's own vertex-type label and names no abstract type, and every VisibleWhen on a "+
+			"manifest.ent target names a column each lens stamping that type projects\n", targetPackage)
 		return
 	}
 	fmt.Printf("lint-manifest-entity-type: %d issue(s)\n", len(issues))
@@ -116,6 +134,79 @@ func collectAbstractTypes() map[string]bool {
 		}
 	}
 	return out
+}
+
+// checkVisibleWhenColumns audits the VISIBLE-WHEN rule: for each op meta in
+// the whole registered corpus carrying Dispatch.VisibleWhen, every edge-
+// manifest lens stamping its TargetType as entityType must project the
+// condition's Field. Reads every package — the op metas live with the
+// vertical that owns the op, the lenses with edge-manifest.
+func checkVisibleWhenColumns(manifest pkgmgr.Definition) []string {
+	stampers := map[string][]pkgmgr.LensSpec{}
+	for _, lens := range manifest.Lenses {
+		for _, m := range reAnyEntityTypeLiteral.FindAllStringSubmatch(lens.Spec, -1) {
+			stampers[m[1]] = append(stampers[m[1]], lens)
+		}
+	}
+
+	var out []string
+	for _, name := range pkgregistry.Names() {
+		def, ok := pkgregistry.Lookup(name)
+		if !ok {
+			continue
+		}
+		for _, op := range def.OpMetas {
+			d := op.Dispatch
+			if d == nil || d.VisibleWhen == nil {
+				continue
+			}
+			lenses := stampers[d.TargetType]
+			if len(lenses) == 0 {
+				continue
+			}
+			if d.VisibleWhen.Field == "" {
+				out = append(out, fmt.Sprintf(
+					"op %s (%s): Dispatch.VisibleWhen names no Field, yet its TargetType %q is a manifest.ent "+
+						"entityType — the renderer treats an unnamed column as unmet and withholds the op from every %s row",
+					op.OperationType, name, d.TargetType, d.TargetType))
+				continue
+			}
+			for _, lens := range lenses {
+				if reProjectedColumn(d.VisibleWhen.Field).MatchString(returnClause(lens.Spec)) {
+					continue
+				}
+				out = append(out, fmt.Sprintf(
+					"op %s (%s): Dispatch.VisibleWhen reads column %q of its %q target, but lens %s stamps "+
+						"entityType %q without projecting `AS %s` — cmd/facet's opVisibleForRow answers false on a row "+
+						"lacking the column, so the op is silently withheld from every %s row that lens produces",
+					op.OperationType, name, d.VisibleWhen.Field, d.TargetType, lens.CanonicalName, d.TargetType,
+					d.VisibleWhen.Field, d.TargetType))
+			}
+		}
+	}
+	return out
+}
+
+// reAnyEntityTypeLiteral captures the literal of every `"<literal>" AS
+// entityType` projection — the type a lens's rows carry, whatever shape the
+// entityKey pairing took.
+var reAnyEntityTypeLiteral = regexp.MustCompile(`"([^"]*)"\s+AS\s+entityType\b`)
+
+// reProjectedColumn matches `AS <column>` at a word boundary — the one way a
+// cypher RETURN names a projected column.
+func reProjectedColumn(column string) *regexp.Regexp {
+	return regexp.MustCompile(`\bAS\s+` + regexp.QuoteMeta(column) + `\b`)
+}
+
+// returnClause is the text from a spec's final RETURN onward — the only
+// clause whose aliases become row columns. A WITH alias that never reaches
+// the RETURN is not projected, so matching the whole spec would pass a
+// column the row does not carry.
+func returnClause(spec string) string {
+	if i := strings.LastIndex(spec, "RETURN"); i >= 0 {
+		return spec[i:]
+	}
+	return ""
 }
 
 // reEntityPair matches the one shape every entityKey/entityType pair in the

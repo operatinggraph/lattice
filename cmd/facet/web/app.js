@@ -1258,6 +1258,10 @@ function entityMeta(d) {
     if (/Cents$/.test(k) && typeof v === "number") parts.push("$" + (v / 100).toFixed(2));
   }
   if (d.available === false) parts.push("sold out");
+  // A full class says so on its card: the row's `full` is what swaps Book for
+  // Join waitlist (the ops' dispatchVisibleWhen), and the visitor should read
+  // why only the waitlist is offered before opening the session.
+  if (d.full === true) parts.push("full");
   return parts.join(" &middot; ");
 }
 

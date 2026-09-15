@@ -15,7 +15,7 @@ non-advisory finding.
 | `lint-facet-discovery` | No vertical vocabulary in `cmd/facet` |
 | `lint-facet-renderer-drift` | Descriptor vocabulary parity across renderers |
 | `lint-app-op-descriptors` | A vertical app wires UI only to described ops; ratchets its hardcoded-op-literal count |
-| `lint-manifest-entity-type` | An edge-manifest lens tail's `entityType` matches its `entityKey` binding |
+| `lint-manifest-entity-type` | An edge-manifest lens tail's `entityType` matches its `entityKey` binding; an op's `Dispatch.VisibleWhen` on a `manifest.ent` target names a column every lens stamping that type projects |
 | `lint-doc-orphan` | A doc comment names the declaration it sits above |
 | `lint-capability-kv-readers` | One reader owns Contract #6 §6.1 |
 | `lint-gap-column-declaration` | Every `missing_*` column that lands in a weaver target's rows is declared in that target's `gaps` map — derived through `internal/lenscolumns`, the one reading of "which keys does a row of this lens carry", which `internal/pkgmgr` holds the same invariant on at the two non-CI paths (the installer's live preflight refuses the install; the capability-artifact validator records the proposal invalid). Second rule over the same rows: every `maxretries_<g>` retry cap has a `missing_<g>` gap beside it — the engine reads a cap only under the name it derives from the gap key, so a hand-spelled cap under any other name is dead |

@@ -166,7 +166,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
 			OperationType: "CreateBooking",
-			// refusal-courtesy(facet): SessionInPast, SessionFull: none — edgeEntitySessions (edge-manifest/lenses.go's edgeSessionsTail) projects no `available` column reflecting a session's start time or seat count; Facet's generic form always offers the op.
+			// refusal-courtesy(facet): SessionFull: hide — Dispatch.VisibleWhen{Field:"full",Equals:false} below withholds the op from a session row whose `full` (edgeEntitySessions: seat-holding forSession bookings >= .schedule.capacity) is not false.
+			// refusal-courtesy(facet): SessionInPast: none — edgeEntitySessions projects no column reflecting a session's start time against the clock (a lens projects recorded facts, never a clock comparison); Facet's generic form offers the op on a past session.
 			// refusal-courtesy(facet): DoubleBooked: none — same lens, same gap: no column reflects whether the viewing actor already holds a claim on this session.
 			// refusal-courtesy(facet): ProtectedBooker, BookerConflict: none — both are properties of the ACTOR (a kernel identity, or a conflicting claim on another session), not of the session row being browsed; no entity lens column could express either.
 			// refusal-courtesy(facet): SessionTooLong: none — the session's span is fixed at CreateSession/CreateSessionSeries mint time (enforced there); Facet supplies no span here, only the session being viewed.
@@ -191,6 +192,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "session",
 				TargetType:  "session",
+				// The seat-state half of the Book / Join waitlist pair: a full
+				// class offers Join waitlist (JoinWaitlist's VisibleWhen below,
+				// the same column negated), never a Book that SessionFull would
+				// refuse — the swap cmd/wellness-app's scheduleCard makes on its
+				// own bookedCount tally, read here from edgeEntitySessions'
+				// `full`. Fail-closed by the vocabulary's rule: a session row
+				// without the column offers neither.
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "full", Equals: false},
 				// leaseAppKey is the resident-rate eligibility param, filled
 				// from the booker's own lease self-anchor rather than asked for
 				// as a raw vertex key. The trailing `?` OPTIONAL marker is
@@ -242,7 +251,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// presentation strings and title differ, since the offered
 			// affordance is "join the waitlist" not "book".
 			OperationType: "JoinWaitlist",
-			// refusal-courtesy(facet): SessionInPast, WaitlistFull: none — edgeEntitySessions projects no `available` column reflecting a session's start time or waitlist occupancy; Facet's generic form always offers the op.
+			// refusal-courtesy(facet): SessionInPast, WaitlistFull: none — edgeEntitySessions projects no column reflecting a session's start time against the clock (a lens projects recorded facts, never a clock comparison) or its waitlist occupancy (`full` is the seat count alone); Facet's generic form offers the op on a past or waitlist-saturated full session.
 			// refusal-courtesy(facet): DoubleBooked: none — same lens, same gap: no column reflects whether the viewing actor already holds a claim on this session.
 			// refusal-courtesy(facet): ProtectedBooker, BookerConflict: none — both are properties of the ACTOR, not of the session row being browsed; no entity lens column could express either.
 			// refusal-courtesy(facet): SessionTooLong: none — the session's span is fixed at CreateSession/CreateSessionSeries mint time; Facet supplies no span here, only the session being viewed.
@@ -267,6 +276,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				AuthContext: "self",
 				TargetField: "session",
 				TargetType:  "session",
+				// The other half of the pair: offered only on a full class,
+				// where CreateBooking is withheld.
+				VisibleWhen: &pkgmgr.OpVisibleWhenSpec{Field: "full", Equals: true},
 				ContextParams: map[string]string{
 					"booker":      "{actor}",
 					"leaseAppKey": "{me.leaseapp?}",
