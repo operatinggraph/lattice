@@ -116,6 +116,9 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// actor_holds_operator).
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+					// The credit-hold walk: the lease's café account, reached
+					// by its heldFor in-link (ddls.go cafe_account_for_lease).
+					{Hub: "{payload.leaseAppKey}", Relation: "heldFor", Direction: "in"},
 				},
 			},
 		},
@@ -171,13 +174,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of the open tab to correct — auto-filled from the tab being viewed."},` +
-				`"lineId":{"type":"string","description":"id of one entry in the tab's own .status.lines to void; its amount is derived from that line, never from amountCents. Leave absent for the legacy amount-only form."},` +
-				`"amountCents":{"type":"integer","title":"Amount","minimum":1,"description":"Amount to take back off the tab, in whole cents. Ignored when lineId is present; required when it is absent."}},` +
-				`"required":["tabKey"]}`,
+				`"lineId":{"type":"string","description":"id of one entry in the tab's own .status.lines to void; its amount is derived from that line, never from a caller-supplied amountCents."}},` +
+				`"required":["tabKey","lineId"]}`,
 			FieldDescriptions: map[string]string{
-				"tabKey":      "The tab being corrected — auto-filled by the client from the tab being viewed (dispatch.targetField), not user-entered.",
-				"lineId":      "The id of the specific charge line to void, from the tab's own .status.lines — its amount is derived from that line, ignoring amountCents. Omit to fall back to the legacy amount-only void.",
-				"amountCents": "How much to take back off the tab, entered in dollars — e.g. 4.50. Required only when lineId is absent. A void larger than the running total clamps the tab to zero rather than failing.",
+				"tabKey": "The tab being corrected — auto-filled by the client from the tab being viewed (dispatch.targetField), not user-entered.",
+				"lineId": "The id of the specific charge line to void, from the tab's own .status.lines — its amount is derived from that line, never from a caller-supplied amountCents.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "tab",

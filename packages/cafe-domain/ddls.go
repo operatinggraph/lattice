@@ -45,7 +45,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"(minimal, D5 — the running total lives on the .status aspect). OpenTab{leaseAppKey} validates the lease " +
 			"is alive, rejects LeaseNotApproved unless the lease's own lease-signing .decision aspect reads " +
 			"approved, rejects TenancyEnded once submittedAt reaches the lease's .tenancy leaseEnd (rent stops there too, so the " +
-			"house tab closes to a moved-out resident at the same instant; a lease with no .tenancy has no term to have ended), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
+			"house tab closes to a moved-out resident at the same instant; a lease with no .tenancy has no term to have ended), rejects CreditHold once the lease's " +
+			"café account carries an arrears episode a reminder has gone out for (cafe-ledger's .arrears.sentAt, reached by a live heldFor " +
+			"walk from the lease — never a caller-declared read — and dropped by cafe-ledger only when the balance returns to zero; overdue-but-unreminded " +
+			"is not a hold; enforced on the staff and resident-self legs alike), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
 			"cafeOpenTabGuard aspect on the leaseapp, mirroring cafe-ledger's cafeLedgerAccountGuard: a class-(d) " +
 			"optionalReads dedup — create the guard fresh on a lease's first-ever tab, OCC-revive it from its prior " +
 			"tombstone on a later one), mints the tab, writes .status {value: open, totalCents: 0, openedAt, " +
@@ -75,20 +78,16 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"this field (no lines key at all, or a line predating orderedBy) is treated as lines=[] / orderedBy " +
 			"absent respectively and simply accrues no itemized entries until its next Charge, itemsMemo staying " +
 			"the only record of what it already carried. " +
-			"VoidCharge (operator/frontOfHouse only — no self-service grant, a POS correction is a staff decision " +
-			"even when reversing a resident's own self-order mis-tap) has two forms. VoidCharge{tabKey, lineId} " +
-			"voids one specific .status.lines entry by its id: rejects UnknownChargeLine if no live (non-voided) " +
-			"line with that id exists on the tab, otherwise derives the amount from the line itself (never " +
-			"trusting a caller-supplied amountCents, the same \"derive, don't trust\" posture Charge's own " +
-			"menuItemKey branch uses) and marks that line voided:true in place. VoidCharge{tabKey, amountCents} " +
-			"(legacy/off-menu form, no lineId — e.g. correcting a tab whose charge predates itemized lines) " +
-			"subtracts the given positive amount without touching .status.lines at all. Either form then subtracts " +
-			"the resolved amount from the OPEN tab's running total, same OCC-conditioned upsert as Charge, clamped " +
-			"at 0 rather than rejected when the void exceeds the current total (an over-void is a caller mistake " +
-			"worth correcting cleanly, not a hard failure). A lineId void re-derives itemsMemo from the non-voided " +
-			"lines (the voided line drops out); the legacy amount-only form appends \"Void correction\" to itemsMemo when it " +
-			"actually reduced the total (a void against an already-0 tab appends nothing — there was no charge to " +
-			"correct). " +
+			"VoidCharge{tabKey, lineId} (operator/frontOfHouse only — no self-service grant, a POS correction " +
+			"is a staff decision even when reversing a resident's own self-order mis-tap) voids one specific " +
+			".status.lines entry by its id: rejects UnknownChargeLine if no live (non-voided) line with that id " +
+			"exists on the tab, otherwise derives the amount from the line itself (never trusting a " +
+			"caller-supplied amountCents, the same \"derive, don't trust\" posture Charge's own menuItemKey " +
+			"branch uses) and marks that line voided:true in place. It then subtracts the resolved amount from " +
+			"the OPEN tab's running total, same OCC-conditioned upsert as Charge, clamped at 0 rather than " +
+			"rejected when the void exceeds the current total (a tab whose recorded total already sits below " +
+			"the sum of its live lines corrects cleanly to 0, not a hard failure), and re-derives itemsMemo from " +
+			"the non-voided lines (the voided line drops out). " +
 			"Settle{tabKey} closes an " +
 			"OPEN tab (.status.value → settled, settledAt stamped, totalCents AND itemsMemo frozen), also OCC-conditioned, and " +
 			"tombstones both the lease's cafeOpenTabGuard (so a later OpenTab can claim it again) and the tab's own " +
@@ -124,10 +123,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> the tab is opened for (OpenTab; required, validated alive)."},` +
 			`"tabId":{"type":"string","description":"Optional bare NanoID for the new tab vertex (OpenTab); absent → minted."},` +
 			`"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of an existing tab (Charge/VoidCharge/Settle/SettleStaleTab/BackfillTabStaleAt; required, validated alive + open)."},` +
-			`"amountCents":{"type":"number","description":"The amount in integer cents; required for an off-menu Charge (no menuItemKey — added to the total) or a lineId-less (legacy) VoidCharge (subtracted, clamped at 0), must be > 0. Ignored by a VoidCharge that names lineId — the amount is derived from the line itself."},` +
+			`"amountCents":{"type":"number","description":"The amount in integer cents; required for an off-menu Charge (no menuItemKey — added to the total), must be > 0. Ignored by VoidCharge — the void amount is always derived from the named lineId's own line."},` +
 			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of a live catalog item; amountCents is derived from it, ignoring any caller-supplied amountCents. Required for a self-service Charge; optional for a staff Charge (its absence means an off-menu, hand-keyed amountCents charge)."},` +
 			`"description":{"type":"string","description":"Optional free-text name for an off-menu Charge's line in .status.itemsMemo/.status.lines (no menuItemKey — a catalog item's own name is used instead). Defaults to \"Off-menu charge\" when omitted."},` +
-			`"lineId":{"type":"string","description":"VoidCharge only: the .status.lines entry id to void (e.g. \"line-2\"). When present, amountCents is ignored and the void amount is derived from the named line instead; rejects UnknownChargeLine if no live (non-voided) line with that id exists. Absent → the legacy amountCents-only void, which does not touch .status.lines."}},` +
+			`"lineId":{"type":"string","description":"VoidCharge (required): the .status.lines entry id to void (e.g. \"line-2\"); the void amount is derived from the named line, never a caller-supplied amountCents; rejects UnknownChargeLine if no live (non-voided) line with that id exists."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.tab.<NanoID> the operation wrote."}}}`,
@@ -135,10 +134,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"leaseAppKey": "Full vtx.leaseapp.<NanoID> key of the resident lease the tab is opened for (OpenTab; required, validated alive). Denormalized onto the tab's own .status aspect so Charge/Settle need no extra declared read to recover it.",
 			"tabId":       "Optional bare NanoID (no dots / key segments) for the new tab vertex (vtx.tab.<tabId>). Absent → minted with nanoid.new() (OpenTab).",
 			"tabKey":      "Full vtx.tab.<NanoID> key of an existing tab (Charge/VoidCharge/Settle/SettleStaleTab/BackfillTabStaleAt; required, validated alive + class=tab + currently open).",
-			"amountCents": "The amount in integer cents; required for an off-menu Charge (must be a positive number, added to the tab's running .status.totalCents) or a lineId-less VoidCharge (must be a positive number, subtracted from .status.totalCents and clamped at 0). Ignored whenever menuItemKey is present (Charge) or lineId is present (VoidCharge).",
+			"amountCents": "The amount in integer cents; required for an off-menu Charge (must be a positive number, added to the tab's running .status.totalCents). Ignored whenever menuItemKey is present (Charge); ignored entirely by VoidCharge, whose void amount is always derived from the named lineId's own line.",
 			"menuItemKey": "Full vtx.menuitem.<NanoID> key of a live catalog item, served at the tab's own building. Required for a self-service Charge; optional for a staff Charge (present → catalog-priced like self-order; absent → hand-keyed amountCents). amountCents is derived from the item's own .price.priceCents, never trusted from the caller, whichever caller names it.",
 			"description": "Optional free-text line name for an off-menu Charge (no menuItemKey) — appended to .status.itemsMemo and recorded as the new .status.lines entry's description, instead of a catalog item's own name. Defaults to \"Off-menu charge\" when omitted. Ignored whenever menuItemKey is present (the item's own name is used).",
-			"lineId":      "VoidCharge only: the id of a .status.lines entry (e.g. \"line-2\") to void by reference. The void amount is derived from the line itself, never trusted from a caller-supplied amountCents. Rejects UnknownChargeLine if no live (non-voided) line with that id exists on the tab. Absent → the legacy amountCents-only void.",
+			"lineId":      "VoidCharge (required): the id of a .status.lines entry (e.g. \"line-2\") to void by reference. The void amount is derived from the line itself, never trusted from a caller-supplied amountCents. Rejects UnknownChargeLine if no live (non-voided) line with that id exists on the tab.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -148,7 +147,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"{value: open, totalCents: 0, itemsMemo: \"\", lines: [], openedAt, leaseAppKey} + the chargedTo and openFor links " +
 					"(both tab→leaseapp) + claims " +
 					"the lease's cafeOpenTabGuard. Returns primaryKey (the tab key). Rejects UnknownLeaseApplication " +
-					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, TenancyEnded if its .tenancy leaseEnd has passed, or OpenTabAlreadyExists if the lease already has an open tab.",
+					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, TenancyEnded if its .tenancy leaseEnd has passed, CreditHold if the lease's café account has been reminded of a balance it still owes (.arrears.sentAt set), or OpenTabAlreadyExists if the lease already has an open tab.",
 			},
 			{
 				Name:    "Charge — ring up an off-menu item on an open tab (operator)",
@@ -188,16 +187,6 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"at 0), marks the line voided:true in place, and re-derives .status.itemsMemo from the remaining " +
 					"non-voided lines (line-2 drops out of it). Returns primaryKey. Rejects TabNotOpen if the tab is already " +
 					"settled, or UnknownChargeLine if line-2 is absent or already voided.",
-			},
-			{
-				Name:    "VoidCharge — legacy amount-only correction, no line reference (operator/frontOfHouse only)",
-				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "amountCents": 450},
-				ExpectedOutcome: "Validates the tab is alive + open, subtracts 450 from .status.totalCents " +
-					"(OCC-conditioned on the aspect's current revision), clamped at 0 rather than going negative, " +
-					"leaves .status.lines untouched, and appends \"Void correction\" to .status.itemsMemo when the " +
-					"total actually decreased. " +
-					"Returns primaryKey. Rejects TabNotOpen if the tab is already settled, or InvalidArgument if " +
-					"amountCents <= 0.",
 			},
 			{
 				Name:    "Settle — close a tab for house-account posting",
@@ -242,9 +231,9 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"(mints, value=open, totalCents=0, itemsMemo=\"\", lines=[], staleAt=openedAt+24h), Charge (OCC-conditioned accumulate onto totalCents, " +
 			"appends the charged item's name to itemsMemo and a matching {id, description, amountCents, voided: false, orderedBy: op.actor} entry to lines, " +
 			"carries staleAt forward unchanged), VoidCharge " +
-			"(OCC-conditioned decrement of totalCents, clamped at 0; a lineId-targeted void marks that lines entry voided:true in place " +
-			"and re-derives itemsMemo from the non-voided lines, a legacy amountCents-only void leaves lines untouched and appends " +
-			"\"Void correction\" to itemsMemo when the total actually decreased; carries staleAt forward unchanged), Settle/SettleStaleTab " +
+			"(OCC-conditioned decrement of totalCents by a named lines entry's own amount, clamped at 0; marks that " +
+			"entry voided:true in place, re-derives itemsMemo from the remaining non-voided lines, and carries " +
+			"staleAt forward unchanged), Settle/SettleStaleTab " +
 			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/lines carried over frozen, itemsMemo frozen as the " +
 			"comma-joined non-voided line descriptions, staleAt dropped — " +
 			"no longer meaningful once settled), and BackfillTabStaleAt (OCC-conditioned backfill of a missing staleAt on a tab opened " +
@@ -260,7 +249,7 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"value":       "open | settled.",
 			"totalCents":  "The tab's running total in integer cents, accumulated by Charge.",
-			"itemsMemo":   "A comma-joined line of what was charged, derived from lines: the description of every non-voided line, in charge order (a lineId void drops its line out). A tab with no lines keeps whatever memo it carries, a legacy amount-only void appending \"Void correction\" to it. Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
+			"itemsMemo":   "A comma-joined line of what was charged, derived from lines: the description of every non-voided line, in charge order (a lineId void drops its line out). A tab with no lines keeps whatever memo it already carries. Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
 			"lines":       "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, orderedBy}, one entry per Charge, in charge order. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
 			"openedAt":    "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
 			"staleAt":     "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open, or BackfillTabStaleAt if it is absent entirely (a tab opened before this field shipped). Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
@@ -918,6 +907,74 @@ def leaseapp_unit(lease_key, memo=None):
         memo[lease_key] = unit
     return unit
 
+def cafe_account_for_lease(lease_key):
+    # The café account held for this lease, or None where no live one exists
+    # -- a lease whose settlement has never minted one (cafeTabSettlement's
+    # missing_account gap fires on the FIRST settle, so a first-ever tab has
+    # no account yet) owes nothing and cannot be on hold. The account is
+    # resolved from the GRAPH, never from the payload: cafe-ledger's
+    # CreateAccount is what writes the heldFor link (cafeaccount -> leaseapp),
+    # so the caller has no field to omit or forge that would reach a
+    # different account. The leaseapp carries at most one live café account
+    # (cafe-ledger's cafeLedgerAccountGuard is a create-only per-lease guard)
+    # but ALSO a loftspace vtx.account.<id> heldFor in-link from the rent
+    # ledger, so the walk filters on the source key's type segment rather
+    # than taking the first live link. Paged with leaseapp_unit's bound: a
+    # page can hold a tombstoned link ahead of the live one. The bound
+    # (LIVE_LINK_PAGE_LIMIT x MAX_LIVE_LINK_PAGES = 32 links) exceeds what
+    # the heldFor->leaseapp writers can ever put on one lease -- cafe-ledger's
+    # CreateAccount and loftspace-ledger's CreateAccount, one link each,
+    # neither ever tombstoned -- so running out of pages cannot happen here
+    # and the final None below is unreachable; a copy of this walk into a
+    # relation with wider fan-in must fail closed on exhaustion the way
+    # actor_holds_operator does, not answer "no account".
+    cursor = None
+    for _page in range(MAX_LIVE_LINK_PAGES):
+        # read-posture: (e) relation=heldFor epoch=none -- a leaseapp carries
+        # at most one live heldFor in-link per ledger (café + rent), so this
+        # is never a keyspace scan. An account created concurrently with this
+        # OpenTab has no arrears episode yet and so nothing to hold on.
+        page, cursor = kv.Links(lease_key, "heldFor", "in", cursor, LIVE_LINK_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            if lk.sourceVertex.startswith("vtx.cafeaccount."):
+                return lk.sourceVertex
+        if cursor == None:
+            return None
+    return None
+
+def require_no_credit_hold(lease_key):
+    # The credit hold: a lease whose café account carries an arrears episode
+    # a reminder has already gone out for opens no new tab. cafe-ledger's
+    # EvaluateCafeArrears writes .arrears.sentAt the moment it sends the
+    # reminder and carries it across every write of the same episode, dropping
+    # it only when the balance returns to zero (the episode ends) -- so sentAt
+    # present means exactly "this resident was reminded and still owes",
+    # while dueAt alone (overdue, not yet reminded) or a bare {evaluatedAt}
+    # (nothing owed) is not a hold. The rule holds on EVERY leg -- staff
+    # standing and resident self alike -- because the debt is the lease's,
+    # not the caller's. The state is reached by the walk above rather than a
+    # caller-declared read: a hold that rested on the submitter's declaration
+    # would be a hold the submitter could decline to declare.
+    acct_key = cafe_account_for_lease(lease_key)
+    if acct_key == None:
+        return
+    # read-posture: (e) per-candidate follow-up read off the enumeration
+    # above -- the account is unknown until the heldFor walk resolves it, so
+    # its .arrears key is data-derived and undeclarable client-side.
+    arrears = kv.Read(acct_key + ".arrears")
+    if arrears == None or arrears.isDeleted:
+        return
+    # The CLASS, not just the key: cafe-ledger is the sole writer of a
+    # .arrears aspect and writes exactly this class, so a document of any
+    # other class here is a fault to refuse, never state to decide a hold on.
+    if not hasattr(arrears, "class") or getattr(arrears, "class") != "cafeAccountArrears":
+        fail("InvalidState: this lease's café account arrears aspect is not a cafeAccountArrears")
+    sent_at = arrears.data.get("sentAt")
+    if sent_at != None:
+        fail("CreditHold: this lease's café account owes a balance a reminder went out for on " + str(sent_at)[:10] + "; the balance must be paid or written off before a new tab opens")
+
 def class_of(state, key):
     if key not in state:
         return None
@@ -982,23 +1039,13 @@ def require_menu_item_price(state, p):
         fail("UnknownMenuItem: " + menu_item_key + ": no .price aspect")
     return price.data.get("priceCents"), price.data.get("name")
 
-def append_items_memo(existing_memo, line):
-    # Comma-joined, empty-string-safe append (a fresh tab's itemsMemo is "").
-    # Used only by VoidCharge's legacy no-lines fallback, where the .status
-    # aspect carries no itemized lines to project a memo from.
-    if existing_memo == None or existing_memo == "":
-        return line
-    return existing_memo + ", " + line
-
 def items_memo_from_lines(lines, fallback):
     # itemsMemo is a projection of the tab's own live .status.lines, not an
     # accumulator: the comma-joined description of every non-voided line, so
     # a voided line drops out of the memo the moment it is voided rather than
     # staying on it with a separate correction line appended after it. A tab
     # opened before .status.lines existed carries no lines at all, so it
-    # falls back to whatever memo it already has (fallback), leaving those
-    # legacy tabs' memos exactly as VoidCharge's own no-lines branch writes
-    # them.
+    # falls back to whatever memo it already has (fallback).
     if lines == None or len(lines) == 0:
         return fallback
     descriptions = []
@@ -1096,6 +1143,10 @@ def execute(state, op):
             lease_end = tenancy.data.get("leaseEnd")
             if type(lease_end) == "string" and time.rfc3339_utc(op.submittedAt) >= time.rfc3339_utc(lease_end):
                 fail("TenancyEnded: this lease's tenancy ended on " + lease_end[:10] + "; a house tab can no longer be opened against it")
+
+        # Credit hold: refused on every leg once the lease's café account has
+        # been reminded of an outstanding balance (require_no_credit_hold).
+        require_no_credit_hold(lease_key)
 
         # One open tab per lease, guarded by a deterministic aspect on the
         # LEASEAPP (not the tab — the tab's own id is independent and
@@ -1277,28 +1328,19 @@ def execute(state, op):
         if class_of(state, tab_key) != "tab":
             fail("WrongClass: tabKey: " + tab_key)
 
-        # Two forms: a lineId-targeted void derives its own amount from the
-        # named .status.lines entry (never trusting a caller-supplied
-        # amountCents, mirroring Charge's own "derive, don't trust" posture
-        # for a catalog menuItemKey); the legacy amountCents-only form (no
-        # lineId — e.g. correcting a tab whose charge predates itemized
-        # lines) is unchanged and touches no lines entry.
-        line_id = optional_string(p, "lineId")
+        # Voids one specific .status.lines entry by its id: derives the
+        # amount from the line itself, never trusting a caller-supplied
+        # amountCents (the same "derive, don't trust" posture Charge's own
+        # menuItemKey branch uses for the catalog price) — the caller names
+        # WHICH line, never HOW MUCH.
+        line_id = required_string(p, "lineId")
         existing = require_open_status(state, tab_key)
-        existing_lines = existing.data.get("lines", [])
-        if line_id != None and line_id != "":
-            new_lines, line_amount = void_line_by_id(existing_lines, line_id)
-            if line_amount == None:
-                fail("UnknownChargeLine: " + line_id)
-            amount_cents = line_amount
-        else:
-            amount_cents = require_number(p, "amountCents")
-            if amount_cents <= 0:
-                fail("InvalidArgument: amountCents: required positive number")
-            new_lines = existing_lines
 
-        # Staff-standing confinement: the lease comes from the tab's OWN
-        # .status aspect (never the payload), same derivation as Charge/Settle.
+        # Staff-standing confinement, BEFORE the line lookup: the lease comes
+        # from the tab's OWN .status aspect (never the payload), same
+        # derivation as Charge/Settle. Confinement precedes UnknownChargeLine
+        # so a staffer confined to another building learns nothing about
+        # which line ids a foreign tab carries from the refusal it gets.
         # workplace-exempt: (no-validated-path) VoidCharge is granted scope=any
         # to operator + frontOfHouse only (permissions.go) and no task mints it,
         # so nothing but the operator escape reaches the exemption.
@@ -1306,28 +1348,24 @@ def execute(state, op):
             require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
                               "cannot void a charge on tab " + tab_key)
 
-        # Clamped, not rejected: an over-void (voiding more than the tab's
-        # current running total) is a caller mistake worth correcting
-        # cleanly to 0, not a hard failure that leaves the wrong total
-        # standing.
+        existing_lines = existing.data.get("lines", [])
+        new_lines, line_amount = void_line_by_id(existing_lines, line_id)
+        if line_amount == None:
+            fail("UnknownChargeLine: " + line_id)
+        amount_cents = line_amount
+
+        # Clamped, not rejected: a tab whose recorded total already sits
+        # below the sum of its live lines (or a void that would overshoot
+        # 0) corrects cleanly to 0 rather than going negative.
         old_total = existing.data.get("totalCents")
         new_total = old_total - amount_cents
         if new_total < 0:
             new_total = 0
-        # A lineId-targeted void projects itemsMemo straight off the
-        # now-updated lines (the voided line simply drops out of the join —
-        # no separate correction entry, since the line itself still carries
-        # the record). The legacy amountCents-only path touches no lines
-        # entry, so nothing else records the correction there: it keeps the
-        # bare "Void correction" append, and only when the void actually
-        # reduced the total (an over-void against an already-0 tab corrected
-        # nothing, so there is no correction to name).
-        if line_id != None and line_id != "":
-            new_memo = items_memo_from_lines(new_lines, existing.data.get("itemsMemo", ""))
-        else:
-            new_memo = existing.data.get("itemsMemo", "")
-            if new_total < old_total:
-                new_memo = append_items_memo(new_memo, "Void correction")
+        # itemsMemo is re-derived straight off the now-updated lines — the
+        # voided line simply drops out of the join, since the line itself
+        # (marked voided:true, not removed) still carries the record on the
+        # itemized receipt.
+        new_memo = items_memo_from_lines(new_lines, existing.data.get("itemsMemo", ""))
         status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo, "lines": new_lines,
                         "openedAt": existing.data.get("openedAt"),
                         "staleAt": existing.data.get("staleAt"),

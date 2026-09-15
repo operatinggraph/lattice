@@ -144,6 +144,7 @@ func submitOpenTabAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 			OptionalReads: []string{leaseKey + ".cafeOpenTab", leaseKey + ".decision", leaseKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: leaseKey, Relation: "heldFor", Direction: "in"},
 			},
 		},
 	}
@@ -199,7 +200,7 @@ func wcSubmitVoidCharge(t *testing.T, ctx context.Context, conn *substrate.Conn,
 		Actor:         actorKey,
 		SubmittedAt:   "2026-07-20T12:30:00Z",
 		Class:         "tab",
-		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","amountCents":100}`),
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"line-1"}`),
 		ContextHint: &processor.ContextHint{
 			Reads: []string{tabKey, tabKey + ".status"},
 			Enumerations: []processor.EnumerationHint{

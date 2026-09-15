@@ -8,7 +8,7 @@ import Foundation
 /// posture. Covers every field kind a shipped op-meta actually exercises —
 /// free-text string, string enum (`SetAppointmentStatus`'s fixed `status`),
 /// boolean (`RecordEncounter`'s `followUpRequested`), money
-/// (`VoidCharge`'s `amountCents`), date (`RecordEncounter`'s
+/// (`CreditCafeAccount`'s `amountCents`), date (`RecordEncounter`'s
 /// `followUpDate`), date-time (`CreateAppointment`'s `startsAt`) and
 /// entity-ref (`RescheduleAppointment`'s `provider`) — kept in step with
 /// `app.js`'s vocabulary by `scripts/lint-facet-renderer-drift.go` (CI,

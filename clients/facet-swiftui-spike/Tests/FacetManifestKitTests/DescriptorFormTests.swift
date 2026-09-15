@@ -130,16 +130,16 @@ final class DescriptorFormTests: XCTestCase {
         XCTAssertEqual(submission.payload["booker"]?.stringValue, "vtx.identity.BOOKER000000000001")
     }
 
-    // MARK: cafe-domain VoidCharge (packages/cafe-domain/opmetas.go) — the
-    // `Cents$` money convention (no shipped op-meta declares `x-format`, so
-    // the name suffix IS the vocabulary's only money signal, mirroring
+    // MARK: cafe-ledger CreditCafeAccount (packages/cafe-ledger/opmetas.go) —
+    // the `Cents$` money convention (no shipped op-meta declares `x-format`,
+    // so the name suffix IS the vocabulary's only money signal, mirroring
     // `app.js`'s `renderField`).
 
-    func testVoidChargeDetectsMoneyAndConvertsDollarsToCents() {
+    func testCreditCafeAccountDetectsMoneyAndConvertsDollarsToCents() {
         let op = opRow(
-            operationType: "VoidCharge",
-            inputSchema: #"{"type":"object","properties":{"tabKey":{"type":"string"},"amountCents":{"type":"integer","title":"Amount","minimum":1}},"required":["tabKey","amountCents"]}"#,
-            dispatchAuthContext: "standing", dispatchTargetField: "tabKey"
+            operationType: "CreditCafeAccount",
+            inputSchema: #"{"type":"object","properties":{"accountKey":{"type":"string"},"amountCents":{"type":"integer","title":"Amount","minimum":1}},"required":["accountKey","amountCents"]}"#,
+            dispatchAuthContext: "self", dispatchTargetField: "accountKey"
         )
         let fields = DescriptorForm.fields(for: op)
         XCTAssertEqual(fields.map(\.name), ["amountCents"])
