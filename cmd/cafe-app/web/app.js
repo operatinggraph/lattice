@@ -881,6 +881,17 @@ function arrearsBadge(balance) {
   );
 }
 
+// localDateTime renders an RFC3339 instant (a tab's openedAt / settledAt, a
+// class or visit's startsAt) as the viewer's local date and time — the same
+// localization the due dates on the same cards already get, so a card never
+// mixes a localized due date with a raw UTC timestamp. "?" when the stamp is
+// absent or does not parse.
+function localDateTime(iso) {
+  if (!iso) return "?";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "?" : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
 // reminderSentDate renders a balance row's reminderSentAt as a local
 // calendar date for the hold copy ("?" when the stamp does not parse).
 function reminderSentDate(balance) {
@@ -1122,7 +1133,7 @@ function renderOpenTabCard(tab, items) {
     '<div class="panel">' +
     "<h2>Open tab</h2>" +
     '<p class="amount">' + money(tab.totalCents) + "</p>" +
-    '<p class="meta">Opened ' + escapeHtml(tab.openedAt || "?") + "</p>" +
+    '<p class="meta">Opened ' + escapeHtml(localDateTime(tab.openedAt)) + "</p>" +
     chargeLinesBlock(tab.lines, tab.itemsMemo, tab.tabKey, true) +
     (catalog.length
       ? '<form id="pos-catalog-form" class="field-row" style="margin-bottom:14px;">' +
@@ -1682,7 +1693,7 @@ function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
   const id = "settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, ""); // markup-safe: stripped to [a-zA-Z0-9], nothing else survives
   const balanceBadge = frontDeskBalanceBadge(balance);
   const classBadge = booking
-    ? '<div class="meta">🧘 Booked: ' + escapeHtml(booking.sessionName || "class") + " · " + escapeHtml(booking.startsAt || "?") + "</div>"
+    ? '<div class="meta">🧘 Booked: ' + escapeHtml(booking.sessionName || "class") + " · " + escapeHtml(localDateTime(booking.startsAt)) + "</div>"
     : "";
   const leaseLine = lease && lease.unitRent
     ? '<div class="meta">🏠 ' + rentAmount(lease.unitRent, lease.unitCurrency) + "/mo" +
@@ -1691,7 +1702,7 @@ function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
   // Existence + time only — never a visit reason (front-desk staff see "a
   // visit is scheduled," not why or with whom).
   const visitBadge = visit
-    ? '<div class="meta">🩺 Visit: ' + escapeHtml(visit.startsAt || "?") + "</div>"
+    ? '<div class="meta">🩺 Visit: ' + escapeHtml(localDateTime(visit.startsAt)) + "</div>"
     : "";
   // The lease's applicant, resolved to a name via the protected roster
   // (nameForIdentity) — falls back to the truncated lease key when the
@@ -1703,7 +1714,7 @@ function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
     '<span class="badge open">open</span>' +
     '<div class="who">' + escapeHtml(who) + "</div>" +
     '<div class="amount">' + money(t.totalCents) + "</div>" +
-    '<div class="meta">Opened ' + escapeHtml(t.openedAt || "?") + "</div>" +
+    '<div class="meta">Opened ' + escapeHtml(localDateTime(t.openedAt)) + "</div>" +
     balanceBadge +
     chargeLinesBlock(t.lines, t.itemsMemo, null, true) +
     classBadge +
@@ -2022,7 +2033,7 @@ async function renderResident() {
   if (open) {
     parts.push(
       '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(openDisplayTotal) +
-      '</p><p class="meta">Opened ' + escapeHtml(open.openedAt || "?") + " — not yet settled</p>" +
+      '</p><p class="meta">Opened ' + escapeHtml(localDateTime(open.openedAt)) + " — not yet settled</p>" +
       chargeLinesBlock(openDisplayLines, open.itemsMemo, null, true) + "</div>" +
       (selfMode ? '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger">Settle My Tab</button></div>' : "")
     );
@@ -2095,7 +2106,7 @@ async function renderResident() {
   if (pendingSettled) {
     parts.push(
       '<div class="panel"><h2>Pending posting</h2><p class="amount">' + money(pendingSettled.totalCents) +
-      '</p><p class="meta">Settled ' + escapeHtml(pendingSettled.settledAt || "?") + " — posting to the ledger shortly</p>" +
+      '</p><p class="meta">Settled ' + escapeHtml(localDateTime(pendingSettled.settledAt)) + " — posting to the ledger shortly</p>" +
       chargeLinesBlock(pendingSettled.lines, pendingSettled.itemsMemo, null, false) + "</div>"
     );
   }
