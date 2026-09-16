@@ -40,7 +40,7 @@ vtx.account.<id>                    class=account       root {} (D5 — balance 
 vtx.transaction.<id>                class=transaction   root {} (D5)
 vtx.transaction.<id>.entry          class=entry          {type ∈ debit|credit, amountCents, memo?, postedAt}
 vtx.leaseapp.<id>.ledgerAccount     class=ledgerAccountGuard  {accountKey}  (the uniqueness guard)
-vtx.account.<id>.arrears            class=loftspaceAccountArrears  {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?, stale?, historyTooLong?}
+vtx.account.<id>.arrears            class=loftspaceAccountArrears  {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?, stale?, historyTooLong?, historyBudget?, replay?}
 vtx.account.<id>.arrearsNotification class=loftspaceAccountArrearsNotification  {status, remindedFor, sentAt}
 
 lnk.account.<id>.heldFor.leaseapp.<id>        (account → leaseapp; account is the later-arriving vertex)
@@ -126,7 +126,8 @@ holds the deposit apart from rent. Operator-only, no self grant, no screen; the 
 hydrates its whole read set from the payload keys.
 
 Every posted entry (`DebitAccount` / `LoftspaceRecordCharge` / `CreditAccount` / `ReturnDeposit`) carries the existing
-`.arrears` forward and marks it `stale` (dropping `historyTooLong`), minting nothing when absent; both
+`.arrears` forward and marks it `stale` (dropping `historyTooLong`, `historyBudget` and `replay` — a
+posted entry changes the set a live checkpoint's cursor pages over), minting nothing when absent; both
 scripts' `derive_reads` hydrate `[account, account.arrears]` so the upsert stays OCC for a submitter
 that declared nothing. `leaseAccounts` projects `arrearsDueAt` / `arrearsRemindedFor` /
 `arrearsReminderSentAt` for the landlord ledger, the tenant statement and the portfolio list.

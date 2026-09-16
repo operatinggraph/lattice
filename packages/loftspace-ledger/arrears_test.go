@@ -668,6 +668,92 @@ func TestArrears_ExactRetirementMovesTheHeadWithinTheEpisode(t *testing.T) {
 	}
 }
 
+// TestArrears_ExactRetirementAcrossPageBoundaryKeepsSentAt proves
+// arrears_head's EPISODE START tracking — not just its head/remindAt — is
+// exact ACROSS pages, the reason the checkpoint keeps every entry's own
+// postedAt instead of collapsing credits into a running total (see
+// arrears_rows' doc comment). It is the paged form of
+// TestArrears_ExactRetirementMovesTheHeadWithinTheEpisode: charge A is
+// reminded for, charge B posts later and queues behind it, and a PLAIN
+// credit — this ledger has no reverses relation at all — exactly retires A,
+// moving the head to B while the account was never square in between. Here
+// the retiring credit sits alone on page 2 and A sits on page 1, so the
+// finalize walk only sees both in the same chronological order a
+// whole-history execution would if (and only if) the checkpoint preserved
+// each entry's own postedAt.
+func TestArrears_ExactRetirementAcrossPageBoundaryKeepsSentAt(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsxpageretire")
+
+	leaseKey := seedLease(t, ctx, conn, "BBARREARSXRTLEASEHJK")
+	acctKey := seedAccountHeldFor(t, ctx, conn, "BBARREARSXRTACCTHJKM", leaseKey)
+
+	chargeA := replayTxID('A', 0)
+	seedEntryAt(t, ctx, conn, acctKey, chargeA, "debit", 240000, "2026-08-01T09:00:00Z", "")
+
+	// 14 filler debit/credit pairs, all dated well before A and netting to
+	// zero exactly — each pair opens and immediately re-empties the queue
+	// long before A ever arrives, so none of them touches episode_start.
+	// Present purely to fill page 1 up to the limit, so the entries that
+	// matter land on the pages this vector is named for.
+	for i := 0; i < 14; i++ {
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('F', i), "debit", 500, "2026-01-01T00:00:00Z", "")
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('F', i+14), "credit", 500, "2026-01-01T00:00:00Z", "")
+	}
+
+	// One page (1 + 28 = 29 entries): the pre-existing episode is reminded
+	// for, BEFORE B or the retiring credit exist.
+	_, sendReq := evaluateArrears(t, ctx, conn, cp, cons, "bbarrxrteval0000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-10T09:00:00Z", processor.OutcomeAccepted)
+	if arrearsNotification(t, ctx, conn, sendReq) == nil {
+		t.Fatal("fixture precondition: A is reminded for past its remindAt")
+	}
+	if arrearsReplay(t, arrearsData(t, ctx, conn, acctKey)) != nil {
+		t.Fatal("fixture precondition: 29 entries fit in one page")
+	}
+
+	// chargeB sorts onto page 1's 30th slot; the credit that exactly
+	// retires A sorts alone onto page 2 — the shape the vector is named for.
+	chargeB := replayTxID('Y', 0)
+	seedEntryAt(t, ctx, conn, acctKey, chargeB, "debit", 240000, "2026-09-01T09:00:00Z", "")
+	payoffA := replayTxID('z', 0)
+	seedEntryAt(t, ctx, conn, acctKey, payoffA, "credit", 240000, "2026-09-03T09:00:00Z", "")
+
+	// Dispatch 1: page 1 (30 entries: A, the 28 fillers, B) — mid-replay.
+	_, req1 := evaluateArrears(t, ctx, conn, cp, cons, "bbarrxrteval0000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-09-03T10:00:00Z", processor.OutcomeAccepted)
+	if arrearsNotification(t, ctx, conn, req1) != nil {
+		t.Fatal("a page sends nothing")
+	}
+	mid := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, mid) == nil {
+		t.Fatalf("31 entries must leave a checkpoint after page 1: %+v", mid)
+	}
+
+	// Dispatch 2: page 2 (the lone retiring credit) — finalizes.
+	_, req2 := evaluateArrears(t, ctx, conn, cp, cons, "bbarrxrteval0000003",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-09-03T11:00:00Z", processor.OutcomeAccepted)
+	final := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, final) != nil {
+		t.Fatalf("two pages, two dispatches: %+v", final)
+	}
+	if got, _ := final["dueAt"].(string); got != "2026-09-01T09:00:00Z" {
+		t.Fatalf("dueAt = %q, want %q — the exact retirement (split across the page boundary) moves the head to B", got, "2026-09-01T09:00:00Z")
+	}
+	if got, _ := final["remindAt"].(string); got != remindFor(t, "2026-09-01T09:00:00Z") {
+		t.Fatalf("remindAt = %q, want %q — B's own due date plus the grace", got, remindFor(t, "2026-09-01T09:00:00Z"))
+	}
+	if got, _ := final["sentAt"].(string); got != "2026-08-10T09:00:00Z" {
+		t.Fatalf("sentAt = %q — the head moved but the account was never square, so the episode's send (from BEFORE the page split) must be carried, not dropped as if B had opened a fresh episode", got)
+	}
+	if got, _ := final["remindedFor"].(string); got != "2026-08-01T09:00:00Z" {
+		t.Fatalf("remindedFor = %q, want A's due date carried (B is not yet due)", got)
+	}
+	if notif := arrearsNotification(t, ctx, conn, req2); notif != nil {
+		t.Fatalf("B is not yet due, and the episode was already reminded for: %+v", notif)
+	}
+}
+
 // TestArrears_RepeatedDueDateMintsADistinctEpisodeKey pins the notification
 // key's uniqueness. Recorded due dates repeat across charges on one lease (a
 // second clause on the same anniversary grid; a backfilled first period), so

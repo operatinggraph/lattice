@@ -240,10 +240,13 @@ func accountBalanceAspectTypeDDL() pkgmgr.DDLSpec {
 //     today. Nor does a debit that leaves the account still IN CREDIT (a refund
 //     took it below zero and this charge only eats into that surplus) — the
 //     surplus prepays the charge outright, so there is no open debit to age.
-//     PayoutCafeCredit is the other debit, and it is NOT a writer of this aspect
-//     at all: its cap bounds it at the credit the account holds, so the balance
-//     it leaves is at most zero and the episode branch never opens — which is
-//     why it is absent from PermittedCommands here while present on .balance.
+//     PayoutCafeCredit is the other debit: its cap bounds it at the credit the
+//     account holds, so the balance it leaves is at most zero and it never
+//     opens or ages an episode either. It writes here only when a replay
+//     checkpoint is live on the account — the payout changes the set the
+//     checkpoint's cursor pages over, so the checkpoint no longer describes
+//     the account and is dropped (carried, then marked stale), the same drop
+//     a posted entry performs mid-replay, below.
 //   - CreditCafeAccount / RefundCafeCharge that take the balance to zero or
 //     below end the episode: {evaluatedAt} alone, so no timer stays armed.
 //   - CreditCafeAccount / RefundCafeCharge that leave a balance mark the state
@@ -283,13 +286,13 @@ func accountBalanceAspectTypeDDL() pkgmgr.DDLSpec {
 //
 // Non-sensitive: dates, booleans, a page count and per-transaction cent
 // aggregates on a vtx.cafeaccount (not an identity), no PII. Declaration-only:
-// written by the four ops above, never dispatched as an operation in its own
+// written by the five ops above, never dispatched as an operation in its own
 // right.
 func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "cafeAccountArrears",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge", arrearsOp},
+		PermittedCommands: []string{"DebitAccount", "CreditCafeAccount", "RefundCafeCharge", "PayoutCafeCredit", arrearsOp},
 		Description: "Per-account arrears-episode aspect. Stored as vtx.cafeaccount.<NanoID>.arrears " +
 			"(class cafeAccountArrears) = {evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?, historyTooLong?, historyBudget?, replay?}. Non-sensitive. " +
 			"dueAt is the FIFO-oldest still-open charge's postedAt plus the ledger's net term — a RECORDED time " +
@@ -311,8 +314,9 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"with) and is a request for a fresh EvaluateCafeArrears, which rewrites the aspect and so never carries " +
 			"it forward. Written by DebitAccount (opens an episode on an account that owed nothing), " +
 			"CreditCafeAccount / RefundCafeCharge (end the episode at zero, else mark stale) and EvaluateCafeArrears " +
-			"(recomputes the head). PayoutCafeCredit never writes it: a payout is capped at the credit the account " +
-			"holds, so the balance it leaves is at most zero and no episode can open. Read by the " +
+			"(recomputes the head). PayoutCafeCredit is capped at the credit the account holds, so the balance it " +
+			"leaves is at most zero and it never opens an episode — but it marks stale (carrying every other field) " +
+			"when a replay checkpoint is live, the same drop a posted entry performs mid-replay. Read by the " +
 			"cafeArrearsReminders convergence lens and projected for the front " +
 			"desk by cafeLeaseAccounts. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,

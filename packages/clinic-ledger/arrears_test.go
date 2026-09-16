@@ -1035,8 +1035,9 @@ func TestArrears_TwoPageHistoryCompletesInTwoDispatches(t *testing.T) {
 		t.Fatalf("params.balanceCents = %v, want 1900 (25 × 100 − 6 × 100) — the aggregate's balance is the account's", got)
 	}
 
-	// A re-dispatch over the finished history: one page again, and it fits, so
-	// it finalizes in place and sends nothing more.
+	// A re-dispatch over the finished history: the 31 entries still outrun one
+	// page, so it checkpoints again at phase A rather than finalizing in
+	// place, and sends nothing more — the episode is already reminded for.
 	_, req3 := evaluateArrears(t, ctx, conn, cp, cons, "clarrtwoeval00000003",
 		bootstrap.WeaverIdentityKey, acctKey, "2026-08-24T09:00:00Z", processor.OutcomeAccepted)
 	if arrearsNotification(t, ctx, conn, req3) != nil {

@@ -430,9 +430,9 @@ def require_manages(unit_key, what):
 # in reality posted AFTER it, which erases the very debit whose postedAt was
 # the episode's start. So every entry — debit or credit — is folded into the
 # aggregate under its own transaction ID and its own postedAt, and arrears_rows
-# hands the unchanged arrears_head the exact same rows a single, whole-history
-# execution would have: no netting, no algebraic shortcut, no reverses
-# relation to walk (this ledger has none — there is no refund verb, README).
+# hands arrears_head the exact same rows a single, whole-history execution
+# would have: no netting, no algebraic shortcut, no reverses relation to walk
+# (this ledger has none — there is no refund verb, README).
 # No entry in this ledger names another it reverses, so the fold has nothing
 # else to compute.
 #
@@ -535,7 +535,7 @@ def arrears_rows(agg):
     # carrying its own postedAt — the exact rows a single, whole-history
     # execution would have handed arrears_head, folded page by page instead of
     # all at once. arrears_head's own FIFO walk, including its episode-start
-    # tracking, is unchanged.
+    # tracking, runs exactly as it does over a single whole-history read.
     rows = []
     for tx_id, e in agg["entries"].items():
         rows.append({"postedAt": e["postedAt"], "key": "vtx.transaction." + tx_id, "type": e["type"],
