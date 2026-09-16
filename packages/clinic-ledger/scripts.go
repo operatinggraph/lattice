@@ -18,6 +18,24 @@ import "fmt"
 // lands on the same second.
 const ArrearsGraceDays = 15
 
+// ArrearsPageLimit × ArrearsMaxPages is EvaluateClinicArrears' replay budget
+// over an account's postedTo history, sized by ROUND TRIPS against the
+// Processor's production script wall (250 ms, starlark_runner.go's
+// defaultScriptWallBudgetMs), not against the live-read budget: every entry
+// costs a KV get inside the page listing plus its own .entry read, and every
+// credit two more for its reverses walk, at ≈2.5 ms per entry with ≈50 ms of
+// fixed step 2–4 overhead measured on the shared stack (a 98-entry, 52-credit
+// account aborted at the wall twice, alone on the host, 2026-09-16). Thirty
+// entries is what fits with headroom for a loaded host; past it the op
+// records historyTooLong rather than abort — an abort is a rejection that
+// leaves the gap open and Weaver re-dispatching the same doomed replay every
+// window. CI runs the wall at 5000 ms (PROCESSOR_SCRIPT_WALL_MS), so no test
+// can prove this number — the measurement above is its evidence.
+const (
+	ArrearsPageLimit = 30
+	ArrearsMaxPages  = 1
+)
+
 // arrearsGracePrelude binds ArrearsGraceDays into Starlark, once, as the Go
 // duration string time.rfc3339_add takes. Both scripts that compute an arrears
 // due date open with it, so the account DDL's Weaver-dispatched evaluation and
@@ -29,7 +47,9 @@ const ArrearsGraceDays = 15
 // make every future edit to either script responsible for escaping it.
 var arrearsGracePrelude = fmt.Sprintf(`
 ARREARS_GRACE_DURATION = "%dh"
-`, ArrearsGraceDays*24)
+ARREARS_PAGE_LIMIT = %d
+ARREARS_MAX_PAGES = %d
+`, ArrearsGraceDays*24, ArrearsPageLimit, ArrearsMaxPages)
 
 // accountDDLScript is the account DDL's Starlark, opened by the grace-term
 // binding above.
@@ -135,12 +155,11 @@ def vertex_alive(state, key):
         return False
     return True
 
-# EvaluateClinicArrears' replay budget over the account's postedTo history: 10
-# pages of 50 entries covers many years of billing history. The ceiling is not a
-# taste judgement — it is what the Processor's production script wall (250ms)
-# affords for a live paged walk plus a per-candidate follow-up read, so raising
-# it does not extend the reach, it just moves the failure from this budget to
-# the wall.
+# EvaluateClinicArrears' replay budget over the account's postedTo history is
+# ARREARS_PAGE_LIMIT × ARREARS_MAX_PAGES entries, bound from Go's
+# ArrearsPageLimit / ArrearsMaxPages (the prelude), where the round-trip
+# arithmetic against the Processor's 250 ms script wall lives. Raising it does
+# not extend the reach, it just moves the failure from this budget to the wall.
 #
 # An account that exceeds it is not aged against a truncated FIFO — a partial
 # replay would name the wrong head and the reminder that went out would name a
@@ -152,9 +171,6 @@ def vertex_alive(state, key):
 # Instead the exhaustion is RECORDED (historyTooLong) so the row goes quiet, the
 # operator can see it in the read model, and the next posted entry re-arms one
 # more attempt.
-ARREARS_PAGE_LIMIT = 50
-ARREARS_MAX_PAGES = 10
-
 def arrears_entries(acct_key):
     # Every live entry posted to this account, as {postedAt, key, type,
     # amountCents, reversesKey}, and whether the page budget ran out before

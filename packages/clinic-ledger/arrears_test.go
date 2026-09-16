@@ -816,9 +816,9 @@ func TestArrears_HistoryPastTheBudgetDegrades(t *testing.T) {
 	// payment would be the re-arming entry there.
 	acctKey := seedLegacyAccount(t, ctx, conn, "CLARREARSBGTACCTHJKM", patientKey)
 
-	// 501 posted entries: one more than ARREARS_PAGE_LIMIT × ARREARS_MAX_PAGES,
-	// so the walk ends with a live cursor and the budget genuinely runs out.
-	const overBudget = 501
+	// One more posted entry than the budget, so the walk ends with a live
+	// cursor and the budget genuinely runs out.
+	overBudget := clinicledger.ArrearsPageLimit*clinicledger.ArrearsMaxPages + 1
 	for i := 0; i < overBudget; i++ {
 		seedEntryAt(t, ctx, conn, acctKey, budgetTxID(i), "debit", 100, "2026-05-01T12:00:00Z", "")
 	}

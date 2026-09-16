@@ -196,8 +196,10 @@ credit carries forward as surplus) and rewrites `.arrears`. A recomputed date th
 `notification` adapter, keyed `<accountKey>:<dueAt>`, with the patient resolved live off the account's own
 `heldFor` link (never the payload; absent → still evaluated). `sentAt`, not `remindedFor`, is the send
 condition: one reminder per arrears **episode**, never one per head. A history past the replay budget
-records `historyTooLong` and goes quiet (no gap, no timer, row still visible) until the next entry that rewrites the aspect (a credit, or an episode-opening charge)
-buys one more attempt. The op is restricted to Weaver's dispatch actor.
+(`ArrearsPageLimit × ArrearsMaxPages` = 30 entries — sized by round trips against the Processor's 250 ms
+script wall, see `scripts.go`) records `historyTooLong` and goes quiet (no gap, no timer, row still
+visible) until the next entry that rewrites the aspect (a credit, or an episode-opening charge) buys one
+more attempt. The op is restricted to Weaver's dispatch actor.
 
 **Nothing is refused.** A clinic is not a café: `CreateAppointment`, check-in and `RecordEncounter` stay open
 to a debtor. The reminder changes what the desk and the patient *see* — `clinicPatientAccounts` carries
