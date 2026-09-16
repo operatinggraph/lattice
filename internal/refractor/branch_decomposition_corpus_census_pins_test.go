@@ -11,6 +11,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"augurProposals":                 {"g0/o0!no-aggregating-item", 0, 0},
 	"availableListings":              {"g0/o0!no-aggregating-item", 0, 0},
 	"backgroundCheckFreshness":       {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
+	"cafeHousePolicies":              {"g0/o0!no-aggregating-item", 0, 0},
 	"cafeIdentitiesRead":             {"g0/o0!no-aggregating-item", 0, 0},
 	"cafeLeaseAccounts":              {"g1/o1!no-aggregating-item", 0, 1},
 	"cafeArrearsReminders":           {"g1/o1!no-aggregating-item", 0, 1},

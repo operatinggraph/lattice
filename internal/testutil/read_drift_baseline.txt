@@ -241,6 +241,11 @@ read	SetAppointmentSite	lnk.provider.<id>.identifiedBy.identity.<id>
 read	SetAppointmentStatus	lnk.identity.<id>.worksAt.building.<id>
 read	SetAppointmentStatus	lnk.provider.<id>.identifiedBy.identity.<id>
 read	SetBookingAttendance	lnk.identity.<id>.worksAt.building.<id>
+# SetCafePolicy's staff-standing confinement (require_workplace on the
+# payload's locationKey) reads the caller's worksAt link live — the same
+# fixture under-declaration every sibling house-configuration op's row above
+# records (CreateMenuItem/RetireMenuItem/SetMenuItemAvailability/UpdateMenuItem).
+read	SetCafePolicy	lnk.identity.<id>.worksAt.building.<id>
 read	SetMenuItemAvailability	lnk.identity.<id>.worksAt.building.<id>
 # SetMenuItemLocation's own staff-standing confinement (require_workplace on
 # the payload's newLocation) reads the caller's worksAt link live, same
@@ -334,6 +339,10 @@ walk	CancelRenewal	vtx.renewal.<id> renews out
 walk	Charge	vtx.building.<id> containedIn out
 walk	Charge	vtx.leaseapp.<id> appliesToUnit out
 walk	Charge	vtx.menuitem.<id> servedAt out
+# house_tab_limit's walk up the tab's unit chain (the resident-self leg's
+# TabLimitExceeded guard) reaches the property level a building is contained
+# in — the same link-discovered hop as the building row above, one level up.
+walk	Charge	vtx.property.<id> containedIn out
 walk	Charge	vtx.unit.<id> containedIn out
 walk	ClinicCreditAccount	vtx.clinicaccount.<id> heldFor out
 walk	ClinicCreditAccount	vtx.clinicaccount.<id> postedTo in
@@ -444,6 +453,10 @@ walk	MarkPastDueNoShow	vtx.appointment.<id> forPatient out
 walk	MarkPastDueNoShow	vtx.appointment.<id> withProvider out
 walk	OpenTab	vtx.building.<id> containedIn out
 walk	OpenTab	vtx.leaseapp.<id> appliesToUnit out
+# house_tab_limit's walk up the lease's unit chain on the resident-self leg
+# (the closed-house TabLimitExceeded guard) reaches the property level a
+# building is contained in — the same link-discovered hop as Charge's row.
+walk	OpenTab	vtx.property.<id> containedIn out
 walk	OpenTab	vtx.unit.<id> containedIn out
 walk	PauseVisitSeries	vtx.building.<id> containedIn out
 # PayoutCafeCredit's share of CreditCafeAccount's confinement walk (see the read
@@ -541,6 +554,10 @@ walk	SetBookingAttendance	vtx.session.<id> atStudio out
 walk	SetBookingAttendance	vtx.studio.<id> locatedAt out
 walk	SetBookingAttendance	vtx.wellnesstransaction.<id> postedTo out
 walk	SetBookingAttendance	vtx.wellnesstransaction.<id> reverses in
+# worksAt_covers' multi-parent containment walk over the payload's
+# locationKey, same shape every sibling house-configuration op's row above
+# records (CreateMenuItem/RetireMenuItem/SetMenuItemAvailability/UpdateMenuItem).
+walk	SetCafePolicy	vtx.building.<id> containedIn out
 walk	SetMenuItemAvailability	vtx.building.<id> containedIn out
 walk	SetMenuItemAvailability	vtx.menuitem.<id> servedAt out
 # worksAt_covers' multi-parent containment walk over the payload's

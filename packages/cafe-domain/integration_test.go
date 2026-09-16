@@ -95,6 +95,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "SetMenuItemAvailability", Scope: "any"},
 			{OperationType: "SetMenuItemLocation", Scope: "any"},
 			{OperationType: "UpdateMenuItem", Scope: "any"},
+			{OperationType: "SetCafePolicy", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

@@ -118,49 +118,65 @@ func sigilCorpus(t *testing.T) []sigilLens {
 }
 
 // The false-refusal guard, aimed at the REAL shipped corpus rather than a
-// fixture shaped like it. Every lens carrying the `*` sigil must be exempt from
-// the install-time label-cap gate for the reason the shipped one is exempt: its
+// fixture shaped like it. A lens carrying the `*` sigil is exempt from the
+// install-time label-cap gate exactly when it is NON-exhaustive: its
 // variable-length walks clear exhaustiveness, so it takes the broad consumer
-// filter whatever it labels and the arithmetic can never refuse it.
-//
-// The day someone writes an EXHAUSTIVE sigil lens — in any package — this stops
-// asserting a stale fact and the arithmetic starts applying, which is exactly
-// when a human should look at that lens's label count against its abstract's
-// declared LeafBudget.
+// filter whatever it labels and the arithmetic can never refuse it
+// (capabilityServiceAccess). An EXHAUSTIVE sigil lens narrows, so the gate
+// applies to it, and the arithmetic must hold against the abstract's declared
+// LeafBudget: cafe-domain's cafeHousePolicies is that lens — a bare
+// `MATCH (loc:location*)` with no concrete label beside it, so it prices at
+// 0 + location's LeafBudget (5) against the cap (8). Any OTHER exhaustive
+// sigil lens is a new fact a human checks against its abstract's budget
+// before pinning it here.
 func TestLensLabelCap_ShippedSigilLensesAreExempt(t *testing.T) {
 	corpus := sigilCorpus(t)
+	exhaustivePinned := map[string]bool{"cafe-domain/cafeHousePolicies": true}
 	for _, sl := range corpus {
+		name := sl.pkg + "/" + sl.lens
 		if sl.facts.Exhaustive {
-			t.Errorf("%s lens %q carries the `*` sigil and is EXHAUSTIVE — it now narrows, so the install-time "+
-				"label-cap gate applies to it; check its arithmetic against the abstract's LeafBudget",
-				sl.pkg, sl.lens)
+			if !exhaustivePinned[name] {
+				t.Errorf("%s carries the `*` sigil and is EXHAUSTIVE — it now narrows, so the install-time "+
+					"label-cap gate applies to it; check its arithmetic against the abstract's LeafBudget, then pin it here", name)
+				continue
+			}
+			if !pkgmgr.LensNeedsCapCheckForTest(sl.facts) {
+				t.Errorf("%s is exhaustive and carries an expansion label, so the label-cap gate must apply to it", name)
+			}
+			for l := range sl.facts.Referenced {
+				if _, isExpansion := sl.facts.Expansion[l]; !isExpansion {
+					t.Errorf("%s names the concrete label %q beside its `*` sigil — its pinned arithmetic is 0 concrete labels + the abstract's LeafBudget; re-price it", name, l)
+				}
+			}
+			continue
 		}
 		if pkgmgr.LensNeedsCapCheckForTest(sl.facts) {
-			t.Errorf("%s lens %q must be exempt from the label-cap gate: it is non-exhaustive and can never narrow",
-				sl.pkg, sl.lens)
+			t.Errorf("%s must be exempt from the label-cap gate: it is non-exhaustive and can never narrow", name)
 		}
 	}
 }
 
 // The positive vector that keeps the guard above from passing vacuously: the
-// sigil is actually present in the corpus, and in the one package that owns it.
+// sigil is actually present in the corpus, in exactly the lenses that own it.
 // A corpus sweep asserting a property of an empty set proves nothing, and the
-// day capabilityServiceAccess drops its abstract labels — or the day some other
-// package adopts the sigil — the coordinates in every comment around here go
-// stale and a human should re-read them.
+// day capabilityServiceAccess drops its abstract labels, cafeHousePolicies
+// gains a concrete label, or some other package adopts the sigil — the
+// coordinates in every comment around here go stale and a human should
+// re-read them.
 func TestLensLabelCap_SigilCorpusIsExactlyServiceLocation(t *testing.T) {
 	corpus := sigilCorpus(t)
 	if len(corpus) == 0 {
 		t.Fatal("no shipped lens carries the `*` sigil — the exemption guard asserts nothing; " +
 			"either capabilityServiceAccess dropped its abstract labels or the lens moved")
 	}
+	want := []string{"cafe-domain/cafeHousePolicies", "service-location/capabilityServiceAccess"}
 	var owners []string
 	for _, sl := range corpus {
 		owners = append(owners, sl.pkg+"/"+sl.lens)
-		if sl.pkg != "service-location" {
-			t.Errorf("package %q lens %q now carries the `*` sigil — service-location was the only owner; "+
-				"re-read the label-cap gate's corpus reasoning against this lens", sl.pkg, sl.lens)
-		}
+	}
+	if strings.Join(owners, ",") != strings.Join(want, ",") {
+		t.Errorf("sigil-bearing lenses = %v, want exactly %v — a lens gained or lost the `*` sigil; "+
+			"re-read the label-cap gate's corpus reasoning against it", owners, want)
 	}
 	t.Logf("sigil-bearing lenses: %s", strings.Join(owners, ", "))
 }

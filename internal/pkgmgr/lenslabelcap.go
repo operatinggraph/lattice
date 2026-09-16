@@ -79,12 +79,14 @@ func mergeSpecLabels(dst *SpecLabels, add SpecLabels) {
 // whatever its label count: full's ReferencedLabels clears exhaustiveness for
 // any unlabeled non-re-reference node and for ANY variable-length hop
 // (labels.go's addPattern), and pipeline.useFullEngineBranches turns that
-// straight into reprojectAll, which narrowedFilterEligible refuses. The only
-// lens in the shipped corpus carrying the `*` sigil —
-// packages/service-location's capabilityServiceAccess — is exactly that shape:
+// straight into reprojectAll, which narrowedFilterEligible refuses.
+// packages/service-location's capabilityServiceAccess is exactly that shape:
 // two `[:containedIn*0..]` walks plus unlabeled positions. Refusing its install
 // over a label count that can never reach a filter would be a false refusal of
-// a shipped package. Second, a lens with no `*` anywhere has no abstract type
+// a shipped package. (The corpus's one EXHAUSTIVE sigil lens, cafe-domain's
+// cafeHousePolicies — a bare `MATCH (loc:location*)` — does narrow, and this
+// gate prices it: 0 concrete labels + location's LeafBudget.) Second, a lens
+// with no `*` anywhere has no abstract type
 // to hold a budget against, and its label count is a static property its own
 // author can already see.
 //

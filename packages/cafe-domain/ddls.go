@@ -33,6 +33,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		openTabGuardAspectTypeDDL(),
 		menuItemVertexTypeDDL(),
 		menuItemPriceAspectTypeDDL(),
+		cafeHousePolicyAspectTypeDDL(),
 	}
 }
 
@@ -50,7 +51,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			".tenancy has no term to have ended), rejects CreditHold once the lease's " +
 			"café account carries an arrears episode a reminder has gone out for (cafe-ledger's .arrears.sentAt, reached by a live heldFor " +
 			"walk from the lease — never a caller-declared read — and dropped by cafe-ledger only when the balance returns to zero; overdue-but-unreminded " +
-			"is not a hold; enforced on the staff and resident-self legs alike), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
+			"is not a hold; enforced on the staff and resident-self legs alike), rejects TabLimitExceeded on the resident-self leg " +
+			"alone when the house's recorded tab limit is 0 (self-service tabs closed — the tightest .cafePolicy.tabLimitCents " +
+			"on the lease's unit and its containedIn ancestors, a live walk; a chain recording no policy has no limit; the " +
+			"staff leg is never limited), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
 			"cafeOpenTabGuard aspect on the leaseapp, mirroring cafe-ledger's cafeLedgerAccountGuard: a class-(d) " +
 			"optionalReads dedup — create the guard fresh on a lease's first-ever tab, OCC-revive it from its prior " +
 			"tombstone on a later one), mints the tab, writes .status {value: open, totalCents: 0, openedAt, " +
@@ -70,6 +74,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"the tab's own building (location_covers against the item's servedAt link) whichever caller names it, " +
 			"and rejects ItemUnavailable if the item's own .price.available reads false (SetMenuItemAvailability, " +
 			"the menuItem vertexType DDL) — a sold-out item is sold out whether it is self-ordered or POS-picked. " +
+			"A resident-self Charge is additionally refused TabLimitExceeded when the tab's running total plus this " +
+			"line would exceed the house's recorded tab limit (the tightest .cafePolicy.tabLimitCents on the tab's unit " +
+			"chain, SetCafePolicy; equal is allowed; no policy on the chain means no limit); the staff leg rings past " +
+			"the limit freely — the desk is warned by its own read model, never refused. " +
 			"Every Charge also appends the charged item's name (the menu item's own .price.name, or the caller's " +
 			"optional description for an off-menu charge, defaulting to \"Off-menu charge\") to .status.itemsMemo, a " +
 			"comma-joined running line so a tab (open or settled) shows what was actually rung up, not just the " +
@@ -373,8 +381,8 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "menuitem",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateMenuItem", "RetireMenuItem", "SetMenuItemAvailability", "SetMenuItemLocation", "UpdateMenuItem"},
-		Description: "Café self-order menu-item catalog DDL. Vertex shape: vtx.menuitem.<NanoID>, class=menuitem, " +
+		PermittedCommands: []string{"CreateMenuItem", "RetireMenuItem", "SetMenuItemAvailability", "SetMenuItemLocation", "UpdateMenuItem", "SetCafePolicy"},
+		Description: "Café self-order menu-item catalog DDL — and the desk's house-configuration script. Vertex shape: vtx.menuitem.<NanoID>, class=menuitem, " +
 			"root data = {} (D5 — name/price/available live on the .price aspect). CreateMenuItem{name, priceCents, locationKey} " +
 			"(operator-only) mints a catalog item + its .price {name, priceCents, available: True} aspect + the servedAt link " +
 			"(menuitem→location, the item being the later-arriving vertex), rejecting UnknownLocation / NotALocation " +
@@ -400,7 +408,15 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 			"the new one (revive, not plain create, so moving an item BACK to a location it served before doesn't " +
 			"CreateOnly-reject on the dead old link). Charge (tab vertexType DDL, above) reads a menu item's .price " +
 			"aspect by known key when a self-service caller submits menuItemKey, deriving amountCents from " +
-			"priceCents rather than trusting a caller-supplied number — the catalog this DDL exists to provide.",
+			"priceCents rather than trusting a caller-supplied number — the catalog this DDL exists to provide. " +
+			"SetCafePolicy{locationKey, tabLimitCents} (staff-standing, confined to a location the actor worksAt or an " +
+			"ancestor of it — CreateMenuItem's own confinement) records the house's self-service tab limit as the " +
+			".cafePolicy aspect (cafeHousePolicy DDL) on a LOCATION vertex (unit|building|property, validated alive + " +
+			"an admitted location type + class, UnknownLocation / NotALocation otherwise): tabLimitCents is a " +
+			"non-negative whole number of cents (InvalidArgument otherwise), 0 meaning self-service tabs are closed at " +
+			"this house. A class-(d) optionalReads write: the caller declares <locationKey>.cafePolicy — absent mints " +
+			"the aspect, present OCC-upserts it on its own revision, tombstoned OCC-revives it. Read by the tab " +
+			"vertexType DDL's OpenTab / Charge on the resident-self leg as the tightest policy on the tab's unit chain.",
 		Script: menuItemDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"name":{"type":"string","description":"Menu item display name (CreateMenuItem / UpdateMenuItem; required, non-empty)."},` +
@@ -409,18 +425,20 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 			`"menuItemId":{"type":"string","description":"Optional bare NanoID for the new item (CreateMenuItem); absent → minted."},` +
 			`"menuItemKey":{"type":"string","description":"vtx.menuitem.<NanoID> of an existing item (RetireMenuItem / SetMenuItemAvailability / SetMenuItemLocation / UpdateMenuItem; required, validated alive)."},` +
 			`"newLocation":{"type":"string","description":"vtx.<locationType>.<NanoID> the item should now be served at (SetMenuItemLocation; required, validated alive + an admitted location type segment)."},` +
-			`"available":{"type":"boolean","description":"Whether the item can currently be ordered (SetMenuItemAvailability; required boolean). A live item never toggled carries no field and reads as available (True)."}},` +
+			`"available":{"type":"boolean","description":"Whether the item can currently be ordered (SetMenuItemAvailability; required boolean). A live item never toggled carries no field and reads as available (True)."},` +
+			`"tabLimitCents":{"type":"integer","minimum":0,"description":"The house's self-service tab limit in whole cents (SetCafePolicy; required non-negative integer). 0 closes self-service tabs at this house."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.menuitem.<NanoID> the operation wrote."}}}`,
 		FieldDescription: map[string]string{
-			"name":        "Menu item display name (CreateMenuItem / UpdateMenuItem; required, non-empty string), stored on the .price aspect.",
-			"priceCents":  "The item's price in integer cents; required, must be a positive number (CreateMenuItem / UpdateMenuItem).",
-			"locationKey": "Full vtx.<locationType>.<NanoID> key (unit|building|property — the class equals the key type) of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment). Becomes the servedAt link, which is what makes the item reachable from a resident of that place.",
-			"menuItemId":  "Optional bare NanoID (no dots / key segments) for the new item (vtx.menuitem.<menuItemId>). Absent → minted with nanoid.new() (CreateMenuItem).",
-			"menuItemKey": "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem / SetMenuItemAvailability / SetMenuItemLocation / UpdateMenuItem; required, validated alive + class=menuitem).",
-			"newLocation": "Full vtx.<locationType>.<NanoID> key (unit|building|property) the item should now be served at (SetMenuItemLocation; required, validated alive + an admitted location type segment). Replaces the item's servedAt link.",
-			"available":   "Whether the item can currently be ordered (SetMenuItemAvailability; required boolean). false takes it off both pickers and refuses a Charge naming it (ItemUnavailable); true puts it back.",
+			"name":          "Menu item display name (CreateMenuItem / UpdateMenuItem; required, non-empty string), stored on the .price aspect.",
+			"priceCents":    "The item's price in integer cents; required, must be a positive number (CreateMenuItem / UpdateMenuItem).",
+			"locationKey":   "Full vtx.<locationType>.<NanoID> key (unit|building|property — the class equals the key type) of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment). Becomes the servedAt link, which is what makes the item reachable from a resident of that place. For SetCafePolicy: the location whose .cafePolicy is recorded (required, validated the same way).",
+			"tabLimitCents": "The house's self-service tab limit in whole cents (SetCafePolicy; required non-negative integer, InvalidArgument otherwise). Stored as .cafePolicy.tabLimitCents on the location; 0 means self-service tabs are closed at this house. A resident's own Charge is refused TabLimitExceeded once the tab's total would pass the tightest limit on its unit chain; OpenTab is refused at 0. The desk is never limited.",
+			"menuItemId":    "Optional bare NanoID (no dots / key segments) for the new item (vtx.menuitem.<menuItemId>). Absent → minted with nanoid.new() (CreateMenuItem).",
+			"menuItemKey":   "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem / SetMenuItemAvailability / SetMenuItemLocation / UpdateMenuItem; required, validated alive + class=menuitem).",
+			"newLocation":   "Full vtx.<locationType>.<NanoID> key (unit|building|property) the item should now be served at (SetMenuItemLocation; required, validated alive + an admitted location type segment). Replaces the item's servedAt link.",
+			"available":     "Whether the item can currently be ordered (SetMenuItemAvailability; required boolean). false takes it off both pickers and refuses a Charge naming it (ItemUnavailable); true puts it back.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -455,6 +473,16 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 					"Rejects UnknownMenuItem if already retired or absent.",
 			},
 			{
+				Name:    "SetCafePolicy — record the house's self-service tab limit",
+				Payload: map[string]any{"locationKey": "vtx.building.<NanoID>", "tabLimitCents": 5000},
+				ExpectedOutcome: "Writes vtx.building.<NanoID>.cafePolicy = {tabLimitCents: 5000} (minted, or OCC-upserted on its " +
+					"own revision when the caller declared it present). Returns primaryKey (the location key). A resident " +
+					"whose unit sits inside this building can self-order up to $50.00 on one tab; the desk rings past it. " +
+					"Rejects UnknownLocation / NotALocation if locationKey is absent, tombstoned, or not a location, " +
+					"InvalidArgument if tabLimitCents is missing, negative, or not a whole number, AuthDenied to a staffer " +
+					"whose workplace does not cover the location.",
+			},
+			{
 				Name:    "SetMenuItemLocation — relocate an item whose place was retired",
 				Payload: map[string]any{"menuItemKey": "vtx.menuitem.<NanoID>", "newLocation": "vtx.unit.<NanoID>"},
 				ExpectedOutcome: "Tombstones the item's current servedAt link (if still live) and creates-or-revives " +
@@ -462,6 +490,49 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 					"mutated, so it carries no write-footprint standing of its own — the AssignProviderSite " +
 					"convention, clinic-domain). Rejects UnknownMenuItem if menuItemKey is absent or tombstoned, " +
 					"UnknownLocation / NotALocation if newLocation is absent, tombstoned, or not a location.",
+			},
+		},
+	}
+}
+
+// cafeHousePolicyAspectTypeDDL declares the .cafePolicy aspect (class
+// cafeHousePolicy) SetCafePolicy writes on a PRE-EXISTING location vertex
+// (unit / building / property — location-domain's) — the house's recorded
+// self-service tab limit. It sits on the place rather than on a café vertex
+// because the café HAS no vertex of its own: menu items are servedAt a
+// location, staff are confined by worksAt, and a tab's place is its lease's
+// unit, so the location IS the house. The local name is vertical-prefixed
+// (cafePolicy) for the reason cafeOpenTabGuard is: a location may carry other
+// packages' aspects, and a bare local name risks colliding key-for-key. The
+// step-6 write gate keys on (operationType, class), so this declaration alone
+// admits the write without touching location-domain's own DDLs.
+// Declaration-only: written by SetCafePolicy (the menuitem vertexType DDL's
+// script), read live by OpenTab / Charge on the resident-self leg.
+func cafeHousePolicyAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "cafeHousePolicy",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SetCafePolicy"},
+		Description: "Per-location café house policy aspect. Stored as vtx.<locationType>.<NanoID>.cafePolicy " +
+			"(class cafeHousePolicy) = {tabLimitCents}. Non-sensitive. Written only by SetCafePolicy (a class-(d) " +
+			"optionalReads write: absent mints it, present OCC-upserts it on its own revision, tombstoned OCC-revives " +
+			"it). tabLimitCents is the house's self-service tab limit in whole cents — a non-negative integer, 0 meaning " +
+			"self-service tabs are closed at this house; a location with no .cafePolicy records no limit. OpenTab and " +
+			"Charge (tab vertexType DDL) read it on the resident-self leg as a live (e) follow-up off the tab's unit " +
+			"chain — the tightest tabLimitCents on the unit and its containedIn ancestors binds, so a property-wide cap " +
+			"stays a cap under a looser building policy; the staff leg is never limited. The cafeHousePolicies lens " +
+			"projects one row per location carrying it, which is how the apps show and set it.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"tabLimitCents":{"type":"integer","minimum":0}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"tabLimitCents": "The house's self-service tab limit in whole cents (non-negative integer; 0 = self-service tabs closed; the aspect absent = no limit recorded). A resident's own Charge is refused TabLimitExceeded once the tab's totalCents plus the line would exceed the tightest limit on the tab's unit chain; a resident's OpenTab is refused at 0.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "house policy aspect — a $50 self-service tab limit",
+				Payload:         map[string]any{"tabLimitCents": 5000},
+				ExpectedOutcome: "Stored as vtx.building.<NanoID>.cafePolicy; written by SetCafePolicy. A resident of any unit inside the building self-orders up to $50.00 per tab; the desk rings past it.",
 			},
 		},
 	}
@@ -879,6 +950,80 @@ def location_covers(candidate_key, target_key):
         frontier = parents
     return False
 
+def house_tab_limit(unit_key):
+    # The house's self-service tab limit for a tab whose place is unit_key:
+    # the TIGHTEST .cafePolicy.tabLimitCents recorded on the unit or any
+    # containedIn ancestor of it, or None when no node on the chain records
+    # one. The same bounded breadth-first walk as location_covers, reading
+    # one aspect per node instead of testing equality. Minimum, not nearest:
+    # cafeHousePolicies + cmd/cafe-app compose the identical rule from the
+    # lease's coveringLocations set with no order to depend on, and a
+    # property-wide cap stays a cap under a looser building policy.
+    #
+    # A tombstoned location or aspect is absent (a tombstoned node is not
+    # walked THROUGH either, so a policy above it stops applying -- the same
+    # cut location_covers makes, and the lens's coveringLocations mirrors),
+    # an aspect of a foreign class is not a policy (the same class filter
+    # cafeHousePolicies applies), and a policy whose value is not a
+    # non-negative whole number is skipped rather than trusted --
+    # SetCafePolicy validates on the way in, so such a row predates that
+    # check or was written out of band, and it must not close every tab on
+    # the chain. An unresolvable unit (None -- the lease carries no
+    # appliesToUnit), a chain cut by a tombstone, or one that outgrows the
+    # walk's node/depth bounds all read as "no limit found": the refusal
+    # this feeds is a courtesy the desk's own read model mirrors, never the
+    # access bound (that is the applicationFor probe), so every degenerate
+    # input fails toward the pre-policy behaviour rather than toward denial
+    # -- the opposite of worksAt_covers, whose bound IS the access rule.
+    if unit_key == None:
+        return None
+    limit = None
+    frontier = [unit_key]
+    seen = [unit_key]
+    for _ in range(WORKPLACE_MAX_DEPTH):
+        if len(frontier) == 0:
+            break
+        parents = []
+        for cur in frontier:
+            parts = cur.split(".")
+            if len(parts) != 3:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # containedIn enumeration below -- the location VERTEX, so a
+            # tombstoned one neither carries a policy nor is walked through.
+            node = kv.Read(cur)
+            if node == None or node.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the same
+            # enumeration -- the location's .cafePolicy aspect, a data-derived
+            # key no dispatcher can name up front (the chain is unknown until
+            # the walk resolves it).
+            policy = kv.Read(cur + ".cafePolicy")
+            if policy != None and not policy.isDeleted and getattr(policy, "class", None) == "cafeHousePolicy":
+                cents = policy.data.get("tabLimitCents")
+                if type(cents) == type(0) and cents >= 0 and (limit == None or cents < limit):
+                    limit = cents
+            cursor = None
+            for _page in range(MAX_PARENT_PAGES):
+                # read-posture: (e) relation=containedIn epoch=none -- a location
+                # has at most a few parents; containment is provisioned topology,
+                # not written concurrently with this op.
+                page, cursor = kv.Links(cur, "containedIn", "out", cursor, WORKPLACE_PARENT_PAGE_LIMIT)
+                for lk in page:
+                    if lk.isDeleted:
+                        continue
+                    nxt = lk.targetVertex
+                    if nxt in seen:
+                        continue
+                    if len(seen) >= WORKPLACE_MAX_NODES:
+                        continue
+                    seen.append(nxt)
+                    parents.append(nxt)
+                if cursor == None:
+                    break
+        frontier = parents
+    return limit
+
 def require_workplace(location_keys, what):
     # Binds the STANDING path only -- operator and staff role grants, which
     # authorize via scope=any and so carry no target the platform has checked.
@@ -1248,6 +1393,15 @@ def execute(state, op):
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only open a tab for their own lease")
 
+            # House tab limit, resident-self leg only: a limit of 0 means the
+            # house has closed self-service tabs, so a tab that could hold
+            # nothing is refused up front rather than at its first Charge.
+            # Any positive limit binds at Charge, not here (a fresh tab is
+            # at $0). The staff leg is never limited -- the desk opens and
+            # rings what it decides, warned by its own read model.
+            if house_tab_limit(leaseapp_unit(lease_key)) == 0:
+                fail("TabLimitExceeded: self-service tabs are closed at this house (the recorded limit is $0.00); ask the desk")
+
         # read-posture: (d) declared in contextHint.optionalReads by the
         # caller — absent is the ordinary not-yet-decided case, mirroring
         # lease-signing's own SignLease probe of the same key
@@ -1446,6 +1600,21 @@ def execute(state, op):
                 fail("ItemUnavailable: " + menu_item_key + " is off the menu today")
 
         new_total = existing.data.get("totalCents") + amount_cents
+
+        # House tab limit, resident-self leg only: the tab's running total
+        # plus this line may not pass the tightest .cafePolicy.tabLimitCents
+        # on the tab's unit chain (house_tab_limit; equal is allowed; a chain
+        # recording no policy has no limit). The staff leg rings past the
+        # limit freely -- the desk is warned by the POS card, never refused.
+        # The unit is the same memoised resolution the locality bound above
+        # already paid for.
+        if is_self:
+            limit = house_tab_limit(leaseapp_unit(existing.data.get("leaseAppKey"), unit_memo))
+            if limit != None and new_total > limit:
+                fail("TabLimitExceeded: this house limits a self-service tab to " + dollars(limit) +
+                     "; the tab stands at " + dollars(existing.data.get("totalCents")) +
+                     " and this item is " + dollars(amount_cents) + "; ask the desk")
+
         existing_lines = existing.data.get("lines", [])
         new_line_id = "line-" + str(len(existing_lines) + 1)
         # A staff ring-up is handed over at the counter, so it is served the
@@ -2307,6 +2476,43 @@ def execute(state, op):
         # item vertex or an aspect rooted on it — only its servedAt link(s).
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": new_lnk}}
+
+    if ot == "SetCafePolicy":
+        # The house's self-service tab limit, recorded on a LOCATION the way
+        # CreateMenuItem anchors an item to one: the caller declares
+        # locationKey in contextHint.reads (require_live_location proves it
+        # alive, an admitted location type AND class) and
+        # <locationKey>.cafePolicy in contextHint.optionalReads (a class-(d)
+        # write -- absent mints the aspect, present OCC-upserts it on its own
+        # revision, tombstoned OCC-revives it; the cafeOpenTabGuard posture).
+        location_key = required_string(p, "locationKey")
+        parts_of(location_key, "locationKey", "")
+        require_live_location(state, location_key, "locationKey")
+
+        limit = require_number(p, "tabLimitCents")
+        if type(limit) != type(0) or limit < 0:
+            fail("InvalidArgument: tabLimitCents: required non-negative whole number of cents; got " + str(limit))
+
+        # Staff-standing confinement: the same location-the-actor-worksAt rule
+        # CreateMenuItem applies, on the payload's own location. It answers
+        # before the policy is read, so a staffer at another building learns
+        # nothing about this house's limit from the refusal.
+        # workplace-exempt: (no-validated-path) SetCafePolicy is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no
+        # task mints it, so op.authTargetValidated is never legitimately true
+        # and only the operator escape reaches the exemption.
+        if not op.authTargetValidated:
+            require_workplace([location_key], "cannot set the house policy at " + location_key)
+
+        policy_key = location_key + ".cafePolicy"
+        data = {"tabLimitCents": limit}
+        if policy_key in state and state[policy_key] != None:
+            mutation = make_aspect_upsert_occ(location_key, "cafePolicy", "cafeHousePolicy", data, state[policy_key].revision)
+        else:
+            mutation = make_aspect(location_key, "cafePolicy", "cafeHousePolicy", data)
+        events = [{"class": "cafe.policySet", "data": {"locationKey": location_key, "tabLimitCents": limit}}]
+        return {"mutations": [mutation], "events": events,
+                "response": {"primaryKey": location_key}}
 
     fail("menuItem DDL: unknown operationType: " + ot)
 `

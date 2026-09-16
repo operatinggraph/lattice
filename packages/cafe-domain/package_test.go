@@ -38,16 +38,16 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // scope=any grant and a resident scope=self one, and silently losing the self
 // row would take self-service away while every count still matched.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 5; got != want {
+	if got, want := len(Package.DDLs), 6; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 5; got != want {
+	if got, want := len(Package.Lenses), 6; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 15; got != want {
+	if got, want := len(Package.Permissions), 16; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 10; got != want {
+	if got, want := len(Package.OpMetas), 11; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -75,6 +75,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"cafeOpenTabGuard", "meta.ddl.aspectType"},
 		{"menuitem", "meta.ddl.vertexType"},
 		{"menuItemPrice", "meta.ddl.aspectType"},
+		{"cafeHousePolicy", "meta.ddl.aspectType"},
 	}
 	for i, want := range wantDDLs {
 		if i >= len(Package.DDLs) {
@@ -85,7 +86,7 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
 		}
 	}
-	for i, want := range []string{"cafeTabSettlement", "cafeStaleTabSettlement", "menuCatalog", "cafeLeaseWorkplaces"} {
+	for i, want := range []string{"cafeTabSettlement", "cafeStaleTabSettlement", "menuCatalog", "cafeHousePolicies", "cafeLeaseWorkplaces"} {
 		if i >= len(Package.Lenses) {
 			break
 		}
@@ -102,6 +103,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"SettleStaleTab", "any"},
 		{"BackfillTabStaleAt", "any"},
 		{"CreateMenuItem", "any"}, {"RetireMenuItem", "any"}, {"SetMenuItemAvailability", "any"}, {"SetMenuItemLocation", "any"},
+		{"SetCafePolicy", "any"},
 		{"UpdateMenuItem", "any"},
 	}
 	for i, want := range wantPerms {

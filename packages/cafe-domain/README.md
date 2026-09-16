@@ -1,6 +1,6 @@
 # cafe-domain
 
-The Café house-tab POS session domain (v0.11.3) — a short-lived `tab` per resident visit
+The Café house-tab POS session domain (v0.18.0) — a short-lived `tab` per resident visit
 (`OpenTab`/`Charge`/`VoidCharge`/`Settle`), settled onto `cafe-ledger`'s append-only house-tab account via a
 Weaver playbook, never a direct cross-package write — plus the `menuitem` self-order catalog a resident's
 own `Charge` binds against, and staff-workplace write confinement for both.
@@ -23,10 +23,10 @@ confinement described below (facet-staff-worlds-design.md §3.5, §9).
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (2) | `tab` (root `{}`, D5, `.status` aspect) · `menuitem` (root `{}`, D5, `.price` aspect) |
-| **Aspect types** (3) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, itemsMemo, lines, openedAt, staleAt, leaseAppKey, settledAt?, paidAtSettleCents?, paidAtSettleBy?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents, available}` |
+| **Aspect types** (4) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, itemsMemo, lines, openedAt, staleAt, leaseAppKey, settledAt?, paidAtSettleCents?, paidAtSettleBy?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents, available}` · `cafeHousePolicy` — `vtx.<locType>.<id>.cafePolicy`, `{tabLimitCents}` (the house's self-service tab limit, on the location) |
 | **Links** (3) | `chargedTo` (tab → leaseapp, permanent) · `openFor` (tab → leaseapp, released by `Settle`) · `servedAt` (menuitem → location, permanent — what makes an item reachable) |
-| **Operations** (9) | `OpenTab` · `Charge` · `VoidCharge` · `Settle` · `CreateMenuItem` · `RetireMenuItem` · `SetMenuItemAvailability` · `SetMenuItemLocation` · `UpdateMenuItem` |
-| **Lenses** (3) | `cafeTabSettlement` (convergence, one row per tab, `missing_account`/`missing_charge`/`missing_payment`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) · `menuCatalog` (plain projection, one row per live menuitem) → `cafe-menu-catalog` (`nats-kv`) · `cafeLeaseWorkplaces` (one row per lease, `coveringLocations` + `leaseEnd`) → `cafe-lease-workplaces` (`nats-kv`) — the read-side half of workplace confinement, plus the resident-readable tenancy-end column |
+| **Operations** (11) | `OpenTab` · `Charge` · `VoidCharge` · `MarkLineServed` · `Settle` · `CreateMenuItem` · `RetireMenuItem` · `SetMenuItemAvailability` · `SetMenuItemLocation` · `UpdateMenuItem` · `SetCafePolicy` |
+| **Lenses** (4) | `cafeTabSettlement` (convergence, one row per tab, `missing_account`/`missing_charge`/`missing_payment`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) · `menuCatalog` (plain projection, one row per live menuitem) → `cafe-menu-catalog` (`nats-kv`) · `cafeLeaseWorkplaces` (one row per lease, `coveringLocations` + `leaseEnd`) → `cafe-lease-workplaces` (`nats-kv`) — the read-side half of workplace confinement, plus the resident-readable tenancy-end column · `cafeHousePolicies` (one row per location carrying a `.cafePolicy`, `{locationKey, tabLimitCents, name}`) → `cafe-house-policies` (`nats-kv`) |
 | **Weaver playbook** (1) | `cafeTabSettlement` — `missing_account` → `directOp(CreateAccount)` · `missing_charge` → `directOp(DebitAccount)` · `missing_payment` → `directOp(CreditCafeAccount)` (all cafe-ledger) |
 
 Grants (`permissions.go`): `OpenTab`/`Charge`/`Settle` grant `operator`+`frontOfHouse` at `scope: any` AND
@@ -46,6 +46,7 @@ vtx.tab.<id>.status          class=tabStatus       {value ∈ open|settled, tota
 vtx.leaseapp.<id>.cafeOpenTab class=cafeOpenTabGuard {tabKey} (claimed by OpenTab, tombstoned by Settle)
 vtx.menuitem.<id>            class=menuitem        root {} (D5)
 vtx.menuitem.<id>.price      class=menuItemPrice   {name, priceCents}
+vtx.<locType>.<id>.cafePolicy class=cafeHousePolicy {tabLimitCents} (written by SetCafePolicy on location-domain's unit|building|property)
 
 lnk.tab.<id>.chargedTo.leaseapp.<id>          (tab → leaseapp; permanent — where the money lands; cafeTabSettlement anchors here)
 lnk.tab.<id>.openFor.leaseapp.<id>            (tab → leaseapp; transient — that the tab is open; Settle tombstones it)
@@ -119,6 +120,22 @@ tombstones a live item, self-OCC'd. A self-order `Charge` is additionally confin
 tab's own building or an ancestor of it (`location_covers`, walking the item's `servedAt` place against the
 tab's lease's `appliesToUnit`) — `servedAt` bounds what a browse walk OFFERS, this bounds what `Charge`
 ACCEPTS. The `menuCatalog` lens lists every live item for the Resident view's self-order picker (P5).
+
+## House tab limit
+
+A house may record a self-service tab limit: `SetCafePolicy{locationKey, tabLimitCents}` (operator +
+`frontOfHouse`, confined to a location the staffer `worksAt` or an ancestor of it — `CreateMenuItem`'s
+confinement) writes `.cafePolicy {tabLimitCents}` on the location (a non-negative whole number of cents;
+`0` = self-service tabs closed at this house; no aspect = no limit recorded). A class-(d) optionalReads
+write: the caller declares `<locationKey>.cafePolicy` — absent mints it, present OCC-upserts it, tombstoned
+OCC-revives it. The effective limit for a tab is the **tightest** `tabLimitCents` on the tab's lease's unit
+and its `containedIn` ancestors (`house_tab_limit`, the `location_covers` walk reading one aspect per node),
+so a property-wide cap stays a cap under a looser building policy. On the **resident-self leg only**,
+`Charge` refuses `TabLimitExceeded` when `totalCents + amountCents` would pass the limit (equal is allowed)
+and `OpenTab` refuses it when the limit is `0`; the staff leg is never limited — the desk rings past the
+limit and is warned by its own read model. `cafeHousePolicies` projects one row per location carrying a
+policy; `cmd/cafe-app` composes each lease's limit from `cafeLeaseWorkplaces.coveringLocations` ∩ those
+rows with the same minimum rule (`/api/residents.tabLimitCents`, null = no limit).
 
 ## Staff-workplace write confinement
 

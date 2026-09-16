@@ -13,7 +13,7 @@ import (
 // the embedded app.js the same way web_hold_test.go lifts openTabGate, so
 // the assertions below are about the markup that ships. money/escapeHtml
 // ride along because menuOptions calls both.
-var menuOptionsDecl = regexp.MustCompile(`(?s)\nfunction menuOptions\(items\) \{\n.*?\n\}\n`)
+var menuOptionsDecl = regexp.MustCompile(`(?s)\nfunction menuOptions\(items, remainingCents\) \{\n.*?\n\}\n`)
 
 func menuOptionsVM(t *testing.T) (*goja.Runtime, goja.Callable) {
 	t.Helper()
