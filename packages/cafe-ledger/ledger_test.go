@@ -3260,8 +3260,9 @@ func TestArrears_TwoPageHistoryCompletesInTwoDispatches(t *testing.T) {
 		t.Fatalf("params.balanceCents = %v, want 1900 (25 × 100 − 6 × 100) — the aggregate's balance is the account's", got)
 	}
 
-	// A re-dispatch over the finished history: one page again, and it fits, so
-	// it finalizes in place and sends nothing more.
+	// A re-dispatch over the finished history: the 31 entries still outrun one
+	// page, so it checkpoints again at phase A rather than finalizing in
+	// place, and sends nothing more — the episode is already reminded for.
 	_, req3 := evaluateArrears(t, ctx, conn, cp, cons, "cafearrtwoeval000003",
 		bootstrap.WeaverIdentityKey, acctKey, "2026-08-24T09:00:00Z", processor.OutcomeAccepted)
 	if arrearsNotification(t, ctx, conn, req3) != nil {
@@ -3444,6 +3445,61 @@ func TestArrears_ChargeOnAnOwingAccountMidReplayRestartsIt(t *testing.T) {
 	}
 	if control["evaluatedAt"] != settled["evaluatedAt"] {
 		t.Fatalf("with no checkpoint to drop, a charge that queues behind the head writes nothing; evaluatedAt moved from %v to %v", settled["evaluatedAt"], control["evaluatedAt"])
+	}
+}
+
+// TestArrears_PayoutMidReplayDropsTheCheckpoint is PayoutCafeCredit's own
+// reset boundary, the payout mirror of
+// TestArrears_ChargeOnAnOwingAccountMidReplayRestartsIt. A payout's cap bounds
+// it at the credit the account holds, so the balance it leaves is at most
+// zero and it never opens an episode — but the transaction it posts still
+// changes the set a live checkpoint's cursor pages over, so it carries the
+// state, drops the checkpoint and marks it stale exactly when one is
+// present, the same drop a charge performs mid-replay.
+func TestArrears_PayoutMidReplayDropsTheCheckpoint(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearspayoutreplay")
+
+	// An account driven into CREDIT by the ops' own route (charge, paid in
+	// full, then refunded), padded to 31 postedTo entries so the first
+	// evaluation checkpoints rather than finalizing.
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEARRPAYLEASEHJK")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "cafearrpayacct", leaseKey, 1000)
+	for i := 0; i < cafeledger.ArrearsPageLimit-2; i++ {
+		postedAt := time.Date(2026, 6, 1+i, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('B', i), "debit", 100, postedAt, "")
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "cafearrpayeval000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	mid := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, mid) == nil {
+		t.Fatalf("fixture: 31 entries must leave a checkpoint after page 1: %+v", mid)
+	}
+
+	payoutAs(t, ctx, conn, cp, cons, "cafearrpaypayout0001", ledgerActorKey, acctKey, 1000, processor.OutcomeAccepted)
+	after := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, after) != nil {
+		t.Fatalf("a payout mid-replay must drop the checkpoint — the set under its cursor has changed: %+v", after)
+	}
+	if stale, _ := after["stale"].(bool); !stale {
+		t.Fatalf("and mark the state stale, which re-opens the evaluation gap: %+v", after)
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after paying the credit out in full = %v, want 0", got)
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "cafearrpayeval000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-23T09:00:00Z", processor.OutcomeAccepted)
+	replay := arrearsReplay(t, arrearsData(t, ctx, conn, acctKey))
+	if replay == nil {
+		t.Fatal("32 entries are two pages, so the restarted evaluation checkpoints again")
+	}
+	if got, _ := replay["pages"].(float64); got != 1 {
+		t.Fatalf("replay.pages = %v, want 1 — the evaluation restarts at page 1, it does not resume a cursor over a moved set", replay["pages"])
+	}
+	if got, _ := replay["phase"].(string); got != cafeledger.ArrearsPhaseA {
+		t.Fatalf("replay.phase = %q, want %q on a fresh page 1", got, cafeledger.ArrearsPhaseA)
 	}
 }
 

@@ -196,19 +196,15 @@ def vertex_alive(state, key):
 # computation is NOT order-independent: collapsing every credit into one sum
 # sorted as if paid before every debit retroactively makes the queue look
 # like it never went empty, which can rename a LATER debit as the episode's
-# opener when the real temporal walk kept an earlier one (verified live: it
-# silently broke TestArrears_ExactRetirementMovesTheHeadWithinTheEpisode — an
-# exact retirement that empties and reopens the queue mid-episode — the
-# moment a netted-aggregate shape was tried here). Unlike loftspace-ledger's
-# identical fix, each entry ALSO keeps its own reversesKey (the id of the
-# charge a refund credit gives back): loftspace carries no reverses relation
-# at all, so its rows always net as plain FIFO, but this ledger's netting
-# pre-pass (arrears_head's own, unchanged) is exact only when it can still
-# see which credit reverses which charge. arrears_rows below rebuilds
-# arrears_head's usual per-row input from the dict once the enumeration is
-# exhausted, so arrears_head is otherwise unchanged from before this fire — it
-# already ran this same sort-then-walk over the whole history in one
-# execution; only how many dispatches fill the dict has changed.
+# opener when the real temporal walk kept an earlier one. Each entry also
+# keeps its own reversesKey (the id of the charge a refund credit gives
+# back): this ledger's netting pre-pass (arrears_head's own) is exact only
+# when it can still see which credit reverses which charge; loftspace-ledger
+# carries no reverses relation at all, so its rows always net as plain FIFO.
+# arrears_rows below rebuilds arrears_head's usual per-row input from the
+# dict once the enumeration is exhausted, so arrears_head itself runs the
+# same sort-then-walk over the whole history in one execution regardless of
+# how many dispatches filled the dict.
 #
 # An account whose history runs past ARREARS_MAX_PAGES pages is not aged
 # against a truncated FIFO — a partial replay would name the wrong head and
