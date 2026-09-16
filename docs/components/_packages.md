@@ -634,6 +634,8 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   cells' shared release seam inherited the seam's one unguarded caller — a tombstone of an already-terminal visit
   re-released keys a later booking held. Not gate-shaped (every minter is a different mechanism); the walk is the
   brief's part-5 copy: for a value released through a shared seam, list the seam's callers and the state each runs in.
+  Fifth minter (café counter payment, 2026-09-16, caught cold): a PLAYBOOK-dispatched leg inherited the human
+  leg's balance cap and parked real cash — a dispatcher is a leg, bounded by the fact it dispatches from.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
@@ -686,7 +688,8 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   a DDL `InputSchema` `maxLength` is declarative — nothing enforces it — and a history cap's byte arithmetic leaned on
   it; the script now refuses past 4,000 bytes. A bound a design counts on is enforced in the script, never read off
   the schema.
-- **A mirror that drops one of the precedent's checks or branches drops the INVARIANT it enforced** — clinic-ledger's
+- **A mirror that drops one of the precedent's checks or branches drops the INVARIANT it enforced** (café `CreditCafeAccount{tabRef}`
+  2026-09-16, caught cold: the `<x>Ref` mirror inherited the precedent's missing tie to the op's target) — clinic-ledger's
   `reversesRef` kept café's liveness check and dropped its ownership check (a desk waiver could disarm another
   patient's `missing_reversal`; the descriptor field then reached the self leg, 2026-09-14); wellness's arrears
   evaluator kept café's stale/carry branch and dropped `.balance → 0`, and the episode boundary went with it (two

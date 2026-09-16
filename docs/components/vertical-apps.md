@@ -69,7 +69,10 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   shape is the goja pin over a fixture holding every non-terminal status the op admits (`ledger_ui_test.go`).
   **Fourth sighting (LoftSpace deposit strip, 2026-09-15, caught cold):** "incl. security deposit $D" applied the
   ledger's custody predicate (charged − returned) to a payment figure — a partial payment read as a whole deposit owed;
-  now "of which up to $min(balance, held)".
+  now "of which up to $min(balance, held)". **Fifth (café counter payment, 2026-09-16, caught cold):** the app's
+  `Posted` boolean enumerated two of the lens's three gap columns after a third was added — a derived FE boolean over
+  gap columns lists every gap the lens's `violating` OR-s; and a button that pays "the total" sent the rendered
+  total, so a stale card became a silent partial — the op now refuses a mismatch and the card re-renders.
 - **An op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`** — a
   rationale comment naming an exemption-less op (the instructor identity bind) reddened `lint-static` after
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats

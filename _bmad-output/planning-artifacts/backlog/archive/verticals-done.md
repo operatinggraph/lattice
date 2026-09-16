@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-15 · `a0ba03a2` · A tab's total always equals its live lines — `VoidCharge` voids by `lineId` only (amount-only form retired), itemsMemo re-derived, workplace confined before the line lookup; proven live at $0.
+- 2026-09-14 · `aa48d51f` · A live read decides no bare mutation on its key — `lint-live-read-pinned-mutation`; 7 sites pinned; dossier class retired ([census](../../../docs/reviews/verticals-packages-occ-gates-2026-09-14.md)).
 - 2026-09-14 · `284ffc66` · Every `derive_reads` op has a bare-envelope vector — `lint-derive-reads-bare-vector` (21 ops); seven derive_reads now derive the vertex root; dossier class retired; live.
 - 2026-09-14 · `cfbc2fa0` · `_packages.md` dossier censused over the vertical packages — 33 unlimited `kv.Links` walks fixed; `lint-links-page-limit` gates it ([census](../../../docs/reviews/verticals-packages-dossier-census-2026-09-14.md)).
 - 2026-09-14 · `0771d77e` · The desk sees a debtor and a charge names its visit — `visitRef`→`forVisit`, a fee-less `settles` refused, `reversesRef` confined, the statement aged per charge, arrears on the picker; live.
