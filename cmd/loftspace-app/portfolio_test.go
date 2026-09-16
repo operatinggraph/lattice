@@ -205,12 +205,17 @@ func cafedomainPrefixKey(suffix string) string {
 	return cafedomain.TabSettlementTarget + "." + suffix
 }
 
-// TestComputeLandlordLeaseBalances_WorstFirstOwedOnly locks in the three
-// things portfolio-pulse's arrears column depends on: unsigned leases are
-// excluded (occupiedLeaseAppKeys' own rule, applied here too), a credit
+// leaseBalancesTestNow anchors every landlord-lease-balance test at a fixed
+// instant (Tests & Determinism: no wall-clock reliance).
+var leaseBalancesTestNow = time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+
+// TestComputeLandlordLeaseBalances_MostOverdueFirstOwedOnly locks in the
+// three things portfolio-pulse's arrears column depends on: unsigned leases
+// are excluded (occupiedLeaseAppKeys' own rule, applied here too), a credit
 // (negative) balance is not arrears so it's dropped rather than shown as
-// "owed", and the remaining rows sort highest-balance-first.
-func TestComputeLandlordLeaseBalances_WorstFirstOwedOnly(t *testing.T) {
+// "owed", and the remaining rows — tied on daysOverdue here (same postedAt,
+// no recorded stamp) — sort highest-balance-first as the tiebreaker.
+func TestComputeLandlordLeaseBalances_MostOverdueFirstOwedOnly(t *testing.T) {
 	rows := []protectedLandlordRow{
 		{EntityKey: "vtx.leaseapp.small", SignedAt: strp("2026-07-01T00:00:00Z"), UnitAddress: strp("12 Small St"), ApplicantName: strp("A. Small")},
 		{EntityKey: "vtx.leaseapp.big", SignedAt: strp("2026-07-01T00:00:00Z"), UnitAddress: strp("99 Big Ave")},
@@ -226,14 +231,113 @@ func TestComputeLandlordLeaseBalances_WorstFirstOwedOnly(t *testing.T) {
 	}
 	get := fakeKV(entries)
 
-	got := computeLandlordLeaseBalances(rows, keysOf(entries), get)
+	got := computeLandlordLeaseBalances(rows, keysOf(entries), get, nil, leaseBalancesTestNow)
 	if len(got) != 2 {
 		t.Fatalf("want 2 arrears rows (unsigned + credit excluded), got %d: %+v", len(got), got)
 	}
 	if got[0].LeaseAppKey != "vtx.leaseapp.big" || got[0].BalanceCents != 480000 || got[0].UnitAddress != "99 Big Ave" {
-		t.Errorf("row 0 = %+v, want the bigger balance first", got[0])
+		t.Errorf("row 0 = %+v, want the bigger balance first (tied on daysOverdue)", got[0])
 	}
 	if got[1].LeaseAppKey != "vtx.leaseapp.small" || got[1].BalanceCents != 5000 || got[1].ApplicantName != "A. Small" {
 		t.Errorf("row 1 = %+v, want the smaller balance second", got[1])
+	}
+	if !got[0].IsOverdue || got[0].DaysOverdue != 9 {
+		t.Errorf("row 0 IsOverdue/DaysOverdue = %v/%d, want true/9 (posted 08-01, now 08-10)", got[0].IsOverdue, got[0].DaysOverdue)
+	}
+}
+
+// TestComputeLandlordLeaseBalances_OverdueOutranksNotYetDue proves the
+// most-overdue-first sort: an overdue $2,400 lease ranks above a not-yet-due
+// $3,300 one (the live bug the fire brief filed — Priya due 09-08 was
+// sorting under Riley's larger, not-yet-due balance).
+func TestComputeLandlordLeaseBalances_OverdueOutranksNotYetDue(t *testing.T) {
+	rows := []protectedLandlordRow{
+		{EntityKey: "vtx.leaseapp.riley", SignedAt: strp("2026-07-01T00:00:00Z")},
+		{EntityKey: "vtx.leaseapp.priya", SignedAt: strp("2026-07-01T00:00:00Z")},
+	}
+	entries := map[string]string{
+		// Riley: $3,300, due in the future — not yet due.
+		"t1": `{"transactionKey":"t1","leaseAppKey":"vtx.leaseapp.riley","type":"debit","amountCents":330000,"postedAt":"2026-09-01T00:00:00Z","dueAt":"2026-09-22T00:00:00Z"}`,
+		// Priya: $2,400, due 2026-09-08 — 7 days overdue at 2026-09-15.
+		"t2": `{"transactionKey":"t2","leaseAppKey":"vtx.leaseapp.priya","type":"debit","amountCents":240000,"postedAt":"2026-09-01T00:00:00Z","dueAt":"2026-09-08T00:00:00Z"}`,
+	}
+	get := fakeKV(entries)
+	now := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
+
+	got := computeLandlordLeaseBalances(rows, keysOf(entries), get, nil, now)
+	if len(got) != 2 {
+		t.Fatalf("want 2 rows, got %d: %+v", len(got), got)
+	}
+	if got[0].LeaseAppKey != "vtx.leaseapp.priya" || !got[0].IsOverdue || got[0].DaysOverdue != 7 {
+		t.Errorf("row 0 = %+v, want Priya, overdue, 7 days", got[0])
+	}
+	if got[1].LeaseAppKey != "vtx.leaseapp.riley" || got[1].IsOverdue || got[1].DaysUntilDue != 7 {
+		t.Errorf("row 1 = %+v, want Riley, not yet due, 7 days out", got[1])
+	}
+}
+
+// TestComputeLandlordLeaseBalances_TwoOverdueSortByDaysThenAmount — among
+// overdue rows, the longer-overdue one ranks first regardless of amount;
+// among equally-overdue rows, the larger balance ranks first.
+func TestComputeLandlordLeaseBalances_TwoOverdueSortByDaysThenAmount(t *testing.T) {
+	rows := []protectedLandlordRow{
+		{EntityKey: "vtx.leaseapp.longoverdue-small"},
+		{EntityKey: "vtx.leaseapp.shortoverdue-big"},
+	}
+	rows[0].SignedAt = strp("2026-01-01T00:00:00Z")
+	rows[1].SignedAt = strp("2026-01-01T00:00:00Z")
+	entries := map[string]string{
+		// 20 days overdue, smaller amount.
+		"t1": `{"transactionKey":"t1","leaseAppKey":"vtx.leaseapp.longoverdue-small","type":"debit","amountCents":10000,"postedAt":"2026-08-01T00:00:00Z","dueAt":"2026-08-01T00:00:00Z"}`,
+		// 5 days overdue, bigger amount — must still rank second.
+		"t2": `{"transactionKey":"t2","leaseAppKey":"vtx.leaseapp.shortoverdue-big","type":"debit","amountCents":900000,"postedAt":"2026-08-16T00:00:00Z","dueAt":"2026-08-16T00:00:00Z"}`,
+	}
+	get := fakeKV(entries)
+	now := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+
+	got := computeLandlordLeaseBalances(rows, keysOf(entries), get, nil, now)
+	if len(got) != 2 {
+		t.Fatalf("want 2 rows, got %d: %+v", len(got), got)
+	}
+	if got[0].LeaseAppKey != "vtx.leaseapp.longoverdue-small" || got[0].DaysOverdue != 20 {
+		t.Errorf("row 0 = %+v, want the longer-overdue lease first regardless of amount", got[0])
+	}
+	if got[1].LeaseAppKey != "vtx.leaseapp.shortoverdue-big" || got[1].DaysOverdue != 5 {
+		t.Errorf("row 1 = %+v, want the shorter-overdue lease second", got[1])
+	}
+}
+
+// TestComputeLandlordLeaseBalances_RecordedDueDateWins proves the leaseAccounts
+// row's recorded arrearsDueAt overrides the ledger's own FIFO-derived head
+// date for a portfolio row, exactly as it does for /api/ledger.
+func TestComputeLandlordLeaseBalances_RecordedDueDateWins(t *testing.T) {
+	rows := []protectedLandlordRow{
+		{EntityKey: "vtx.leaseapp.stamped", SignedAt: strp("2026-07-01T00:00:00Z")},
+	}
+	entries := map[string]string{
+		"t1": `{"transactionKey":"t1","leaseAppKey":"vtx.leaseapp.stamped","type":"debit","amountCents":10000,"postedAt":"2026-09-01T00:00:00Z","dueAt":"2026-09-01T00:00:00Z"}`,
+	}
+	get := fakeKV(entries)
+	acctByLease := map[string]leaseAccountProjection{
+		"vtx.leaseapp.stamped": {
+			LeaseAppKey:           "vtx.leaseapp.stamped",
+			ArrearsDueAt:          "2026-09-10T00:00:00Z",
+			ArrearsReminderSentAt: "2026-09-15T00:00:00Z",
+		},
+	}
+	now := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)
+
+	got := computeLandlordLeaseBalances(rows, keysOf(entries), get, acctByLease, now)
+	if len(got) != 1 {
+		t.Fatalf("want 1 row, got %d: %+v", len(got), got)
+	}
+	if got[0].DueDate != "2026-09-10T00:00:00Z" {
+		t.Errorf("DueDate = %q, want the RECORDED stamp (2026-09-10), not the FIFO head's dueAt (2026-09-01)", got[0].DueDate)
+	}
+	if got[0].DaysOverdue != 6 {
+		t.Errorf("DaysOverdue = %d, want 6 (now 09-16 minus recorded due 09-10)", got[0].DaysOverdue)
+	}
+	if got[0].ReminderSentAt != "2026-09-15T00:00:00Z" {
+		t.Errorf("ReminderSentAt = %q, want the row's own stamp threaded verbatim", got[0].ReminderSentAt)
 	}
 }

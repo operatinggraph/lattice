@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
+	loftspaceledger "github.com/operatinggraph/lattice/packages/loftspace-ledger"
 	onebill "github.com/operatinggraph/lattice/packages/one-bill"
 )
 
@@ -100,6 +102,14 @@ func computeOneBillHistory(keys []string, get kvGetter, leaseAppKey string) ([]o
 // self-anchor handleApplications relies on), so — unlike /api/ledger, which
 // today trusts the query param unchecked — a signed-in tenant cannot pull
 // another lease's statement by guessing its key.
+//
+// The combined balance is rent + café, but the AGE (dueDate/isOverdue/
+// daysOverdue/daysUntilDue/reminderSentAt) is the RENT account's alone — a
+// café tab has no due date of its own — so this handler additionally reads
+// the loftspace-ledger `leaseAccounts` + `ledgerHistory` buckets (the same
+// pair /api/ledger reads) and derives it the same way (deriveRentArrears,
+// ledger.go). rentBalanceCents carries the rent-only balance alongside the
+// combined one so the FE can name which balance the age refers to.
 func (s *server) handleOneBillStatement(w http.ResponseWriter, r *http.Request) {
 	actor, err := s.authenticateRead(r)
 	if err != nil {
@@ -157,9 +167,61 @@ func (s *server) handleOneBillStatement(w http.ResponseWriter, r *http.Request) 
 		return entry.Value, true
 	}
 	rows, balance := computeOneBillHistory(keys, get, leaseAppKey)
+
+	acctBucket := loftspaceledger.LeaseAccountsBucket
+	acctKeys, err := conn.KVListKeys(ctx, acctBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+acctBucket+": "+err.Error()+" (is loftspace-ledger installed and the Refractor projecting?)")
+		return
+	}
+	acctValues, err := readAllOrFail(acctKeys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, acctBucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read lease accounts for one-bill rent age", "bucket", acctBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+acctBucket+" incomplete: "+err.Error())
+		return
+	}
+	acctGet := func(key string) ([]byte, bool) { v, ok := acctValues[key]; return v, ok }
+	acctRow, _ := findLeaseAccountRow(acctKeys, acctGet, leaseAppKey)
+
+	ledgerBucket := loftspaceledger.LedgerHistoryBucket
+	ledgerKeys, err := conn.KVListKeys(ctx, ledgerBucket)
+	if err != nil {
+		s.writeError(w, http.StatusBadGateway,
+			"list "+ledgerBucket+": "+err.Error()+" (is loftspace-ledger installed and the Refractor projecting?)")
+		return
+	}
+	ledgerValues, err := readAllOrFail(ledgerKeys, func(key string) ([]byte, error) {
+		entry, err := conn.KVGet(ctx, ledgerBucket, key)
+		if err != nil {
+			return nil, err
+		}
+		return entry.Value, nil
+	})
+	if err != nil {
+		s.logger.Error("read ledger history for one-bill rent age", "bucket", ledgerBucket, "error", err)
+		s.writeError(w, http.StatusBadGateway, "read "+ledgerBucket+" incomplete: "+err.Error())
+		return
+	}
+	ledgerGet := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
+	rentRows, rentBalance := computeLedgerHistory(ledgerKeys, ledgerGet, leaseAppKey)
+	arrears := deriveRentArrears(rentRows, acctRow.ArrearsDueAt, acctRow.ArrearsReminderSentAt, time.Now().UTC())
+
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"leaseAppKey":  leaseAppKey,
-		"entries":      rows,
-		"balanceCents": balance,
+		"leaseAppKey":      leaseAppKey,
+		"entries":          rows,
+		"balanceCents":     balance,
+		"rentBalanceCents": rentBalance,
+		"dueDate":          arrears.DueDate,
+		"isOverdue":        arrears.IsOverdue,
+		"daysOverdue":      arrears.DaysOverdue,
+		"daysUntilDue":     arrears.DaysUntilDue,
+		"reminderSentAt":   arrears.ReminderSentAt,
 	})
 }

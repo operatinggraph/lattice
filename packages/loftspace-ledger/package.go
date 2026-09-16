@@ -37,7 +37,27 @@
 //
 //   - The `leaseAccounts` lens (one row per lease, accountKey null until one
 //     is opened) — the FE's only way to resolve a lease's account key, since
-//     it can no longer be derived from leaseAppKey.
+//     it can no longer be derived from leaseAppKey — projecting the account's
+//     arrears due date, reminded-for date and reminder send instant beside it.
+//
+//   - The `loftspaceAccountArrears` aspect type (DDL `loftspaceAccountArrears`)
+//     — vtx.account.<NanoID>.arrears = {evaluatedAt, dueAt?, remindAt?,
+//     remindedFor?, sentAt?, stale?, historyTooLong?}, the account's
+//     arrears-episode state. Minted and rewritten by EvaluateLoftspaceArrears;
+//     every posted entry marks it stale (this ledger stores no balance, so an
+//     entry cannot tell an episode opening from one continuing).
+//
+//   - The `loftspaceArrearsReminders` weaver-target lens + its §10.8 playbook
+//     (targets.go) — the wellness-ledger arrears mechanism applied to this
+//     ledger, which likewise stores no balance. missing_evaluation dispatches
+//     directOp(EvaluateLoftspaceArrears), which ages the account with the same
+//     plain FIFO the tenant's statement runs, stamps .arrears with the head's
+//     OWN recorded due date (its postedAt when it recorded none) and the
+//     reminder instant the five-day grace puts after it, and fires ONE
+//     external.notification per arrears episode to the bridge's
+//     "notification" adapter once that instant has passed.
+//     `RecordLoftspaceArrearsReminderNotification` records the outcome as an
+//     audit-only .arrearsNotification aspect (notifications.go).
 //
 // This is the ledger the semantic-contracts-executable-paper design builds to:
 // vtx.account.<id> + Debit/CreditAccount + ledger entries linked back to
@@ -48,7 +68,9 @@
 // for why the account carries its own independent NanoID rather than the
 // lease's).
 //
-// Depends lease-signing (the leaseapp vertex type an account is heldFor).
+// Depends lease-signing (the leaseapp vertex type an account is heldFor) and
+// orchestration-base (MarkExpired and the freshnessExpiry marker the arrears
+// @at firing writes onto the account).
 package loftspaceledger
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -56,7 +78,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "loftspace-ledger",
-	Version: "0.7.4",
+	Version: "0.7.5",
 	Description: "Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount, independently-minted " +
 		"id, one per lease via a .ledgerAccount guard aspect on the leaseapp) + the transaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo; DebitAccount's " +
@@ -67,12 +89,20 @@ var Package = pkgmgr.Definition{
 		"balance, credit only and amount-capped at the account's own recomputed outstanding balance, or a " +
 		"landlord recording a charge or a payment on a lease of a unit they manage, uncapped) + the " +
 		"ledgerHistory read-model lens (one row per transaction) + the leaseAccounts lens (lease -> account " +
-		"key lookup). Depends lease-signing.",
-	Depends:     []string{"lease-signing"},
-	DDLs:        DDLs(),
-	Lenses:      Lenses(),
-	Permissions: Permissions(),
-	OpMetas:     OpMetas(),
+		"key lookup, plus the account's arrears due date and reminder timestamps). " +
+		"Also ships the rent-arrears reminder: the account's .arrears episode aspect (minted by evaluation; every " +
+		"posted entry marks it stale, since no balance is stored) + the loftspaceArrearsReminders weaver-target " +
+		"convergence lens, whose §10.8 playbook dispatches EvaluateLoftspaceArrears — that op ages the account with " +
+		"the same plain FIFO the tenant's statement runs, records the head's own recorded due date (its postedAt " +
+		"when it recorded none) and the reminder instant five days after it, and fires ONE external.notification " +
+		"per arrears episode to the bridge's \"notification\" adapter, keyed on (accountKey, dueAt, headKey). " +
+		"RecordLoftspaceArrearsReminderNotification records the outcome. Depends lease-signing + orchestration-base.",
+	Depends:       []string{"lease-signing", "orchestration-base"},
+	DDLs:          DDLs(),
+	Lenses:        Lenses(),
+	Permissions:   Permissions(),
+	WeaverTargets: WeaverTargets(),
+	OpMetas:       OpMetas(),
 	// DebitAccount carries no op-meta: it is Weaver's clause-authorized
 	// charge and the operator's CLI charge, with no shipped screen; the
 	// person-facing "Record charge" descriptor is LoftspaceRecordCharge's.

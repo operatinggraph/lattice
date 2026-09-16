@@ -146,6 +146,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"leaseApplicationComplete":   oneKey,
 	"leaseExpiry":                oneKey,
 	"leaseRentSettlement":        oneKey,
+	"loftspaceArrearsReminders":  oneKey,
 	"myTasks":                    walkMultiPosition,
 	// PositionsBinding("object") is {0, 1}: the `(owner)` end is unlabeled, so it
 	// admits every type — an object attached to another object included.

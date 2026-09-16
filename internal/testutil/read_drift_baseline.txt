@@ -379,6 +379,14 @@ walk	EndVisitSeries	vtx.visitseries.<id> withProvider out
 # .entry read this target's own doc comment (targets.go) already carries —
 # no dispatcher can name it up front.
 walk	EvaluateCafeArrears	vtx.cafetransaction.<id> reverses out
+# tenant_for_account (packages/loftspace-ledger/scripts.go) resolves the
+# tenant an arrears reminder addresses TWO hops from the account: the heldFor
+# walk (declared by the loftspaceArrearsReminders playbook) names the lease,
+# and the lease's own applicationFor link names the identity. The lease hub
+# only exists once the heldFor walk has resolved it, so no dispatcher can
+# name this second walk up front — the same shape CreditAccount's landlord
+# proof carries above for the lease's appliesToUnit hop.
+walk	EvaluateLoftspaceArrears	vtx.leaseapp.<id> applicationFor out
 # arrears_entries (packages/wellness-ledger/scripts.go) follows the same
 # netting hops off each CREDIT its bounded postedTo replay discovers, and in
 # this ledger the charge a refund gives back is TWO hops away: the refund

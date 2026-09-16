@@ -209,9 +209,9 @@ func Lenses() []pkgmgr.LensSpec {
 //     nothing owed rewrites .arrears to {evaluatedAt} alone: no dueAt, so no
 //     timer and no gap, and nothing of the finished episode survives to make
 //     the NEXT charge look already reminded. Where the next charge posted
-//     BEFORE that evaluation ran, the op finds a head newer than the recorded
-//     send and drops the send record itself, so the row re-arms for the new
-//     episode with remindedFor absent.
+//     BEFORE that evaluation ran, the op finds an episode opener newer than
+//     the recorded send and drops the send record itself, so the row re-arms
+//     for the new episode with remindedFor absent.
 //   - A new episode's dueAt is necessarily later than any instant already
 //     recorded in the marker (its charge posts after the last episode's
 //     ended, and both add the same term), so the permanent marker never
