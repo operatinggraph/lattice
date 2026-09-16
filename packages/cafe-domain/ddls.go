@@ -40,7 +40,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "tab",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab", "BackfillTabStaleAt"},
+		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "MarkLineServed", "Settle", "SettleStaleTab", "BackfillTabStaleAt"},
 		Description: "Café house-tab session DDL. Vertex shape: vtx.tab.<NanoID>, class=tab, root data = {} " +
 			"(minimal, D5 — the running total lives on the .status aspect). OpenTab{leaseAppKey} validates the lease " +
 			"is alive, rejects LeaseNotApproved unless the lease's own lease-signing .decision aspect reads " +
@@ -74,10 +74,13 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"optional description for an off-menu charge, defaulting to \"Off-menu charge\") to .status.itemsMemo, a " +
 			"comma-joined running line so a tab (open or settled) shows what was actually rung up, not just the " +
 			"total; a repeated identical name in the memo is exactly what a duplicate tap looks like. Every Charge " +
-			"also appends a structured entry {id, description, amountCents, voided: false, orderedBy} to .status.lines " +
+			"also appends a structured entry {id, description, amountCents, voided: false, orderedBy, orderedAt} to .status.lines " +
 			"(id = \"line-\" + the 1-based position of the new entry, deterministic and collision-free within one " +
 			"tab; orderedBy = op.actor, the identity that submitted THIS Charge — the resident on a self-order, the " +
-			"staffer on a POS ring-up, distinguishing the two on the itemized receipt where itemsMemo cannot), " +
+			"staffer on a POS ring-up, distinguishing the two on the itemized receipt where itemsMemo cannot; " +
+			"orderedAt = op.submittedAt, RFC3339). A staff ring-up is handed over at the counter, so that line also " +
+			"carries servedAt = orderedAt and servedBy = op.actor; a self-ordered line carries neither until the " +
+			"desk marks it served — it is the desk's work, and the orders queue lists it oldest-first — " +
 			"the itemized breakdown a receipt renders instead of the flat memo string; a tab whose .status predates " +
 			"this field (no lines key at all, or a line predating orderedBy) is treated as lines=[] / orderedBy " +
 			"absent respectively and simply accrues no itemized entries until its next Charge, itemsMemo staying " +
@@ -92,6 +95,12 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"rejected when the void exceeds the current total (a tab whose recorded total already sits below " +
 			"the sum of its live lines corrects cleanly to 0, not a hard failure), and re-derives itemsMemo from " +
 			"the non-voided lines (the voided line drops out). " +
+			"MarkLineServed{tabKey, lineId} (operator/frontOfHouse only, confined to the tab's own building the same " +
+			"way VoidCharge is) records that one specific .status.lines entry was handed over: rejects " +
+			"UnknownChargeLine if no line with that id exists, LineVoided if it was voided, LineAlreadyServed if it " +
+			"already carries servedAt, TabNotOpen once the tab is settled; otherwise stamps servedAt = op.submittedAt " +
+			"and servedBy = op.actor on that line alone, the same OCC-conditioned upsert of .status with totalCents, " +
+			"itemsMemo and every other line carried forward unchanged. " +
 			"Settle{tabKey} closes an " +
 			"OPEN tab (.status.value → settled, settledAt stamped, totalCents AND itemsMemo frozen), also OCC-conditioned, and " +
 			"tombstones both the lease's cafeOpenTabGuard (so a later OpenTab can claim it again) and the tab's own " +
@@ -194,6 +203,15 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"settled, or UnknownChargeLine if line-2 is absent or already voided.",
 			},
 			{
+				Name:    "MarkLineServed — record that a self-ordered line was handed over (operator/frontOfHouse only)",
+				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "lineId": "line-1"},
+				ExpectedOutcome: "Validates the tab is alive + open and the caller works at its building, then stamps " +
+					"servedAt = op.submittedAt and servedBy = op.actor on line-1 of .status.lines (OCC-conditioned; " +
+					"totalCents, itemsMemo and every other line carried forward unchanged). Returns primaryKey. Rejects " +
+					"TabNotOpen if the tab is already settled, UnknownChargeLine if line-1 is absent, LineVoided if it was " +
+					"voided, or LineAlreadyServed if it already carries servedAt.",
+			},
+			{
 				Name:    "Settle — close a tab for house-account posting",
 				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>"},
 				ExpectedOutcome: "Validates the tab is alive + open, sets .status.value to settled and stamps " +
@@ -230,15 +248,17 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "tabStatus",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "Settle", "SettleStaleTab", "BackfillTabStaleAt"},
+		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "MarkLineServed", "Settle", "SettleStaleTab", "BackfillTabStaleAt"},
 		Description: "Tab status aspect (café). Stored as vtx.tab.<NanoID>.status (class tabStatus) = " +
 			"{value: open|settled, totalCents, itemsMemo, lines, openedAt, staleAt, leaseAppKey, settledAt?}. Non-sensitive. Written by OpenTab " +
 			"(mints, value=open, totalCents=0, itemsMemo=\"\", lines=[], staleAt=openedAt+24h), Charge (OCC-conditioned accumulate onto totalCents, " +
-			"appends the charged item's name to itemsMemo and a matching {id, description, amountCents, voided: false, orderedBy: op.actor} entry to lines, " +
+			"appends the charged item's name to itemsMemo and a matching {id, description, amountCents, voided: false, orderedBy: op.actor, orderedAt: op.submittedAt} entry to lines " +
+			"(a staff ring-up's entry also carries servedAt = orderedAt and servedBy = op.actor — handed over at the counter; a self-order's does not), " +
 			"carries staleAt forward unchanged), VoidCharge " +
 			"(OCC-conditioned decrement of totalCents by a named lines entry's own amount, clamped at 0; marks that " +
 			"entry voided:true in place, re-derives itemsMemo from the remaining non-voided lines, and carries " +
-			"staleAt forward unchanged), Settle/SettleStaleTab " +
+			"staleAt forward unchanged), MarkLineServed (OCC-conditioned stamp of servedAt = op.submittedAt and servedBy = op.actor " +
+			"on one named, live, not-yet-served lines entry; nothing else changes), Settle/SettleStaleTab " +
 			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/lines carried over frozen, itemsMemo frozen as the " +
 			"comma-joined non-voided line descriptions, staleAt dropped — " +
 			"no longer meaningful once settled), and BackfillTabStaleAt (OCC-conditioned backfill of a missing staleAt on a tab opened " +
@@ -248,14 +268,14 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"value":{"type":"string","enum":["open","settled"]},"totalCents":{"type":"number"},"itemsMemo":{"type":"string"},` +
-			`"lines":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"},"amountCents":{"type":"number"},"voided":{"type":"boolean"},"orderedBy":{"type":"string"}}}},` +
+			`"lines":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"},"amountCents":{"type":"number"},"voided":{"type":"boolean"},"orderedBy":{"type":"string"},"orderedAt":{"type":"string"},"servedAt":{"type":"string"},"servedBy":{"type":"string"}}}},` +
 			`"openedAt":{"type":"string"},"staleAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":       "open | settled.",
 			"totalCents":  "The tab's running total in integer cents, accumulated by Charge.",
 			"itemsMemo":   "A comma-joined line of what was charged, derived from lines: the description of every non-voided line, in charge order (a lineId void drops its line out). A tab with no lines keeps whatever memo it already carries. Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
-			"lines":       "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, orderedBy}, one entry per Charge, in charge order. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
+			"lines":       "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, orderedBy, orderedAt, servedAt?, servedBy?}, one entry per Charge, in charge order. orderedAt is the Charge's op.submittedAt (RFC3339). servedAt/servedBy record that the line was handed over: stamped at ring-up on a staff Charge (the counter hands it over), by MarkLineServed on a self-order; a line with orderedAt and no servedAt is still to make, a line with neither predates this field and its state is unknown. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
 			"openedAt":    "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
 			"staleAt":     "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open, or BackfillTabStaleAt if it is absent entirely (a tab opened before this field shipped). Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
 			"leaseAppKey": "The resident lease this tab belongs to (denormalized from OpenTab's payload).",
@@ -265,10 +285,11 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name: "tab status aspect",
 				Payload: map[string]any{"value": "open", "totalCents": 850, "itemsMemo": "Latte, Croissant", "lines": []any{
-					map[string]any{"id": "line-1", "description": "Latte", "amountCents": 450, "voided": false},
-					map[string]any{"id": "line-2", "description": "Croissant", "amountCents": 400, "voided": false},
+					map[string]any{"id": "line-1", "description": "Latte", "amountCents": 450, "voided": false, "orderedBy": "vtx.identity.<NanoID>", "orderedAt": "2026-07-07T12:05:00Z"},
+					map[string]any{"id": "line-2", "description": "Croissant", "amountCents": 400, "voided": false, "orderedBy": "vtx.identity.<NanoID>", "orderedAt": "2026-07-07T12:06:00Z", "servedAt": "2026-07-07T12:06:00Z", "servedBy": "vtx.identity.<NanoID>"},
 				}, "openedAt": "2026-07-07T12:00:00Z", "staleAt": "2026-07-08T12:00:00Z", "leaseAppKey": "vtx.leaseapp.<NanoID>"},
-				ExpectedOutcome: "Stored as vtx.tab.<NanoID>.status; written by OpenTab/Charge/VoidCharge/Settle/SettleStaleTab.",
+				ExpectedOutcome: "Stored as vtx.tab.<NanoID>.status; written by OpenTab/Charge/VoidCharge/MarkLineServed/Settle/SettleStaleTab. " +
+					"line-1 is a self-order still to make; line-2 is a staff ring-up, served at ring-up.",
 			},
 		},
 	}
@@ -1092,12 +1113,44 @@ def void_line_by_id(lines, line_id):
     for line in lines:
         if found_amount == None and line.get("id") == line_id and not line.get("voided", False):
             found_amount = line.get("amountCents")
-            new_lines.append({"id": line.get("id"), "description": line.get("description"),
-                               "amountCents": line.get("amountCents"), "voided": True,
-                               "orderedBy": line.get("orderedBy")})
+            # The line is copied whole and only voided is rewritten, so every
+            # other key it carries (orderedBy, orderedAt, servedAt, servedBy)
+            # survives the void.
+            voided_line = dict(line)
+            voided_line["voided"] = True
+            new_lines.append(voided_line)
         else:
             new_lines.append(line)
     return new_lines, found_amount
+
+def serve_line_by_id(lines, line_id, served_at, served_by):
+    # Stamps servedAt/servedBy on the .status.lines entry matching line_id,
+    # copied whole with only those two keys added, and returns the new list.
+    # Refuses UnknownChargeLine (no entry with that id), LineVoided (the
+    # entry was voided; nothing to hand over) or LineAlreadyServed (it
+    # already carries servedAt) — each decided on the line's own recorded
+    # state, never on a caller-supplied flag.
+    target = None
+    for line in lines:
+        if line.get("id") == line_id:
+            target = line
+            break
+    if target == None:
+        fail("UnknownChargeLine: " + line_id)
+    if target.get("voided", False):
+        fail("LineVoided: " + line_id + " was voided, nothing to hand over")
+    if target.get("servedAt"):
+        fail("LineAlreadyServed: " + line_id + " was served at " + str(target.get("servedAt")))
+    new_lines = []
+    for line in lines:
+        if line.get("id") == line_id:
+            served_line = dict(line)
+            served_line["servedAt"] = served_at
+            served_line["servedBy"] = served_by
+            new_lines.append(served_line)
+        else:
+            new_lines.append(line)
+    return new_lines
 
 def execute(state, op):
     ot = op.operationType
@@ -1340,9 +1393,17 @@ def execute(state, op):
         new_total = existing.data.get("totalCents") + amount_cents
         existing_lines = existing.data.get("lines", [])
         new_line_id = "line-" + str(len(existing_lines) + 1)
-        new_lines = existing_lines + [{"id": new_line_id, "description": item_name,
-                                        "amountCents": amount_cents, "voided": False,
-                                        "orderedBy": op.actor}]
+        # A staff ring-up is handed over at the counter, so it is served the
+        # moment it is charged; a self-order is the desk's work until
+        # MarkLineServed records the hand-over.
+        ordered_at = time.rfc3339_utc(op.submittedAt)
+        new_line = {"id": new_line_id, "description": item_name,
+                    "amountCents": amount_cents, "voided": False,
+                    "orderedBy": op.actor, "orderedAt": ordered_at}
+        if not is_self:
+            new_line["servedAt"] = ordered_at
+            new_line["servedBy"] = op.actor
+        new_lines = existing_lines + [new_line]
         new_memo = items_memo_from_lines(new_lines, existing.data.get("itemsMemo", ""))
         status_data = {"value": "open", "totalCents": new_total, "itemsMemo": new_memo, "lines": new_lines,
                         "openedAt": existing.data.get("openedAt"),
@@ -1411,6 +1472,43 @@ def execute(state, op):
                         "leaseAppKey": existing.data.get("leaseAppKey")}
         mutations = [make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision)]
         events = [{"class": "tab.chargeVoided", "data": {"tabKey": tab_key, "amountCents": amount_cents, "totalCents": new_total}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": tab_key}}
+
+    if ot == "MarkLineServed":
+        # Operator/frontOfHouse-only (permissions.go grants no scope=self):
+        # handing an order over is the desk's act, so the resident who ordered
+        # it cannot mark their own line served.
+        tab_key = required_string(p, "tabKey")
+        parts_of(tab_key, "tabKey", "tab")
+        if not vertex_alive(state, tab_key):
+            fail("UnknownTab: " + tab_key)
+        if class_of(state, tab_key) != "tab":
+            fail("WrongClass: tabKey: " + tab_key)
+        line_id = required_string(p, "lineId")
+        existing = require_open_status(state, tab_key)
+
+        # Staff-standing confinement BEFORE the line lookup, the VoidCharge
+        # order: the lease comes from the tab's OWN .status aspect, and a
+        # staffer confined to another building learns nothing about which
+        # line ids a foreign tab carries from the refusal it gets.
+        # workplace-exempt: (no-validated-path) MarkLineServed is granted
+        # scope=any to operator + frontOfHouse only (permissions.go) and no
+        # task mints it, so nothing but the operator escape reaches the
+        # exemption.
+        if not op.authTargetValidated:
+            require_workplace([leaseapp_unit(existing.data.get("leaseAppKey"))],
+                              "cannot mark a line served on tab " + tab_key)
+
+        served_at = time.rfc3339_utc(op.submittedAt)
+        new_lines = serve_line_by_id(existing.data.get("lines", []), line_id, served_at, op.actor)
+        status_data = {"value": "open", "totalCents": existing.data.get("totalCents"),
+                        "itemsMemo": existing.data.get("itemsMemo", ""), "lines": new_lines,
+                        "openedAt": existing.data.get("openedAt"),
+                        "staleAt": existing.data.get("staleAt"),
+                        "leaseAppKey": existing.data.get("leaseAppKey")}
+        mutations = [make_aspect_upsert_occ(tab_key, "status", "tabStatus", status_data, existing.revision)]
+        events = [{"class": "tab.lineServed", "data": {"tabKey": tab_key, "lineId": line_id, "servedAt": served_at}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": tab_key}}
 

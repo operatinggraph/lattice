@@ -289,6 +289,12 @@ read	TombstoneSessionSeries	lnk.session.<id>.atStudio.studio.<id>
 read	TombstoneStudio	lnk.identity.<id>.worksAt.building.<id>
 read	UpdateMenuItem	lnk.identity.<id>.worksAt.building.<id>
 read	VerifyGuarantor	lnk.identity.<id>.manages.unit.<id>
+# MarkLineServed runs VoidCharge's confinement walk verbatim (the tab's own
+# lease -> unit -> containedIn ancestors, then the worksAt key at each), so it
+# carries the same three undeclarable follow-ups.
+read	MarkLineServed	lnk.identity.<id>.worksAt.building.<id>
+read	MarkLineServed	lnk.identity.<id>.worksAt.unit.<id>
+read	MarkLineServed	vtx.leaseapp.<id>
 read	VoidCharge	lnk.identity.<id>.worksAt.building.<id>
 read	VoidCharge	lnk.identity.<id>.worksAt.unit.<id>
 read	VoidCharge	vtx.leaseapp.<id>
@@ -573,6 +579,9 @@ walk	UpdateMenuItem	vtx.building.<id> containedIn out
 walk	UpdateMenuItem	vtx.menuitem.<id> servedAt out
 walk	VerifyGuarantor	vtx.leaseapp.<id> appliesToUnit out
 walk	VerifyGuarantor	vtx.renewal.<id> renews out
+walk	MarkLineServed	vtx.building.<id> containedIn out
+walk	MarkLineServed	vtx.leaseapp.<id> appliesToUnit out
+walk	MarkLineServed	vtx.unit.<id> containedIn out
 walk	VoidCharge	vtx.building.<id> containedIn out
 walk	VoidCharge	vtx.leaseapp.<id> appliesToUnit out
 walk	VoidCharge	vtx.unit.<id> containedIn out

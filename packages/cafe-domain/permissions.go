@@ -74,6 +74,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
+			OperationType: "MarkLineServed",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit MarkLineServed (records that one order line on an open tab was handed over). No self-service grant — handing an order over is the desk's act, so the resident who ordered it cannot mark it served.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
 			OperationType: "Settle",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit Settle (closes a tab for house-account posting).",

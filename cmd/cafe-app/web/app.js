@@ -441,8 +441,9 @@ function orderedByLabel(orderedBy) {
 }
 
 // chargeLinesBlock renders a tab's itemized .status.lines (cafe-domain's
-// tabStatus aspect — one {id, description, amountCents, voided, orderedBy}
-// entry per Charge, the structured twin of the flat itemsMemo string) as a
+// tabStatus aspect — one {id, description, amountCents, voided, orderedBy,
+// orderedAt, servedAt?, servedBy?} entry per Charge, the structured twin of
+// the flat itemsMemo string) as a
 // priced list, a voided line struck through and labeled rather than hidden. A
 // tab whose lines is empty or absent (predates the field, or nothing charged
 // yet) falls back to the flat itemsMemo line — the only place old and new
@@ -450,8 +451,14 @@ function orderedByLabel(orderedBy) {
 // Void action (wired by the caller after insertion) — staff POS only, since
 // VoidCharge grants no self-service scope. A synthetic {pending: true} line
 // (renderResident's own optimistic overlay, not real cafeTabs data) renders
-// muted and labeled instead of getting a Void button.
-function chargeLinesBlock(lines, memo, voidableTabKey) {
+// muted and labeled instead of getting a Void button. A live (not voided,
+// not pending) line also carries a state tag — "to make" while orderedAt is
+// set and servedAt isn't AND the tab is still open (tabOpen; a settled tab's
+// unserved line is done, whatever its stamps say, so a receipt never asks for
+// it to be made), "served" once servedAt lands, nothing for a line that
+// predates both fields — so a resident sees their own order's state on their
+// own card, same as the desk does on POS/Front Desk.
+function chargeLinesBlock(lines, memo, voidableTabKey, tabOpen) {
   if (!lines || !lines.length) return itemsMemoLine(memo);
   return (
     '<ul class="items-list">' +
@@ -459,7 +466,10 @@ function chargeLinesBlock(lines, memo, voidableTabKey) {
       .map(
         (l) =>
           '<li class="item-line' + (l.voided ? " voided" : "") + (l.pending ? " pending" : "") + '">' +
-          '<span class="item-desc">' + escapeHtml(l.description) + orderedByLabel(l.orderedBy) + "</span>" +
+          '<span class="item-desc">' + escapeHtml(l.description) + orderedByLabel(l.orderedBy) +
+          (tabOpen && !l.voided && !l.pending && l.orderedAt && !l.servedAt ? ' <span class="meta">· to make</span>' : "") +
+          (!l.voided && !l.pending && l.servedAt ? ' <span class="meta">· served</span>' : "") +
+          "</span>" +
           '<span class="item-amount">' + money(l.amountCents) + "</span>" +
           (l.voided
             ? '<span class="meta">(voided)</span>'
@@ -661,6 +671,18 @@ function applyHatGating() {
 
 // ---- view routing -------------------------------------------------
 
+// frontDeskOrdersTimer re-reads /api/tabs and repaints the Orders panel
+// every 15 s while the Front Desk view is showing (loadFrontDesk itself only
+// runs on entry, on Refresh, and after an op) — cleared whenever the view
+// changes, so it never stacks. frontDeskServesInFlight counts the Mark served
+// clicks awaiting a reply; while it is non-zero the poll holds its repaint, so
+// it cannot replace a disabled button with a fresh one mid-submit.
+// frontDeskOrdersPainted is the signature of the rows last painted: a poll
+// that reads the same queue leaves the DOM (and keyboard focus) alone.
+let frontDeskOrdersTimer = null;
+let frontDeskServesInFlight = 0;
+let frontDeskOrdersPainted = "";
+
 function showView(view) {
   if ((view === "pos" || view === "frontdesk" || view === "menu") && !isFrontDesk()) view = "resident";
   document.querySelectorAll("[role=tabpanel]").forEach((s) => {
@@ -671,9 +693,21 @@ function showView(view) {
     b.classList.toggle("active", active);
     b.setAttribute("aria-selected", active ? "true" : "false");
   });
+  if (frontDeskOrdersTimer) {
+    clearInterval(frontDeskOrdersTimer);
+    frontDeskOrdersTimer = null;
+  }
   if (view === "pos") loadPos();
-  else if (view === "frontdesk") loadFrontDesk();
-  else if (view === "menu") loadManageMenu();
+  else if (view === "frontdesk") {
+    loadFrontDesk();
+    frontDeskOrdersTimer = setInterval(async () => {
+      if (frontDeskServesInFlight || document.hidden) return;
+      try {
+        const r = await appGet("/api/tabs");
+        if (!frontDeskServesInFlight) renderFrontDeskOrders(r.tabs || []);
+      } catch (_) { /* transient poll failure — the next tick or a Refresh recovers */ }
+    }, 15000);
+  } else if (view === "menu") loadManageMenu();
   else if (view === "resident") loadResident();
 }
 
@@ -1089,7 +1123,7 @@ function renderOpenTabCard(tab, items) {
     "<h2>Open tab</h2>" +
     '<p class="amount">' + money(tab.totalCents) + "</p>" +
     '<p class="meta">Opened ' + escapeHtml(tab.openedAt || "?") + "</p>" +
-    chargeLinesBlock(tab.lines, tab.itemsMemo, tab.tabKey) +
+    chargeLinesBlock(tab.lines, tab.itemsMemo, tab.tabKey, true) +
     (catalog.length
       ? '<form id="pos-catalog-form" class="field-row" style="margin-bottom:14px;">' +
         '<select id="pos-catalog-item">' +
@@ -1205,6 +1239,124 @@ function renderFrontDeskToday(summary) {
     : "No voids.";
 }
 
+// ordersQueue is the desk's orders queue: every line, across every open tab,
+// that still needs making — not voided, carrying an orderedAt, and not yet
+// servedAt — oldest orderedAt first (ties broken by tabKey then lineId so
+// the order is stable render to render). A line's state is one of three:
+// "to make" (orderedAt set, servedAt absent — queued here), "served"
+// (servedAt set — not queued), or unknown (orderedAt absent — the line
+// predates this field, and is never queued since its ordering time can't be
+// read). A settled or otherwise non-open tab contributes nothing: its lines
+// are done, whatever their stamps say.
+function ordersQueue(tabs) {
+  const rows = [];
+  for (const t of tabs || []) {
+    if (t.status !== "open") continue;
+    for (const l of t.lines || []) {
+      if (l.voided || !l.orderedAt || l.servedAt) continue;
+      rows.push({
+        tabKey: t.tabKey,
+        leaseAppKey: t.leaseAppKey,
+        lineId: l.id,
+        description: l.description,
+        amountCents: l.amountCents,
+        orderedBy: l.orderedBy,
+        orderedAt: l.orderedAt,
+      });
+    }
+  }
+  // lineId is "line-" + a 1-based position, so the tie within one tab is
+  // broken on that number (line-2 before line-10), never on the string.
+  const lineNo = (id) => parseInt(String(id || "").replace(/^line-/, ""), 10) || 0;
+  rows.sort((a, b) => {
+    if (a.orderedAt !== b.orderedAt) return a.orderedAt < b.orderedAt ? -1 : 1;
+    if (a.tabKey !== b.tabKey) return a.tabKey < b.tabKey ? -1 : 1;
+    return lineNo(a.lineId) - lineNo(b.lineId);
+  });
+  return rows;
+}
+
+// orderedAgoLabel renders how long ago a queued line's orderedAt was,
+// relative to now: "just now" under a minute, "N min ago" under an hour,
+// "N h ago" beyond that. orderedAt or now failing to parse renders "?"
+// rather than a garbage duration.
+function orderedAgoLabel(orderedAt, now) {
+  const then = new Date(orderedAt).getTime();
+  const at = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const ms = at - then;
+  if (isNaN(ms)) return "?";
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return minutes + " min ago";
+  return Math.floor(minutes / 60) + " h ago";
+}
+
+// refusal-courtesy: MarkLineServed/TabNotOpen: hide — ordersQueue only lists lines of tabs whose status === "open"
+// refusal-courtesy: MarkLineServed/LineVoided, LineAlreadyServed: hide — ordersQueue only lists lines with !voided && orderedAt && !servedAt, so a voided or served line never gets a Mark served button
+// renderFrontDeskOrders paints the Orders panel (#frontdesk-orders) from
+// ordersQueue(tabs) — hidden when nothing is queued, otherwise a header
+// count plus one row per line: description, who ordered it, how long ago,
+// and a Mark served button that submits MarkLineServed and refreshes the
+// desk on success. Who ordered resolves from the line's own orderedBy
+// through the identity roster (nameForIdentity), so no lease join is needed.
+function renderFrontDeskOrders(tabs) {
+  const section = document.getElementById("frontdesk-orders");
+  const count = document.getElementById("frontdesk-orders-count");
+  const list = document.getElementById("frontdesk-orders-items");
+  if (!section || !count || !list) return;
+  const rows = ordersQueue(tabs);
+  if (!rows.length) {
+    section.hidden = true;
+    list.innerHTML = "";
+    frontDeskOrdersPainted = "";
+    return;
+  }
+  const now = new Date();
+  const signature = rows.map((r) => r.tabKey + "/" + r.lineId + "@" + orderedAgoLabel(r.orderedAt, now)).join("|");
+  if (!section.hidden && signature === frontDeskOrdersPainted) return;
+  frontDeskOrdersPainted = signature;
+  section.hidden = false;
+  count.textContent = rows.length + " to make";
+  list.innerHTML = rows
+    .map((row) => {
+      const who = row.orderedBy ? " · " + escapeHtml(nameForIdentity(idOf(row.orderedBy))) : "";
+      return (
+        "<li>" +
+        '<span class="item-desc">' + escapeHtml(row.description) + who +
+        " · " + escapeHtml(orderedAgoLabel(row.orderedAt, now)) + "</span>" +
+        '<button type="button" class="ghost" data-serve-tab="' + escapeHtml(row.tabKey) +
+        '" data-serve-line="' + escapeHtml(row.lineId) + '">Mark served</button>' +
+        "</li>"
+      );
+    })
+    .join("");
+  list.querySelectorAll("[data-serve-tab]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const tabKey = btn.dataset.serveTab;
+      const lineId = btn.dataset.serveLine;
+      btn.disabled = true;
+      frontDeskServesInFlight++;
+      try {
+        await opOrThrow(
+          {
+            operationType: "MarkLineServed", class: "tab",
+            reads: [tabKey, tabKey + ".status"],
+            payload: { tabKey, lineId },
+          },
+          "mark the order served"
+        );
+        toast("Served.", true);
+        setTimeout(loadFrontDesk, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      } finally {
+        frontDeskServesInFlight--;
+      }
+    });
+  });
+}
+
 // refusal-courtesy: Settle/TabNotOpen: hide — loadFrontDesk filters to tabs whose status === "open" (tabs = (r.tabs || []).filter(...)) before drawing a settle-<tabKey> button per one
 async function loadFrontDesk() {
   const grid = document.getElementById("frontdesk-grid");
@@ -1212,13 +1364,16 @@ async function loadFrontDesk() {
   grid.innerHTML = "";
   summary.textContent = "";
   // A failed refresh must not leave the previous load's sales painted
-  // beside the error, so the Today panel resets with the grid.
+  // beside the error, so the Today panel resets with the grid, and the
+  // Orders panel resets with them (empty tabs hides it).
   renderFrontDeskToday(summarizeToday([], new Date()));
-  let tabs;
+  renderFrontDeskOrders([]);
+  let tabs, allTabs;
   try {
     const r = await appGet("/api/tabs");
     renderFrontDeskToday(summarizeToday(r.tabs || [], new Date()));
-    tabs = (r.tabs || []).filter((t) => t.status === "open");
+    allTabs = r.tabs || [];
+    tabs = allTabs.filter((t) => t.status === "open");
   } catch (e) {
     grid.innerHTML = '<div class="empty">' + escapeHtml(e.message) + "</div>";
     return;
@@ -1261,6 +1416,7 @@ async function loadFrontDesk() {
   // arrears must stay visible even when every tab has settled, unlike the
   // per-tab balance badge below which only exists on an open tab's card.
   renderFrontDeskArrears(balancesList, residentsByLease);
+  renderFrontDeskOrders(allTabs);
 
   summary.textContent = tabs.length + " open tab" + (tabs.length === 1 ? "" : "s");
   if (!tabs.length) {
@@ -1549,7 +1705,7 @@ function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
     '<div class="amount">' + money(t.totalCents) + "</div>" +
     '<div class="meta">Opened ' + escapeHtml(t.openedAt || "?") + "</div>" +
     balanceBadge +
-    chargeLinesBlock(t.lines, t.itemsMemo, null) +
+    chargeLinesBlock(t.lines, t.itemsMemo, null, true) +
     classBadge +
     leaseLine +
     visitBadge +
@@ -1867,7 +2023,7 @@ async function renderResident() {
     parts.push(
       '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(openDisplayTotal) +
       '</p><p class="meta">Opened ' + escapeHtml(open.openedAt || "?") + " — not yet settled</p>" +
-      chargeLinesBlock(openDisplayLines, open.itemsMemo, null) + "</div>" +
+      chargeLinesBlock(openDisplayLines, open.itemsMemo, null, true) + "</div>" +
       (selfMode ? '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger">Settle My Tab</button></div>' : "")
     );
     if (selfMode) {
@@ -1940,7 +2096,7 @@ async function renderResident() {
     parts.push(
       '<div class="panel"><h2>Pending posting</h2><p class="amount">' + money(pendingSettled.totalCents) +
       '</p><p class="meta">Settled ' + escapeHtml(pendingSettled.settledAt || "?") + " — posting to the ledger shortly</p>" +
-      chargeLinesBlock(pendingSettled.lines, pendingSettled.itemsMemo, null) + "</div>"
+      chargeLinesBlock(pendingSettled.lines, pendingSettled.itemsMemo, null, false) + "</div>"
     );
   }
   const rows = ledger.transactions || [];
@@ -2027,7 +2183,7 @@ async function renderResident() {
                 : "") +
               (receipt
                 ? '<details class="receipt"><summary>Receipt</summary>' +
-                  chargeLinesBlock(receipt.lines, receipt.memo, null) +
+                  chargeLinesBlock(receipt.lines, receipt.memo, null, false) +
                   "</details>"
                 : "") +
               "</li>"
