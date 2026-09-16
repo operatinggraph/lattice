@@ -30,7 +30,7 @@ including the café FE (`cmd/cafe-app`). The one-bill composition lens unioning 
 | **Links** (4) | `heldFor` (cafeaccount → leaseapp) · `postedTo` (cafetransaction → cafeaccount) · `settles` (cafetransaction → tab: the charge that settled a `cafe-domain` tab, and the counter payment for the cash the desk took as it was settled) · `reverses` (cafetransaction → cafetransaction, a refund to the charge it gives back) |
 | **Operations** (7) | `CreateAccount` · `DebitAccount` (optional `tabRef` — `cafe-domain`'s settlement consumer) · `CreditCafeAccount` (optional `reason` — `payment` or the staff-only `waiver`; optional staff-only `tabRef` — the settlement playbook's counter-payment consumer) · `RefundCafeCharge` · `PayoutCafeCredit` · `EvaluateCafeArrears` (Weaver-dispatched) · `RecordCafeArrearsReminderNotification` (bridge replyOp) |
 | **Projection lenses** (2) | `cafeLedgerHistory` (one row per transaction) → `cafe-ledger-history` · `cafeLeaseAccounts` (lease → account key lookup, plus the account's arrears due date / reminder timestamp) → `cafe-lease-accounts` (both `nats-kv`, `full` engine) |
-| **Weaver targets** (1) | `cafeArrearsReminders` — its own convergence lens → `weaver-targets`; one gap, `missing_evaluation` → `directOp(EvaluateCafeArrears)` |
+| **Weaver targets** (1) | `cafeArrearsReminders` — its own convergence lens → `weaver-targets`; three gaps, `missing_evaluation` and the two replay-continuation gaps `missing_replay_a` / `missing_replay_b`, all → `directOp(EvaluateCafeArrears)` |
 
 `CreateAccount` and `DebitAccount` are granted to `operator` alone at `scope: any`
 (`permissions.go`) — both are orchestrator-submitted, neither is something a person decides to do.
@@ -241,7 +241,7 @@ Nothing used to tell a resident they owed the café money. `cafeArrearsReminders
 and it is this package's first orchestration.
 
 The account carries a `.arrears` aspect (`{evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?,
-historyTooLong?}`) whose whole lifetime is coarse on purpose. A charge that takes the balance from
+historyTooLong?, historyBudget?, replay?}`) whose whole lifetime is coarse on purpose. A charge that takes the balance from
 zero-or-below to **owing** IS the FIFO-oldest open charge, so `post_entry` can record the due date its own
 `postedAt` implies (`postedAt` + `ArrearsGraceDays`) without replaying anything; a payment that clears the
 balance rewrites the aspect to `{evaluatedAt}` alone and ends the episode. Everything in between it refuses to
@@ -251,14 +251,14 @@ credit (a refund took it below zero) writes nothing at all — the surplus prepa
 open debit to age. An account carrying no `.balance` at all (the legacy set) can only ever mark stale — it has
 no before/after balance to reason from, so it never mints arrears state off a number it does not have.
 
-The lens arms Weaver's `@at` at the recorded `dueAt` and opens its one gap when the timer's lapse is recorded
-on the account, when the state is `stale`, or when the account has never been evaluated. All three dispatch
-the same remediation, `EvaluateCafeArrears`, which recomputes the head with **the same FIFO the resident's own
-statement runs** (`cmd/cafe-app/ledger.go`, `deriveStatement` — credits offset the oldest still-open charge
-first, an unapplied credit carries forward as surplus) and rewrites `.arrears`. A recomputed date that has
-passed is recorded as `remindedFor` — that is what closes the gap — and where **no reminder has yet gone out in
-this episode** (`sentAt` absent) the same commit stamps `sentAt` and fires `external.notification` to the
-bridge's `notification` adapter, keyed `<accountKey>:<dueAt>`.
+The lens arms Weaver's `@at` at the recorded `dueAt` and opens its evaluation gap when the timer's lapse is
+recorded on the account, when the state is `stale`, or when the account has never been evaluated. All three
+dispatch the same remediation, `EvaluateCafeArrears`, which recomputes the head with **the same FIFO the
+resident's own statement runs** (`cmd/cafe-app/ledger.go`, `deriveStatement` — credits offset the oldest
+still-open charge first, an unapplied credit carries forward as surplus) and rewrites `.arrears`. A recomputed
+date that has passed is recorded as `remindedFor` — that is what closes the gap — and where **no reminder has
+yet gone out in this episode** (`sentAt` absent) the same commit stamps `sentAt` and fires
+`external.notification` to the bridge's `notification` adapter, keyed `<accountKey>:<dueAt>`.
 
 `sentAt`, not `remindedFor`, is the send condition, and the difference is what makes it **one reminder per
 arrears episode** rather than one per head. An episode runs from the charge that took the account from square
@@ -270,13 +270,15 @@ finds it already recorded and emits nothing, and the adapter dedups a genuine re
 A resident who pays off and runs a new tab up gets a fresh episode with a clean `sentAt`, and its due date is
 necessarily later than any instant the permanent `freshnessExpiry` marker already holds.
 
-An account whose transaction history outruns the evaluation's bounded replay budget is not refused — it is
-recorded. A refusal would be a permanent silent stop: the row's own gap is the only thing that re-drives the
-op, and a rejected op never closes it, so Weaver would re-dispatch a doomed evaluation on every window with
-nothing sent and nothing said. The evaluation instead writes `historyTooLong`, carrying `dueAt`/`remindedFor`/
-`sentAt` untouched and sending nothing, and the lens suppresses **both** the gap and the `@at` while the flag
-stands. The row stays in `weaver-targets` for an operator to find; the next posted entry drops the flag and
-re-marks the state stale, buying exactly one more attempt.
+The replay is **resumable**: one page of `ArrearsPageLimit` (30) entries per dispatch — sized by round trips
+against the Processor's 250 ms script wall, see `scripts.go` — with the running aggregate and cursor recorded
+on `.arrears.replay` between pages and Weaver chaining the dispatches through the lens's two phase gaps
+(`missing_replay_a` / `missing_replay_b`), so a history of up to `ArrearsPageLimit × ArrearsMaxPages` = 600
+entries is evaluated exactly across up to 20 dispatches. A history past that records `historyTooLong` with the
+budget it exhausted (`historyBudget`) and goes quiet (no gap, no timer, row still visible) until the next entry
+that rewrites the aspect — a payment, or an episode-opening charge — buys one more attempt — or until a raised
+budget re-arms it once. A posted entry mid-replay drops the checkpoint and the next evaluation restarts at
+page 1.
 
 The op is restricted to **Weaver's dispatch actor**. Its `operator`/`scope: any` grant admits every
 operator-role holder, and the account named on the payload is forwarded into a message a resident actually

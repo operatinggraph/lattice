@@ -7,15 +7,22 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // (the §10.2↔§10.8 binding); LensRef resolves to that lens's in-batch NanoID at
 // install.
 //
-// The single gap → remediation:
+// Three gaps, one op:
 //
 //   - missing_evaluation → directOp(EvaluateCafeArrears) over the account. The
 //     op recomputes the FIFO-oldest open charge, rewrites .arrears, and — where
 //     the recomputed due date has passed and nothing has gone out for it — fires
-//     the notification. Whichever of the three ways the gap opened (never
-//     evaluated, marked stale by a partial payment, or a timer fired at a due
-//     date nothing was reminded for), the remediation is the same recomputation,
-//     which is why this target carries ONE gap rather than three.
+//     the notification. Whichever of the ways the gap opened (never evaluated,
+//     marked stale by a partial payment, a timer fired at a due date nothing
+//     was reminded for, or a historyTooLong flag recorded under a smaller
+//     replay budget than the current one), the remediation is the same
+//     recomputation.
+//   - missing_replay_a / missing_replay_b → the same directOp. A history longer
+//     than one page of the op's postedTo replay is consumed one page per
+//     dispatch, and the checkpoint each page leaves on .arrears.replay
+//     alternates its phase; the lens projects one gap per phase so each page
+//     closes the gap that dispatched it and opens the other (the Gaps comment
+//     below). The op reads the checkpoint, not the column.
 //
 // directOp, not a Loom pattern: a reminder is a single op, no multi-step
 // externalTask flow — the same shape wellness-reminders' and clinic-reminders'
@@ -58,24 +65,51 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				"about the charge that has actually been sitting unpaid the longest. Paying it off ends the " +
 				"episode; running a new tab up starts a fresh one.",
 			LensRef: CafeArrearsRemindersTarget,
+			// Three gaps, one op. missing_evaluation opens on an account that
+			// needs evaluating (never evaluated, stale, or a recorded lapse at
+			// its due date) and dispatches the FIRST page of the op's postedTo
+			// replay. A history longer than one page leaves a checkpoint on
+			// .arrears.replay whose phase flips on every page, and the lens
+			// projects one gap per phase: the page written under phase a closes
+			// missing_replay_a and opens missing_replay_b, whose dispatch
+			// writes phase a again, and so on until the finalize page writes no
+			// checkpoint and every gap is false. Each gap episode is therefore
+			// exactly one dispatch — its mark and dispatch count are cleared by
+			// the page it dispatched — so the engine's default retry budget
+			// stands and a REJECTED page (a wall breach) is reclaimed up to
+			// that budget, then parked loud under GapBudgetExhausted. The op
+			// itself does not know which gap dispatched it: it reads the
+			// checkpoint and continues, or starts. The three entries are
+			// identical in every field; they differ only in which column
+			// dispatches them.
 			Gaps: map[string]pkgmgr.GapActionSpec{
-				"missing_evaluation": {
-					Action:    "directOp",
-					Operation: arrearsOp,
-					// EvaluateCafeArrears is unique to this package's cafeaccount
-					// vertexType DDL today, but pinned regardless — the defensive
-					// shape cafe-domain's own directOps use, and the ledger
-					// operationType namespace is global (permissions.go).
-					Class:         "cafeaccount",
-					Params:        map[string]string{"accountKey": "row.entityKey"},
-					Reads:         []string{"row.entityKey"},
-					OptionalReads: []string{"row.entityKey.arrears"},
-					Enumerations: []pkgmgr.EnumerationSpec{
-						{Hub: "row.entityKey", Relation: "postedTo", Direction: "in"},
-						{Hub: "row.entityKey", Relation: "heldFor", Direction: "out"},
-					},
-				},
+				"missing_evaluation": arrearsEvaluationGap(),
+				"missing_replay_a":   arrearsEvaluationGap(),
+				"missing_replay_b":   arrearsEvaluationGap(),
 			},
+		},
+	}
+}
+
+// arrearsEvaluationGap is the directOp(EvaluateCafeArrears) every gap on the
+// cafeArrearsReminders target dispatches — the same params, reads and
+// enumerations whichever column opened, because the op reads its own
+// checkpoint to decide where in the replay it is.
+func arrearsEvaluationGap() pkgmgr.GapActionSpec {
+	return pkgmgr.GapActionSpec{
+		Action:    "directOp",
+		Operation: arrearsOp,
+		// EvaluateCafeArrears is unique to this package's cafeaccount
+		// vertexType DDL today, but pinned regardless — the defensive shape
+		// cafe-domain's own directOps use, and the ledger operationType
+		// namespace is global (permissions.go).
+		Class:         "cafeaccount",
+		Params:        map[string]string{"accountKey": "row.entityKey"},
+		Reads:         []string{"row.entityKey"},
+		OptionalReads: []string{"row.entityKey.arrears"},
+		Enumerations: []pkgmgr.EnumerationSpec{
+			{Hub: "row.entityKey", Relation: "postedTo", Direction: "in"},
+			{Hub: "row.entityKey", Relation: "heldFor", Direction: "out"},
 		},
 	}
 }
