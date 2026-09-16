@@ -303,13 +303,16 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"ReturnDeposit{leaseAppKey, clauseKey, accountKey} (the LoftSpace \"a lease takes a security deposit\" " +
 			"design) is Weaver's dispatch for leaseRentSettlement's missing_depositReturn gap (packages/semantic-contracts): " +
 			"operator-only, no self grant, no screen. It reads everything from the graph's own record, never the " +
-			"payload — the clause's .terms must carry purpose=deposit (NotADeposit otherwise) and its amountCents is " +
+			"payload — the clause's .terms must carry purpose=deposit on a oneTime computational clause (NotADeposit " +
+			"otherwise: a monthly clause completes on its final period after N charges and a judgment clause charges " +
+			"nothing, so neither is a deposit) and its amountCents is " +
 			"the amount credited; the clause's .status must be completed, the state DebitAccount's one-time charge " +
 			"leaves (DepositNotCharged while still active — an uncharged deposit is never refunded); the lease's " +
 			".tenancy must record endedAt (TenancyNotEnded otherwise — the recorded end, never the notice or the " +
-			"term); and the clause's own deterministic chargesTo / governs links must name the payload account and " +
-			"lease (ClauseAccountMismatch / ClauseLeaseMismatch). A clause already returned is an idempotent no-op " +
-			"(empty mutations, no event). Otherwise it mints vtx.transaction.<NanoID> + .entry {type: credit, " +
+			"term; UnknownLeaseApplication for a lease that is not live); and the clause's own deterministic " +
+			"chargesTo / governs links must name the payload account and lease (ClauseAccountMismatch / " +
+			"ClauseLeaseMismatch). Only then is a clause already returned an idempotent no-op (empty mutations, no " +
+			"event) — a mis-addressed submit is refused, never read as done. Otherwise it mints vtx.transaction.<NanoID> + .entry {type: credit, " +
 			"amountCents, postedAt, memo: \"Security deposit returned\"} + the postedTo link + the authorizedBy link " +
 			"(transaction→clause, the same chain of custody the charge recorded), moves the clause's .status to " +
 			"{state: returned, returnedAt: postedAt, ...every field kept} pinned to the revision it hydrated at, and " +
@@ -317,7 +320,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"clauseKey, leaseAppKey, amountCents}. The credit is an ordinary credit: it nets against whatever the " +
 			"tenant still owes and the remainder reads as a credit balance — the refund owed. The DDL's own " +
 			"derive_reads hydrates every key it reads (the account and its .arrears, the clause and its .terms and " +
-			".status, the lease's .tenancy, and the two custody links) whatever the submitter declared. " +
+			".status, the lease and its .tenancy, and the two custody links) whatever the submitter declared. " +
 			"Every entry, from any of the four ops, ALSO marks the account's .arrears episode state " +
 			"(loftspaceAccountArrears DDL) stale where it exists — carrying every other field, the episode's send " +
 			"record included — and mints nothing where it does not: with no stored balance an entry cannot tell an " +
@@ -330,11 +333,11 @@ func transactionDDL() pkgmgr.DDLSpec {
 			`{"accountKey":{"type":"string","description":"vtx.account.<NanoID> the transaction posts to (every op; required, validated alive). ReturnDeposit additionally requires the clause's chargesTo link to name it."},` +
 			`"clauseKey":{"type":"string","description":"ReturnDeposit only: vtx.clause.<NanoID> of the completed purpose=deposit clause being returned (required for ReturnDeposit; validated alive, NotADeposit / DepositNotCharged otherwise). Its own .terms.amountCents is the amount credited."},` +
 			`"leaseAppKey":{"type":"string","description":"ReturnDeposit only: vtx.leaseapp.<NanoID> of the lease whose .tenancy.endedAt is the recorded end the return rides (required for ReturnDeposit; TenancyNotEnded while absent). The clause's governs link must name it."},` +
-			`"amountCents":{"type":"number","description":"The transaction amount in integer cents; required, must be > 0. A debit is a charge (increases what the tenant owes); a credit is a payment (decreases it)."},` +
+			`"amountCents":{"type":"number","description":"The transaction amount in integer cents; required by DebitAccount / LoftspaceRecordCharge / CreditAccount, must be > 0. A debit is a charge (increases what the tenant owes); a credit is a payment (decreases it). ReturnDeposit takes none — it credits the clause's own .terms.amountCents."},` +
 			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"June rent\", \"Late fee\"). Optional."},` +
 			`"clauseRef":{"type":"string","description":"DebitAccount only: vtx.clause.<NanoID> of the semantic-contract clause authorizing this charge (optional, validated alive when supplied). The clause's OWN .terms.amountCents is authoritative — a payload amountCents that disagrees is rejected (AmountMismatch). Writes the authorizedBy audit link and updates the clause's .status."},` +
 			`"period":{"type":"string","description":"DebitAccount only, alongside clauseRef (Fire V3): \"monthly\" keeps the clause active instead of completing it; any other value (or omitted) marks the clause completed, the Fire V1/V2 behavior. chargeValidUntil is stamped unconditionally either way (defense-in-depth — see the DDL description)."}},` +
-			`"required":["accountKey","amountCents"]}`,
+			`"required":["accountKey"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.transaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{

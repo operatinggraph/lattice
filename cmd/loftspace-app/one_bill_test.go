@@ -56,3 +56,29 @@ func TestComputeOneBillHistory_PeriodRidesThrough(t *testing.T) {
 		t.Errorf("café row must carry no period, got (%q, %q)", rows[1].PeriodStart, rows[1].DueAt)
 	}
 }
+
+// TestComputeOneBillHistory_ClausePurposeRidesThrough — a rent entry
+// authorized by a purpose=deposit clause carries clausePurpose through to
+// the combined statement row (the entry-row "Deposit" tag reads it); a
+// café entry (which never authorizes off a semantic-contracts clause) and
+// a plain rent charge both stay empty.
+func TestComputeOneBillHistory_ClausePurposeRidesThrough(t *testing.T) {
+	entries := map[string]string{
+		"vtx.transaction.1":     `{"transactionKey":"vtx.transaction.1","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":150000,"postedAt":"2026-06-01T00:00:00Z","source":"rent","clausePurpose":"deposit"}`,
+		"vtx.transaction.2":     `{"transactionKey":"vtx.transaction.2","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":230000,"postedAt":"2026-06-02T00:00:00Z","source":"rent"}`,
+		"vtx.cafetransaction.1": `{"transactionKey":"vtx.cafetransaction.1","accountKey":"vtx.cafeaccount.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":525,"postedAt":"2026-06-03T00:00:00Z","source":"cafe"}`,
+	}
+	rows, _ := computeOneBillHistory(keysOf(entries), fakeKV(entries), "vtx.leaseapp.lll")
+	if len(rows) != 3 {
+		t.Fatalf("want 3 rows, got %d", len(rows))
+	}
+	if rows[0].ClausePurpose != "deposit" {
+		t.Errorf("deposit row clausePurpose = %q, want deposit", rows[0].ClausePurpose)
+	}
+	if rows[1].ClausePurpose != "" {
+		t.Errorf("plain rent row clausePurpose = %q, want empty", rows[1].ClausePurpose)
+	}
+	if rows[2].ClausePurpose != "" {
+		t.Errorf("café row clausePurpose = %q, want empty", rows[2].ClausePurpose)
+	}
+}

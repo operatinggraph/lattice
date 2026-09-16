@@ -184,6 +184,35 @@ func TestOneBill_RentEntries_ProjectsTaggedRow(t *testing.T) {
 	require.Equal(t, 150000.0, v["amountCents"])
 }
 
+// TestOneBill_RentEntries_ProjectsClausePurpose — a rent transaction
+// authorizedBy a purpose=deposit clause carries clausePurpose through to the
+// combined statement, apart from rent by this column, never by the memo; a
+// plain rent charge with no clauseRef projects null (never a default).
+func TestOneBill_RentEntries_ProjectsClausePurpose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newObFixture(t)
+	f.mkRentTx(t, "deptx", 150000)
+	f.vtx(t, "dep_clause", "clause")
+	f.aspect(t, "dep_clause", "terms", "clauseTerms", map[string]any{
+		"kind": "computational", "conditioned": false, "amountCents": 150000.0, "period": "oneTime", "purpose": "deposit",
+	})
+	f.edge(t, "authorizedBy", "deptx", "dep_clause")
+	f.mkRentTx(t, "plaintx", 230000)
+
+	rows := f.project(t, rentEntriesSpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["transactionKey"].(string)] = r.Values
+	}
+	dep := byKey["vtx.transaction."+f.ids["deptx"]]
+	require.Equal(t, "deposit", dep["clausePurpose"])
+	plain := byKey["vtx.transaction."+f.ids["plaintx"]]
+	require.Nil(t, plain["clausePurpose"], "a plain charge with no clauseRef must project null, never a default")
+}
+
 func TestOneBill_CafeEntries_ProjectsTaggedRow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

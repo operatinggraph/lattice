@@ -176,8 +176,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"accountKey":{"type":"string","x-entityRef":"account","description":"vtx.account.<NanoID> of the lease's ledger account the credit posts to; the clause's chargesTo link must name it."}},` +
 				`"required":["leaseAppKey","clauseKey","accountKey"]}`,
 			FieldDescriptions: map[string]string{
-				"leaseAppKey": "The lease the deposit clause governs (ClauseLeaseMismatch otherwise). Its .tenancy must record endedAt — the recorded end of the tenancy, never the notice or the scheduled term end (TenancyNotEnded while absent).",
-				"clauseKey":   "The deposit clause: .terms.purpose must be deposit (NotADeposit otherwise) and .status must be completed, the state DebitAccount's charge leaves (DepositNotCharged while still active). A clause already returned is a no-op.",
+				"leaseAppKey": "The lease the deposit clause governs (ClauseLeaseMismatch otherwise; UnknownLeaseApplication when not live). Its .tenancy must record endedAt — the recorded end of the tenancy, never the notice or the scheduled term end (TenancyNotEnded while absent).",
+				"clauseKey":   "The deposit clause: .terms.purpose must be deposit on a oneTime computational clause (NotADeposit otherwise) and .status must be completed, the state DebitAccount's charge leaves (DepositNotCharged while still active). A clause already returned is a no-op once the lease and account it names check out.",
 				"accountKey":  "The lease's ledger account the credit posts to; the clause's chargesTo link must name it (ClauseAccountMismatch otherwise).",
 			},
 		},

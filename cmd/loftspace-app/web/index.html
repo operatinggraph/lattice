@@ -329,7 +329,11 @@
         <div class="row3">
           <div class="field"><label for="li-bathrooms">Bathrooms <span class="opt">(opt)</span></label><input type="number" id="li-bathrooms" min="0" step="0.5" /></div>
           <div class="field"><label for="li-sqft">Sqft <span class="opt">(opt)</span></label><input type="number" id="li-sqft" min="0" step="1" /></div>
-          <div class="field"></div>
+          <div class="field">
+            <label for="li-deposit">Security deposit ($, optional)</label>
+            <input type="number" id="li-deposit" min="0" step="1" placeholder="1500" />
+            <p class="hint">Leave blank for no deposit — an empty field clears any deposit already set on save.</p>
+          </div>
         </div>
         <div class="field" id="li-photos-field">
           <label for="li-photos">Photos <span class="opt">(optional)</span></label>

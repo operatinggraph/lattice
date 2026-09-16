@@ -10,17 +10,19 @@ import (
 )
 
 // rentArrearsUIDecls lifts the shipped UTC_MONTH_ABBR/fmtUTCDate/moneyAmount/
-// rentBalanceLine/rentAgeText declarations out of the embedded app.js — the
-// rotate_offer_test.go / renewal_ready_test.go / lease_term_ui_test.go
-// pattern: the REAL shipped source runs here, not a copy, so these pins are
-// a statement about what ships. All five are self-contained (no DOM/state),
-// so goja can evaluate them directly.
+// rentBalanceLine/rentAgeText/depositLine/listingDepositLine declarations out
+// of the embedded app.js — the rotate_offer_test.go / renewal_ready_test.go /
+// lease_term_ui_test.go pattern: the REAL shipped source runs here, not a
+// copy, so these pins are a statement about what ships. All seven are
+// self-contained (no DOM/state), so goja can evaluate them directly.
 var rentArrearsUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nconst UTC_MONTH_ABBR = \[.*?\];\n`),
 	regexp.MustCompile(`(?s)\nfunction fmtUTCDate\(s\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction moneyAmount\(n\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction rentBalanceLine\(data\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction rentAgeText\(row\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction depositLine\(data\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction listingDepositLine\(listing\) \{\n.*?\n\}\n`),
 }
 
 // rentArrearsUIVM evaluates the declarations WEST OF GREENWICH — goja's Date
@@ -79,6 +81,32 @@ func callRentAgeText(t *testing.T, vm *goja.Runtime, row map[string]interface{})
 	res, err := fn(goja.Undefined(), vm.ToValue(row))
 	if err != nil {
 		t.Fatalf("rentAgeText(%v) threw: %v", row, err)
+	}
+	return res.String()
+}
+
+func callDepositLine(t *testing.T, vm *goja.Runtime, data map[string]interface{}) string {
+	t.Helper()
+	fn, ok := goja.AssertFunction(vm.Get("depositLine"))
+	if !ok {
+		t.Fatal("depositLine is not a function after evaluating its declaration")
+	}
+	res, err := fn(goja.Undefined(), vm.ToValue(data))
+	if err != nil {
+		t.Fatalf("depositLine(%v) threw: %v", data, err)
+	}
+	return res.String()
+}
+
+func callListingDepositLine(t *testing.T, vm *goja.Runtime, listing map[string]interface{}) string {
+	t.Helper()
+	fn, ok := goja.AssertFunction(vm.Get("listingDepositLine"))
+	if !ok {
+		t.Fatal("listingDepositLine is not a function after evaluating its declaration")
+	}
+	res, err := fn(goja.Undefined(), vm.ToValue(listing))
+	if err != nil {
+		t.Fatalf("listingDepositLine(%v) threw: %v", listing, err)
 	}
 	return res.String()
 }
@@ -153,6 +181,16 @@ func TestRentBalanceLine_EverySuffix(t *testing.T) {
 			map[string]interface{}{"balanceCents": 5000.0, "rentBalanceCents": 5000.0, "dueDate": "2026-09-08T00:00:00Z", "isOverdue": true, "daysOverdue": 7.0},
 			"Balance owed: $50 · rent due Sep 8, 2026 · 7 days overdue",
 		},
+		{
+			"a held deposit appends its own inclusion clause, last",
+			map[string]interface{}{"balanceCents": 5000.0, "depositHeldCents": 150000.0},
+			"Balance owed: $50 · incl. security deposit $1500",
+		},
+		{
+			"a returned (zero-held) deposit adds no inclusion clause",
+			map[string]interface{}{"balanceCents": 5000.0, "depositHeldCents": 0.0},
+			"Balance owed: $50",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := callRentBalanceLine(t, vm, tc.data); got != tc.want {
@@ -182,6 +220,66 @@ func TestRentAgeText_EveryBranch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := callRentAgeText(t, vm, tc.row); got != tc.want {
 				t.Errorf("rentAgeText(%v) = %q, want %q", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDepositLine_HeldReturnedNone pins depositLine's three branches — held
+// (the charged figure, "held since" the charge date), returned (the SAME
+// charged figure, not the net-zero held amount, "returned" the credit
+// date), and none at all (empty string — a deposit-less unit, or a lease
+// whose deposit has not yet billed) — against the ledger.go
+// computeDepositSummary shapes /api/ledger and /api/one-bill actually send.
+func TestDepositLine_HeldReturnedNone(t *testing.T) {
+	vm := rentArrearsUIVM(t)
+	for _, tc := range []struct {
+		name string
+		data map[string]interface{}
+		want string
+	}{
+		{
+			"held",
+			map[string]interface{}{"depositHeldCents": 150000.0, "depositChargedCents": 150000.0, "depositChargedAt": "2026-06-01T00:00:00Z"},
+			"Security deposit $1500 · held since Jun 1, 2026",
+		},
+		{
+			"returned",
+			map[string]interface{}{"depositHeldCents": 0.0, "depositChargedCents": 150000.0, "depositChargedAt": "2026-06-01T00:00:00Z", "depositReturnedAt": "2027-06-01T00:00:00Z"},
+			"Security deposit $1500 · returned Jun 1, 2027",
+		},
+		{
+			"no deposit row at all",
+			map[string]interface{}{"balanceCents": 230000.0},
+			"",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := callDepositLine(t, vm, tc.data); got != tc.want {
+				t.Errorf("depositLine(%v) = %q, want %q", tc.data, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestListingDepositLine_PresentAbsent pins the browse-card deposit line: a
+// listing carrying a depositAmount renders it in the same currency shape
+// money() uses, and a listing with none (the absent-field "no deposit"
+// state) renders "" so the caller skips the element entirely.
+func TestListingDepositLine_PresentAbsent(t *testing.T) {
+	vm := rentArrearsUIVM(t)
+	for _, tc := range []struct {
+		name    string
+		listing map[string]interface{}
+		want    string
+	}{
+		{"present, USD", map[string]interface{}{"depositAmount": 1500.0, "rentCurrency": "USD"}, "Security deposit $1500"},
+		{"present, non-USD", map[string]interface{}{"depositAmount": 1500.0, "rentCurrency": "CAD"}, "Security deposit 1500 CAD"},
+		{"absent", map[string]interface{}{"rentAmount": 2400.0, "rentCurrency": "USD"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := callListingDepositLine(t, vm, tc.listing); got != tc.want {
+				t.Errorf("listingDepositLine(%v) = %q, want %q", tc.listing, got, tc.want)
 			}
 		})
 	}
@@ -243,13 +341,14 @@ func TestRentArrearsUI_ReachesDOMViaTextContentOnly(t *testing.T) {
 	for _, want := range []string{
 		"balance.textContent = rentBalanceLine(data);",
 		"age.textContent = ageText;",
+		"deposit.textContent = depositText;",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("app.js: want the literal call site %q — a rendering path changed shape", want)
 		}
 	}
 
-	unsafeSinks := regexp.MustCompile(`\.(?:innerHTML|outerHTML)\s*(?:\+?=)[^;\n]*\b(?:rentBalanceLine|rentAgeText|ageText)\b`)
+	unsafeSinks := regexp.MustCompile(`\.(?:innerHTML|outerHTML)\s*(?:\+?=)[^;\n]*\b(?:rentBalanceLine|rentAgeText|ageText|depositLine|depositText)\b`)
 	if m := unsafeSinks.FindString(text); m != "" {
 		t.Errorf("app.js: %q reaches an innerHTML/outerHTML sink — must be .textContent", m)
 	}

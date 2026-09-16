@@ -100,6 +100,37 @@ func TestComputeListings_HidesWithdrawn(t *testing.T) {
 	}
 }
 
+// TestComputeListings_DepositAmountRidesThrough — a listing carrying a
+// depositAmount reshapes it into the nested listing object; a listing with
+// none omits the field entirely rather than projecting a misleading zero.
+func TestComputeListings_DepositAmountRidesThrough(t *testing.T) {
+	entries := map[string]string{
+		"vtx.unit.aaa": `{"unitKey":"vtx.unit.aaa","status":"available","rentAmount":2400,"depositAmount":1500}`,
+		"vtx.unit.bbb": `{"unitKey":"vtx.unit.bbb","status":"available","rentAmount":1800}`,
+	}
+	got := computeListings(keysOf(entries), fakeKV(entries), "available")
+	if len(got) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(got))
+	}
+	byKey := map[string]listingRow{}
+	for _, r := range got {
+		byKey[r.UnitKey] = r
+	}
+	var withDeposit, without map[string]any
+	if err := json.Unmarshal(byKey["vtx.unit.aaa"].Listing, &withDeposit); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if withDeposit["depositAmount"] != 1500.0 {
+		t.Errorf("depositAmount = %v, want 1500", withDeposit["depositAmount"])
+	}
+	if err := json.Unmarshal(byKey["vtx.unit.bbb"].Listing, &without); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := without["depositAmount"]; ok {
+		t.Errorf("depositAmount present for a listing with none: %v", without)
+	}
+}
+
 func TestComputeListings_SkipsUndecodable(t *testing.T) {
 	entries := map[string]string{
 		"vtx.unit.aaa": `not json`,

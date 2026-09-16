@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -147,36 +149,200 @@ func TestCreateClause_Purpose_Refusals(t *testing.T) {
 	}
 }
 
-// TestSupersedeClause_InheritsPurpose — the replacement clause is minted
-// through mint_clause, so the purpose the amendment supplies is recorded on
-// it the same way.
-func TestSupersedeClause_InheritsPurpose(t *testing.T) {
-	ctx, conn := setupBcEnv(t)
-	cp, cons := newBcPipeline(t, ctx, conn, "supersedepurpose")
-
-	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPPURPHJKMNP")
-	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsuppurp01", leaseKey)
-	oldClauseKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesuppurp", leaseKey, acctKey,
-		`,"amountCents":250000,"purpose":"deposit"`, processor.OutcomeAccepted)
-
-	supersedeReqID := testutil.GenReqID("supersedepurpose001")
+// submitSupersede drives one SupersedeClause over oldClauseKey with the given
+// extra payload fields, declaring the amended clause, its .terms (the read
+// the inheriting shape requires), its .status (the active check's read), the
+// lease and the account.
+func submitSupersede(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
+	label, oldClauseKey, leaseKey, acctKey, extra string, want processor.MessageOutcome) (*processor.OperationReply, string) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
 	env := &processor.OperationEnvelope{
-		RequestID:     supersedeReqID,
+		RequestID:     reqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "SupersedeClause",
 		Actor:         scActorKey,
 		SubmittedAt:   "2026-07-02T14:00:00Z",
 		Class:         "clause",
 		Payload: json.RawMessage(`{"clauseKey":"` + oldClauseKey + `","leaseAppKey":"` + leaseKey +
-			`","accountKey":"` + acctKey + `","prose":"Security deposit (amended to $3,000).","amountCents":300000,"purpose":"deposit"}`),
-		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, leaseKey, acctKey}},
+			`","accountKey":"` + acctKey + `","prose":"Amended."` + extra + `}`),
+		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, oldClauseKey + ".terms", oldClauseKey + ".status", leaseKey, acctKey}},
 	}
-	testutil.PublishOp(t, conn, env)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != want {
+		t.Fatalf("%s: outcome = %v, want %v (reply: %+v)", label, outcome, want, reply.Error)
+	}
+	return reply, "vtx.clause." + nanoIDFromRequestID(reqID)
+}
 
-	newTerms := readData(t, ctx, conn, "vtx.clause."+nanoIDFromRequestID(supersedeReqID)+".terms")
+// TestSupersedeClause_PurposeInheritedWhenOmitted — an amendment that names
+// no purpose keeps the amended clause's token: the replacement of a deposit
+// clause is still the deposit clause, so leaseRentSettlement's
+// missing_deposit stays shut and no second deposit is minted. The amended
+// clause's .terms is the declared read the inheritance is served from; a
+// dispatch that omits it is refused rather than allowed to untag.
+func TestSupersedeClause_PurposeInheritedWhenOmitted(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "supersedeinherit")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPPURPHJKMNP")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsuppurp01", leaseKey)
+	oldClauseKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesuppurp", leaseKey, acctKey,
+		`,"amountCents":250000,"purpose":"deposit"`, processor.OutcomeAccepted)
+
+	_, newKey := submitSupersede(t, ctx, conn, cp, cons, "supersedeinherit001", oldClauseKey, leaseKey, acctKey,
+		`,"amountCents":300000`, processor.OutcomeAccepted)
+	newTerms := readData(t, ctx, conn, newKey+".terms")
 	if got, _ := newTerms["purpose"].(string); got != "deposit" {
-		t.Fatalf("the replacement clause's terms.purpose = %q, want deposit", got)
+		t.Fatalf("the replacement's terms.purpose = %q, want the inherited deposit", got)
+	}
+	if got, _ := newTerms["amountCents"].(float64); got != 300000 {
+		t.Fatalf("the replacement's amountCents = %v, want the amended 300000", newTerms["amountCents"])
+	}
+
+	// A second amendment that omits both the purpose AND the .terms read is
+	// refused: the inheritance has nothing to read from, and dropping the
+	// token silently is exactly what it exists to prevent.
+	undeclaredReqID := testutil.GenReqID("supersedeinherit002")
+	undeclared := &processor.OperationEnvelope{
+		RequestID:     undeclaredReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "SupersedeClause",
+		Actor:         scActorKey,
+		SubmittedAt:   "2026-07-02T15:00:00Z",
+		Class:         "clause",
+		Payload: json.RawMessage(`{"clauseKey":"` + newKey + `","leaseAppKey":"` + leaseKey +
+			`","accountKey":"` + acctKey + `","prose":"Amended again.","amountCents":310000}`),
+		ContextHint: &processor.ContextHint{Reads: []string{newKey, newKey + ".status", leaseKey, acctKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, undeclared)
+	if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidState") {
+		t.Fatalf("an amendment with no purpose and no .terms read must be refused InvalidState, got %v / %+v", outcome, reply.Error)
+	}
+	if keyExists(t, ctx, conn, "vtx.clause."+nanoIDFromRequestID(undeclaredReqID)) {
+		t.Fatalf("a refused amendment mints nothing")
+	}
+}
+
+// TestSupersedeClause_PurposeOverridden — a payload that names a purpose
+// wins over the amended clause's, and one naming a purpose the deposit
+// shape refuses is refused the same way CreateClause refuses it.
+func TestSupersedeClause_PurposeOverridden(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "supersedeoverride")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPQVRHJKMNPQ")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsupovr001", leaseKey)
+	oldClauseKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesupovr1", leaseKey, acctKey,
+		`,"amountCents":4500,"purpose":"lockout"`, processor.OutcomeAccepted)
+
+	_, newKey := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride01", oldClauseKey, leaseKey, acctKey,
+		`,"amountCents":5500,"purpose":"lateFee"`, processor.OutcomeAccepted)
+	if got, _ := readData(t, ctx, conn, newKey+".terms")["purpose"].(string); got != "lateFee" {
+		t.Fatalf("the payload's purpose overrides the amended clause's, got %q", got)
+	}
+
+	// A plain clause (no token) amended without a purpose stays untagged.
+	plainKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesupovr2", leaseKey, acctKey,
+		`,"amountCents":4500`, processor.OutcomeAccepted)
+	_, plainNew := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride02", plainKey, leaseKey, acctKey,
+		`,"amountCents":4600`, processor.OutcomeAccepted)
+	if v, ok := readData(t, ctx, conn, plainNew+".terms")["purpose"]; ok {
+		t.Fatalf("a clause with no token stays untagged through an amendment, got %v", v)
+	}
+
+	// The deposit shape is closed at mint on this path too: amending a
+	// deposit to a monthly clause is refused.
+	reply, refusedKey := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride03", newKey, leaseKey, acctKey,
+		`,"amountCents":5500,"period":"monthly","purpose":"deposit"`, processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: purpose") {
+		t.Fatalf("purpose=deposit on a monthly clause must be refused, got %+v", reply.Error)
+	}
+	if keyExists(t, ctx, conn, refusedKey) {
+		t.Fatalf("a refused amendment mints nothing")
+	}
+}
+
+// TestCreateClause_DepositShape_Refusals — purpose=deposit is one shape: a
+// oneTime computational clause. A monthly or a judgment "deposit" is refused
+// at mint, so neither the lens nor ReturnDeposit ever meets one this package
+// wrote.
+func TestCreateClause_DepositShape_Refusals(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "depositshape")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASEDEPSHAPEHJKMN")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctdepshape1", leaseKey)
+	inspectorKey := seedIdentity(t, ctx, conn, "BBDEPSHAPEYNSPHJKMNP")
+
+	cases := []struct{ name, label, payload string }{
+		{"monthly", "createclausedepshp1", `{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"Deposit.","amountCents":250000,"period":"monthly","purpose":"deposit"}`},
+		{"judgment", "createclausedepshp2", `{"leaseAppKey":"` + leaseKey + `","kind":"judgment","inspectorKey":"` + inspectorKey + `","prose":"Deposit.","purpose":"deposit"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqID := testutil.GenReqID(tc.label)
+			env := &processor.OperationEnvelope{
+				RequestID:     reqID,
+				Lane:          processor.LaneDefault,
+				OperationType: "CreateClause",
+				Actor:         scActorKey,
+				SubmittedAt:   "2026-07-02T12:00:00Z",
+				Class:         "clause",
+				Payload:       json.RawMessage(tc.payload),
+				ContextHint:   &processor.ContextHint{Reads: []string{leaseKey, acctKey, inspectorKey}},
+			}
+			outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+			if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: purpose") {
+				t.Fatalf("%s: want an InvalidArgument: purpose refusal, got %v / %+v", tc.name, outcome, reply.Error)
+			}
+			if keyExists(t, ctx, conn, "vtx.clause."+nanoIDFromRequestID(reqID)) {
+				t.Fatalf("%s: a refused CreateClause must mint nothing", tc.name)
+			}
+		})
+	}
+}
+
+// TestCreateClause_AmountCents_WholeCents — a flat amountCents that arrives
+// as a float within a millionth of an integer (leaseRentSettlement's
+// dollars×100 conversion) is recorded as that integer; a fractional cent is
+// refused.
+func TestCreateClause_AmountCents_WholeCents(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "wholecents")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASEWHQLECENTSHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctwholecent", leaseKey)
+
+	clauseKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausewholec1", leaseKey, acctKey,
+		`,"amountCents":150000.00000000001`, processor.OutcomeAccepted)
+	terms := readData(t, ctx, conn, clauseKey+".terms")
+	if got, _ := terms["amountCents"].(float64); got != 150000 {
+		t.Fatalf("amountCents = %v, want the integer 150000", terms["amountCents"])
+	}
+	low := submitCreateClause(t, ctx, conn, cp, cons, "createclausewholec2", leaseKey, acctKey,
+		`,"amountCents":149999.9999999`, processor.OutcomeAccepted)
+	if got, _ := readData(t, ctx, conn, low+".terms")["amountCents"].(float64); got != 150000 {
+		t.Fatalf("a float just under the integer rounds to it, got %v", got)
+	}
+
+	reqID := testutil.GenReqID("createclausewholec3")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreateClause",
+		Actor:         scActorKey,
+		SubmittedAt:   "2026-07-02T12:00:00Z",
+		Class:         "clause",
+		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"A fee.","amountCents":1234.5}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{leaseKey, acctKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, "whole number of cents") {
+		t.Fatalf("a fractional cent must be refused, got %v / %+v", outcome, reply.Error)
+	}
+	if keyExists(t, ctx, conn, "vtx.clause."+nanoIDFromRequestID(reqID)) {
+		t.Fatalf("a refused CreateClause must mint nothing")
 	}
 }
 
@@ -273,5 +439,68 @@ func TestDeposit_ChargedThenReturned_ThroughBothPackages(t *testing.T) {
 	}
 	if got, _ := status["returnedAt"].(string); got != "2027-07-03T09:00:00Z" {
 		t.Fatalf("returnedAt = %q", got)
+	}
+}
+
+// TestSupersedeClause_NonActiveClause_Refused — only an active clause is
+// superseded: a completed (charged) and a returned deposit clause are each
+// refused ClauseNotActive with nothing minted and the status untouched, and
+// a dispatch that never declared .status is refused InvalidState rather than
+// allowed to amend a clause whose state it cannot see. The active case is
+// the positive vector every other supersede test in this package runs.
+func TestSupersedeClause_NonActiveClause_Refused(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "supersedenonactive")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPNQNACTHJKM")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsupnonac1", leaseKey)
+
+	cases := []struct{ name, mintLabel, label, state string }{
+		{"completed", "createclausesupna01", "supersedenonactive1", "completed"},
+		{"returned", "createclausesupna02", "supersedenonactive2", "returned"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clauseKey := submitCreateClause(t, ctx, conn, cp, cons, tc.mintLabel, leaseKey, acctKey,
+				`,"amountCents":250000,"purpose":"deposit"`, processor.OutcomeAccepted)
+			seedAspect(t, ctx, conn, clauseKey, "status", "clauseStatus", map[string]any{"state": tc.state, "completedAt": "2026-07-02T13:00:00Z"})
+			reply, newKey := submitSupersede(t, ctx, conn, cp, cons, tc.label, clauseKey, leaseKey, acctKey,
+				`,"amountCents":300000`, processor.OutcomeRejected)
+			if reply.Error == nil || !strings.Contains(reply.Error.Message, "ClauseNotActive") {
+				t.Fatalf("%s: want ClauseNotActive, got %+v", tc.name, reply.Error)
+			}
+			if keyExists(t, ctx, conn, newKey) {
+				t.Fatalf("%s: a refused amendment mints nothing", tc.name)
+			}
+			if got, _ := readData(t, ctx, conn, clauseKey+".status")["state"].(string); got != tc.state {
+				t.Fatalf("%s: the refused amendment must leave the status %s, got %q", tc.name, tc.state, got)
+			}
+			if !keyExists(t, ctx, conn, clauseKey) {
+				t.Fatalf("%s: the clause root must stay live", tc.name)
+			}
+		})
+	}
+
+	// .status undeclared: refused InvalidState, never amended blind.
+	activeKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesupna03", leaseKey, acctKey,
+		`,"amountCents":4500`, processor.OutcomeAccepted)
+	reqID := testutil.GenReqID("supersedenonactive3")
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "SupersedeClause",
+		Actor:         scActorKey,
+		SubmittedAt:   "2026-07-02T14:00:00Z",
+		Class:         "clause",
+		Payload: json.RawMessage(`{"clauseKey":"` + activeKey + `","leaseAppKey":"` + leaseKey +
+			`","accountKey":"` + acctKey + `","prose":"Amended.","amountCents":4600}`),
+		ContextHint: &processor.ContextHint{Reads: []string{activeKey, activeKey + ".terms", leaseKey, acctKey}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidState") {
+		t.Fatalf("an amendment that never declared .status must be refused InvalidState, got %v / %+v", outcome, reply.Error)
+	}
+	if keyExists(t, ctx, conn, "vtx.clause."+nanoIDFromRequestID(reqID)) {
+		t.Fatalf("a refused amendment mints nothing")
 	}
 }

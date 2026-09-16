@@ -9,7 +9,10 @@ import (
 // clauseDDLScript handles CreateClause + InspectPremises + SupersedeClause +
 // BackfillClauseTerm + ShortenClauseTerm. Known-key reads only (validates the
 // lease/account/inspector/conditionedOn/superseded-clause vertex by the keys
-// the caller lists in ContextHint.Reads; BackfillClauseTerm reads the
+// the caller lists in ContextHint.Reads; SupersedeClause reads the amended
+// clause's .status the same way (required — only an active clause is
+// superseded) and its .terms whenever the payload names no purpose, to
+// inherit its token; BackfillClauseTerm reads the
 // clause's .terms and the lease's .tenancy the same way, and its .status as
 // an absence-tolerant OptionalRead; ShortenClauseTerm reads the clause's
 // .terms and the lease's .notice as REQUIRED declared reads, and the
@@ -105,6 +108,22 @@ def optional_purpose(p):
             fail("InvalidArgument: purpose: required token ^[a-z][a-zA-Z0-9]{0,31}$, got " + v)
     return v
 
+def whole_cents(v, name):
+    # A ledger amount is an integer number of cents. A lens-computed figure
+    # arrives as a float (leaseRentSettlement's dollars×100 conversion is
+    # float64 arithmetic, so 1500.00 × 100 can land as 150000.00000000001):
+    # within a millionth of an integer it IS that integer; anything further
+    # off is a fractional cent, refused rather than silently rounded.
+    if type(v) == type(0):
+        return v
+    nearest = int(v + 0.5)
+    d = v - nearest
+    if d < 0:
+        d = -d
+    if d > 0.000001:
+        fail("InvalidArgument: " + name + ": must be a whole number of cents")
+    return nearest
+
 def parts_of(key, name, want_type):
     parts = key.split(".")
     if len(parts) != 3 or parts[0] != "vtx":
@@ -151,11 +170,13 @@ def next_anniversary_after(valid_from, d):
     # The start of the period after the one containing d.
     return time.rfc3339_add_months(valid_from, period_index(valid_from, d) + 1)
 
-def mint_clause(state, p):
+def mint_clause(state, p, inherited_purpose):
     # Shared by CreateClause and SupersedeClause (Fire V4): builds a fresh
     # clause vertex + its aspects/links from the same payload shape. Returns
     # {"clause_key", "clause_id", "mutations", "event_data"} — the caller
     # decides the event class and whether to fold in amendment mutations.
+    # inherited_purpose is the amended clause's own token, used when the
+    # payload names none (SupersedeClause); None everywhere else.
     lease_key = required_string(p, "leaseAppKey")
     _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
     prose = required_string(p, "prose")
@@ -218,8 +239,17 @@ def mint_clause(state, p):
     # (leaseRentSettlement's deposit gaps read purpose='deposit'). Recorded
     # only when supplied: a clause minted without one carries no purpose key.
     purpose = optional_purpose(p)
+    if purpose == None:
+        purpose = inherited_purpose
     if purpose != None:
         terms_data["purpose"] = purpose
+    # The security deposit is ONE shape: a oneTime computational clause. A
+    # monthly clause completes on its final period and a judgment clause
+    # charges nothing, so a "deposit" of either kind could never be returned
+    # for what was collected — the shape is refused here rather than left for
+    # ReturnDeposit to refuse after the lens has picked it.
+    if purpose == "deposit" and (period != "oneTime" or kind != "computational"):
+        fail("InvalidArgument: purpose: deposit is a oneTime computational clause; got period " + period + ", kind " + kind)
     acct_key = None
     acct_id = None
     amount_cents = None
@@ -262,6 +292,7 @@ def mint_clause(state, p):
             amount_cents = require_number(p, "amountCents")
             if amount_cents <= 0:
                 fail("InvalidArgument: amountCents: required positive number")
+            amount_cents = whole_cents(amount_cents, "amountCents")
         terms_data["amountCents"] = amount_cents
     else:
         insp_key = required_string(p, "inspectorKey")
@@ -313,7 +344,7 @@ def execute(state, op):
     p = op.payload
 
     if ot == "CreateClause":
-        minted = mint_clause(state, p)
+        minted = mint_clause(state, p, None)
         events = [{"class": "clause.created", "data": minted["event_data"]}]
         return {"mutations": minted["mutations"], "events": events,
                 "response": {"primaryKey": minted["clause_key"]}}
@@ -331,16 +362,52 @@ def execute(state, op):
             # it not-alive), so a clause can only be amended once at a time.
             fail("UnknownClause: " + old_key)
 
-        minted = mint_clause(state, p)
+        # Only an ACTIVE clause is superseded. A completed clause has been
+        # charged (DebitAccount's one-time write) and a returned one has been
+        # credited back: re-minting either as a fresh active clause would bill
+        # it again through clauseSatisfaction — a second deposit collected —
+        # and rewriting its status would drop the record of the charge. The
+        # amended clause's .status is a REQUIRED declared read: CreateClause
+        # writes it unconditionally, so its absence here means the dispatcher
+        # never declared it, never that the clause is new.
+        old_status_key = old_key + ".status"
+        if not (old_status_key in state and vertex_alive(state, old_status_key)):
+            fail("InvalidState: " + old_key + "'s .status was not hydrated; declare it in reads")
+        old_status_doc = state[old_status_key]
+        old_state = old_status_doc.data.get("state")
+        if old_state != "active":
+            fail("ClauseNotActive: " + old_key + " is " + str(old_state) + "; only an active clause can be superseded")
+
+        # The purpose token is inherited: an amendment that names none keeps
+        # the amended clause's own, read from its hydrated .terms (a REQUIRED
+        # declared read for the inheriting shape — mint_clause writes .terms
+        # unconditionally, so its absence here means the dispatcher never
+        # declared it, and an amendment that silently dropped a deposit's
+        # token would let leaseRentSettlement mint a second deposit). A
+        # payload that names a purpose overrides it; one that names the
+        # token itself is validated exactly as at mint.
+        if optional_purpose(p) == None:
+            old_terms_key = old_key + ".terms"
+            if not vertex_alive(state, old_terms_key):
+                fail("InvalidState: " + old_key + "'s .terms was not hydrated; declare it in reads")
+            inherited = state[old_terms_key].data.get("purpose")
+            minted = mint_clause(state, p, inherited)
+        else:
+            minted = mint_clause(state, p, None)
         new_key = minted["clause_key"]
         new_id = minted["clause_id"]
 
         amends_lnk = "lnk.clause." + new_id + ".amends.clause." + old_id
         superseded_at = time.rfc3339_utc(op.submittedAt)
+        # The superseded mark is pinned to the revision the active check read:
+        # a DebitAccount completing this clause between hydration and commit
+        # (the charge that would make it un-amendable) must conflict with this
+        # write rather than be overwritten by a status computed from the
+        # pre-charge state — the ShortenClauseTerm / EndTenancy OCC shape.
         mutations = minted["mutations"] + [
             make_link(amends_lnk, new_key, old_key, "amends", "amends", {}),
             make_vtx_tombstone(old_key, "clause"),
-            {"op": "update", "key": old_key + ".status",
+            {"op": "update", "key": old_status_key, "expectedRevision": old_status_doc.revision,
              "document": {"class": "clauseStatus", "isDeleted": False,
                           "vertexKey": old_key, "localName": "status",
                           "data": {"state": "superseded", "supersededAt": superseded_at, "supersededBy": new_key}}},

@@ -45,12 +45,20 @@ type depositFixture struct {
 type depositOption func(*depositSeed)
 
 type depositSeed struct {
-	purpose       string
-	status        map[string]any
-	endedAt       string
-	chargesToAcct string
-	governsLease  string
-	arrears       map[string]any
+	purpose          string
+	period, kind     string
+	status           map[string]any
+	endedAt          string
+	chargesToAcct    string
+	governsLease     string
+	chargesToDeleted bool
+	arrears          map[string]any
+}
+
+func withPeriod(p string) depositOption { return func(s *depositSeed) { s.period = p } }
+func withKind(k string) depositOption   { return func(s *depositSeed) { s.kind = k } }
+func withChargesToTombstoned() depositOption {
+	return func(s *depositSeed) { s.chargesToDeleted = true }
 }
 
 func withPurpose(p string) depositOption { return func(s *depositSeed) { s.purpose = p } }
@@ -73,6 +81,8 @@ func seedDepositFixture(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	t.Helper()
 	seed := &depositSeed{
 		purpose: "deposit",
+		period:  "oneTime",
+		kind:    "computational",
 		status:  map[string]any{"state": "completed", "completedAt": depositChargedAt, "chargeValidUntil": "2026-08-01T13:00:00Z"},
 		endedAt: tenancyEndedAt,
 	}
@@ -89,7 +99,7 @@ func seedDepositFixture(t *testing.T, ctx context.Context, conn *substrate.Conn,
 
 	clauseKey := "vtx.clause." + clauseID
 	seedVertex(t, ctx, conn, clauseKey, "clause", nil)
-	terms := map[string]any{"kind": "computational", "conditioned": false, "amountCents": depositAmountCents, "period": "oneTime"}
+	terms := map[string]any{"kind": seed.kind, "conditioned": false, "amountCents": depositAmountCents, "period": seed.period}
 	if seed.purpose != "" {
 		terms["purpose"] = seed.purpose
 	}
@@ -100,8 +110,17 @@ func seedDepositFixture(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	if seed.chargesToAcct != "" {
 		chargesTo = seed.chargesToAcct
 	}
-	seedLink(t, ctx, conn, "lnk.clause."+clauseID+".chargesTo.account."+chargesTo[len("vtx.account."):],
-		clauseKey, chargesTo, "chargesTo", "chargesTo")
+	chargesToKey := "lnk.clause." + clauseID + ".chargesTo.account." + chargesTo[len("vtx.account."):]
+	seedLink(t, ctx, conn, chargesToKey, clauseKey, chargesTo, "chargesTo", "chargesTo")
+	if seed.chargesToDeleted {
+		// The link's tombstone: the same document with isDeleted true — what
+		// a repointed or retracted custody link leaves under the key.
+		doc := map[string]any{"class": "chargesTo", "isDeleted": true, "sourceVertex": clauseKey, "targetVertex": chargesTo, "localName": "chargesTo", "data": map[string]any{}}
+		b, _ := json.Marshal(doc)
+		if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, chargesToKey, b); err != nil {
+			t.Fatalf("tombstone link %s: %v", chargesToKey, err)
+		}
+	}
 	governs := leaseKey
 	if seed.governsLease != "" {
 		governs = seed.governsLease
@@ -308,7 +327,10 @@ func TestReturnDeposit_UndeclaredSubmitter_StillReturns(t *testing.T) {
 // TestReturnDeposit_Refusals — each fact the return rides on, moved off the
 // charged-and-ended state one at a time: the bare submission shape, so every
 // refusal is the script's own code rather than a hydration miss on a
-// declared-required key.
+// declared-required key. The two returned-but-misaddressed cases pin the
+// order: a clause already returned is a no-op only once the lease, the
+// tenancy and the custody links check out — a mis-addressed hand submit
+// refuses, never reads as done.
 func TestReturnDeposit_Refusals(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "returndepositrefuse")
@@ -325,6 +347,18 @@ func TestReturnDeposit_Refusals(t *testing.T) {
 			useAcct: "vtx.account.BBRETDEPNQSUCHACCTHJ"},
 		{name: "unknown-clause", label: "bbretdepref000000002", leaseID: "BBRETDEPREFLEASE2HJK", clauseID: "BBRETDEPREFCLAUSE2HJ", code: "UnknownClause",
 			useClause: "vtx.clause.BBRETDEPNQSUCHCLSEHJ"},
+		{name: "unknown-lease", label: "bbretdepref000000009", leaseID: "BBRETDEPREFLEASE9HJK", clauseID: "BBRETDEPREFCLAUSE9HJ", code: "UnknownLeaseApplication",
+			useLease: "vtx.leaseapp.BBRETDEPNQSUCHLEASEH"},
+		{name: "not-a-deposit-monthly", label: "bbretdepref000000010", leaseID: "BBRETDEPREFLEASEAHJK", clauseID: "BBRETDEPREFCLAUSEAHJ", code: "NotADeposit",
+			opts: []depositOption{withPeriod("monthly")}},
+		{name: "not-a-deposit-judgment", label: "bbretdepref000000011", leaseID: "BBRETDEPREFLEASEBHJK", clauseID: "BBRETDEPREFCLAUSEBHJ", code: "NotADeposit",
+			opts: []depositOption{withKind("judgment")}},
+		{name: "clause-chargesTo-link-tombstoned", label: "bbretdepref000000012", leaseID: "BBRETDEPREFLEASECHJK", clauseID: "BBRETDEPREFCLAUSECHJ", code: "ClauseAccountMismatch",
+			opts: []depositOption{withChargesToTombstoned()}},
+		{name: "returned-but-misaddressed-lease", label: "bbretdepref000000013", leaseID: "BBRETDEPREFLEASEDHJK", clauseID: "BBRETDEPREFCLAUSEDHJ", code: "ClauseLeaseMismatch",
+			opts: []depositOption{withStatus(map[string]any{"state": "returned", "returnedAt": "2027-07-02T09:00:00Z"}), withGoverns(otherLease)}},
+		{name: "returned-but-tenancy-not-ended", label: "bbretdepref000000014", leaseID: "BBRETDEPREFLEASEEHJK", clauseID: "BBRETDEPREFCLAUSEEHJ", code: "TenancyNotEnded",
+			opts: []depositOption{withStatus(map[string]any{"state": "returned", "returnedAt": "2027-07-02T09:00:00Z"}), withEndedAt("")}},
 		{name: "not-a-deposit-no-purpose", label: "bbretdepref000000003", leaseID: "BBRETDEPREFLEASE3HJK", clauseID: "BBRETDEPREFCLAUSE3HJ", code: "NotADeposit",
 			opts: []depositOption{withPurpose("")}},
 		{name: "not-a-deposit-other-purpose", label: "bbretdepref000000004", leaseID: "BBRETDEPREFLEASE4HJK", clauseID: "BBRETDEPREFCLAUSE4HJ", code: "NotADeposit",
@@ -359,8 +393,10 @@ func TestReturnDeposit_Refusals(t *testing.T) {
 			if keyExists(t, ctx, conn, txKey) {
 				t.Fatalf("%s: a refused return must mint nothing", tc.name)
 			}
+			// The seeded-returned cases keep their seeded returnedAt; every
+			// other case must not have been marked returned by a refused submit.
 			status, _ := readDoc(t, ctx, conn, f.clauseKey+".status")["data"].(map[string]any)
-			if got, _ := status["state"].(string); got == "returned" {
+			if got, _ := status["returnedAt"].(string); got == depositReturnAt {
 				t.Fatalf("%s: a refused return must not mark the clause returned", tc.name)
 			}
 		})

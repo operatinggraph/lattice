@@ -976,11 +976,13 @@ def execute(state, op):
 // the one entry that is not post_entry's: it credits a charged deposit clause's
 // amount back once the lease's tenancy has ended, links the credit
 // authorizedBy the clause exactly as DebitAccount's charge was, and marks the
-// clause's .status returned under OCC — the third writer of that aspect after
-// CreateClause and DebitAccount. Every key it reads is hydrated: the account,
-// the clause, its .terms and .status, the lease's .tenancy and the two
-// deterministic custody links, all supplied by this script's own derive_reads
-// whatever the submitter declared, so a live read never decides a refusal.
+// clause's .status returned under OCC — this package's second writer of that
+// aspect after DebitAccount, beside semantic-contracts' own four (the
+// clauseStatus DDL there lists every one). Every key it reads is hydrated:
+// the lease, the account, the clause, its .terms and .status, the lease's
+// .tenancy and the two deterministic custody links, all supplied by this
+// script's own derive_reads whatever the submitter declared, so a live read
+// never decides a refusal.
 //
 // A self-scoped submit (authContext.target present) is bound to the account's
 // own heldFor topology along one of two paths, resident first: the lease's
@@ -1612,17 +1614,24 @@ def return_deposit(state, op):
         fail("UnknownAccount: " + acct_key)
     if not vertex_alive(state, clause_key):
         fail("UnknownClause: " + clause_key)
+    if not vertex_alive(state, lease_key):
+        fail("UnknownLeaseApplication: " + lease_key)
 
-    # Only a deposit is returned. The purpose token CreateClause recorded is
-    # the fact of what the clause is for — the same mark the dispatching lens
-    # selected it by — so a clause without it is refused whatever its prose
-    # says; the amount is the clause's own, as DebitAccount charged it.
+    # Only a deposit is returned, and a deposit is ONE shape: the purpose
+    # token CreateClause recorded (the same mark the dispatching lens selected
+    # it by — a clause without it is refused whatever its prose says) on a
+    # oneTime computational clause. A monthly clause reaches completed too,
+    # on its final period after N charges, and a judgment clause charges
+    # nothing: neither could be returned for what was collected. The amount
+    # is the clause's own, as DebitAccount charged it.
     terms_key = clause_key + ".terms"
     if not vertex_alive(state, terms_key):
         fail("UnknownClause: " + clause_key + " has no live .terms aspect")
     terms = state[terms_key].data
     if terms.get("purpose") != "deposit":
         fail("NotADeposit: " + clause_key + " carries no purpose=deposit; only a security deposit clause is returned")
+    if terms.get("period") != "oneTime" or terms.get("kind") != "computational":
+        fail("NotADeposit: " + clause_key + " is not a oneTime computational clause; a deposit is charged once and returned once")
     amount_cents = terms.get("amountCents")
     if amount_cents == None or amount_cents <= 0:
         fail("NotADeposit: " + clause_key + " carries no positive amountCents to return")
@@ -1635,18 +1644,6 @@ def return_deposit(state, op):
         fail("InvalidState: " + clause_key + " has no live .status aspect")
     status_doc = state[status_key]
     status_state = status_doc.data.get("state")
-    if status_state == "returned":
-        # Idempotent no-op (the EndTenancy shape: empty mutations, no event,
-        # no primaryKey): the deposit is already returned. The lens's
-        # missing_depositReturn drops a returned clause from candidacy, so a
-        # dispatch that still names it is a race with an earlier return, not
-        # a second refund.
-        return {"mutations": [], "events": [], "response": {}}
-    if status_state != "completed":
-        # completed is the state DebitAccount's one-time charge leaves; an
-        # active clause is minted but not yet billed, and returning an
-        # uncharged deposit would credit money never collected.
-        fail("DepositNotCharged: " + clause_key + " is " + str(status_state) + ", not completed; a deposit is returned only once DebitAccount has charged it")
 
     # The recorded end of the tenancy (EndTenancy's endedAt) is what a return
     # rides — never the notice's intention or the term's scheduled end.
@@ -1668,6 +1665,23 @@ def return_deposit(state, op):
     governs_lnk = "lnk.clause." + clause_id + ".governs.leaseapp." + lease_id
     if not vertex_alive(state, governs_lnk):
         fail("ClauseLeaseMismatch: " + clause_key + " does not govern " + lease_key)
+
+    # Only a well-addressed submit reaches the state checks: a return that
+    # names the wrong lease or account is refused above even when the clause
+    # is already returned — a mis-addressed hand submit must never read as
+    # "done".
+    if status_state == "returned":
+        # Idempotent no-op (the EndTenancy shape: empty mutations, no event,
+        # no primaryKey): the deposit is already returned. The lens's
+        # missing_depositReturn drops a returned clause from candidacy, so a
+        # dispatch that still names it is a race with an earlier return, not
+        # a second refund.
+        return {"mutations": [], "events": [], "response": {}}
+    if status_state != "completed":
+        # completed is the state DebitAccount's one-time charge leaves; an
+        # active clause is minted but not yet billed, and returning an
+        # uncharged deposit would credit money never collected.
+        fail("DepositNotCharged: " + clause_key + " is " + str(status_state) + ", not completed; a deposit is returned only once DebitAccount has charged it")
 
     tx_id = nanoid.new()
     tx_key = "vtx.transaction." + tx_id
@@ -1745,12 +1759,12 @@ def derive_reads(op):
     if ot == "ReturnDeposit":
         # ReturnDeposit's whole read set, derived from the three payload keys:
         # the account root and its .arrears (the same two as every entry op),
-        # the clause root, its .terms and .status, the lease's .tenancy, and
-        # the two deterministic custody links — which no dispatcher can
+        # the clause root, its .terms and .status, the lease root and its
+        # .tenancy, and the two deterministic custody links — which no dispatcher can
         # template (a link key spans two payload fields), so this is the one
         # channel that hydrates them. All optionalReads, so the handler's own
-        # refusals (UnknownAccount, UnknownClause, TenancyNotEnded,
-        # ClauseAccountMismatch, ClauseLeaseMismatch) name what is absent
+        # refusals (UnknownAccount, UnknownClause, UnknownLeaseApplication,
+        # TenancyNotEnded, ClauseAccountMismatch, ClauseLeaseMismatch) name what is absent
         # instead of an opaque hydration miss; a dispatcher that declares a
         # key required keeps it required (weakest wins).
         keys = []
@@ -1770,7 +1784,7 @@ def derive_reads(op):
             if has_lease:
                 keys.append("lnk.clause." + clause_id + ".governs.leaseapp." + lease_key.split(".")[2])
         if has_lease:
-            keys.append(lease_key + ".tenancy")
+            keys += [lease_key, lease_key + ".tenancy"]
         if len(keys) == 0:
             return {}
         return {"optionalReads": keys}

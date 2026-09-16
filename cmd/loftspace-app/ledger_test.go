@@ -107,6 +107,80 @@ func TestComputeLedgerHistory_NoTransactionsZeroBalance(t *testing.T) {
 	}
 }
 
+// TestComputeLedgerHistory_ClausePurposeRidesThrough — the authorizing
+// clause's own recorded purpose (a security deposit's own "deposit" token)
+// passes through unchanged; a row authorized by a purpose-less clause, or by
+// none at all, stays empty (omitempty).
+func TestComputeLedgerHistory_ClausePurposeRidesThrough(t *testing.T) {
+	entries := map[string]string{
+		"vtx.transaction.1": `{"transactionKey":"vtx.transaction.1","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":150000,"postedAt":"2026-06-01T00:00:00Z","clauseKey":"vtx.clause.deposit","clausePurpose":"deposit"}`,
+		"vtx.transaction.2": `{"transactionKey":"vtx.transaction.2","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":230000,"postedAt":"2026-06-02T00:00:00Z","clauseKey":"vtx.clause.rent"}`,
+	}
+	rows, _ := computeLedgerHistory(keysOf(entries), fakeKV(entries), "vtx.leaseapp.lll")
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(rows))
+	}
+	if rows[0].ClausePurpose != "deposit" {
+		t.Errorf("row 1 clausePurpose = %q, want deposit", rows[0].ClausePurpose)
+	}
+	if rows[1].ClausePurpose != "" {
+		t.Errorf("row 2 (rent clause, no purpose) clausePurpose = %q, want empty", rows[1].ClausePurpose)
+	}
+}
+
+// TestComputeDepositSummary_HeldReturnedNoneIgnoresOther pins every branch
+// the FE's depositLine reads: a charged-and-unreturned deposit reads held
+// (its own charged figure, no returned date); a charged-and-returned one
+// nets to zero held but still names its charged figure and its return date;
+// a lease with no deposit clause at all reads entirely empty (the "no
+// deposit row" case depositLine renders as ""); and a non-deposit one-time
+// charge (no purpose, or a purpose other than "deposit") is ignored
+// entirely rather than bleeding into the deposit figures.
+func TestComputeDepositSummary_HeldReturnedNoneIgnoresOther(t *testing.T) {
+	t.Run("held", func(t *testing.T) {
+		rows := []ledgerEntryRow{
+			{Type: "debit", AmountCents: 150000, PostedAt: "2026-06-01T00:00:00Z", ClausePurpose: "deposit"},
+			{Type: "debit", AmountCents: 230000, PostedAt: "2026-06-01T00:00:00Z"}, // rent, no purpose — ignored
+		}
+		s := computeDepositSummary(rows)
+		if s.DepositHeldCents != 150000 || s.DepositChargedCents != 150000 {
+			t.Errorf("held/charged = %d/%d, want 150000/150000", s.DepositHeldCents, s.DepositChargedCents)
+		}
+		if s.DepositChargedAt != "2026-06-01T00:00:00Z" {
+			t.Errorf("chargedAt = %q, want 2026-06-01T00:00:00Z", s.DepositChargedAt)
+		}
+		if s.DepositReturnedAt != "" {
+			t.Errorf("returnedAt = %q, want empty while still held", s.DepositReturnedAt)
+		}
+	})
+	t.Run("returned", func(t *testing.T) {
+		rows := []ledgerEntryRow{
+			{Type: "debit", AmountCents: 150000, PostedAt: "2026-06-01T00:00:00Z", ClausePurpose: "deposit"},
+			{Type: "credit", AmountCents: 150000, PostedAt: "2027-06-01T00:00:00Z", ClausePurpose: "deposit"},
+		}
+		s := computeDepositSummary(rows)
+		if s.DepositHeldCents != 0 {
+			t.Errorf("held = %d, want 0 once returned", s.DepositHeldCents)
+		}
+		if s.DepositChargedCents != 150000 {
+			t.Errorf("chargedCents = %d, want the original charge (150000) to still name the figure", s.DepositChargedCents)
+		}
+		if s.DepositChargedAt != "2026-06-01T00:00:00Z" || s.DepositReturnedAt != "2027-06-01T00:00:00Z" {
+			t.Errorf("chargedAt/returnedAt = %q/%q, want the recorded stamps", s.DepositChargedAt, s.DepositReturnedAt)
+		}
+	})
+	t.Run("no deposit clause at all", func(t *testing.T) {
+		rows := []ledgerEntryRow{
+			{Type: "debit", AmountCents: 230000, PostedAt: "2026-06-01T00:00:00Z"},
+			{Type: "debit", AmountCents: 5000, PostedAt: "2026-06-02T00:00:00Z", ClausePurpose: "lockoutFee"},
+		}
+		s := computeDepositSummary(rows)
+		if s.DepositHeldCents != 0 || s.DepositChargedCents != 0 || s.DepositChargedAt != "" || s.DepositReturnedAt != "" {
+			t.Errorf("want an entirely empty summary (no deposit clause at all), got %+v", s)
+		}
+	})
+}
+
 func TestResolveLeaseAccount_FindsMatchOrEmpty(t *testing.T) {
 	entries := map[string]string{
 		"vtx.leaseapp.lll":   `{"leaseAppKey":"vtx.leaseapp.lll","accountKey":"vtx.account.xyz"}`,

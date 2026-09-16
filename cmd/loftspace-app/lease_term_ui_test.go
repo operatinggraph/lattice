@@ -9,11 +9,11 @@ import (
 )
 
 // leaseTermUIDecls lifts the shipped fmtDate/fmtUTCDate/applicationBannerFor/
-// relistOffered/decisionOffered/entryPeriodLabel declarations (plus fmtUTCDate's
-// UTC_MONTH_ABBR dependency) out of the embedded app.js — the
-// rotate_offer_test.go / renewal_ready_test.go pattern: the REAL shipped
+// relistOffered/decisionOffered/entryPeriodLabel/depositRowTag declarations
+// (plus fmtUTCDate's UTC_MONTH_ABBR dependency) out of the embedded app.js —
+// the rotate_offer_test.go / renewal_ready_test.go pattern: the REAL shipped
 // source runs here, not a copy, so these pins are a statement about what
-// ships. All six are self-contained (no DOM/state), so goja can evaluate
+// ships. All seven are self-contained (no DOM/state), so goja can evaluate
 // them directly.
 var leaseTermUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nconst UTC_MONTH_ABBR = \[.*?\];\n`),
@@ -23,6 +23,7 @@ var leaseTermUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction decisionOffered\(a, unit\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction relistOffered\(apps\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction entryPeriodLabel\(e\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction depositRowTag\(e\) \{\n.*?\n\}\n`),
 }
 
 // leaseTermUIVM evaluates the declarations WEST OF GREENWICH: goja's Date
@@ -302,6 +303,45 @@ func TestEntryPeriodLabel_NamesThePeriodAndDueDate(t *testing.T) {
 			" · covers Sep 6, 2026 – Oct 6, 2026"},
 		{"a payment has no period", map[string]interface{}{"type": "credit", "postedAt": "2026-09-14T00:00:00Z"}, ""},
 		{"a half-stamped row renders nothing", map[string]interface{}{"periodStart": "2026-09-06T00:00:00Z"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := run(t, tc.e); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDepositRowTag_ChargeReturnAndFallthrough pins depositRowTag: a
+// clausePurpose="deposit" row tags the charge/return by TYPE regardless of
+// what period fields it carries (a deposit clause is oneTime — never a
+// period, so entryPeriodLabel would otherwise read ""); any other row
+// (rent, a plain charge, a purpose-less one-time fee) falls straight
+// through to entryPeriodLabel unchanged.
+func TestDepositRowTag_ChargeReturnAndFallthrough(t *testing.T) {
+	vm := leaseTermUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("depositRowTag"))
+	if !ok {
+		t.Fatal("depositRowTag is not a function after evaluating its declaration")
+	}
+	run := func(t *testing.T, e map[string]interface{}) string {
+		t.Helper()
+		res, err := fn(goja.Undefined(), vm.ToValue(e))
+		if err != nil {
+			t.Fatalf("depositRowTag threw: %v", err)
+		}
+		return res.String()
+	}
+	for _, tc := range []struct {
+		name string
+		e    map[string]interface{}
+		want string
+	}{
+		{"deposit charge (debit)", map[string]interface{}{"type": "debit", "clausePurpose": "deposit"}, " · Security deposit"},
+		{"deposit return (credit)", map[string]interface{}{"type": "credit", "clausePurpose": "deposit"}, " · Security deposit returned"},
+		{"rent row with a period falls through", map[string]interface{}{"type": "debit", "periodStart": "2026-09-06T00:00:00Z", "periodEnd": "2026-10-06T00:00:00Z"}, " · covers Sep 6, 2026 – Oct 6, 2026"},
+		{"plain charge, no purpose, no period falls through to empty", map[string]interface{}{"type": "debit"}, ""},
+		{"non-deposit purpose falls through", map[string]interface{}{"type": "debit", "clausePurpose": "lockoutFee"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := run(t, tc.e); got != tc.want {

@@ -15,6 +15,11 @@ package semanticcontracts
 //   - a one-time clause WITHOUT the purpose token on the same lease is never
 //     counted by either gap.
 //   - missing_deposit and missing_clause are independent in both directions.
+//   - an ended tenancy that never had a deposit clause is never minted one.
+//   - a purpose=deposit clause of another archetype (monthly, judgment —
+//     seeded; mint_clause refuses the shape) holds the mint shut and is
+//     never a return candidate.
+//   - two charged deposit clauses are returned one per pass.
 
 import (
 	"testing"
@@ -45,6 +50,20 @@ func (f *bcFixture) mkOneTimeClause(t *testing.T, name, leaseName, purpose, stat
 	terms := map[string]any{"kind": "computational", "conditioned": false, "amountCents": 250000.0, "period": "oneTime"}
 	if purpose != "" {
 		terms["purpose"] = purpose
+	}
+	f.aspect(t, name, "terms", "clauseTerms", terms)
+	f.aspect(t, name, "status", "clauseStatus", map[string]any{"state": state})
+	f.edge(t, "governs", name, leaseName)
+}
+
+// mkPurposeClause seeds a computational clause of the given period, or a
+// judgment clause when kind is "judgment", carrying the purpose token.
+func (f *bcFixture) mkPurposeClause(t *testing.T, name, leaseName, purpose, period, kind, state string) {
+	t.Helper()
+	f.vtx(t, name, "clause")
+	terms := map[string]any{"kind": kind, "conditioned": false, "period": period, "purpose": purpose}
+	if kind == "computational" {
+		terms["amountCents"] = 250000.0
 	}
 	f.aspect(t, name, "terms", "clauseTerms", terms)
 	f.aspect(t, name, "status", "clauseStatus", map[string]any{"state": state})
@@ -166,15 +185,20 @@ func TestLeaseRentSettlement_OneTimeClauseWithoutPurpose_NeverCounted(t *testing
 		t.Skip("requires NATS")
 	}
 	f := newBcFixture(t)
-	f.mkDepositLease(t, "depfee", depositEndedAt)
+	f.mkDepositLease(t, "depfee", "")
 	f.mkOneTimeClause(t, "depfee_lockout", "depfee", "", "completed")
 	f.mkOneTimeClause(t, "depfee_pet", "depfee", "petFee", "completed")
 
 	v := f.projectLeaseAt(t, "depfee")[0].Values
 	require.Equal(t, true, v["missing_deposit"], "a one-time fee with no purpose token, or another purpose, is not the deposit — period alone is no mark")
 	require.Equal(t, int64(0), v["depositClauseCount"])
-	require.Nil(t, v["depositClauseKey"], "a charged one-time fee on an ended tenancy is never returned as a deposit")
-	require.Equal(t, false, v["missing_depositReturn"])
+	require.Nil(t, v["depositClauseKey"], "a charged one-time fee is never a return candidate")
+
+	f.mkDepositLease(t, "depfeeended", depositEndedAt)
+	f.mkOneTimeClause(t, "depfeeended_lockout", "depfeeended", "", "completed")
+	w := f.projectLeaseAt(t, "depfeeended")[0].Values
+	require.Nil(t, w["depositClauseKey"], "a charged one-time fee on an ended tenancy is never returned as a deposit")
+	require.Equal(t, false, w["missing_depositReturn"])
 }
 
 // TestLeaseRentSettlement_DepositAndRentGapsIndependent — a lease with its
@@ -200,4 +224,89 @@ func TestLeaseRentSettlement_DepositAndRentGapsIndependent(t *testing.T) {
 	require.Equal(t, false, w["missing_deposit"])
 	require.Equal(t, true, w["missing_clause"], "a deposit clause is oneTime — it never suppresses the rent clause")
 	require.Equal(t, true, w["violating"])
+}
+
+// TestLeaseRentSettlement_EndedTenancy_NoClause_NeverMinted — a lease that
+// records a deposit but whose tenancy ended before any deposit clause was
+// minted is not minted one now: it would be billed and refunded in one
+// breath. Neither gap opens.
+func TestLeaseRentSettlement_EndedTenancy_NoClause_NeverMinted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkDepositLease(t, "dependednoclause", depositEndedAt)
+
+	v := f.projectLeaseAt(t, "dependednoclause")[0].Values
+	require.Equal(t, false, v["missing_deposit"], "the tenancy has ended — a deposit minted now would be charged and refunded for nothing")
+	require.Equal(t, false, v["missing_depositReturn"])
+	require.Equal(t, 2500.0, v["depositAmount"])
+	require.Equal(t, depositEndedAt, v["endedAt"])
+}
+
+// TestLeaseRentSettlement_OtherArchetypeDeposit_HoldsMintShut_NeverReturned
+// — a purpose=deposit clause that is not a oneTime computational clause
+// (mint_clause refuses the shape; this is seeded data) counts as the
+// installed deposit, so the mint stays shut and nothing is charged twice —
+// and is never a return candidate, whatever its state: a monthly clause's
+// completed means its final period billed, not a deposit collected.
+func TestLeaseRentSettlement_OtherArchetypeDeposit_HoldsMintShut_NeverReturned(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkDepositLease(t, "depmonthly", depositEndedAt)
+	f.mkPurposeClause(t, "depmonthly_dep", "depmonthly", "deposit", "monthly", "computational", "completed")
+
+	v := f.projectLeaseAt(t, "depmonthly")[0].Values
+	require.Equal(t, false, v["missing_deposit"], "a clause tagged deposit holds the mint shut whatever its shape")
+	require.Equal(t, int64(1), v["depositClauseCount"])
+	require.Nil(t, v["depositClauseKey"], "a completed monthly clause is not a charged deposit")
+	require.Equal(t, false, v["missing_depositReturn"])
+
+	f.mkDepositLease(t, "depjudgment", depositEndedAt)
+	f.mkPurposeClause(t, "depjudgment_dep", "depjudgment", "deposit", "oneTime", "judgment", "completed")
+
+	w := f.projectLeaseAt(t, "depjudgment")[0].Values
+	require.Equal(t, false, w["missing_deposit"])
+	require.Nil(t, w["depositClauseKey"], "a judgment clause charges nothing — nothing to return")
+	require.Equal(t, false, w["missing_depositReturn"])
+}
+
+// TestLeaseRentSettlement_TwoChargedDeposits_ReturnedOnePerPass — two
+// charged purpose=deposit clauses on one ended lease (an amendment that
+// re-minted one): max() picks exactly one; once it is marked returned the
+// other is the sole candidate on the next pass — the missing_term idiom, so
+// neither is starved behind the first pick.
+func TestLeaseRentSettlement_TwoChargedDeposits_ReturnedOnePerPass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkDepositLease(t, "twodeps", depositEndedAt)
+	f.mkOneTimeClause(t, "twodeps_a", "twodeps", "deposit", "completed")
+	f.mkOneTimeClause(t, "twodeps_b", "twodeps", "deposit", "completed")
+	aKey := "vtx.clause." + f.ids["twodeps_a"]
+	bKey := "vtx.clause." + f.ids["twodeps_b"]
+
+	first := f.projectLeaseAt(t, "twodeps")[0].Values
+	require.Equal(t, true, first["missing_depositReturn"])
+	pick, _ := first["depositClauseKey"].(string)
+	require.Contains(t, []string{aKey, bKey}, pick, "max() must pick one of the two charged deposits")
+
+	pickedName, otherKey := "twodeps_a", bKey
+	if pick == bKey {
+		pickedName, otherKey = "twodeps_b", aKey
+	}
+	f.aspect(t, pickedName, "status", "clauseStatus", map[string]any{"state": "returned", "returnedAt": "2027-07-03T09:00:00Z"})
+
+	second := f.projectLeaseAt(t, "twodeps")[0].Values
+	require.Equal(t, true, second["missing_depositReturn"], "the other charged deposit is still there")
+	require.Equal(t, otherKey, second["depositClauseKey"], "the passed-over clause is now the sole candidate")
+
+	f.aspect(t, "twodeps_a", "status", "clauseStatus", map[string]any{"state": "returned"})
+	f.aspect(t, "twodeps_b", "status", "clauseStatus", map[string]any{"state": "returned"})
+	third := f.projectLeaseAt(t, "twodeps")[0].Values
+	require.Equal(t, false, third["missing_depositReturn"], "both returned — the gap closes")
+	require.Equal(t, false, third["missing_deposit"])
 }

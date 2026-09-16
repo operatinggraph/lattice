@@ -95,7 +95,12 @@ func clauseDDL() pkgmgr.DDLSpec {
 			".terms.purpose naming what the clause is FOR — the mark a lens tells a purpose-built clause apart by " +
 			"where period alone cannot (a security deposit is a oneTime clause like any other one-time fee): " +
 			"leaseRentSettlement mints the deposit clause with purpose=deposit and reads it back by that token to " +
-			"return the deposit once the tenancy ends. Absent means no purpose — every clause minted without one. " +
+			"return the deposit once the tenancy ends. The deposit token is ONE shape — purpose=deposit is refused " +
+			"on anything but a oneTime computational clause, since a monthly clause completes on its final period " +
+			"and a judgment clause charges nothing, so neither could ever be returned for what was collected. " +
+			"Absent means no purpose — every clause minted without one. A flat amountCents is coerced to whole " +
+			"cents (a lens-computed dollars×100 float within a millionth of an integer is that integer; a " +
+			"fractional cent is refused InvalidArgument). " +
 			"Either kind may " +
 			"carry an optional " +
 			"conditionedOnKey (any live vertex, e.g. a " +
@@ -107,8 +112,15 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"SupersedeClause{clauseKey, <the same fields CreateClause takes>} (Fire V4 self-amendment) mints a " +
 			"replacement clause exactly like CreateClause, writes an amends link (new clause to amended clause), " +
 			"tombstones the amended clause's root (retracting its clauseSatisfaction row via anchor-tombstone " +
-			"retraction), and marks its .status superseded (audit). clauseKey must name a currently-live clause " +
-			"(no double-amend).",
+			"retraction), and marks its .status superseded (audit; pinned to the revision it hydrated at, so a " +
+			"charge completing the clause meanwhile conflicts rather than being overwritten). clauseKey must name " +
+			"a currently-live, ACTIVE clause: UnknownClause when tombstoned (no double-amend), ClauseNotActive when " +
+			"its .status — a required declared read, InvalidState when not hydrated — is completed, returned or " +
+			"anything but active, since re-minting a charged clause as a fresh active one would bill it again. " +
+			"The purpose token is inherited: a payload that names none keeps the amended " +
+			"clause's own, read from its .terms — a REQUIRED declared read on that shape (InvalidState when not " +
+			"hydrated), so an amendment can never silently untag a deposit and let leaseRentSettlement mint a " +
+			"second one; a payload that names a purpose overrides it.",
 		Script: clauseDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> this clause governs (required, validated alive)."},` +
@@ -134,12 +146,12 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"kind":             "\"computational\" (default) or \"judgment\". computational requires accountKey + an amount (flat or prorated); judgment requires inspectorKey.",
 			"prose":            "The legal paragraph a signer agreed to. Stored verbatim on the .prose aspect; never interpreted — the machine terms are the separate .terms aspect.",
 			"accountKey":       "Full vtx.account.<NanoID> key of the ledger account this clause charges. CreateClause validates it is alive and writes the chargesTo link (clause→account); the account key also flows into the clauseSatisfaction lens as the directOp target.",
-			"amountCents":      "The flat charge amount in integer cents when no proration trio is supplied; required (kind=computational), must be a positive number. Stored on the .terms aspect and flows type-preserved into the DebitAccount directOp's amountCents param when the clause is unsatisfied.",
+			"amountCents":      "The flat charge amount in integer cents when no proration trio is supplied; required (kind=computational), must be a positive whole number of cents (a float within a millionth of an integer is coerced to it; a fractional cent is refused). Stored on the .terms aspect and flows type-preserved into the DebitAccount directOp's amountCents param when the clause is unsatisfied.",
 			"period":           "computational only: \"oneTime\" (default) or \"monthly\". A monthly clause re-arms via the .status aspect's chargeValidUntil after each debit instead of completing once — on its term's anniversary grid when it carries validFrom/validUntil.",
-			"purpose":          "Optional token, ^[a-z][a-zA-Z0-9]{0,31}$ (InvalidArgument otherwise), recorded verbatim on .terms.purpose when supplied and absent otherwise. Names what the clause is FOR so a lens can tell it apart from any other clause of the same period — leaseRentSettlement mints the security deposit with \"deposit\" and returns it by the same token. Never interpreted by the clause script itself.",
+			"purpose":          "Optional token, ^[a-z][a-zA-Z0-9]{0,31}$ (InvalidArgument otherwise), recorded verbatim on .terms.purpose when supplied and absent otherwise. Names what the clause is FOR so a lens can tell it apart from any other clause of the same period — leaseRentSettlement mints the security deposit with \"deposit\" and returns it by the same token; \"deposit\" is refused on anything but a oneTime computational clause. SupersedeClause inherits the amended clause's token when the payload names none.",
 			"validFrom":        "Optional, monthly only, with validUntil: the term's start (RFC3339, canonicalized to UTC). Stored on .terms; the clauseSatisfaction lens bills the first period once a recorded lapse reaches it, and DebitAccount computes every later due date from it.",
 			"validUntil":       "Optional, monthly only, with validFrom: the term's exclusive end (RFC3339, canonicalized to UTC; must be after validFrom). Stored on .terms; no period starting at or after it is billed, and the clause completes once its next due reaches it.",
-			"clauseKey":        "SupersedeClause: full vtx.clause.<NanoID> key of the live clause being amended. BackfillClauseTerm: the live, untermed, monthly computational clause to stamp a term onto (AlreadyTermed if it has one). ShortenClauseTerm: the live, already-termed monthly clause to shorten (NotTermed if it carries no term yet).",
+			"clauseKey":        "SupersedeClause: full vtx.clause.<NanoID> key of the live, ACTIVE clause being amended (ClauseNotActive once charged or returned; its .status is a required read). BackfillClauseTerm: the live, untermed, monthly computational clause to stamp a term onto (AlreadyTermed if it has one). ShortenClauseTerm: the live, already-termed monthly clause to shorten (NotTermed if it carries no term yet).",
 			"rateCents":        "Fire V3 proration input: the full-period rate in integer cents. Combined with periodDays+daysOccupied to compute amountCents once, at creation, in exact Starlark bignum integer arithmetic (no float division). Stored on .terms for audit alongside the computed amountCents.",
 			"periodDays":       "Fire V3 proration input: days in the full period rateCents is denominated over. Stored on .terms for audit.",
 			"daysOccupied":     "Fire V3 proration input: days actually occupied this partial period; must be positive and at most periodDays. Stored on .terms for audit.",
@@ -310,7 +322,7 @@ func clauseDDL() pkgmgr.DDLSpec {
 					"supersededBy:<newClauseKey>} (audit). Emits clause.superseded{clauseKey:<old>, " +
 					"supersededBy:<new>} then clause.created{...}. Returns the new clause's primaryKey. A second " +
 					"SupersedeClause naming the same old clauseKey is rejected (UnknownClause — already " +
-					"tombstoned).",
+					"tombstoned); one naming a completed or returned clause is rejected ClauseNotActive.",
 			},
 		},
 	}
@@ -475,9 +487,11 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"{state, completedAt?, chargeValidUntil?, supersededAt?, supersededBy?, returnedAt?}, state ∈ {active, " +
 			"completed, superseded, returned}. Non-sensitive. Created active by CreateClause (or SupersedeClause minting the replacement " +
 			"clause, Fire V4); updated by loftspace-ledger's DebitAccount when it posts the " +
-			"authorizing charge, or by SupersedeClause on the AMENDED clause (state→superseded, supersededAt " +
+			"authorizing charge (an UNCONDITIONED update), or by SupersedeClause on the AMENDED clause — only while " +
+			"it is still active — (state→superseded, supersededAt " +
 			"stamped, supersededBy = the new clause's key — audit only, since the convergence retraction is the " +
-			"root tombstone, not this state) (an UNCONDITIONED update in every case). For a period=oneTime clause: state → " +
+			"root tombstone, not this state; pinned to the hydrated revision, so a charge landing meanwhile " +
+			"conflicts). For a period=oneTime clause: state → " +
 			"completed + completedAt stamped — audit/display bookkeeping only, since the clauseSatisfaction " +
 			"lens's convergence gate for that case derives from the authorizedBy transaction link, not this aspect " +
 			"(see the design's R3). For a period=monthly clause (Fire V3): state STAYS active and chargeValidUntil " +
@@ -532,7 +546,7 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "clause status aspect — superseded (Fire V4)",
 				Payload:         map[string]any{"state": "superseded", "supersededAt": "2026-07-02T14:00:00Z", "supersededBy": "vtx.clause.<newNanoID>"},
-				ExpectedOutcome: "Updated (op:update, unconditioned) by SupersedeClause on the amended clause, atomically alongside the root tombstone that retracts its clauseSatisfaction row.",
+				ExpectedOutcome: "Updated (op:update, pinned to the hydrated revision) by SupersedeClause on the amended clause — active until now — atomically alongside the root tombstone that retracts its clauseSatisfaction row.",
 			},
 		},
 	}

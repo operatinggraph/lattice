@@ -198,7 +198,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"ledgerHistory":                 {narrow, "account clause leaseapp transaction", modeLabel},
 	"oneBillCafeEntries":            {narrow, "cafeaccount cafetransaction leaseapp", modeRelation},
 	"oneBillClinicEntries":          {narrow, "clinicaccount clinictransaction identity leaseapp patient", modeLabel},
-	"oneBillRentEntries":            {narrow, "account leaseapp transaction", modeRelation},
+	"oneBillRentEntries":            {narrow, "account clause leaseapp transaction", modeLabel},
 	"oneBillWellnessEntries":        {narrow, "identity leaseapp wellnessaccount wellnesstransaction", modeLabel},
 	"opCatalog":                     {narrow, "meta permission role", modeRelation},
 	"pastDueAppointments":           {narrow, "appointment patient provider", modeRelation},

@@ -887,9 +887,11 @@ func leaseDepositAspectDDL() pkgmgr.DDLSpec {
 			"at the SAME first-approve event that CREATE-ONLY-stamps .tenancy (recordedAt = that same op.submittedAt " +
 			"instant, canonical-UTC RFC3339) — never on a decline, a re-approve, or any later listing edit. Written " +
 			"only when the listing carries a positive depositAmount; no aspect when it does not (the unit takes no " +
-			"deposit). Read by the leaseApplicationsRead / landlordLeaseApplicationsRead read models (depositAmount); " +
-			"renewalsRead does NOT project it — a renewal keeps the deposit, nothing there reads it. Declaration-only: " +
-			"no op handler.",
+			"deposit). Read by the leaseApplicationsRead / landlordLeaseApplicationsRead read models (depositAmount) " +
+			"and by semantic-contracts' leaseRentSettlement lens, whose missing_deposit gap mints the one-time " +
+			"purpose=deposit clause for this amount once the lease has its ledger account (and whose " +
+			"missing_depositReturn returns it on .tenancy.endedAt); renewalsRead does NOT project it — a renewal " +
+			"keeps the deposit, nothing there reads it. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"amount":{"type":"number"},"recordedAt":{"type":"string"}},` +
