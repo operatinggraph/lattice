@@ -590,7 +590,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   `Σ_arms(pages × pageLimit) / perCommit` against the script's own page constants; price a `validUntil`/`freshUntil` window as a vendor-validity policy over the stack's lifetime and name
   what retires the superseded artifact; for a gap over a growing set prove the FIRST dispatch closes it (aggregate to
   the run's extreme, pin a re-projection after the op's write) — Weaver has no episode boundary of its own; for every
-  ARM of the op (no-op, collapse, complete) pin the gap FALSE over the state that arm leaves.
+  ARM of the op (no-op, collapse, complete) pin the gap FALSE over the state that arm leaves. Sighting: a lens-computed
+  param the dispatched op can refuse on SHAPE (`whole_cents` on a fractional-dollar `depositAmount`) is a gap refused on every
+  pass — pin the param's admissible domain at its source (loftspace deposit, 2026-09-15, caught cold).
 - **A standing `scope=any` write on an entity with no workplace confines by the target's STATE MACHINE, not by
   liveness** — a bind accepting any live identity lets a desk actor attach a stranger's record to their own login and
   inherit its grants (identity-domain confines to `unclaimed` for this reason). Minted: clinic `BindPatientIdentity`
@@ -613,7 +615,8 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   that status, in every package anchoring the type, deciding each site; for a link a refund/settlement mint walks,
   list every op that can reach the walk and the states each leaves the anchor in — a probe on one exists on all or
   the exclusion is stated per pair; nothing runs before the walk that proves the caller may name the target.
-  Mechanize on the next sighting.
+  Second minter: `SupersedeClause` re-mints `.terms` from its payload, so a `purpose` the deposit gaps read was dropped
+  or changed on supersede (semantic-contracts, 2026-09-15, caught cold — now equal-or-omitted). Mechanize on the next sighting.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
@@ -644,7 +647,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   can be absent for a live vertex, else absence means undeclared → fail closed (the negative vector submits WITHOUT
   the declaration); state the recorded event's exact meaning at the reader; when a fire breaks an invariant two
   fields shared (`endedAt = leaseEnd`), grep every reader of the proxy field repo-wide; a date fact is stored as its
-  UTC calendar day.
+  UTC calendar day. Sightings (loftspace deposit, 2026-09-15, caught cold): `.status.state = completed` read as "charged"
+  when a termed monthly clause also completes on its final period — the archetype is a conjunct; `depositHeldCents`
+  (charged − returned, custody) read as "unpaid" on the balance line — the ledger attributes no payment to a clause.
 - **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from** — `mint_clause` wrote
   `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires; the inbound walk bound fine, a
   clause-anchored `(c)-[:governs]->(l:leaseapp)` never could (`adjacency/store.go` `OtherType: dstType`). Check: a
@@ -656,7 +661,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   `DecideLeaseApplication` derived the tenancy from them (a zero term ended a lease at approval; `2026-9-15` died
   unnamed). Minted: lease-signing (2026-09-14). Check: when a script starts reading an aspect another op writes, open
   that writer's validation and refuse the malformed shapes THERE (`InvalidTerms`), storing the normalized value; the
-  reader keeps a named refusal for rows that predate the check.
+  reader keeps a named refusal for rows that predate the check. Second sighting: `rentAmount` / `depositAmount` /
+  `requestedRent` became whole-cent-load-bearing when `mint_clause` gained `whole_cents` (2026-09-15, caught cold) —
+  the three sources now refuse more than two decimals.
 - **A mirror that drops one of the precedent's checks or branches drops the INVARIANT it enforced** — clinic-ledger's
   `reversesRef` kept café's liveness check and dropped its ownership check (a desk waiver could disarm another
   patient's `missing_reversal`; the descriptor field then reached the self leg, 2026-09-14); wellness's arrears

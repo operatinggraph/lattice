@@ -67,6 +67,9 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   2026-09-14, caught cold), narrowing the other way:** a courtesy filter (`startsAt <= now`) tighter than the op's
   predicate excluded the primary flow — a checked-in visit carries no clock. Not gate-able generically; the mandated
   shape is the goja pin over a fixture holding every non-terminal status the op admits (`ledger_ui_test.go`).
+  **Fourth sighting (LoftSpace deposit strip, 2026-09-15, caught cold):** "incl. security deposit $D" applied the
+  ledger's custody predicate (charged − returned) to a payment figure — a partial payment read as a whole deposit owed;
+  now "of which up to $min(balance, held)".
 - **An op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`** — a
   rationale comment naming an exemption-less op (the instructor identity bind) reddened `lint-static` after
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats

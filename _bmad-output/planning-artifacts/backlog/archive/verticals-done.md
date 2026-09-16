@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-14 · `71912135` · A lost application is a recorded fact — `RecordApplicationLoss` writes `.decision = lost` off `missing_lossRecorded`; every liveness gate, `SignLease` and every landlord surface read it; 52/52 live rivals recorded.
 - 2026-09-14 · `4fe3ecef` · A losing applicant is told the unit went to someone else — both application read lenses project `lost_to_rival`; banner + landlord row read it; expired and lost-application tasks read-only; all 52 live rivals read it.
 - 2026-09-14 · `4fe3ecef` · A rent charge names its billing period and due date — `DebitAccount` stamps `periodStart`/`periodEnd`/`dueAt` on the `.entry` from the clause grid; both lenses project them; both statements say "covers … · due …".
 - 2026-09-14 · `b56bc0f0` · The lease is signed on the applicant's terms — `.tenancy` derives from `.terms` (listing fallback, malformed terms refused) and records `rentAmount`; both cards state what the signature commits to; Priya approved live.

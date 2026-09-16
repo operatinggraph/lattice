@@ -55,8 +55,8 @@ aspect at the approval event).
    optional, `> 0` when present; absent = the unit takes no deposit). `SetListing` accepts it via `optional_number`
    and REPLACES it like every other field (a re-submit without it clears it — the edit form pre-fills it);
    `SetListingStatus` preserves it through `copy_data` unchanged. The DDL / OpMeta / package doc text names it; the
-   Facet `SetListing` descriptor gains the field. `availableListings` projects `depositAmount`; `landlordUnitsRead`
-   projects `unit_deposit`.
+   Facet `SetListing` descriptor gains the field. `availableListings` projects `depositAmount` — the browse card, the landlord unit console and the edit
+   form's pre-fill all read it (`landlordUnitsRead` projects nothing: no reader).
 2. **The deposit is recorded on the lease at approval, as its own aspect: `.deposit = {amount, recordedAt}`**
    (class `leaseDeposit`), written create-only by `DecideLeaseApplication` on the same first-approve branch that
    stamps `.tenancy`, from `listing.depositAmount` when it is a positive number, else no aspect. The listing is a
@@ -65,49 +65,68 @@ aspect at the approval event).
    protected application read lenses (`leaseApplicationsRead`, `landlordLeaseApplicationsRead`) project
    `deposit_amount`; `renewalsRead` does not (a renewal keeps the deposit; nothing there reads it).
 3. **`CreateClause` gains an optional `purpose` token recorded on `.terms.purpose`** (`^[a-z][a-zA-Z0-9]{0,31}$`,
-   `InvalidArgument` otherwise; absent = no purpose, every existing clause). `SupersedeClause` inherits it through
-   `mint_clause`. The purpose is what lets a lens tell a deposit from any other one-time fee — the same role
+   `InvalidArgument` otherwise; absent = no purpose, every existing clause). `SupersedeClause` keeps the amended clause's recorded purpose — a payload `purpose` is admitted only when it equals
+   it (both absent counts) — and refuses `ClauseNotActive` on a `completed` / `returned` clause (a charged clause
+   re-minted as `active` would bill again; its `.status` is a required read, the `superseded` write pinned to the
+   hydrated revision). A deposit clause's `purpose` is refused on any other shape: `deposit` is a `oneTime`
+   `computational` clause. The purpose is what lets a lens tell a deposit from any other one-time fee — the same role
    `period = 'monthly' AND conditioned <> true` plays for rent.
 4. **`leaseRentSettlement` mints and returns the deposit with two new gaps** (every column declared):
-   - `missing_deposit` = `accountKey <> null AND depositAmount <> null AND depositClauseCount = 0`, where
+   - `missing_deposit` = `accountKey <> null AND depositAmount <> null AND endedAt = null AND depositClauseCount = 0`
+     (an ended tenancy with no deposit clause is never minted, billed and refunded), where
      `depositAmount = l.deposit.data.amount`, `depositCents = CASE WHEN depositAmount = null THEN null ELSE
      depositAmount * 100 END` (the `termRentCents` guard), `depositClauseCount = count(DISTINCT CASE WHEN
-     c.terms.data.purpose = 'deposit' THEN c.key ELSE null END)`. Dispatch `CreateClause{leaseAppKey, accountKey,
+     c.terms.data.purpose = 'deposit' THEN c.key ELSE null END)` — purpose-only: a mis-shaped `deposit` clause can
+     only be seeded or legacy data, and the money-conservative reading of one is "the landlord installed a deposit"
+     (the mint stays shut, the return never opens). Dispatch `CreateClause{leaseAppKey, accountKey,
      amountCents: row.depositCents, period: "oneTime", purpose: "deposit", prose: "Security deposit, held for the
      tenancy and returned when it ends."}`. It waits on the account like `missing_clause` does (the account opens
      once `requestedRent` is recorded) and opens at approval, before the signature, like the rent clause — the
      one-time archetype then bills it at once through `clauseSatisfaction` → `DebitAccount`, unchanged.
-   - `missing_depositReturn` = `endedAt <> null AND depositClauseKey <> null`, where `endedAt =
+   - `missing_depositReturn` = `accountKey <> null AND endedAt <> null AND depositClauseKey <> null`, where `endedAt =
      l.tenancy.data.endedAt` and `depositClauseKey = max(CASE WHEN c.terms.data.purpose = 'deposit' AND
-     c.status.data.state = 'completed' THEN c.key ELSE null END)` — `completed` is the state `DebitAccount` leaves a
+     c.terms.data.period = 'oneTime' AND c.terms.data.kind = 'computational' AND c.status.data.state = 'completed'
+     THEN c.key ELSE null END)` (a monthly clause also reaches `completed`, on its final period) — `completed` is the state `DebitAccount` leaves a
      charged one-time clause in, so an uncharged deposit (still `active`) is not returned before it is charged, and
      a `returned` clause drops out, closing the gap. Dispatch `ReturnDeposit{leaseAppKey, clauseKey:
      row.depositClauseKey, accountKey}` (loftspace-ledger, Class `transaction`; Reads: the account, the lease's
-     `.tenancy`, the clause, its `.terms`, `.status`, and the deterministic `chargesTo` / `governs` link keys;
-     OptionalReads: the account's `.arrears` — `derive_reads` covers it server-side).
+     `.tenancy`, the clause, its `.terms`, `.status`; OptionalReads: the account's `.arrears`). The deterministic
+     `chargesTo` / `governs` link keys span two row columns, which a `Params` template cannot express, so the op's own
+     `derive_reads` hydrates them (with the account root, the lease root and `.arrears`) as optionalReads for every
+     submitter — absent ⇒ the op's refusal, never a live read.
 5. **`ReturnDeposit` (loftspace-ledger, operator `any`, Weaver's dispatch) posts the deposit back as a credit.**
-   It reads the clause's `.terms` and refuses `NotADeposit` (`purpose <> 'deposit'`), reads `.status` and refuses
-   `DepositNotCharged` (`state = 'active'`) / no-ops with empty mutations on `returned` (the `EndTenancy` idempotent
-   shape — the gap is closed, a re-dispatch is a race), reads the lease's `.tenancy` and refuses `TenancyNotEnded`
-   (`endedAt` absent), and proves the clause `chargesTo` the payload account and `governs` the payload lease off the
-   deterministic link keys (`ClauseAccountMismatch` / `ClauseLeaseMismatch`). It writes one `transaction`
+   It proves the account, clause and lease roots live (`UnknownAccount` / `UnknownClause` / `UnknownLeaseApplication`),
+   reads the clause's `.terms` and refuses `NotADeposit` unless `purpose = 'deposit'`, `period = 'oneTime'`, `kind =
+   'computational'` and `amountCents > 0`, reads `.status` (absent ⇒ `InvalidState`, CreateClause writes it
+   unconditionally), reads the lease's `.tenancy` and refuses `TenancyNotEnded` (`endedAt` absent), proves the clause
+   `chargesTo` the payload account and `governs` the payload lease off the deterministic link keys
+   (`ClauseAccountMismatch` / `ClauseLeaseMismatch`), and only then no-ops with empty mutations on `returned` (the
+   `EndTenancy` idempotent shape — the gap is closed, a re-dispatch is a race; a mis-addressed submit refuses first)
+   or refuses `DepositNotCharged` on any other state than `completed`. It writes one `transaction`
    (`.entry = {type: "credit", amountCents: the clause's amountCents, postedAt, memo: "Security deposit returned"}`,
    `postedTo` the account, `authorizedBy` the clause — the chain of custody `DebitAccount` records), updates the
-   clause `.status` under OCC to `{state: "returned", returnedAt, …every recorded field kept}` (one more writer of
-   `.status` after `CreateClause` and `DebitAccount`, serialized on the hydrated revision), and marks `.arrears`
-   stale exactly as `post_entry` does (a credit moves the FIFO). The return credit is an ordinary credit on the
+   clause `.status` to `{state: "returned", returnedAt, …every recorded field kept}` with an explicit
+   `expectedRevision` (the hydrated revision — an explicit pin is a terminal conflict, never a §3.2 re-hydrate retry,
+   so a racing second return is rejected rather than replayed), emits `loftspace.depositReturned`, and marks
+   `.arrears` stale through the `arrears_stale_mark` helper `post_entry` shares (a credit moves the FIFO). The return credit is an ordinary credit on the
    lease's account: it nets against whatever the tenant still owes (the final rent period, arrears) and the remainder
    reads "Credit balance: $X" — the refund owed to the tenant. A payout verb, deductions and interest are product
    rules the PO did not file (alternatives).
-6. **Both statements hold the deposit apart.** `ledgerHistory` projects `c.terms.data.purpose AS clausePurpose`;
-   `ledger.go` threads `ClausePurpose` and computes `depositHeldCents` (Σ debits − Σ credits over deposit rows) +
-   `depositChargedAt` / `depositReturnedAt` on `/api/ledger` and `/api/one-bill`. The FE adds one "Security deposit"
+6. **Both statements hold the deposit apart.** `ledgerHistory` and one-bill's `rentEntries` project `c.terms.data.purpose AS clausePurpose`;
+   `ledger.go` / `one_bill.go` thread `ClausePurpose` and compute `depositHeldCents` (Σ debits − Σ credits over deposit
+   rows — custody, not what is unpaid: a payment names no clause) + `depositChargedCents` / `depositChargedAt` /
+   `depositReturnedAt` on `/api/ledger` and `/api/one-bill`. The FE adds one "Security deposit"
    line above the balance on the landlord ledger and the tenant statement: "Security deposit $D · held since
    <date>" / "Security deposit $D · returned <date>"; deposit rows carry a "Deposit" tag in place of the
-   covers-period label; `rentBalanceLine` appends " · incl. security deposit $D" while `depositHeldCents > 0` so the
-   owed figure is never read as rent alone. The listing card (browse), the landlord unit console and the edit /
+   covers-period label; `rentBalanceLine` appends " · of which up to $min(balance, held) is the security deposit" while a balance is owed
+   and a deposit is held, so the owed figure is never read as rent alone (the ledger cannot attribute a payment to the
+   deposit, so it says "up to"). The tenant's "Pay rent" panel shows the bare balance; the strip is on the adjacent
+   Statement panel (`refreshStatementBody`, the one-bill read). The listing card (browse), the landlord unit console and the edit /
    post forms show "Security deposit $D"; the terms panel and the landlord application card show it once recorded
-   on the lease (`depositAmount` from the read lenses). Dates render by `fmtUTCDate`.
+   on the lease (`depositAmount` from the read lenses). Every amount source (`SetListing` rent + deposit, the
+   application's `requestedRent`, the renewal's rent) refuses more than two decimals — `mint_clause` coerces
+   `amountCents` to whole cents and refuses a fractional one, so a fractional-dollar source would otherwise leave the
+   mint gap refused on every Weaver pass. Dates render by `fmtUTCDate`.
 7. **Proof.** Package tests: `SetListing` accepts / validates / clears `depositAmount`, `SetListingStatus` keeps it;
    `DecideLeaseApplication` records `.deposit` from the listing and records none for an absent or non-positive
    figure; `CreateClause` `purpose` accepted / refused / absent; cypher pins of both gaps over one fixture set (no
@@ -220,3 +239,38 @@ not file — alternatives table, not rows).
 **7. Non-goals.** Deductions, interest, a payout verb; a deposit on renewals (kept, not re-billed); café / wellness
 ledgers; retro-fitting a deposit onto an already-approved lease (`.deposit` is recorded at the approval event only);
 Facet's ledger surfaces.
+
+### Build note (2026-09-15)
+
+Shipped `ec274abe` (merge of `f561c439` · `e46dce40` · `aa6b8f88`) + `6b47d0c1`; brief `1f78958f`. CI reddened once on the
+merge: the app's protected read now selects `deposit_amount` and the two Postgres-gated RLS fixtures (`rls_columns_test.go`,
+skipped locally without `POSTGRES_TEST_DSN`) lacked the column (502 on every read-boundary vector — reproduced locally
+against the stack's Postgres with CI's DSN, fixed, revert-proved), and the notice vector's steady-state window opened
+before the tenancyEnd row had re-projected the relist (a KV wait followed by a read-model assertion — the vector now waits
+for the row). Live on the shared stack (loftspace-domain 0.13.2, lease-signing 0.41.2, semantic-contracts 0.7.3,
+loftspace-ledger 0.8.2, one-bill 0.5.1 diff-applied; `landlordLeaseApplicationsRead` latched on the new column between
+the install and `provision-readpath`, resumed with `lattice lens resume <NanoID> --actor <Loupe operator>` — the CLI takes
+the bare NanoID, a dotted `vtx.meta.…` never matches the responder's `*` token; `bin/loftspace-app` cycled): Nora Vance's
+40 Riverside Walk took `SetListing` with `depositAmount: 2400` through the Gateway as the landlord; `availableListings`
+and the unit console read `depositAmount 2400`; Riley Chen's existing lease on it carries no `.deposit` (recorded at
+approval only) and its `/api/ledger` reads `depositHeldCents 0`. Every unit of hers is leased, so the approval → mint →
+charge → return path is proven by `TestLeaseConvergence_DepositChargedAndReturned`, not live.
+
+Deviations from the brief (folded into the body above): `landlordUnitsRead` projects no `unit_deposit` (no reader);
+the custody links ride `derive_reads`, not the dispatcher's `Reads`; `missing_deposit` conjoins `endedAt = null`,
+`missing_depositReturn` conjoins `accountKey <> null` and the `oneTime` `computational` archetype; `ReturnDeposit` refuses
+before its no-op and proves the lease root; `SupersedeClause` keeps the recorded purpose, refuses `ClauseNotActive`, reads
+`.status` / `.terms` as required and pins its `superseded` write; `mint_clause` coerces whole cents and every amount source
+refuses more than two decimals; `ReturnDeposit` has no courtesy lines (no client site — `lint-refusal-courtesy` governs
+sites, not ops); the balance line says "of which up to $min(balance, held)"; one-bill projects `clausePurpose`; the deposit
+row's tag replaces its memo; the unit card is currency-aware.
+
+Review classification (a cold pass over Inc 1+2, a cold cumulative pass over the whole diff, three fix rounds):
+**design-gap** — the archetype pin on `completed` (a termed monthly clause completes too), purpose inheritance vs override
+on supersede, `endedAt = null` on the mint, whole cents at the reader vs the three sources, the balance-line custody /
+unpaid conflation (`_packages.md` sightings on the recorded-fact, "leg", cadence and load-bearing-field entries;
+`vertical-apps.md` sighting on the count-predicate entry); **implementation-bug** — the no-op before custody, the
+unproven lease root, `SupersedeClause` accepting a `completed` clause (pre-existing, closed here); **brief-gap** — the
+grounding named `refreshTenantLedgerBody` as the tenant statement (it is `refreshStatementBody`), the RLS column fixture
+(a Postgres-gated test the brief's green list never ran); **review-over-reach** — the explicit `expectedRevision` pin
+(precedent-consistent, kept with the trade stated in the comment). Adjacent finds: none open.
