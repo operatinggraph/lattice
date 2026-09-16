@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.27.13
+version: 0.28.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -146,6 +146,10 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: wellnessRefundDetail
       class: meta.ddl.aspectType
+    - canonicalName: bookingChangeNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: bookingChangeNotification
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: wellnessStudios
       adapter: nats-kv
@@ -249,6 +253,9 @@ declares:
     - operationType: PromoteWaitlistedBookings
       scope: any
       grantsTo: [operator]
+    - operationType: RecordBookingChangeNotification
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: wellnessOrphanedBookingSettlement
       lensRef: wellnessOrphanedBookingSettlement
@@ -270,3 +277,4 @@ declares:
     - operationType: SetStudioProfile
     - operationType: CreateInstructor
     - operationType: SetInstructorProfile
+    - operationType: RecordBookingChangeNotification
