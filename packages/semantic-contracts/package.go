@@ -11,8 +11,11 @@
 //   - The `clause` vertex type (DDL `clause`) — CreateClause mints
 //     vtx.clause.<NanoID> (root data {} per D5) governing a lease: a .prose
 //     aspect (the legal paragraph), a .terms aspect ({kind, conditioned,
-//     amountCents?, period, validFrom?, validUntil?, basis?, rateCents?,
-//     periodDays?, daysOccupied?}), and a .status aspect ({state}).
+//     amountCents?, period, purpose?, validFrom?, validUntil?, basis?,
+//     rateCents?, periodDays?, daysOccupied?}), and a .status aspect
+//     ({state}). `purpose` is an optional token naming what the clause is
+//     for — the mark a lens tells a purpose-built clause apart by where
+//     period alone cannot (the security deposit is purpose=deposit).
 //     `kind=computational` (default) charges a ledger account (chargesTo
 //     link) — `period` selects "oneTime" (default) or "monthly" (recurring),
 //     a monthly clause may carry a term (validFrom/validUntil, both or
@@ -74,7 +77,15 @@
 //     op re-keys such a link as it terms the clause. Its fifth gap,
 //     missing_termShortened → directOp(ShortenClauseTerm), caps a termed
 //     clause running past a recorded notice's moveOutAt at max(moveOutAt,
-//     validFrom) — one clause per pass, the same shape.
+//     validFrom) — one clause per pass, the same shape. Its two deposit
+//     gaps (the LoftSpace "a lease takes a security deposit" design):
+//     missing_deposit → directOp(CreateClause) mints a oneTime
+//     purpose=deposit clause for the amount the lease's .deposit aspect
+//     recorded at approval, which clauseSatisfaction then bills at once;
+//     missing_depositReturn → directOp(ReturnDeposit) (loftspace-ledger),
+//     once the lease's .tenancy records endedAt and the deposit clause is
+//     completed (charged), credits the deposit back on the lease's account
+//     and marks the clause returned, which closes the gap.
 //
 // loftspace-ledger's DebitAccount op accepts an optional clauseRef: when
 // present it writes the lnk.transaction.authorizedBy.clause audit link and
@@ -100,7 +111,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "semantic-contracts",
-	Version: "0.6.0",
+	Version: "0.7.0",
 	Description: "LoftSpace 'Executable Paper' reference package (fixed/one-time, conditioned, judgment, " +
 		"recurring monthly — termed to a calendar-month period grid or untermed — and prorated computational " +
 		"clauses, plus self-amendment and early shortening): the clause vertex type " +
@@ -114,8 +125,9 @@ var Package = pkgmgr.Definition{
 		"has minted without one, and shortening a termed clause to a recorded early move-out (missing_terms → " +
 		"directOp(BackfillLeaseTerms), missing_account → directOp(LoftspaceCreateAccount), missing_clause → " +
 		"directOp(CreateClause) with the term, missing_term → directOp(BackfillClauseTerm), " +
-		"missing_termShortened → directOp(ShortenClauseTerm), dollars→cents conversion in the lens). Depends " +
-		"lease-signing + loftspace-ledger.",
+		"missing_termShortened → directOp(ShortenClauseTerm), missing_deposit → directOp(CreateClause) with " +
+		"purpose=deposit, missing_depositReturn → directOp(ReturnDeposit), dollars→cents conversion in the lens). " +
+		"Depends lease-signing + loftspace-ledger.",
 	Depends:       []string{"lease-signing", "loftspace-ledger"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

@@ -220,7 +220,7 @@ func TestPackage_CreateLeaseDocInstanceFloorsTenantNameAbsence(t *testing.T) {
 //     losing Protected would move identity-bearing rows onto an open surface, so
 //     the flag is pinned per lens, not just the lens name.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 16; got != want {
+	if got, want := len(Package.DDLs), 17; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 11; got != want {
@@ -259,6 +259,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"decidedProfileSnapshot", "meta.ddl.aspectType"},
 		{"tenantName", "meta.ddl.aspectType"},
 		{"tenancyNotice", "meta.ddl.aspectType"},
+		{"leaseDeposit", "meta.ddl.aspectType"},
 		{"leaseServiceInstance", "meta.ddl.vertexType"},
 		{"leaseServiceReply", "meta.ddl.vertexType"},
 		{"leaseServiceDispatch", "meta.ddl.vertexType"},

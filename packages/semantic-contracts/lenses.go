@@ -58,8 +58,9 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: LeaseRentSettlementTarget + ".{actorSuffix}",
-				BodyColumns: []string{"violating", "missing_terms", "missing_account", "missing_clause", "missing_term", "missing_termShortened", "entityKey", "leaseAppKey", "accountKey",
-					"leaseStart", "termStart", "leaseEnd", "termRentCents", "untermedClauseKey", "overrunClauseKey", "moveOutAt"},
+				BodyColumns: []string{"violating", "missing_terms", "missing_account", "missing_clause", "missing_term", "missing_termShortened", "missing_deposit", "missing_depositReturn", "entityKey", "leaseAppKey", "accountKey",
+					"leaseStart", "termStart", "leaseEnd", "termRentCents", "untermedClauseKey", "overrunClauseKey", "moveOutAt",
+					"depositAmount", "depositCents", "endedAt", "depositClauseCount", "depositClauseKey"},
 				EmptyBehavior: "delete",
 				KeyColumn:     "entityId",
 				Freshness:     "auto",
@@ -73,8 +74,9 @@ func Lenses() []pkgmgr.LensSpec {
 // approve-readiness floor already requires the signature, scripts.go)
 // projects a row and needs an agreed rent, then a ledger account, then a
 // recurring monthly rent clause for its CURRENT term — and any monthly clause
-// it already has minted without a term gets one — in four gap columns:
-// `missing_account`/`missing_clause` mirror cafe-domain's tabSettlement
+// it already has minted without a term gets one, a recorded security deposit
+// is minted as a one-time clause and returned once the tenancy ends — in its
+// gap columns: `missing_account`/`missing_clause` mirror cafe-domain's tabSettlement
 // missing_account → missing_charge shape exactly (lenses.go), except the
 // second gap here mints a CLAUSE, not a charge, because rent's actual
 // recurring billing is clauseSatisfaction's job (above) once the clause
@@ -157,6 +159,50 @@ func Lenses() []pkgmgr.LensSpec {
 //     renewal's clause overrunning the same notice, say) is the sole remaining
 //     max() and is selected on the very next pass, never starved behind a
 //     candidate that no longer needs picking.
+//   - `missing_deposit` — the lease records a security deposit
+//     (l.deposit.data.amount, the figure DecideLeaseApplication copied from
+//     the unit's listing at approval — recorded at the event, so a listing
+//     edited afterwards never re-prices what this lease owes), the ledger
+//     account exists, and no clause governing this lease carries
+//     .terms.purpose = 'deposit' (depositClauseCount, the same
+//     count(DISTINCT CASE WHEN ... THEN c.key ELSE null END) existence check
+//     termClauseCount is). `purpose` is the shape filter: a deposit clause
+//     is a oneTime computational clause like any other one-time fee (a
+//     lockout charge, a prorated amenity fee), so period alone cannot tell
+//     it apart, and prose is free text a landlord-installed clause could
+//     repeat — the recorded token is what a lens reads as the fact of what
+//     the clause is for, the role period=monthly + conditioned<>true plays
+//     for rent. Weaver dispatches CreateClause{leaseAppKey, accountKey,
+//     amountCents: depositCents, period: "oneTime", purpose: "deposit",
+//     prose: <literal>} (this package); the oneTime archetype then bills it
+//     at once through clauseSatisfaction → DebitAccount, which marks the
+//     clause completed. Waits on the account exactly as missing_clause does
+//     (accountKey <> null) and is independent of it: a lease with a rent
+//     clause and no deposit clause opens only this gap, and a deposit clause
+//     never counts toward termClauseCount (it is not monthly). Closes on the
+//     first mint — one clause per lease, and a lease with no .deposit never
+//     opens it. depositCents is the lens's own ×100 conversion of the
+//     recorded dollar amount, CASE-guarded exactly like termRentCents below.
+//   - `missing_depositReturn` — the tenancy has ended (l.tenancy.data.endedAt,
+//     EndTenancy's recorded fact — the instant every consumer of a move-out
+//     keys on, never the notice's intention or the term's scheduled end) and
+//     a deposit clause governing this lease is CHARGED: depositClauseKey is
+//     max(CASE WHEN purpose = 'deposit' AND status.state = 'completed' THEN
+//     c.key ELSE null END), the one-per-pass shape untermedClauseKey uses.
+//     `completed` is the charged conjunct because it is the state
+//     DebitAccount's own one-time write leaves the clause in once the
+//     authorizing debit has posted — so a deposit minted but not yet billed
+//     (still `active`) is never returned before it is charged, and a clause
+//     ReturnDeposit has already marked `returned` drops out of the CASE,
+//     which is what closes the gap: over every state ReturnDeposit leaves
+//     (the credit, the idempotent no-op on an already-returned clause), the
+//     column reads false. The accountKey <> null conjunct is what lets the
+//     dispatch template row.accountKey (Weaver refuses a null param) — a
+//     charged clause implies the account, but the gate states it rather
+//     than relies on it. Weaver dispatches ReturnDeposit{leaseAppKey,
+//     clauseKey: depositClauseKey, accountKey} (loftspace-ledger), which
+//     posts the deposit back as a credit authorizedBy the clause and marks
+//     it returned.
 //
 // The term the rent clause covers is the lease's CURRENT one. termStart is
 // l.tenancy.data.termStart — the renewed term's start, which SignRenewal
@@ -217,6 +263,10 @@ WITH
   coalesce(l.tenancy.data.termStart, l.tenancy.data.leaseStart) AS termStart,
   coalesce(l.tenancy.data.rentAmount, l.terms.data.requestedRent) AS termRent,
   l.notice.data.moveOutAt AS moveOutAt,
+  l.deposit.data.amount AS depositAmount,
+  l.tenancy.data.endedAt AS endedAt,
+  count(DISTINCT CASE WHEN (c.terms.data.purpose = 'deposit') THEN c.key ELSE null END) AS depositClauseCount,
+  max(CASE WHEN (c.terms.data.purpose = 'deposit') AND (c.status.data.state = 'completed') THEN c.key ELSE null END) AS depositClauseKey,
   count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = coalesce(l.tenancy.data.termStart, l.tenancy.data.leaseStart)) THEN c.key ELSE null END) AS termClauseCount,
   count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = null) THEN c.key ELSE null END) AS untermedClauseCount,
   max(CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = null) THEN c.key ELSE null END) AS untermedClauseKey,
@@ -233,13 +283,20 @@ RETURN
   untermedClauseKey,
   overrunClauseKey,
   moveOutAt,
+  depositAmount,
+  endedAt,
+  depositClauseCount,
+  depositClauseKey,
   (CASE WHEN termRent = null THEN null ELSE (termRent * 100) END) AS termRentCents,
+  (CASE WHEN depositAmount = null THEN null ELSE (depositAmount * 100) END) AS depositCents,
   (requestedRent = null) AS missing_terms,
   ((requestedRent <> null) AND (accountKey = null)) AS missing_account,
   ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) AS missing_clause,
   ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null)) AS missing_term,
   ((overrunClauseKey <> null)) AS missing_termShortened,
-  ((requestedRent = null) OR ((requestedRent <> null) AND (accountKey = null)) OR ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) OR ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null)) OR ((overrunClauseKey <> null))) AS violating
+  ((accountKey <> null) AND (depositAmount <> null) AND (depositClauseCount = 0)) AS missing_deposit,
+  ((accountKey <> null) AND (endedAt <> null) AND (depositClauseKey <> null)) AS missing_depositReturn,
+  ((requestedRent = null) OR ((requestedRent <> null) AND (accountKey = null)) OR ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) OR ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null)) OR ((overrunClauseKey <> null)) OR ((accountKey <> null) AND (depositAmount <> null) AND (depositClauseCount = 0)) OR ((accountKey <> null) AND (endedAt <> null) AND (depositClauseKey <> null))) AS violating
 `
 
 // clauseSatisfactionSpec is the one-row-per-clause satisfaction cypher (§3.2

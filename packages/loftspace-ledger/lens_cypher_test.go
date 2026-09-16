@@ -135,6 +135,7 @@ func TestLedgerHistory_PostedCharge_ProjectsRow(t *testing.T) {
 	require.Equal(t, "2026-07-25T00:00:00Z", v["postedAt"])
 	require.Nil(t, v["clauseKey"], "a plain human-submitted charge carries no clause")
 	require.Nil(t, v["clauseProse"])
+	require.Nil(t, v["clausePurpose"])
 }
 
 func TestLedgerHistory_UnpostedTransaction_ProjectsNothing(t *testing.T) {
@@ -179,6 +180,9 @@ func TestLedgerHistory_AuthorizedByClause_ProjectsProse(t *testing.T) {
 	f.aspect(t, "clausal_clause", "prose", "clause", map[string]any{
 		"text": "Rent is due on the first of each month.",
 	})
+	f.aspect(t, "clausal_clause", "terms", "clauseTerms", map[string]any{
+		"kind": "computational", "conditioned": false, "amountCents": 125000.0, "period": "monthly",
+	})
 	f.edge(t, "authorizedBy", "clausal_tx", "clausal_clause")
 
 	rows := f.project(t, "ledgerHistory", ledgerHistorySpec)
@@ -186,6 +190,39 @@ func TestLedgerHistory_AuthorizedByClause_ProjectsProse(t *testing.T) {
 	v := rows[0].Values
 	require.Equal(t, "vtx.clause."+f.ids["clausal_clause"], v["clauseKey"], "the authorizedBy hop answers 'why was I charged this?'")
 	require.Equal(t, "Rent is due on the first of each month.", v["clauseProse"])
+	require.Nil(t, v["clausePurpose"], "a clause minted without a purpose token projects null, never a default")
+}
+
+// TestLedgerHistory_DepositEntries_ProjectClausePurpose — the deposit's
+// charge and its return credit are both authorizedBy the same purpose=deposit
+// clause, and each row carries that token: the statement holds the deposit
+// apart from rent by this column, never by the memo.
+func TestLedgerHistory_DepositEntries_ProjectClausePurpose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.mkPostedCharge(t, "dep", 250000, "")
+	f.vtx(t, "dep_clause", "clause")
+	f.aspect(t, "dep_clause", "prose", "clause", map[string]any{"text": "Security deposit, held for the tenancy and returned when it ends."})
+	f.aspect(t, "dep_clause", "terms", "clauseTerms", map[string]any{
+		"kind": "computational", "conditioned": false, "amountCents": 250000.0, "period": "oneTime", "purpose": "deposit",
+	})
+	f.edge(t, "authorizedBy", "dep_tx", "dep_clause")
+	// The return credit, on the same account, authorizedBy the same clause.
+	f.vtx(t, "depret_tx", "transaction")
+	f.edge(t, "postedTo", "depret_tx", "dep_acct")
+	f.aspect(t, "depret_tx", "entry", "transaction", map[string]any{
+		"type": "credit", "amountCents": 250000.0, "postedAt": "2027-07-03T09:00:00Z", "memo": "Security deposit returned",
+	})
+	f.edge(t, "authorizedBy", "depret_tx", "dep_clause")
+
+	rows := f.project(t, "ledgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 2)
+	for _, r := range rows {
+		require.Equal(t, "deposit", r.Values["clausePurpose"], "row %v", r.Values["transactionKey"])
+		require.Equal(t, "vtx.clause."+f.ids["dep_clause"], r.Values["clauseKey"])
+	}
 }
 
 func TestLeaseAccounts_LeaseWithNoAccount_ProjectsNullAccount(t *testing.T) {

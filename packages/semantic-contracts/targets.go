@@ -86,6 +86,31 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     fully billed; Enumerations declares the op's one bounded walk, the
 //     clause's own outbound governs links, which it reads to verify the
 //     clause governs the lease the dispatch named.
+//   - missing_deposit → directOp(CreateClause) (this package) — the lease
+//     records a security deposit and no clause governing it carries
+//     purpose=deposit. The same shape as missing_clause: accountKey from this
+//     same row (the gap waits on the account), amountCents from depositCents
+//     (the lens's ×100 conversion of the recorded dollar figure — never a raw
+//     dollar column), period/purpose/prose literal. Reads the lease and the
+//     account, exactly as missing_clause does; the purpose token is what the
+//     lens's own deposit gaps read the minted clause back by.
+//   - missing_depositReturn → directOp(ReturnDeposit) (loftspace-ledger) —
+//     the tenancy has ended and a charged (completed) deposit clause governs
+//     the lease. Params route the lease, that clause (row.depositClauseKey,
+//     the lens's max() over the governs fan — non-null whenever the gap is
+//     open) and the account; Reads routes the account root, the lease's
+//     .tenancy (the endedAt the op reads, required — the gap only opens once
+//     it is recorded), the clause, its .terms (the amount and the purpose
+//     the op re-derives from the clause's own record) and its .status
+//     (required — CreateClause writes it unconditionally, and the op pins its
+//     `returned` write to the revision it hydrated at); OptionalReads the
+//     account's .arrears, the stale mark every posted entry lands
+//     (absence-tolerant: no account carries it before an evaluation). The
+//     two deterministic link keys the op proves the clause's custody by
+//     (chargesTo the payload account, governs the payload lease) cannot be
+//     row-templated — a link key spans two row columns — so the op's own
+//     derive_reads supplies them server-side (Contract #2 §2.5 class (g)),
+//     whatever this dispatch declares.
 //
 // Cross-checked by TestSemanticContracts_LeaseRentSettlementColumnsMatchLens.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
@@ -124,7 +149,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				"agreed rent is backfilled from the unit's listed rent; whichever of the account/clause is then " +
 				"still missing is created; a monthly clause minted without a term has one stamped from the " +
 				"lease's tenancy — so a signed lease actually bills its rent, for exactly its term, and a signed " +
-				"renewal mints its own clause for the renewed term.",
+				"renewal mints its own clause for the renewed term. A lease that records a security deposit has a " +
+				"one-time deposit clause minted for it, and once the tenancy has ended a charged deposit is " +
+				"returned as a credit on the lease's account.",
 			LensRef: LeaseRentSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_terms": {
@@ -185,6 +212,35 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Enumerations: []pkgmgr.EnumerationSpec{
 						{Hub: "row.overrunClauseKey", Relation: "governs", Direction: "out"},
 					},
+				},
+				"missing_deposit": {
+					Action:    "directOp",
+					Operation: "CreateClause",
+					Class:     "clause",
+					Params: map[string]string{
+						"leaseAppKey": "row.leaseAppKey",
+						"accountKey":  "row.accountKey",
+						"amountCents": "row.depositCents",
+						"period":      "oneTime",
+						"purpose":     "deposit",
+						"prose":       "Security deposit, held for the tenancy and returned when it ends.",
+					},
+					Reads: []string{"row.leaseAppKey", "row.accountKey"},
+				},
+				"missing_depositReturn": {
+					Action:    "directOp",
+					Operation: "ReturnDeposit",
+					// ReturnDeposit is claimed by loftspace-ledger's transaction
+					// vertexType DDL alone; pinned regardless, the idiom every
+					// directOp in this file uses.
+					Class: "transaction",
+					Params: map[string]string{
+						"leaseAppKey": "row.leaseAppKey",
+						"clauseKey":   "row.depositClauseKey",
+						"accountKey":  "row.accountKey",
+					},
+					Reads:         []string{"row.accountKey", "row.leaseAppKey.tenancy", "row.depositClauseKey", "row.depositClauseKey.terms", "row.depositClauseKey.status"},
+					OptionalReads: []string{"row.accountKey.arrears"},
 				},
 			},
 		},

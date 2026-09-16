@@ -151,7 +151,15 @@ func lsReadDoc(t *testing.T, ctx context.Context, conn *substrate.Conn, key stri
 // createUnit submits CreateLocation(unit) and returns the minted unit key.
 func createUnit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer) string {
 	t.Helper()
-	reqID := testutil.GenReqID("mkunit")
+	return createUnitLabeled(t, ctx, conn, cp, cons, "mkunit")
+}
+
+// createUnitLabeled is createUnit's sibling for a test that mints more than
+// one unit: the label must be distinct per call, since GenReqID derives the
+// request id (and so the minted unit's NanoID) deterministically from it.
+func createUnitLabeled(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label string) string {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
 	unitKey := "vtx.unit." + lsNanoIDFromRequestID(reqID)
 	env := &processor.OperationEnvelope{
 		RequestID:     reqID,
@@ -547,4 +555,66 @@ func TestLoftspace_UnauthorizedDenied(t *testing.T) {
 	}
 	testutil.PublishOp(t, conn, env)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+}
+
+// TestLoftspace_SetListingDepositAmount proves depositAmount: accepted and
+// stored when present, absent when omitted, refused when <= 0, and preserved
+// verbatim by a SetListingStatus rewrite (copy_data carries every field it
+// does not itself rewrite).
+func TestLoftspace_SetListingDepositAmount(t *testing.T) {
+	ctx, conn := setupLoftspaceEnv(t)
+	cp, cons := newLoftspacePipeline(t, ctx, conn, "deposit")
+
+	base := `"rentAmount":2400,"rentCurrency":"USD","bedrooms":2,"availableFrom":"2026-08-01T00:00:00Z","leaseTermMonths":12,"status":"available"`
+
+	// depositAmount present -> stored.
+	withDeposit := createUnitLabeled(t, ctx, conn, cp, cons, "mkDepYes01")
+	setListing(t, ctx, conn, cp, cons, "depYes00001", withDeposit,
+		`{"unit":"`+withDeposit+`",`+base+`,"depositAmount":1500}`, processor.OutcomeAccepted)
+	ldata, _ := lsReadDoc(t, ctx, conn, withDeposit+".listing")["data"].(map[string]any)
+	if v, ok := ldata["depositAmount"]; !ok || v != float64(1500) {
+		t.Fatalf("depositAmount = %v (ok=%v), want 1500", v, ok)
+	}
+
+	// depositAmount absent -> no field written (the unit takes no deposit).
+	noDeposit := createUnitLabeled(t, ctx, conn, cp, cons, "mkDepNo001")
+	setListing(t, ctx, conn, cp, cons, "depNo000001", noDeposit,
+		`{"unit":"`+noDeposit+`",`+base+`}`, processor.OutcomeAccepted)
+	ldata, _ = lsReadDoc(t, ctx, conn, noDeposit+".listing")["data"].(map[string]any)
+	if _, ok := ldata["depositAmount"]; ok {
+		t.Fatalf("depositAmount present when omitted from payload; data=%v", ldata)
+	}
+
+	// depositAmount == 0 -> refused (InvalidArgument, > 0 required).
+	zeroUnit := createUnitLabeled(t, ctx, conn, cp, cons, "mkDepZero1")
+	got, why := setListingWithReason(t, ctx, conn, cp, cons, "depZero0001", zeroUnit,
+		`{"unit":"`+zeroUnit+`",`+base+`,"depositAmount":0}`)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("SetListing with depositAmount=0 = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "InvalidArgument") || !strings.Contains(why, "depositAmount") {
+		t.Errorf("refused with %q, want an InvalidArgument naming depositAmount", why)
+	}
+
+	// depositAmount < 0 -> refused.
+	negUnit := createUnitLabeled(t, ctx, conn, cp, cons, "mkDepNeg01")
+	got, why = setListingWithReason(t, ctx, conn, cp, cons, "depNeg00001", negUnit,
+		`{"unit":"`+negUnit+`",`+base+`,"depositAmount":-100}`)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("SetListing with depositAmount=-100 = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "InvalidArgument") || !strings.Contains(why, "depositAmount") {
+		t.Errorf("refused with %q, want an InvalidArgument naming depositAmount", why)
+	}
+
+	// A SetListingStatus rewrite (copy_data) preserves depositAmount verbatim.
+	setListingStatus(t, ctx, conn, cp, cons, "depStat0001", withDeposit, "loftspaceListing",
+		`{"unit":"`+withDeposit+`","status":"leased"}`, processor.OutcomeAccepted)
+	ldata, _ = lsReadDoc(t, ctx, conn, withDeposit+".listing")["data"].(map[string]any)
+	if v, ok := ldata["depositAmount"]; !ok || v != float64(1500) {
+		t.Fatalf("depositAmount not preserved across SetListingStatus: %v (ok=%v)", v, ok)
+	}
+	if ldata["status"] != "leased" {
+		t.Fatalf("status = %v, want leased", ldata["status"])
+	}
 }

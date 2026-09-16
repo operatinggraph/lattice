@@ -91,6 +91,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"sqft":{"type":"integer","title":"Square feet","description":"Optional floor area in square feet. Must be > 0."},` +
 				`"availableFrom":{"type":"string","format":"date-time","title":"Available from","description":"Earliest move-in date."},` +
 				`"leaseTermMonths":{"type":"integer","title":"Lease term (months)","description":"Lease term in months. Must be > 0."},` +
+				`"depositAmount":{"type":"number","title":"Security deposit","description":"Optional security deposit, a number > 0 in the listing's currency. Absent = the unit takes no deposit."},` +
 				`"status":{"type":"string","title":"Status","enum":["available","pending","leased","withdrawn"],"description":"Listing availability. 'withdrawn' is off-market and hidden from applicant browse; relist by setting available again."}},` +
 				`"required":["unit","rentAmount","rentCurrency","bedrooms","availableFrom","leaseTermMonths","status"]}`,
 			FieldDescriptions: map[string]string{
@@ -102,6 +103,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"sqft":            "Optional floor area in square feet. Omitted clears any existing value (full replace).",
 				"availableFrom":   "Earliest move-in date.",
 				"leaseTermMonths": "Lease term in whole months.",
+				"depositAmount":   "Optional security deposit, a number > 0 in the listing's currency. REPLACES the stored value, so a re-submit without it clears it (absent = the unit takes no deposit).",
 				"status":          "Listing availability. 'withdrawn' takes the unit off-market (hidden from applicant browse; relist via status=available). Setting only THIS field going forward — without resupplying the economics — is SetListingStatus, a separate op.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{

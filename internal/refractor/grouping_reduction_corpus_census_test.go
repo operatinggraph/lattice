@@ -75,8 +75,9 @@ type groupingVerdict struct {
 // clauseSatisfaction carries validFrom/validUntil (the clause's own .terms) and
 // periodStart (a CASE over its .status and .terms), and leaseRentSettlement
 // carries leaseStart/leaseEnd/termStart/termRent (the lease's own .tenancy and
-// .terms, two of them coalesced) — every one an anchor-own aspect read, so
-// each is determined by the anchor already in the key.
+// .terms, two of them coalesced), depositAmount (its .deposit) and endedAt
+// (its .tenancy) — every one an anchor-own aspect read, so each is
+// determined by the anchor already in the key.
 var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"applicantRosterRead":               {"p", 0},
 	"appointmentReminders":              {"p", 0},
@@ -155,14 +156,14 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"identityCredentialsRead":           {"p", 0},
 	"identityErasureResidue":            {"key(i) key(i)+1 key(i)+2 key(i)+3 key(i)+4 p!i", 4},
 	"identityIndexHint":                 {"p", 0},
-	"landlordLeaseApplicationsRead":     {"key(applicantEmailEnv applicantKey applicantNameEnv applicantPhoneEnv declineReason employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision landlordKey noticeGivenAt noticeGivenBy noticeMoveOutAt profileSubmitted referenceCount signedAt ssnVal tenancyEndedAt tenancyLeaseEnd tenancyLeaseStart tenancyRentAmount tenancyTermStart termsLeaseTermMonths termsMoveInDate termsRequestedRent u unitAddress unitAvailableFrom unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!applicantEmailEnv", 0},
+	"landlordLeaseApplicationsRead":     {"key(applicantEmailEnv applicantKey applicantNameEnv applicantPhoneEnv declineReason depositAmount employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision landlordKey noticeGivenAt noticeGivenBy noticeMoveOutAt profileSubmitted referenceCount signedAt ssnVal tenancyEndedAt tenancyLeaseEnd tenancyLeaseStart tenancyRentAmount tenancyTermStart termsLeaseTermMonths termsMoveInDate termsRequestedRent u unitAddress unitAvailableFrom unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!applicantEmailEnv", 0},
 	"landlordUnitsRead":                 {"p", 0},
 	"leaseAccounts":                     {"p", 0},
 	"leaseApplicationComplete":          {"key(applicant declineReason employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision profileSubmittedAt referenceCount signedAt ssnVal tenancyEndedAt termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!profileSubmittedAt", 0},
-	"leaseApplicationsRead":             {"key(applicantKey declineReason employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision noticeGivenAt noticeGivenBy noticeMoveOutAt profileSubmitted referenceCount signedAt ssnVal tenancyEndedAt tenancyLeaseEnd tenancyLeaseStart tenancyRentAmount tenancyTermStart termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!applicantKey", 0},
+	"leaseApplicationsRead":             {"key(applicantKey declineReason depositAmount employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision noticeGivenAt noticeGivenBy noticeMoveOutAt profileSubmitted referenceCount signedAt ssnVal tenancyEndedAt tenancyLeaseEnd tenancyLeaseStart tenancyRentAmount tenancyTermStart termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!applicantKey", 0},
 	"leaseExpiry":                       {"key(endedAt entityKey landlordDecision lapsedAt leaseEnd moveOutAt renewalOpensAt signedAt unitKey) p!endedAt", 0},
 	"tenancyEnd":                        {"key(endedAt entityKey landlordDecision lapsedAt leaseEnd moveOutAt signedAt termEnd unitKey unitStatus) p!landlordDecision", 0},
-	"leaseRentSettlement":               {"key(accountKey decision entityKey leaseEnd leaseStart moveOutAt requestedRent termRent termStart) p!decision", 0},
+	"leaseRentSettlement":               {"key(accountKey decision depositAmount endedAt entityKey leaseEnd leaseStart moveOutAt requestedRent termRent termStart) p!decision", 0},
 	"ledgerHistory":                     {"p", 0},
 	"loftspaceArrearsReminders":         {"p", 0},
 	"menuCatalog":                       {"p", 0},

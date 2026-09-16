@@ -51,6 +51,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // read set; the transaction DDL's own derive_reads GUARANTEES it for a
 // submitter that omitted it.
 //
+// ReturnDeposit carries an InputSchema + FieldDescriptions and no Dispatch:
+// it is Weaver's leaseRentSettlement dispatch (packages/semantic-contracts,
+// missing_depositReturn) and the operator's CLI escape hatch, with no
+// shipped screen — no Dispatch means no descriptor-driven client (Facet
+// included) ever offers it, so it carries no refusal-courtesy declarations
+// (a `(facet)` line on an op with no Dispatch is a stale declaration, not a
+// courtesy). The schema is what names its three fields as required, the
+// declaration lint-opmeta-required-fields checks the script's own
+// required_string calls against, and what a CLI operator reads to spell
+// the payload. Its reads need no static declaration here: the transaction
+// DDL's own derive_reads supplies the whole set from the payload keys.
+//
 // EvaluateLoftspaceArrears and the arrears notification replyOp carry a bare
 // OpMetaSpec — no Presentation, no Dispatch — for discoverability alone, parity
 // with wellness-ledger's own evaluate + replyOp metas. Neither has a form to
@@ -155,6 +167,19 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): AmountMismatch, TermExhausted: unreachable — LoftspaceRecordCharge's post_entry call hardcodes allow_clause_ref=False (scripts.go), so the clauseRef branch that raises these never runs for any LoftspaceRecordCharge dispatch.
 			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column.
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — a debit never enters the balance block: the resident branch refuses it AuthDenied first, the landlord branch has no cap.
+		},
+		{
+			OperationType: "ReturnDeposit",
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","x-entityRef":"leaseapp","description":"vtx.leaseapp.<NanoID> of the lease whose .tenancy.endedAt is recorded — the end the return rides."},` +
+				`"clauseKey":{"type":"string","x-entityRef":"clause","description":"vtx.clause.<NanoID> of the completed purpose=deposit clause being returned; its own .terms.amountCents is the amount credited."},` +
+				`"accountKey":{"type":"string","x-entityRef":"account","description":"vtx.account.<NanoID> of the lease's ledger account the credit posts to; the clause's chargesTo link must name it."}},` +
+				`"required":["leaseAppKey","clauseKey","accountKey"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The lease the deposit clause governs (ClauseLeaseMismatch otherwise). Its .tenancy must record endedAt — the recorded end of the tenancy, never the notice or the scheduled term end (TenancyNotEnded while absent).",
+				"clauseKey":   "The deposit clause: .terms.purpose must be deposit (NotADeposit otherwise) and .status must be completed, the state DebitAccount's charge leaves (DepositNotCharged while still active). A clause already returned is a no-op.",
+				"accountKey":  "The lease's ledger account the credit posts to; the clause's chargesTo link must name it (ClauseAccountMismatch otherwise).",
+			},
 		},
 		{OperationType: arrearsOp},
 	}, notificationOpMetas()...)

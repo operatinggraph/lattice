@@ -2548,6 +2548,30 @@ func setListingAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, u
 	}
 }
 
+// seedUnitWithListingDeposit is seedUnitWithListing's sibling for a vector
+// that needs a listing carrying depositAmount — the Decide .deposit-recording
+// vectors below.
+func seedUnitWithListingDeposit(t *testing.T, ctx context.Context, conn *substrate.Conn, id, availableFrom string, leaseTermMonths int, rentAmount, depositAmount float64) string {
+	t.Helper()
+	key := "vtx.unit." + id
+	seedVertex(t, ctx, conn, key, "location", map[string]any{})
+	listing := map[string]any{
+		"class": "listing", "isDeleted": false, "vertexKey": key, "localName": "listing",
+		"data": map[string]any{
+			"availableFrom":   availableFrom,
+			"leaseTermMonths": leaseTermMonths,
+			"rentAmount":      rentAmount,
+			"rentCurrency":    "USD",
+			"depositAmount":   depositAmount,
+		},
+	}
+	lb, _ := json.Marshal(listing)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key+".listing", lb); err != nil {
+		t.Fatalf("set unit .listing %s: %v", key, err)
+	}
+	return key
+}
+
 // createApplicationWithTerms submits CreateLeaseApplication with an
 // applicant-supplied moveInDate/leaseTermMonths/requestedRent? against an
 // ALREADY-SEEDED unit, so the Decide tenancy-derivation vectors below have a
@@ -2700,6 +2724,70 @@ func TestDecideLeaseApplication_TenancyNoTerms_FallsBackToListing(t *testing.T) 
 	}
 	if got, _ := tdata["rentAmount"].(float64); got != 2050 {
 		t.Fatalf("tenancy.rentAmount = %v, want 2050 (the listing's own rent)", tdata["rentAmount"])
+	}
+}
+
+// TestDecideLeaseApplication_RecordsDepositFromListing: a listing carrying a
+// positive depositAmount gets it CREATE-ONLY-stamped onto .deposit on the
+// same first approve that stamps .tenancy.
+func TestDecideLeaseApplication_RecordsDepositFromListing(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-deposit-recorded")
+
+	applicantKey := seedApplicant(t, ctx, conn, "LLdepoapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListingDeposit(t, ctx, conn, "LLdepount1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050, 1500)
+	appKey := createApplicationForUnit(t, ctx, conn, cp, cons, applicantKey, unitKey)
+	signLease(t, ctx, conn, cp, cons, "decDepoSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decDepoApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	ddoc := readDoc(t, ctx, conn, appKey+".deposit")
+	if ddoc["class"] != "leaseDeposit" {
+		t.Fatalf("deposit class = %v, want leaseDeposit", ddoc["class"])
+	}
+	ddata, _ := ddoc["data"].(map[string]any)
+	if got, _ := ddata["amount"].(float64); got != 1500 {
+		t.Fatalf("deposit.amount = %v, want 1500 (the listing's own depositAmount)", ddata["amount"])
+	}
+	if got, _ := ddata["recordedAt"].(string); got != "2026-06-26T10:00:00Z" {
+		t.Fatalf("deposit.recordedAt = %q, want 2026-06-26T10:00:00Z (the same instant as decidedAt)", got)
+	}
+}
+
+// TestDecideLeaseApplication_NoDepositWhenListingHasNone: a listing with no
+// depositAmount at all leaves .deposit unwritten — the unit takes no deposit.
+func TestDecideLeaseApplication_NoDepositWhenListingHasNone(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-deposit-absent")
+
+	applicantKey := seedApplicant(t, ctx, conn, "JJdepoapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListing(t, ctx, conn, "JJdepount1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050)
+	appKey := createApplicationForUnit(t, ctx, conn, cp, cons, applicantKey, unitKey)
+	signLease(t, ctx, conn, cp, cons, "decNoDepSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decNoDepApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, appKey+".deposit") {
+		t.Fatalf("an approve against a listing with no depositAmount must stamp no .deposit aspect")
+	}
+}
+
+// TestDecideLeaseApplication_NoDepositWhenListingDepositZero: a listing whose
+// depositAmount is 0 is not a positive figure — .deposit stays unwritten,
+// mirroring .tenancy.rentAmount's own non-positive-offer guard.
+func TestDecideLeaseApplication_NoDepositWhenListingDepositZero(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-deposit-zero")
+
+	applicantKey := seedApplicant(t, ctx, conn, "KKdepoapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListingDeposit(t, ctx, conn, "KKdepount1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050, 0)
+	appKey := createApplicationForUnit(t, ctx, conn, cp, cons, applicantKey, unitKey)
+	signLease(t, ctx, conn, cp, cons, "decZeroDepSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decZeroDepApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, appKey+".deposit") {
+		t.Fatalf("an approve against a listing with depositAmount=0 must stamp no .deposit aspect")
 	}
 }
 

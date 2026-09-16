@@ -126,7 +126,7 @@ func TestLandlordUnitsRead_ProjectsManagedUnit(t *testing.T) {
 	f.vtx(t, "larry", "identity")
 	unitKey := f.vtx(t, "u1", "unit")
 	f.manages(t, "larry", "u1")
-	f.unitAspect(t, "u1", "listing", "listing", map[string]any{"status": "leased", "rentAmount": 1500.0, "rentCurrency": "USD"})
+	f.unitAspect(t, "u1", "listing", "listing", map[string]any{"status": "leased", "rentAmount": 1500.0, "rentCurrency": "USD", "depositAmount": 1500.0})
 
 	rows := f.projectUnits(t)
 	require.Len(t, rows, 1)
@@ -135,6 +135,7 @@ func TestLandlordUnitsRead_ProjectsManagedUnit(t *testing.T) {
 	require.Equal(t, "leased", v["unit_status"])
 	require.Equal(t, 1500.0, v["unit_rent"])
 	require.Equal(t, "USD", v["unit_currency"])
+	require.Equal(t, 1500.0, v["unit_deposit"])
 	anchors, ok := v["authz_anchors"].([]any)
 	require.True(t, ok, "authz_anchors must be a list, got %T", v["authz_anchors"])
 	require.Equal(t, []any{f.ids["larry"]}, anchors, "authz_anchors must carry exactly the managing landlord's bare NanoID")

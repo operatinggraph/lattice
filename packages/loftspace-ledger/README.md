@@ -15,8 +15,8 @@ account). Install: `lattice-pkg install packages/loftspace-ledger` (after both; 
 |---|---|
 | **Vertex types** (3) | `account` (root `{}`, D5) · `transaction` (root `{}`, D5, `.entry` aspect) · `loftspaceArrearsNotificationOp` (the bridge's replyOp handler, no vertex of its own) |
 | **Aspect types** (3) | `ledgerAccountGuard` — `vtx.leaseapp.<id>.ledgerAccount`, the per-lease create-only uniqueness guard · `loftspaceAccountArrears` — `vtx.account.<id>.arrears`, the arrears-episode state · `loftspaceAccountArrearsNotification` — `vtx.account.<id>.arrearsNotification`, the reminder's delivery outcome |
-| **Links** (2) | `heldFor` (account → leaseapp) · `postedTo` (transaction → account) |
-| **Operations** (6) | `LoftspaceCreateAccount` · `DebitAccount` · `LoftspaceRecordCharge` · `CreditAccount` · `EvaluateLoftspaceArrears` (Weaver-dispatched) · `RecordLoftspaceArrearsReminderNotification` (bridge replyOp) |
+| **Links** (3) | `heldFor` (account → leaseapp) · `postedTo` (transaction → account) · `authorizedBy` (transaction → clause, written by `DebitAccount` with a `clauseRef` and by `ReturnDeposit`) |
+| **Operations** (7) | `LoftspaceCreateAccount` · `DebitAccount` · `LoftspaceRecordCharge` · `CreditAccount` · `ReturnDeposit` (Weaver-dispatched) · `EvaluateLoftspaceArrears` (Weaver-dispatched) · `RecordLoftspaceArrearsReminderNotification` (bridge replyOp) |
 | **Projection lenses** (2) | `ledgerHistory` (one row per transaction) → `loftspace-ledger-history` · `leaseAccounts` (lease → account key lookup + the account's `arrearsDueAt` / `arrearsRemindedFor` / `arrearsReminderSentAt`) → `loftspace-lease-accounts` (both `nats-kv`, `full` engine) |
 | **Weaver targets** (1) | `loftspaceArrearsReminders` (one row per account) → `weaver-targets`; playbook `missing_evaluation → directOp EvaluateLoftspaceArrears` |
 
@@ -61,7 +61,7 @@ for why the account carries its own id rather than the lease's.
 
 ## Append-only ledger + the clause seam
 
-`DebitAccount`/`LoftspaceRecordCharge`/`CreditAccount` each mint a fresh `vtx.transaction.<id>` with a `.entry` aspect and
+`DebitAccount`/`LoftspaceRecordCharge`/`CreditAccount`/`ReturnDeposit` each mint a fresh `vtx.transaction.<id>` with a `.entry` aspect and
 the `postedTo` link back to the account — no balance field is ever written or mutated; the
 `ledgerHistory` lens derives a balance by summing `amountCents` (positive for debit, negative for
 credit) client-side, so concurrent debits/credits never race a read-modify-write.
@@ -106,7 +106,19 @@ dates come from. `EvaluateLoftspaceArrears{accountKey}` — dispatched by Weaver
   to owing — not necessarily the head, which a partial payment can move past it) is dropped as a
   finished episode's.
 
-Every posted entry (`DebitAccount` / `LoftspaceRecordCharge` / `CreditAccount`) carries the existing
+`ReturnDeposit{leaseAppKey, clauseKey, accountKey}` is the deposit's way back — `semantic-contracts`'
+`leaseRentSettlement` playbook dispatches it (`missing_depositReturn`) once the lease's `.tenancy`
+records `endedAt` and its `purpose: deposit` clause is `completed` (charged). It reads everything from
+the graph's own record: the clause's `.terms` (`NotADeposit` without the purpose token; the amount is
+the clause's own), its `.status` (`DepositNotCharged` while still `active`; a `returned` clause is an
+idempotent no-op), the lease's `.tenancy` (`TenancyNotEnded` without `endedAt`) and the clause's own
+`chargesTo` / `governs` links (`ClauseAccountMismatch` / `ClauseLeaseMismatch`). It posts one credit
+`authorizedBy` the clause and moves the clause's `.status` to `returned` under OCC — an ordinary credit
+that nets against whatever the tenant still owes; `ledgerHistory` projects `clausePurpose` so a statement
+holds the deposit apart from rent. Operator-only, no self grant, no screen; the DDL's `derive_reads`
+hydrates its whole read set from the payload keys.
+
+Every posted entry (`DebitAccount` / `LoftspaceRecordCharge` / `CreditAccount` / `ReturnDeposit`) carries the existing
 `.arrears` forward and marks it `stale` (dropping `historyTooLong`), minting nothing when absent; both
 scripts' `derive_reads` hydrate `[account, account.arrears]` so the upsert stays OCC for a submitter
 that declared nothing. `leaseAccounts` projects `arrearsDueAt` / `arrearsRemindedFor` /

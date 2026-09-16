@@ -10,6 +10,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	DebitAccount           → operator
 //	LoftspaceRecordCharge  → operator, consumer (scope=self — landlord only, see below)
 //	CreditAccount          → operator, consumer (scope=self — resident or landlord, see below)
+//	ReturnDeposit          → operator (Weaver's leaseRentSettlement dispatch)
 //	EvaluateLoftspaceArrears                   → operator (Weaver's dispatch actor; the script refuses every other)
 //	RecordLoftspaceArrearsReminderNotification → operator (the bridge's service actor)
 //
@@ -94,6 +95,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // clause-billing dispatch, so the person-facing charge gets its own
 // vertical-unique name and DebitAccount keeps the orchestrated one.
 //
+// ReturnDeposit is the deposit's way back: Weaver's leaseRentSettlement
+// playbook (packages/semantic-contracts) dispatches it once a lease's
+// tenancy has ended and its deposit clause is charged. It grants `operator`
+// at scope=any — the same idiom as every engine-submitted op — and nothing
+// else: no self grant (the resident is owed the money, never the one who
+// records its return), no consoleOperator or frontOfHouse counterpart (no
+// desk workflow returns a deposit by hand; the lens does it on the recorded
+// end), and unlike EvaluateLoftspaceArrears no actor refusal in the script —
+// the op forwards nothing to a tenant, and an operator running it by hand
+// against a clause the graph proves charged and ended is exactly the
+// Weaver dispatch.
+//
 // EvaluateLoftspaceArrears and the arrears notification replyOp are the two
 // ops no human path reaches. Both grant `operator` at scope=any — the
 // operator-grant idiom every engine-submitted op uses — and neither is
@@ -146,6 +159,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "self",
 			Note:          "Grants a consumer the right to record a charge on the ledger account of a lease on a unit they MANAGE — a landlord's own receivable. scripts.go proves it off the account's own heldFor→appliesToUnit→manages topology; a resident (applicationFor) holding this grant is still refused.",
 			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "ReturnDeposit",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit ReturnDeposit (credits a charged security deposit back on the lease's ledger account once the tenancy has ended, marking the deposit clause returned). Dispatched by WEAVER's leaseRentSettlement playbook (packages/semantic-contracts, missing_depositReturn); not a console verb — no consoleOperator or frontOfHouse grant is minted for it.",
+			GrantsTo:      []string{"operator"},
 		},
 		{
 			OperationType: arrearsOp,

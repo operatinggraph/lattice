@@ -77,6 +77,34 @@ def require_number(p, name):
         fail("InvalidArgument: " + name + ": required number")
     return v
 
+PURPOSE_FIRST_CHARS = "abcdefghijklmnopqrstuvwxyz"
+PURPOSE_REST_CHARS = PURPOSE_FIRST_CHARS + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+PURPOSE_MAX_LEN = 32
+
+def optional_purpose(p):
+    # The clause's purpose token — ^[a-z][a-zA-Z0-9]{0,31}$, spelled out
+    # character by character because the sandbox ships no regex builtin: a
+    # lower-case first letter, alphanumerics after it, 32 at most. Absent or
+    # None means the clause carries no purpose; anything else that is not a
+    # token is refused rather than dropped, since a lens reads the recorded
+    # token as the fact of what the clause is FOR.
+    if not hasattr(p, "purpose"):
+        return None
+    v = getattr(p, "purpose")
+    if v == None:
+        return None
+    if type(v) != type(""):
+        fail("InvalidArgument: purpose: required token ^[a-z][a-zA-Z0-9]{0,31}$")
+    if len(v) == 0 or len(v) > PURPOSE_MAX_LEN:
+        fail("InvalidArgument: purpose: required token ^[a-z][a-zA-Z0-9]{0,31}$, got " + v)
+    for i, ch in enumerate(v.elems()):
+        if i == 0:
+            if ch not in PURPOSE_FIRST_CHARS:
+                fail("InvalidArgument: purpose: required token ^[a-z][a-zA-Z0-9]{0,31}$, got " + v)
+        elif ch not in PURPOSE_REST_CHARS:
+            fail("InvalidArgument: purpose: required token ^[a-z][a-zA-Z0-9]{0,31}$, got " + v)
+    return v
+
 def parts_of(key, name, want_type):
     parts = key.split(".")
     if len(parts) != 3 or parts[0] != "vtx":
@@ -184,6 +212,14 @@ def mint_clause(state, p):
     if valid_from != None:
         terms_data["validFrom"] = valid_from
         terms_data["validUntil"] = valid_until
+    # purpose: the token a lens tells a purpose-built clause apart by — the
+    # role period=monthly + conditioned<>true plays for the rent clause, made
+    # explicit for a clause whose period alone is not a recognizable mark
+    # (leaseRentSettlement's deposit gaps read purpose='deposit'). Recorded
+    # only when supplied: a clause minted without one carries no purpose key.
+    purpose = optional_purpose(p)
+    if purpose != None:
+        terms_data["purpose"] = purpose
     acct_key = None
     acct_id = None
     amount_cents = None
@@ -251,6 +287,8 @@ def mint_clause(state, p):
     if valid_from != None:
         event_data["validFrom"] = valid_from
         event_data["validUntil"] = valid_until
+    if purpose != None:
+        event_data["purpose"] = purpose
 
     if kind == "computational":
         charges_lnk = "lnk.clause." + clause_id + ".chargesTo.account." + acct_id

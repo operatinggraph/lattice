@@ -35,7 +35,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 6; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 9; got != want {
+	if got, want := len(Package.Permissions), 10; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 3; got != want {
@@ -47,7 +47,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 5; got != want {
+	if got, want := len(Package.OpMetas), 6; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
@@ -58,7 +58,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"LoftspaceCreateAccount", "any"}, {"LoftspaceCreateAccount", "self"}, {"DebitAccount", "any"}, {"CreditAccount", "any"}, {"CreditAccount", "self"}, {"LoftspaceRecordCharge", "any"}, {"LoftspaceRecordCharge", "self"}, {"EvaluateLoftspaceArrears", "any"}, {"RecordLoftspaceArrearsReminderNotification", "any"}}
+	wantPerms := []struct{ op, scope string }{{"LoftspaceCreateAccount", "any"}, {"LoftspaceCreateAccount", "self"}, {"DebitAccount", "any"}, {"CreditAccount", "any"}, {"CreditAccount", "self"}, {"LoftspaceRecordCharge", "any"}, {"LoftspaceRecordCharge", "self"}, {"ReturnDeposit", "any"}, {"EvaluateLoftspaceArrears", "any"}, {"RecordLoftspaceArrearsReminderNotification", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break

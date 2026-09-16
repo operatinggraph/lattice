@@ -1008,6 +1008,22 @@ def execute(state, op):
 
                 mutations.append(make_aspect(app_key, "tenancy", "tenancy", tenancy_data))
 
+                # .deposit: the security-deposit figure the tenancy owes,
+                # recorded at THIS approval event from the listing's own
+                # depositAmount — CREATE-ONLY, in the same mutation batch as
+                # .tenancy (one event, both or neither). It is its own
+                # aspect, not a .tenancy field: SignRenewal rewrites .tenancy
+                # wholesale from a fixed five-field list, and a field bolted
+                # on there would vanish on the first renewal. The listing is
+                # a mutable relation a landlord can edit after approval, so
+                # the figure is captured here rather than read live at
+                # return time — a later listing edit must not re-price a
+                # signed lease's deposit. No aspect when the listing carries
+                # no positive depositAmount (the unit takes no deposit).
+                deposit_amount = listing.data.get("depositAmount")
+                if deposit_amount != None and (type(deposit_amount) == type(0) or type(deposit_amount) == type(0.0)) and deposit_amount > 0:
+                    mutations.append(make_aspect(app_key, "deposit", "leaseDeposit", {"amount": deposit_amount, "recordedAt": decided_at}))
+
         # .decidedProfileSnapshot: the fair-housing preservation record —
         # stamped exactly once, on the FIRST .decision write of EITHER value
         # (approve OR decline; a decline is the more fair-housing-salient

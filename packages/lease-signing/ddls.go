@@ -39,6 +39,12 @@ import (
 //     once, at signing, snapshotting the applicant identity's own .name;
 //     absent when the applicant had no live .name to snapshot. See
 //     RetentionClasses().
+//   - `leaseDeposit` — the security-deposit aspect-type DDL
+//     DecideLeaseApplication write-gates on the SAME first-approve branch as
+//     .tenancy (the leaseapp vertexType script owns the write). NOT
+//     sensitive: a dollar figure and when it was recorded, not personal
+//     data. CREATE-ONLY-stamped once, from the unit's listing.depositAmount,
+//     when that figure is a positive number; absent otherwise.
 //   - `leaseServiceInstance` — CreateLeaseServiceInstance, the externalTask
 //     instanceOp Loom submits: mints the claim vertex vtx.service.<handle>,
 //     records its family + the providedTo link, and emits external.<adapter>.
@@ -81,6 +87,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		decidedProfileSnapshotAspectDDL(),
 		tenantNameAspectDDL(),
 		tenancyNoticeAspectDDL(),
+		leaseDepositAspectDDL(),
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
 		leaseServiceDispatchDDL(),
@@ -148,6 +155,13 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"landlord who approved, and a tenant who later signs a renewal extending leaseEnd, is never silently " +
 			"truncated back to the original term. (SignRenewal also records termStart on .tenancy and may rewrite " +
 			"rentAmount; this op writes rentAmount only from the sources above.) " +
+			"On that SAME first approve, it also CREATE-ONLY-stamps a .deposit aspect (class leaseDeposit) " +
+			"{amount, recordedAt (canonical-UTC RFC3339, the same instant as decidedAt)} from the unit's own " +
+			"listing.depositAmount when it is a positive number — recorded at THIS approval event rather than read " +
+			"live at return time, so a landlord editing the listing's deposit after approval never re-prices a " +
+			"signed lease. No .deposit aspect is written when the listing carries no positive depositAmount (the " +
+			"unit takes no deposit). It is its own aspect, not a .tenancy field, because SignRenewal rewrites " +
+			".tenancy wholesale from a fixed field list that a bolted-on deposit would not survive. " +
 			"On the FIRST decision of EITHER value (approve or decline), it also CREATE-ONLY-stamps a .decidedProfileSnapshot " +
 			"aspect (class decidedProfileSnapshot, SENSITIVE, same underwritingRecord retention class as .profile) copying the " +
 			"then-current .profile / .underwritingParties / .applicationSignals data maps (each keyed under its own name, " +
@@ -846,6 +860,50 @@ func tenancyNoticeAspectDDL() pkgmgr.DDLSpec {
 				Name:            "tenancy-notice aspect",
 				Payload:         map[string]any{"moveOutAt": "2027-03-31T00:00:00Z", "givenAt": "2027-02-14T09:30:00Z", "givenBy": "tenant"},
 				ExpectedOutcome: "Stored as vtx.leaseapp.<NanoID>.notice, written CREATE-ONLY by GiveNotice. The tenancyEnd lens now arms its timer on 2027-03-31T00:00:00Z (if that precedes leaseEnd) and EndTenancy records endedAt there; SignRenewal refuses NoticeGiven; leaseExpiry opens no cycle.",
+			},
+		},
+	}
+}
+
+// leaseDepositAspectDDL declares the leaseapp's .deposit aspect — the security
+// deposit a tenancy owes, recorded at approval. Written ONCE by
+// DecideLeaseApplication, on the SAME first-approve branch that CREATE-ONLY-
+// stamps .tenancy (one event, both or neither), from the unit's own
+// listing.depositAmount when it is a positive number; never rewritten. It is
+// its own aspect rather than a .tenancy field because .tenancy already has
+// two whole-aspect writers (DecideLeaseApplication, SignRenewal) and
+// SignRenewal rewrites it from a fixed field list a bolted-on deposit would
+// not survive (the "mirror drops the invariant" class). The listing is a
+// mutable relation a landlord can edit after approval, so the figure is
+// captured at the approval event rather than read live at return time. Not
+// sensitive: a dollar figure and when it was recorded, not personal data.
+func leaseDepositAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "leaseDeposit",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"DecideLeaseApplication"},
+		Description: "Security-deposit aspect (lease-signing). Stored as vtx.leaseapp.<NanoID>.deposit (class leaseDeposit) " +
+			"= {amount, recordedAt}: the deposit figure the tenancy owes, captured from the unit's listing.depositAmount " +
+			"at the SAME first-approve event that CREATE-ONLY-stamps .tenancy (recordedAt = that same op.submittedAt " +
+			"instant, canonical-UTC RFC3339) — never on a decline, a re-approve, or any later listing edit. Written " +
+			"only when the listing carries a positive depositAmount; no aspect when it does not (the unit takes no " +
+			"deposit). Read by the leaseApplicationsRead / landlordLeaseApplicationsRead read models (depositAmount); " +
+			"renewalsRead does NOT project it — a renewal keeps the deposit, nothing there reads it. Declaration-only: " +
+			"no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"amount":{"type":"number"},"recordedAt":{"type":"string"}},` +
+			`"required":["amount","recordedAt"]}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"amount":     "The security-deposit figure, a number > 0 in the listing's currency, copied verbatim from the unit's listing.depositAmount at approval.",
+			"recordedAt": "When the deposit was recorded — the SAME op.submittedAt instant .tenancy's leaseStart derivation uses on this first approve, canonical UTC.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "lease-deposit aspect",
+				Payload:         map[string]any{"amount": 1500, "recordedAt": "2027-02-14T09:30:00Z"},
+				ExpectedOutcome: "Stored as vtx.leaseapp.<NanoID>.deposit, written CREATE-ONLY by DecideLeaseApplication on the first approve, alongside .tenancy. leaseApplicationsRead / landlordLeaseApplicationsRead now project depositAmount.",
 			},
 		},
 	}

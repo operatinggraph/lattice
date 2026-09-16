@@ -54,7 +54,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			"attach the leasable facets onto an EXISTING location unit (vtx.unit.<NanoID>, owned by " +
 			"location-domain) — this package introduces NO vertex type. SetListing writes the .listing aspect " +
 			"{rentAmount, rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom (RFC3339 date), " +
-			"leaseTermMonths, status ∈ available|pending|leased|withdrawn}. SetUnitAddress writes the .address aspect " +
+			"leaseTermMonths, depositAmount?, status ∈ available|pending|leased|withdrawn}. SetUnitAddress writes the .address aspect " +
 			"{line1, line2?, city, region, postal}. SetListingStatus is a status-only transition: it reads the " +
 			"existing .listing (kv.Read) and rewrites ONLY status, preserving the economics verbatim (rejects a " +
 			"unit with no listing) — the op a lease-application's convergence directOp dispatches to mark a unit " +
@@ -77,6 +77,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			`"sqft":{"type":"integer","description":"Floor area in square feet (SetListing; optional, > 0)."},` +
 			`"availableFrom":{"type":"string","description":"Earliest move-in date, RFC3339 (SetListing; required)."},` +
 			`"leaseTermMonths":{"type":"integer","description":"Lease term in months (SetListing; required, > 0)."},` +
+			`"depositAmount":{"type":"number","description":"Security deposit, a number > 0 in the listing's currency (SetListing; optional; absent = the unit takes no deposit)."},` +
 			`"status":{"type":"string","enum":["available","pending","leased","withdrawn"],"description":"Listing availability state (SetListing / SetListingStatus; required). 'withdrawn' = off-market (hidden from applicant Browse; relist by flipping back to 'available')."},` +
 			`"line1":{"type":"string","description":"Street address line 1 (SetUnitAddress; required)."},` +
 			`"line2":{"type":"string","description":"Street address line 2 (SetUnitAddress; optional)."},` +
@@ -95,6 +96,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			"sqft":            "Optional floor area in square feet (integer > 0). Stored on the .listing aspect when present (SetListing).",
 			"availableFrom":   "Earliest move-in date, RFC3339. Stored verbatim on the .listing aspect (SetListing).",
 			"leaseTermMonths": "Lease term in months (integer > 0). Stored on the .listing aspect (SetListing).",
+			"depositAmount":   "Security deposit, a number > 0 in the listing's currency. Absent = the unit takes no deposit. Stored on the .listing aspect when present (SetListing REPLACES the stored value on every write — a re-submit without it clears it).",
 			"status":          "Listing availability, one of {available, pending, leased, withdrawn}. 'withdrawn' takes the unit off-market (hidden from applicant Browse; relist via SetListingStatus status=available). Stored on the .listing aspect (SetListing sets it alongside the economics; SetListingStatus rewrites only this field, preserving the rest).",
 			"line1":           "Street address line 1. Stored on the .address aspect (SetUnitAddress).",
 			"line2":           "Optional street address line 2. Stored on the .address aspect when present (SetUnitAddress).",
@@ -114,6 +116,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 					"sqft":            950,
 					"availableFrom":   "2026-08-01T00:00:00Z",
 					"leaseTermMonths": 12,
+					"depositAmount":   2400,
 					"status":          "available",
 				},
 				ExpectedOutcome: "Validates the unit is alive + a vtx.unit.<NanoID> key, then writes vtx.unit.<unitNanoID>.listing " +
@@ -161,8 +164,9 @@ func listingAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"SetListing", "SetListingStatus"},
 		Description: "Listing-economics aspect (LoftSpace). Stored as vtx.unit.<NanoID>.listing = {rentAmount, " +
-			"rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom, leaseTermMonths, status}. Non-sensitive; " +
-			"attaches to a location unit, not an identity. Written by SetListing (full upsert) and SetListingStatus " +
+			"rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom, leaseTermMonths, depositAmount?, status}. Non-sensitive; " +
+			"attaches to a location unit, not an identity. depositAmount is the security deposit, a number > 0 in the " +
+			"listing's currency; absent = no deposit. Written by SetListing (full upsert) and SetListingStatus " +
 			"(status-only rewrite, preserving the rest) — both owned by the loftspaceListing vertexType DDL's " +
 			"script; this aspect-type DDL exists so step-6's permittedCommands check, keyed on the mutation's " +
 			"class, admits the write. Declaration-only: no op handler.",
@@ -170,7 +174,7 @@ func listingAspectTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"rentAmount":{"type":"number"},"rentCurrency":{"type":"string"},"bedrooms":{"type":"integer"},` +
 			`"bathrooms":{"type":"number"},"sqft":{"type":"integer"},"availableFrom":{"type":"string"},` +
-			`"leaseTermMonths":{"type":"integer"},"status":{"type":"string","enum":["available","pending","leased"]}}}`,
+			`"leaseTermMonths":{"type":"integer"},"depositAmount":{"type":"number"},"status":{"type":"string","enum":["available","pending","leased"]}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"rentAmount":      "Monthly rent (number).",
@@ -180,12 +184,13 @@ func listingAspectTypeDDL() pkgmgr.DDLSpec {
 			"sqft":            "Floor area in square feet.",
 			"availableFrom":   "Earliest move-in date (RFC3339).",
 			"leaseTermMonths": "Lease term in months.",
+			"depositAmount":   "Security deposit, a number > 0 in the listing's currency; absent = no deposit.",
 			"status":          "Availability: available | pending | leased.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "listing aspect",
-				Payload:         map[string]any{"rentAmount": 2400, "rentCurrency": "USD", "bedrooms": 2, "availableFrom": "2026-08-01T00:00:00Z", "leaseTermMonths": 12, "status": "available"},
+				Payload:         map[string]any{"rentAmount": 2400, "rentCurrency": "USD", "bedrooms": 2, "availableFrom": "2026-08-01T00:00:00Z", "leaseTermMonths": 12, "depositAmount": 2400, "status": "available"},
 				ExpectedOutcome: "Stored as vtx.unit.<NanoID>.listing; written by SetListing as an unconditioned upsert.",
 			},
 		},
@@ -424,6 +429,9 @@ def execute(state, op):
         sqft = optional_number(p, "sqft", False)
         if sqft != None:
             data["sqft"] = sqft
+        deposit_amount = optional_number(p, "depositAmount", False)
+        if deposit_amount != None:
+            data["depositAmount"] = deposit_amount
 
         listing_key = unit + ".listing"
         mutations = [make_aspect_upsert(unit, "listing", "listing", data)]

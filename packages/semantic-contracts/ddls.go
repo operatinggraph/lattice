@@ -14,10 +14,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // (LoftSpace "a tenant gives notice" design) shortens an already-termed
 // clause's validUntil to a recorded early move-out and updates status the
 // same way, so clauseTerms/clauseStatus permit it too.
-// clauseStatus also permits DebitAccount — the cross-package write
-// loftspace-ledger's DebitAccount makes to mark a fixed/one-time clause
-// completed (the objectLiveness → TombstoneObject precedent: a package's
-// aspect DDL lists every op, in any package, that legitimately writes it).
+// clauseStatus also permits DebitAccount and ReturnDeposit — the
+// cross-package writes loftspace-ledger makes to mark a fixed/one-time clause
+// completed once its authorizing charge posts, and a charged deposit clause
+// returned once its credit posts (the objectLiveness → TombstoneObject
+// precedent: a package's aspect DDL lists every op, in any package, that
+// legitimately writes it).
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{
 		clauseDDL(),
@@ -47,7 +49,7 @@ func clauseDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"CreateClause", "InspectPremises", "SupersedeClause", "BackfillClauseTerm", "ShortenClauseTerm"},
 		Description: "Semantic-contract clause DDL. Vertex shape: vtx.clause.<NanoID>, class=clause, root data = {} " +
 			"(minimal, D5 — the provision text and terms are aspects). CreateClause{leaseAppKey, kind?, prose, " +
-			"accountKey?, amountCents?, period?, rateCents?, periodDays?, daysOccupied?, inspectorKey?, " +
+			"accountKey?, amountCents?, period?, purpose?, rateCents?, periodDays?, daysOccupied?, inspectorKey?, " +
 			"conditionedOnKey?} mints the clause under a fresh NanoID, requiring the lease (and, per kind, the " +
 			"account or inspector, and the conditionedOn vertex if given) all be live (no-orphan invariant). " +
 			"`kind` selects the archetype: \"computational\" (default, Fire V1) requires an account and an amount " +
@@ -89,6 +91,11 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"start, the recorded fact that the clause bills nothing — and .status completes once its recorded due " +
 			"date reaches the new validUntil, the same mark BackfillClauseTerm and DebitAccount leave for the " +
 			"identical fact. Rent for the period containing the move-out is billed whole (monthly, no proration). " +
+			"`purpose` is an optional token (^[a-z][a-zA-Z0-9]{0,31}$, InvalidArgument otherwise) recorded on " +
+			".terms.purpose naming what the clause is FOR — the mark a lens tells a purpose-built clause apart by " +
+			"where period alone cannot (a security deposit is a oneTime clause like any other one-time fee): " +
+			"leaseRentSettlement mints the deposit clause with purpose=deposit and reads it back by that token to " +
+			"return the deposit once the tenancy ends. Absent means no purpose — every clause minted without one. " +
 			"Either kind may " +
 			"carry an optional " +
 			"conditionedOnKey (any live vertex, e.g. a " +
@@ -110,6 +117,7 @@ func clauseDDL() pkgmgr.DDLSpec {
 			`"accountKey":{"type":"string","description":"vtx.account.<NanoID> this clause charges (required + validated alive when kind=computational)."},` +
 			`"amountCents":{"type":"number","description":"The flat one-time (or recurring-per-period) charge amount in integer cents, when kind=computational and no rateCents/periodDays/daysOccupied proration trio is supplied (required, must be > 0, in that case)."},` +
 			`"period":{"type":"string","description":"computational only: \"oneTime\" (default) or \"monthly\" (Fire V3 recurring fee). A prorated clause (rateCents/periodDays/daysOccupied) must be oneTime."},` +
+			`"purpose":{"type":"string","description":"Optional token (^[a-z][a-zA-Z0-9]{0,31}$) naming what the clause is for, recorded on .terms.purpose — the shape filter a lens reads a purpose-built clause back by (leaseRentSettlement's deposit gaps read \"deposit\"). Omit for a clause with no purpose."},` +
 			`"validFrom":{"type":"string","description":"Optional (monthly only, together with validUntil): RFC3339 start of the clause's term — the first period's due date. Normalized to canonical UTC. Refused on a oneTime clause or without validUntil."},` +
 			`"validUntil":{"type":"string","description":"Optional (monthly only, together with validFrom): RFC3339 end of the clause's term, exclusive; must be after validFrom. No period starting at or after it is ever billed."},` +
 			`"clauseKey":{"type":"string","description":"SupersedeClause: vtx.clause.<NanoID> of the live clause being amended. BackfillClauseTerm: the live untermed monthly clause to stamp a term onto. ShortenClauseTerm: the live, already-termed monthly clause to shorten to the lease's recorded move-out."},` +
@@ -128,6 +136,7 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"accountKey":       "Full vtx.account.<NanoID> key of the ledger account this clause charges. CreateClause validates it is alive and writes the chargesTo link (clause→account); the account key also flows into the clauseSatisfaction lens as the directOp target.",
 			"amountCents":      "The flat charge amount in integer cents when no proration trio is supplied; required (kind=computational), must be a positive number. Stored on the .terms aspect and flows type-preserved into the DebitAccount directOp's amountCents param when the clause is unsatisfied.",
 			"period":           "computational only: \"oneTime\" (default) or \"monthly\". A monthly clause re-arms via the .status aspect's chargeValidUntil after each debit instead of completing once — on its term's anniversary grid when it carries validFrom/validUntil.",
+			"purpose":          "Optional token, ^[a-z][a-zA-Z0-9]{0,31}$ (InvalidArgument otherwise), recorded verbatim on .terms.purpose when supplied and absent otherwise. Names what the clause is FOR so a lens can tell it apart from any other clause of the same period — leaseRentSettlement mints the security deposit with \"deposit\" and returns it by the same token. Never interpreted by the clause script itself.",
 			"validFrom":        "Optional, monthly only, with validUntil: the term's start (RFC3339, canonicalized to UTC). Stored on .terms; the clauseSatisfaction lens bills the first period once a recorded lapse reaches it, and DebitAccount computes every later due date from it.",
 			"validUntil":       "Optional, monthly only, with validFrom: the term's exclusive end (RFC3339, canonicalized to UTC; must be after validFrom). Stored on .terms; no period starting at or after it is billed, and the clause completes once its next due reaches it.",
 			"clauseKey":        "SupersedeClause: full vtx.clause.<NanoID> key of the live clause being amended. BackfillClauseTerm: the live, untermed, monthly computational clause to stamp a term onto (AlreadyTermed if it has one). ShortenClauseTerm: the live, already-termed monthly clause to shorten (NotTermed if it carries no term yet).",
@@ -152,6 +161,22 @@ func clauseDDL() pkgmgr.DDLSpec {
 					"Emits clause.created{clauseKey, leaseAppKey, kind, accountKey, amountCents}. Returns primaryKey. The " +
 					"clauseSatisfaction lens immediately projects the clause as violating (missing_charge=true, no " +
 					"authorizedBy transaction yet); Weaver dispatches directOp(DebitAccount) to close the gap.",
+			},
+			{
+				Name: "CreateClause — the security deposit (leaseRentSettlement's missing_deposit dispatch)",
+				Payload: map[string]any{
+					"leaseAppKey": "vtx.leaseapp.<NanoID>",
+					"accountKey":  "vtx.account.<NanoID>",
+					"prose":       "Security deposit, held for the tenancy and returned when it ends.",
+					"amountCents": 250000,
+					"period":      "oneTime",
+					"purpose":     "deposit",
+				},
+				ExpectedOutcome: "As the fixed-fee example, plus .terms.purpose=\"deposit\" — the token " +
+					"leaseRentSettlement's deposit gaps read the clause back by. clauseSatisfaction bills it at once " +
+					"through DebitAccount, which marks the clause completed; once the lease's .tenancy records endedAt, " +
+					"leaseRentSettlement's missing_depositReturn dispatches loftspace-ledger's ReturnDeposit, which " +
+					"credits the amount back and marks the clause returned.",
 			},
 			{
 				Name: "CreateClause — a conditioned pet fee",
@@ -322,8 +347,8 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateClause", "SupersedeClause", "BackfillClauseTerm", "ShortenClauseTerm"},
 		Description: "The clause's machine terms — what 'fulfillment' means digitally. Stored as " +
-			"vtx.clause.<NanoID>.terms (class clauseTerms) = {kind, conditioned, amountCents?, period, validFrom?, " +
-			"validUntil?, basis?, rateCents?, periodDays?, daysOccupied?}, kind ∈ {computational, judgment}. " +
+			"vtx.clause.<NanoID>.terms (class clauseTerms) = {kind, conditioned, amountCents?, period, purpose?, " +
+			"validFrom?, validUntil?, basis?, rateCents?, periodDays?, daysOccupied?}, kind ∈ {computational, judgment}. " +
 			"Non-sensitive. " +
 			"computational (Fire V1, default) carries amountCents; judgment (Fire V2) carries no amountCents — its " +
 			"gate is the requiresInspectionBy link + the clauseInspection aspect, not a charge. `conditioned` is " +
@@ -331,7 +356,11 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 			"conditionedOn link's liveness) because a tombstoned condition TARGET makes the lens's optional match " +
 			"resolve null exactly like \"never conditioned\" would; only this flag lets the lens tell the two " +
 			"apart. `period` (Fire V3) is \"oneTime\" (default) or \"monthly\" (computational only) — the " +
-			"clauseSatisfaction lens's recurring gate reads this column, not a stored charge count. A monthly " +
+			"clauseSatisfaction lens's recurring gate reads this column, not a stored charge count. `purpose` is " +
+			"the optional token CreateClause records when supplied (^[a-z][a-zA-Z0-9]{0,31}$) — what the clause is " +
+			"FOR, the mark a lens tells a purpose-built clause apart by where period alone cannot: " +
+			"leaseRentSettlement's deposit gaps read purpose=deposit, and loftspace-ledger's ledgerHistory projects " +
+			"it beside each authorized entry. Absent on every clause minted without one. A monthly " +
 			"clause's TERM is `validFrom`/`validUntil` (both or neither, canonical RFC3339 UTC, validUntil > " +
 			"validFrom): the lens bills one period per calendar month of [validFrom, validUntil) and DebitAccount " +
 			"computes each next due date from validFrom; absent, the clause is untermed and bills on the ~30d " +
@@ -347,7 +376,7 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 			"Declaration-only: no op handler of its own.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":{"kind":{"type":"string"},"conditioned":{"type":"boolean"},` +
-			`"amountCents":{"type":"number"},"period":{"type":"string"},"validFrom":{"type":"string"},"validUntil":{"type":"string"},"basis":{"type":"string"},` +
+			`"amountCents":{"type":"number"},"period":{"type":"string"},"purpose":{"type":"string"},"validFrom":{"type":"string"},"validUntil":{"type":"string"},"basis":{"type":"string"},` +
 			`"rateCents":{"type":"number"},"periodDays":{"type":"number"},"daysOccupied":{"type":"number"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
@@ -355,6 +384,7 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 			"conditioned":  "True iff CreateClause received a conditionedOnKey. The clauseSatisfaction lens's conditioning gate reads this flag, not the link's liveness.",
 			"amountCents":  "The charge amount in integer cents — either the flat CreateClause payload value, or (Fire V3) the once-computed prorated result. Absent for kind=judgment.",
 			"period":       "\"oneTime\" (default) or \"monthly\" (Fire V3, computational only). The clauseSatisfaction lens's missing_charge gate branches on this column.",
+			"purpose":      "Optional token (^[a-z][a-zA-Z0-9]{0,31}$) naming what the clause is for, verbatim from CreateClause. leaseRentSettlement's missing_deposit / missing_depositReturn gaps filter on purpose=deposit; ledgerHistory projects it as clausePurpose. Absent when none was supplied.",
 			"validFrom":    "Monthly only, with validUntil: the term's start, canonical RFC3339 UTC — the first period's due date and the origin of every later anniversary. Absent on an untermed clause (leaseRentSettlement's missing_term gap, when the lease has a .tenancy).",
 			"validUntil":   "Monthly only, with validFrom: the term's exclusive end, canonical RFC3339 UTC. No period starting at or after it is billed. ShortenClauseTerm may cap it down to a recorded early move-out (never below validFrom).",
 			"basis":        "Fire V3: \"daysOccupied\" when amountCents was proration-computed; absent for a flat charge.",
@@ -367,6 +397,11 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "clause terms aspect — fixed one-time",
 				Payload:         map[string]any{"kind": "computational", "conditioned": false, "amountCents": 4500, "period": "oneTime"},
 				ExpectedOutcome: "Stored as vtx.clause.<NanoID>.terms; created once by CreateClause alongside the clause vertex.",
+			},
+			{
+				Name:            "clause terms aspect — the security deposit",
+				Payload:         map[string]any{"kind": "computational", "conditioned": false, "amountCents": 250000, "period": "oneTime", "purpose": "deposit"},
+				ExpectedOutcome: "Stored as vtx.clause.<NanoID>.terms by leaseRentSettlement's missing_deposit dispatch of CreateClause; the purpose token is what its missing_depositReturn gap and ledgerHistory's clausePurpose read the clause back by.",
 			},
 			{
 				Name:            "clause terms aspect — judgment",
@@ -432,11 +467,13 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		// amended clause's status superseded. BackfillClauseTerm moves an
 		// untermed clause's recorded due date onto its new term's grid.
 		// ShortenClauseTerm completes a termed clause whose recorded due
-		// reaches its new, shortened validUntil.
-		PermittedCommands: []string{"CreateClause", "DebitAccount", "SupersedeClause", "BackfillClauseTerm", "ShortenClauseTerm"},
+		// reaches its new, shortened validUntil. ReturnDeposit (loftspace-ledger)
+		// marks a charged deposit clause returned once its credit posts — the
+		// second cross-package writer, the same precedent as DebitAccount.
+		PermittedCommands: []string{"CreateClause", "DebitAccount", "SupersedeClause", "BackfillClauseTerm", "ShortenClauseTerm", "ReturnDeposit"},
 		Description: "The clause's lifecycle state. Stored as vtx.clause.<NanoID>.status (class clauseStatus) = " +
-			"{state, completedAt?, chargeValidUntil?, supersededAt?, supersededBy?}, state ∈ {active, completed, " +
-			"superseded}. Non-sensitive. Created active by CreateClause (or SupersedeClause minting the replacement " +
+			"{state, completedAt?, chargeValidUntil?, supersededAt?, supersededBy?, returnedAt?}, state ∈ {active, " +
+			"completed, superseded, returned}. Non-sensitive. Created active by CreateClause (or SupersedeClause minting the replacement " +
 			"clause, Fire V4); updated by loftspace-ledger's DebitAccount when it posts the " +
 			"authorizing charge, or by SupersedeClause on the AMENDED clause (state→superseded, supersededAt " +
 			"stamped, supersededBy = the new clause's key — audit only, since the convergence retraction is the " +
@@ -456,16 +493,20 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"validUntil), keeping every other key. ShortenClauseTerm marks state completed (+ completedAt) when a " +
 			"recorded chargeValidUntil (or, never charged, validFrom) has already reached the newly shortened " +
 			"validUntil — the same completion fact BackfillClauseTerm's cap-at-validUntil case leaves, keeping " +
-			"every other key.",
+			"every other key. loftspace-ledger's ReturnDeposit moves a completed deposit clause (purpose=deposit) " +
+			"to state returned (+ returnedAt, the credit's postedAt), keeping every other key — completedAt and " +
+			"chargeValidUntil included — pinned to the revision the dispatch hydrated; leaseRentSettlement's " +
+			"missing_depositReturn reads completed as 'charged, not yet returned' and returned as closed.",
 		Script:       aspectDeclarationOnlyScript,
-		InputSchema:  `{"type":"object","properties":{"state":{"type":"string"},"completedAt":{"type":"string"},"chargeValidUntil":{"type":"string"},"supersededAt":{"type":"string"},"supersededBy":{"type":"string"}}}`,
+		InputSchema:  `{"type":"object","properties":{"state":{"type":"string"},"completedAt":{"type":"string"},"chargeValidUntil":{"type":"string"},"supersededAt":{"type":"string"},"supersededBy":{"type":"string"},"returnedAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"state":            "active (CreateClause, and every monthly recharge) or completed (DebitAccount, period=oneTime clauses only) or superseded (SupersedeClause, Fire V4, on the amended clause).",
+			"state":            "active (CreateClause, and every monthly recharge) or completed (DebitAccount, period=oneTime clauses only) or superseded (SupersedeClause, Fire V4, on the amended clause) or returned (ReturnDeposit, a completed purpose=deposit clause whose credit has posted).",
 			"completedAt":      "RFC3339 timestamp DebitAccount stamps when it marks a oneTime clause completed. Absent while active or for monthly clauses.",
 			"chargeValidUntil": "RFC3339 due date of a period=monthly clause's NEXT charge: DebitAccount (re-)stamps it on every charge — postedAt + ~30d for an untermed clause, the next anniversary of .terms.validFrom for a termed one (= validUntil after the final period's charge); BackfillClauseTerm moves it onto a newly stamped term's grid. The clauseSatisfaction lens's recurring convergence gate and the projected freshUntil column both read this field. Absent for period=oneTime clauses and for a monthly clause never charged.",
 			"supersededAt":     "Fire V4: RFC3339 timestamp SupersedeClause stamps on the amended clause's status. Audit only — the row-retraction signal is the root tombstone, not this field.",
 			"supersededBy":     "Fire V4: the replacement clause's full vtx.clause.<NanoID> key. Audit only, same caveat as supersededAt.",
+			"returnedAt":       "RFC3339 timestamp ReturnDeposit stamps (the return credit's postedAt) when it marks a charged deposit clause returned. Absent on every other clause; state=returned beside it is what closes leaseRentSettlement's missing_depositReturn.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -482,6 +523,11 @@ func clauseStatusAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "clause status aspect — due date moved onto a backfilled term's grid",
 				Payload:         map[string]any{"state": "active", "chargeValidUntil": "2026-09-08T00:00:00Z"},
 				ExpectedOutcome: "Updated by BackfillClauseTerm on an untermed monthly clause whose lease's tenancy starts 2026-09-08: a recorded due before validFrom (or none) becomes validFrom; one inside the term becomes the start of the period containing it. state and every other key are kept.",
+			},
+			{
+				Name:            "clause status aspect — deposit returned",
+				Payload:         map[string]any{"state": "returned", "completedAt": "2026-07-02T12:00:00Z", "chargeValidUntil": "2026-08-01T12:00:00Z", "returnedAt": "2027-07-02T12:00:00Z"},
+				ExpectedOutcome: "Updated (op:update, pinned to the hydrated revision) by loftspace-ledger's ReturnDeposit on a completed purpose=deposit clause once the tenancy's endedAt is recorded: state becomes returned, returnedAt is the credit's postedAt, every field DebitAccount left is kept.",
 			},
 			{
 				Name:            "clause status aspect — superseded (Fire V4)",

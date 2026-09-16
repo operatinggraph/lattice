@@ -965,12 +965,22 @@ def execute(state, op):
     fail("aspect-type DDL: not an operation handler: " + op.operationType)
 `
 
-// transactionDDLScript handles DebitAccount, LoftspaceRecordCharge and
-// CreditAccount. Each mints a fresh transaction vertex + a .entry aspect +
-// the postedTo link to the account. The ledger is append-only: no aspect on the account is read or
-// mutated here, so concurrent debits/credits against the same account never
-// race a read-modify-write — the balance is derived by the ledgerHistory lens
-// summing entries.
+// transactionDDLScript handles DebitAccount, LoftspaceRecordCharge,
+// CreditAccount and ReturnDeposit. Each mints a fresh transaction vertex + a
+// .entry aspect + the postedTo link to the account. The ledger is append-only:
+// no aspect on the account is read or mutated here, so concurrent
+// debits/credits against the same account never race a read-modify-write —
+// the balance is derived by the ledgerHistory lens summing entries.
+//
+// ReturnDeposit (the LoftSpace "a lease takes a security deposit" design) is
+// the one entry that is not post_entry's: it credits a charged deposit clause's
+// amount back once the lease's tenancy has ended, links the credit
+// authorizedBy the clause exactly as DebitAccount's charge was, and marks the
+// clause's .status returned under OCC — the third writer of that aspect after
+// CreateClause and DebitAccount. Every key it reads is hydrated: the account,
+// the clause, its .terms and .status, the lease's .tenancy and the two
+// deterministic custody links, all supplied by this script's own derive_reads
+// whatever the submitter declared, so a live read never decides a refusal.
 //
 // A self-scoped submit (authContext.target present) is bound to the account's
 // own heldFor topology along one of two paths, resident first: the lease's
@@ -1130,6 +1140,54 @@ def is_account_key(key):
         if ch not in NANOID_ALPHABET:
             return False
     return True
+
+def is_vertex_key(key, want_type):
+    # is_account_key's grammar for any vertex type: derive_reads derives the
+    # clause and lease keys ReturnDeposit reads by the same rule, so a
+    # malformed payload key derives nothing and the handler's own parts_of
+    # raises the clean InvalidArgument.
+    if key == None or type(key) != type(""):
+        return False
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != want_type:
+        return False
+    if len(parts[2]) != 20:
+        return False
+    for ch in parts[2].elems():
+        if ch not in NANOID_ALPHABET:
+            return False
+    return True
+
+def arrears_stale_mark(acct_key):
+    # The account's .arrears episode state (class loftspaceAccountArrears,
+    # ddls.go). This ledger stores no balance, so a posted entry cannot tell an
+    # episode opening from one continuing, or a clearing payment from a
+    # partial one. It does the one thing it can: mark what already EXISTS
+    # stale — a request for EvaluateLoftspaceArrears to recompute the head
+    # (and whether there still is one) from the account's own history — and
+    # mint nothing where nothing exists, since an account with no arrears
+    # state is already opening the never-evaluated gap. Every debit and every
+    # credit lands here alike, whichever op posted it: a charge behind an
+    # older head changes nothing the head reads, but this op cannot know it
+    # is behind one. Returns the mutation list to append — one update, or
+    # none.
+    arrears_key = acct_key + ".arrears"
+    # read-posture: (d) optionalReads — derived server-side by this script's own
+    # derive_reads(op) for every entry op (Contract #2 §2.5 class (g)), and
+    # declared statically by opmetas.go's OpDispatchSpec.OptionalReads.
+    # Absence-tolerant: no account carries .arrears until an evaluation has run
+    # on it.
+    arrears_doc = kv.Read(arrears_key)
+    if arrears_doc == None or arrears_doc.isDeleted:
+        return []
+    # The CLASS, not just the key: this package is the sole writer of a
+    # .arrears aspect and writes exactly that class, so a document of any
+    # other class here is a fault to refuse, never state to carry.
+    if not hasattr(arrears_doc, "class") or getattr(arrears_doc, "class") != "loftspaceAccountArrears":
+        fail("InvalidState: this account's arrears aspect is not a loftspaceAccountArrears")
+    arrears_data = carry_arrears(arrears_doc)
+    arrears_data["stale"] = True
+    return [make_aspect_update(acct_key, "arrears", "loftspaceAccountArrears", arrears_data)]
 
 # Self-credit balance-verification budget (post_entry's resident branch):
 # 10 pages of 50 postedTo entries covers many years of a monthly rent
@@ -1526,41 +1584,139 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
                                             "data": {"state": "completed", "completedAt": posted_at,
                                                      "chargeValidUntil": charge_valid_until}}})
 
-    # The account's .arrears episode state (class loftspaceAccountArrears,
-    # ddls.go). This ledger stores no balance, so a posted entry cannot tell an
-    # episode opening from one continuing, or a clearing payment from a
-    # partial one. It does the one thing it can: mark what already EXISTS
-    # stale — a request for EvaluateLoftspaceArrears to recompute the head
-    # (and whether there still is one) from the account's own history — and
-    # mint nothing where nothing exists, since an account with no arrears
-    # state is already opening the never-evaluated gap. Every debit and every
-    # credit lands here alike, whichever of the three ops posted it: a charge
-    # behind an older head changes nothing the head reads, but this op cannot
-    # know it is behind one.
-    arrears_key = acct_key + ".arrears"
-    # read-posture: (d) optionalReads — derived server-side by this script's own
-    # derive_reads(op) for all three entry ops (Contract #2 §2.5 class (g)), and
-    # declared statically by opmetas.go's OpDispatchSpec.OptionalReads.
-    # Absence-tolerant: no account carries .arrears until an evaluation has run
-    # on it.
-    arrears_doc = kv.Read(arrears_key)
-    if arrears_doc != None and not arrears_doc.isDeleted:
-        # The CLASS, not just the key: this package is the sole writer of a
-        # .arrears aspect and writes exactly that class, so a document of any
-        # other class here is a fault to refuse, never state to carry.
-        if not hasattr(arrears_doc, "class") or getattr(arrears_doc, "class") != "loftspaceAccountArrears":
-            fail("InvalidState: this account's arrears aspect is not a loftspaceAccountArrears")
-        arrears_data = carry_arrears(arrears_doc)
-        arrears_data["stale"] = True
-        mutations.append(make_aspect_update(acct_key, "arrears", "loftspaceAccountArrears", arrears_data))
+    mutations += arrears_stale_mark(acct_key)
 
+    return {"mutations": mutations, "events": events,
+            "response": {"primaryKey": tx_key}}
+
+def return_deposit(state, op):
+    # The security deposit comes back as a credit on the lease's account once
+    # the tenancy has ended: an ordinary credit that nets against whatever the
+    # tenant still owes, whose remainder the statement reads as the refund
+    # owed. Dispatched by leaseRentSettlement's missing_depositReturn
+    # (packages/semantic-contracts, targets.go) with the lease, the charged
+    # deposit clause the lens selected, and the lease's account. Every fact
+    # below is read from the graph's own record, never trusted from the
+    # payload: the amount and the purpose from the clause's .terms, whether
+    # it was charged from its .status, the end from the lease's .tenancy,
+    # and the clause's custody from its own deterministic links.
+    p = op.payload
+    lease_key = required_string(p, "leaseAppKey")
+    _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
+    clause_key = required_string(p, "clauseKey")
+    _, clause_id = parts_of(clause_key, "clauseKey", "clause")
+    acct_key = required_string(p, "accountKey")
+    _, acct_id = parts_of(acct_key, "accountKey", "account")
+
+    if not vertex_alive(state, acct_key):
+        fail("UnknownAccount: " + acct_key)
+    if not vertex_alive(state, clause_key):
+        fail("UnknownClause: " + clause_key)
+
+    # Only a deposit is returned. The purpose token CreateClause recorded is
+    # the fact of what the clause is for — the same mark the dispatching lens
+    # selected it by — so a clause without it is refused whatever its prose
+    # says; the amount is the clause's own, as DebitAccount charged it.
+    terms_key = clause_key + ".terms"
+    if not vertex_alive(state, terms_key):
+        fail("UnknownClause: " + clause_key + " has no live .terms aspect")
+    terms = state[terms_key].data
+    if terms.get("purpose") != "deposit":
+        fail("NotADeposit: " + clause_key + " carries no purpose=deposit; only a security deposit clause is returned")
+    amount_cents = terms.get("amountCents")
+    if amount_cents == None or amount_cents <= 0:
+        fail("NotADeposit: " + clause_key + " carries no positive amountCents to return")
+
+    # CreateClause writes .status unconditionally, so its absence here is a
+    # missing hydration or a torn clause, never a fresh one — fail closed
+    # rather than treat "no state" as "not yet charged".
+    status_key = clause_key + ".status"
+    if not (status_key in state and vertex_alive(state, status_key)):
+        fail("InvalidState: " + clause_key + " has no live .status aspect")
+    status_doc = state[status_key]
+    status_state = status_doc.data.get("state")
+    if status_state == "returned":
+        # Idempotent no-op (the EndTenancy shape: empty mutations, no event,
+        # no primaryKey): the deposit is already returned. The lens's
+        # missing_depositReturn drops a returned clause from candidacy, so a
+        # dispatch that still names it is a race with an earlier return, not
+        # a second refund.
+        return {"mutations": [], "events": [], "response": {}}
+    if status_state != "completed":
+        # completed is the state DebitAccount's one-time charge leaves; an
+        # active clause is minted but not yet billed, and returning an
+        # uncharged deposit would credit money never collected.
+        fail("DepositNotCharged: " + clause_key + " is " + str(status_state) + ", not completed; a deposit is returned only once DebitAccount has charged it")
+
+    # The recorded end of the tenancy (EndTenancy's endedAt) is what a return
+    # rides — never the notice's intention or the term's scheduled end.
+    tenancy_key = lease_key + ".tenancy"
+    ended_at = None
+    if tenancy_key in state and vertex_alive(state, tenancy_key):
+        ended_at = state[tenancy_key].data.get("endedAt")
+    if ended_at == None:
+        fail("TenancyNotEnded: " + lease_key + " records no endedAt; the deposit is returned once the tenancy has ended")
+
+    # Custody: the clause must charge THIS account and govern THIS lease, off
+    # its own deterministic link keys (mint_clause writes both once, with the
+    # clause as source). Both are hydrated by derive_reads below; an absent
+    # or tombstoned link is a mismatch between the payload and the clause's
+    # record, so the credit lands nowhere it does not belong.
+    charges_lnk = "lnk.clause." + clause_id + ".chargesTo.account." + acct_id
+    if not vertex_alive(state, charges_lnk):
+        fail("ClauseAccountMismatch: " + clause_key + " does not charge " + acct_key)
+    governs_lnk = "lnk.clause." + clause_id + ".governs.leaseapp." + lease_id
+    if not vertex_alive(state, governs_lnk):
+        fail("ClauseLeaseMismatch: " + clause_key + " does not govern " + lease_key)
+
+    tx_id = nanoid.new()
+    tx_key = "vtx.transaction." + tx_id
+    posted_at = time.rfc3339_utc(op.submittedAt)
+    entry_data = {"type": "credit", "amountCents": amount_cents, "postedAt": posted_at,
+                  "memo": "Security deposit returned"}
+
+    # postedTo / authorizedBy: the transaction (later-arriving) is the source
+    # of both (Contract #1 §1.1) — the same chain of custody DebitAccount
+    # recorded for the charge, so the statement tells the return from a
+    # payment by the clause it names.
+    posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
+    authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
+
+    # The clause's .status moves to returned, keeping every field DebitAccount
+    # left (completedAt, chargeValidUntil) and pinned to the revision the
+    # dispatch hydrated: a concurrent writer of .status must conflict rather
+    # than be overwritten by a return computed from a stale state, and a
+    # second return racing this one conflicts here instead of crediting twice.
+    status_data = {}
+    for k, v in status_doc.data.items():
+        status_data[k] = v
+    status_data["state"] = "returned"
+    status_data["returnedAt"] = posted_at
+
+    mutations = [
+        make_vtx(tx_key, "transaction", {}),
+        make_aspect(tx_key, "entry", "transactionEntry", entry_data),
+        make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
+        make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}),
+        {"op": "update", "key": status_key, "expectedRevision": status_doc.revision,
+         "document": {"class": "clauseStatus", "isDeleted": False,
+                      "vertexKey": clause_key, "localName": "status", "data": status_data}},
+    ]
+    # A credit moves the FIFO the arrears evaluation ages, exactly as every
+    # post_entry credit does.
+    mutations += arrears_stale_mark(acct_key)
+
+    events = [{"class": "loftspace.depositReturned",
+               "data": {"accountKey": acct_key, "transactionKey": tx_key, "clauseKey": clause_key,
+                        "leaseAppKey": lease_key, "amountCents": amount_cents}}]
     return {"mutations": mutations, "events": events,
             "response": {"primaryKey": tx_key}}
 
 def derive_reads(op):
     # Contract #2 §2.5 class (g): the keys post_entry's .arrears write depends
     # on, returned server-side for EVERY dispatch of the three entry ops,
-    # whatever the submitter declared. The write is a bare update that is
+    # whatever the submitter declared — and ReturnDeposit's whole read set,
+    # below. The write is a bare update that is
     # only auto-conditioned on the step-4 hydrated revision (Contract #3
     # §3.2) for a key that WAS hydrated — a submitter that omitted the
     # declaration would get a live read and an UNCONDITIONED update, so two
@@ -1586,6 +1742,38 @@ def derive_reads(op):
     # (also a struct). No kv, no nanoid: both are fail-closed stubs in this
     # pass, and a derivation that reads state is a read, not a derivation.
     ot = op.operationType
+    if ot == "ReturnDeposit":
+        # ReturnDeposit's whole read set, derived from the three payload keys:
+        # the account root and its .arrears (the same two as every entry op),
+        # the clause root, its .terms and .status, the lease's .tenancy, and
+        # the two deterministic custody links — which no dispatcher can
+        # template (a link key spans two payload fields), so this is the one
+        # channel that hydrates them. All optionalReads, so the handler's own
+        # refusals (UnknownAccount, UnknownClause, TenancyNotEnded,
+        # ClauseAccountMismatch, ClauseLeaseMismatch) name what is absent
+        # instead of an opaque hydration miss; a dispatcher that declares a
+        # key required keeps it required (weakest wins).
+        keys = []
+        acct_key = optional_string(op.payload, "accountKey")
+        clause_key = optional_string(op.payload, "clauseKey")
+        lease_key = optional_string(op.payload, "leaseAppKey")
+        has_acct = is_account_key(acct_key)
+        has_clause = is_vertex_key(clause_key, "clause")
+        has_lease = is_vertex_key(lease_key, "leaseapp")
+        if has_acct:
+            keys += [acct_key, acct_key + ".arrears"]
+        if has_clause:
+            keys += [clause_key, clause_key + ".terms", clause_key + ".status"]
+            clause_id = clause_key.split(".")[2]
+            if has_acct:
+                keys.append("lnk.clause." + clause_id + ".chargesTo.account." + acct_key.split(".")[2])
+            if has_lease:
+                keys.append("lnk.clause." + clause_id + ".governs.leaseapp." + lease_key.split(".")[2])
+        if has_lease:
+            keys.append(lease_key + ".tenancy")
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
     if ot != "DebitAccount" and ot != "LoftspaceRecordCharge" and ot != "CreditAccount":
         return {}
     # optional_string, never required_string: a missing or malformed
@@ -1624,6 +1812,13 @@ def execute(state, op):
         # at the balance) or its appliesToUnit unit carries a manages link from
         # it (landlord, uncapped).
         return post_entry(state, op, "credit", "account.credited", False)
+
+    if ot == "ReturnDeposit":
+        # Operator-only (permissions.go: one scope=any grant, Weaver's
+        # dispatch actor), no self grant, no task minted for it — so no
+        # authContext target ever reaches this branch; the custody it proves
+        # is the clause's own (chargesTo / governs), off the graph's record.
+        return return_deposit(state, op)
 
     fail("transaction DDL: unknown operationType: " + ot)
 `, RecurringChargePeriod)

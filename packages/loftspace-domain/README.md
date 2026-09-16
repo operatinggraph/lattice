@@ -30,7 +30,7 @@ link to the payload unit (`permissions.go`). The ownership ops carry no self gra
 vtx.unit.<id>              class=location (owned by location-domain; root {})
 vtx.unit.<id>.listing      class=listing   {rentAmount, rentCurrency, bedrooms, bathrooms?, sqft?,
                                             availableFrom (RFC3339 date), leaseTermMonths,
-                                            status ∈ available|pending|leased|withdrawn}
+                                            depositAmount?, status ∈ available|pending|leased|withdrawn}
 vtx.unit.<id>.address      class=address   {line1, line2?, city, region, postal}
 
 lnk.identity.<landlordID>.manages.unit.<unitID>   (class "manages" — landlord → unit;
@@ -51,7 +51,7 @@ data) lives on the identity side, owned by `lease-signing` / `identity-domain`, 
 ## Operations
 
 - **`SetListing`** — `{unit, rentAmount, rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom,
-  leaseTermMonths, status}`. Validates `unit` is an alive `vtx.unit.<id>` of `class=location` (listed in
+  leaseTermMonths, depositAmount?, status}`. Validates `unit` is an alive `vtx.unit.<id>` of `class=location` (listed in
   `ContextHint.Reads`), then an **unconditioned upsert** of the whole `.listing` aspect (create-if-absent
   / overwrite-if-present) — republishing (e.g. flipping `status`) overwrites in place. Returns
   `primaryKey`.

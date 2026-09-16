@@ -120,6 +120,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "unit_status", Type: "text"},
 				{Name: "unit_rent", Type: "double precision"},
 				{Name: "unit_currency", Type: "text"},
+				{Name: "unit_deposit", Type: "double precision"},
 			},
 		},
 		{
@@ -209,6 +210,7 @@ RETURN
   u.listing.data.sqft AS sqft,
   u.listing.data.availableFrom AS availableFrom,
   u.listing.data.leaseTermMonths AS leaseTermMonths,
+  u.listing.data.depositAmount AS depositAmount,
   u.address.data.line1 AS addrLine1,
   u.address.data.line2 AS addrLine2,
   u.address.data.city AS addrCity,
@@ -278,6 +280,7 @@ RETURN
   u.listing.data.status         AS unit_status,
   u.listing.data.rentAmount     AS unit_rent,
   u.listing.data.rentCurrency   AS unit_currency,
+  u.listing.data.depositAmount  AS unit_deposit,
   [nanoIdFromKey(landlord.key)] + [(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors
 `
 

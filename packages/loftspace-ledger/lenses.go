@@ -216,9 +216,14 @@ RETURN
 // The trailing OPTIONAL MATCH walks authorizedBy to a semantic-contracts clause
 // (Fire V4 "why was I charged this?") — OPTIONAL because a plain human-
 // submitted DebitAccount/CreditAccount carries no clauseRef, and this lens
-// projects a row for every transaction regardless. No compile-time dependency
-// on semantic-contracts: the cypher matches a vertex by class label at read
-// time, same as any other package's lens matching a cross-package link.
+// projects a row for every transaction regardless. clausePurpose is the
+// clause's recorded .terms.purpose (null on every clause minted without one):
+// the statement holds a purpose=deposit entry — the charge and, once the
+// tenancy has ended, ReturnDeposit's credit, both authorizedBy the same
+// clause — apart from rent by this column, never by the memo. No compile-time
+// dependency on semantic-contracts: the cypher matches a vertex by class
+// label at read time, same as any other package's lens matching a
+// cross-package link.
 const ledgerHistorySpec = `MATCH (t:transaction)
 MATCH (t)-[:postedTo]->(a:account)
 MATCH (a)-[:heldFor]->(l:leaseapp)
@@ -236,7 +241,8 @@ RETURN
   t.entry.data.periodEnd AS periodEnd,
   t.entry.data.dueAt AS dueAt,
   c.key AS clauseKey,
-  c.prose.data.text AS clauseProse`
+  c.prose.data.text AS clauseProse,
+  c.terms.data.purpose AS clausePurpose`
 
 // leaseAccountsSpec projects one row per lease — the anchor is the leaseapp
 // (not the account), so a lease with no ledger account yet still gets a row

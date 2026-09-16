@@ -4,7 +4,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `account`
 // (LoftspaceCreateAccount, EvaluateLoftspaceArrears), `transaction`
-// (DebitAccount, LoftspaceRecordCharge, CreditAccount), the
+// (DebitAccount, LoftspaceRecordCharge, CreditAccount, ReturnDeposit), the
 // `ledgerAccountGuard` aspect-type declaration (the lease-anchored
 // uniqueness guard LoftspaceCreateAccount writes), the
 // `loftspaceAccountArrears` aspect-type declaration (the account's
@@ -184,8 +184,9 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 //     convergence gap and the timer, so the row goes quiet rather than
 //     re-dispatching a doomed evaluation on every window; it is dropped by
 //     the next posted entry's carry, which buys exactly one more attempt.
-//   - EVERY DebitAccount / LoftspaceRecordCharge / CreditAccount against an
-//     account that carries the aspect marks it stale (carrying every other
+//   - EVERY DebitAccount / LoftspaceRecordCharge / CreditAccount /
+//     ReturnDeposit against an account that carries the aspect marks it
+//     stale (carrying every other
 //     field, the send record included): with no balance to reason from, an
 //     entry can tell neither an episode opening from one continuing nor a
 //     clearing payment from a partial one, so it asks for the recomputation
@@ -193,14 +194,14 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 //     — such an account is already opening the never-evaluated gap.
 //
 // Non-sensitive: dates and two booleans on a vtx.account (not an identity),
-// no money and no PII. Declaration-only: written by the four ops above, never
+// no money and no PII. Declaration-only: written by the five ops above, never
 // dispatched as an operation in its own right. Never tombstoned (an account
 // is never tombstoned).
 func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "loftspaceAccountArrears",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"DebitAccount", "LoftspaceRecordCharge", "CreditAccount", arrearsOp},
+		PermittedCommands: []string{"DebitAccount", "LoftspaceRecordCharge", "CreditAccount", "ReturnDeposit", arrearsOp},
 		Description: "Per-account arrears-episode aspect. Stored as vtx.account.<NanoID>.arrears " +
 			"(class loftspaceAccountArrears) = {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?, stale?, historyTooLong?}. " +
 			"Non-sensitive. dueAt is the FIFO-oldest still-open charge's OWN recorded due date (the .entry.dueAt a " +
@@ -218,7 +219,7 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"stale means what is recorded may no longer describe the account — EVERY posted entry sets it, because " +
 			"this ledger stores no balance for an entry to reason from — and is a request for a fresh " +
 			"EvaluateLoftspaceArrears, which rewrites the aspect and so never carries it forward. Written by " +
-			"DebitAccount / LoftspaceRecordCharge / CreditAccount (mark stale; mint nothing where absent) and " +
+			"DebitAccount / LoftspaceRecordCharge / CreditAccount / ReturnDeposit (mark stale; mint nothing where absent) and " +
 			"EvaluateLoftspaceArrears (recomputes the head; ends the episode at {evaluatedAt} alone when nothing is " +
 			"owed, and drops a send record that predates the charge that opened the episode it finds — the boundary between an episode paid " +
 			"off and the next one opened before any evaluation ran). Read by the loftspaceArrearsReminders " +
@@ -250,7 +251,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "transaction",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"DebitAccount", "CreditAccount", "LoftspaceRecordCharge"},
+		PermittedCommands: []string{"DebitAccount", "CreditAccount", "LoftspaceRecordCharge", "ReturnDeposit"},
 		Description: "Ledger transaction DDL. Vertex shape: vtx.transaction.<NanoID>, class=transaction, root data = {} " +
 			"(minimal, D5 — the entry detail is a .entry aspect). DebitAccount{accountKey, amountCents, memo?, clauseRef?, " +
 			"period?} records a charge (rent, a late fee, a deposit) — the orchestrated shape, operator-only, that " +
@@ -258,7 +259,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"amountCents, memo?} records the same debit entry as a person's manual charge (no clauseRef/period — a " +
 			"vertical-unique name because operationType is a global namespace and cafe-ledger admits its own " +
 			"DebitAccount); CreditAccount{accountKey, amountCents, memo?} " +
-			"records a payment received. Each mints a fresh vtx.transaction.<NanoID> + a .entry aspect {type " +
+			"records a payment received; ReturnDeposit{leaseAppKey, clauseKey, accountKey} (below) credits a " +
+			"charged security deposit back once the tenancy has ended. Each mints a fresh vtx.transaction.<NanoID> + a .entry aspect {type " +
 			"(debit|credit), amountCents, memo?, postedAt, periodStart?, periodEnd?, dueAt?} + the postedTo link (transaction→account, the transaction " +
 			"is the later-arriving vertex so it is the source — Contract #1 §1.1). The ledger is APPEND-ONLY — no " +
 			"balance is stored or mutated on the account; the ledgerHistory lens derives a balance by summing " +
@@ -298,7 +300,25 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"postedAt + 30 days) and dueAt (the period's start: validFrom is the first period's due date and every " +
 			"later period falls due on its anniversary) — so a statement names the month covered and the due date " +
 			"from the row itself. A one-time charge stamps none of the three. " +
-			"Every entry, from any of the three ops, ALSO marks the account's .arrears episode state " +
+			"ReturnDeposit{leaseAppKey, clauseKey, accountKey} (the LoftSpace \"a lease takes a security deposit\" " +
+			"design) is Weaver's dispatch for leaseRentSettlement's missing_depositReturn gap (packages/semantic-contracts): " +
+			"operator-only, no self grant, no screen. It reads everything from the graph's own record, never the " +
+			"payload — the clause's .terms must carry purpose=deposit (NotADeposit otherwise) and its amountCents is " +
+			"the amount credited; the clause's .status must be completed, the state DebitAccount's one-time charge " +
+			"leaves (DepositNotCharged while still active — an uncharged deposit is never refunded); the lease's " +
+			".tenancy must record endedAt (TenancyNotEnded otherwise — the recorded end, never the notice or the " +
+			"term); and the clause's own deterministic chargesTo / governs links must name the payload account and " +
+			"lease (ClauseAccountMismatch / ClauseLeaseMismatch). A clause already returned is an idempotent no-op " +
+			"(empty mutations, no event). Otherwise it mints vtx.transaction.<NanoID> + .entry {type: credit, " +
+			"amountCents, postedAt, memo: \"Security deposit returned\"} + the postedTo link + the authorizedBy link " +
+			"(transaction→clause, the same chain of custody the charge recorded), moves the clause's .status to " +
+			"{state: returned, returnedAt: postedAt, ...every field kept} pinned to the revision it hydrated at, and " +
+			"marks .arrears stale like every other entry. Emits loftspace.depositReturned{accountKey, transactionKey, " +
+			"clauseKey, leaseAppKey, amountCents}. The credit is an ordinary credit: it nets against whatever the " +
+			"tenant still owes and the remainder reads as a credit balance — the refund owed. The DDL's own " +
+			"derive_reads hydrates every key it reads (the account and its .arrears, the clause and its .terms and " +
+			".status, the lease's .tenancy, and the two custody links) whatever the submitter declared. " +
+			"Every entry, from any of the four ops, ALSO marks the account's .arrears episode state " +
 			"(loftspaceAccountArrears DDL) stale where it exists — carrying every other field, the episode's send " +
 			"record included — and mints nothing where it does not: with no stored balance an entry cannot tell an " +
 			"episode opening from one continuing, so it asks EvaluateLoftspaceArrears to recompute rather than " +
@@ -307,7 +327,9 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"hydrates it whatever the submitter declared.",
 		Script: transactionDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"accountKey":{"type":"string","description":"vtx.account.<NanoID> the transaction posts to (DebitAccount/CreditAccount; required, validated alive)."},` +
+			`{"accountKey":{"type":"string","description":"vtx.account.<NanoID> the transaction posts to (every op; required, validated alive). ReturnDeposit additionally requires the clause's chargesTo link to name it."},` +
+			`"clauseKey":{"type":"string","description":"ReturnDeposit only: vtx.clause.<NanoID> of the completed purpose=deposit clause being returned (required for ReturnDeposit; validated alive, NotADeposit / DepositNotCharged otherwise). Its own .terms.amountCents is the amount credited."},` +
+			`"leaseAppKey":{"type":"string","description":"ReturnDeposit only: vtx.leaseapp.<NanoID> of the lease whose .tenancy.endedAt is the recorded end the return rides (required for ReturnDeposit; TenancyNotEnded while absent). The clause's governs link must name it."},` +
 			`"amountCents":{"type":"number","description":"The transaction amount in integer cents; required, must be > 0. A debit is a charge (increases what the tenant owes); a credit is a payment (decreases it)."},` +
 			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"June rent\", \"Late fee\"). Optional."},` +
 			`"clauseRef":{"type":"string","description":"DebitAccount only: vtx.clause.<NanoID> of the semantic-contract clause authorizing this charge (optional, validated alive when supplied). The clause's OWN .terms.amountCents is authoritative — a payload amountCents that disagrees is rejected (AmountMismatch). Writes the authorizedBy audit link and updates the clause's .status."},` +
@@ -316,7 +338,9 @@ func transactionDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.transaction.<NanoID> of the minted transaction (the operation's principal key)."}}}`,
 		FieldDescription: map[string]string{
-			"accountKey":  "Full vtx.account.<NanoID> key the transaction posts to. DebitAccount/CreditAccount validate it is alive and write the postedTo link (transaction→account) the ledgerHistory lens walks.",
+			"accountKey":  "Full vtx.account.<NanoID> key the transaction posts to. Every op validates it is alive and writes the postedTo link (transaction→account) the ledgerHistory lens walks; ReturnDeposit also proves the clause's chargesTo link names it (ClauseAccountMismatch otherwise).",
+			"clauseKey":   "ReturnDeposit only. Full vtx.clause.<NanoID> key of the deposit clause being returned: its .terms must carry purpose=deposit and its .status must be completed (charged). The credit's amountCents is the clause's own; the transaction is linked authorizedBy it and its .status moves to returned.",
+			"leaseAppKey": "ReturnDeposit only. Full vtx.leaseapp.<NanoID> key of the lease the clause governs (ClauseLeaseMismatch otherwise); its .tenancy.endedAt must be recorded (TenancyNotEnded otherwise).",
 			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the ledgerHistory lens. DebitAccount with a clauseRef must match the clause's own .terms.amountCents exactly (AmountMismatch otherwise) — the clause is the authoritative amount, not the payload.",
 			"memo":        "Optional free-text description of the charge or payment (e.g. \"June rent\", \"Late fee — 5 days\"). Stored on the .entry aspect when supplied; projected by the ledgerHistory lens.",
 			"clauseRef":   "DebitAccount only. Full vtx.clause.<NanoID> key of the semantic-contract clause authorizing this charge. When supplied, validates the clause is alive, derives the authoritative amountCents from the clause's own .terms (rejecting AmountMismatch on disagreement with the payload), writes the authorizedBy link (transaction→clause), and updates the clause's .status per the period param.",
@@ -337,6 +361,18 @@ func transactionDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Same shape as DebitAccount, but writes .entry{type: credit, ...} and emits " +
 					"account.credited{accountKey, transactionKey, amountCents}. A payment reduces what the tenant owes " +
 					"(the ledgerHistory-derived balance = sum(debits) − sum(credits)).",
+			},
+			{
+				Name:    "ReturnDeposit — credit the security deposit back once the tenancy has ended",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "clauseKey": "vtx.clause.<NanoID>", "accountKey": "vtx.account.<NanoID>"},
+				ExpectedOutcome: "The clause's .terms carry purpose=deposit and amountCents 250000, its .status is completed " +
+					"(DebitAccount charged it), the lease's .tenancy records endedAt, and the clause's chargesTo / governs " +
+					"links name the account and lease: commits vtx.transaction.<NanoID> + .entry{type: credit, amountCents: " +
+					"250000, memo: \"Security deposit returned\", postedAt} + postedTo + authorizedBy (transaction→clause), " +
+					"moves .status to {state: returned, returnedAt, completedAt kept}, marks .arrears stale where present, " +
+					"and emits loftspace.depositReturned. leaseRentSettlement's missing_depositReturn then closes (a " +
+					"returned clause is not a candidate); a re-dispatch against the returned clause is an empty no-op. " +
+					"Dispatched by Weaver's leaseRentSettlement playbook, never by a screen.",
 			},
 			{
 				Name:    "DebitAccount — clause-authorized one-time charge (semantic-contracts Weaver dispatch)",

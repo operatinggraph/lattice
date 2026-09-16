@@ -167,6 +167,10 @@ func TestLeaseApplicationsRead_ProjectsTenancyColumns(t *testing.T) {
 		"termStart":      "2027-03-15T00:00:00Z",
 		"rentAmount":     1900,
 	})
+	f.aspect(t, "app", "deposit", "leaseDeposit", map[string]any{
+		"amount":     1500,
+		"recordedAt": "2026-09-15T00:00:00Z",
+	})
 
 	rows := f.projectRead(t)
 	require.Len(t, rows, 1)
@@ -177,6 +181,7 @@ func TestLeaseApplicationsRead_ProjectsTenancyColumns(t *testing.T) {
 	require.Equal(t, "2027-03-15T00:00:00Z", v["tenancy_term_start"])
 	require.EqualValues(t, 1900, v["tenancy_rent_amount"])
 	require.Nil(t, v["tenancy_ended_at"], "tenancy_ended_at is null on every live row")
+	require.EqualValues(t, 1500, v["deposit_amount"])
 }
 
 // TestLeaseApplicationsRead_BareShellProducesNoRow — a malformed application with
