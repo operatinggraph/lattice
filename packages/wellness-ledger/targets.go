@@ -11,7 +11,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // bookingRef/priceBookingRef/refundRef validation) and can read
 // booking/session/wellnessrefund data directly, so no separate domain-side
 // package or cross-package dependency is needed — and ArrearsRemindersTarget's
-// single missing_evaluation gap (the cafe-ledger arrears mechanism).
+// three gaps (missing_evaluation plus the two replay-continuation gaps
+// missing_replay_a / missing_replay_b), one directOp shared across all three
+// (arrearsEvaluationGap below) — the resumable, page-per-dispatch arrears
+// mechanism clinic-ledger ships, applied to this ledger.
 //
 //   - NoShowSettlementTarget's missing_account → directOp(WellnessCreateAccount),
 //     opening the booker's account lazily on first no-show rather than
@@ -41,36 +44,44 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     because its minting op already resolved a live accountKey off the
 //     original charge's postedTo link before minting it — unlike the two
 //     targets above, there is no "account might not exist yet" case here.
-//   - ArrearsRemindersTarget's missing_evaluation → directOp
-//     (EvaluateWellnessArrears) over the account. The op recomputes the
-//     FIFO-oldest open charge, rewrites .arrears, and — where the recomputed
-//     due date has passed and nothing has gone out for it — fires the
-//     notification. Whichever of the three ways the gap opened (never
-//     evaluated, marked stale by a posted entry, or a timer fired at a due
-//     date nothing was reminded for), the remediation is the same
-//     recomputation, which is why this target carries ONE gap rather than
-//     three. Params{accountKey: row.entityKey} names only the anchor's own
-//     key: the member the reminder addresses is NOT routed through Params —
-//     an optional-hop column is null on every row where the hop misses, and
-//     the strategist refuses to dispatch any row whose Params reference a
-//     null column (internal/weaver/strategist.go), which would silently
-//     starve exactly the accounts most worth aging. The op resolves the
-//     identity itself, live, off the account's own heldFor out-link.
-//     Reads[row.entityKey] routes the account ROOT (the liveness guard's
-//     hydration); OptionalReads[row.entityKey.arrears] routes the account's
-//     own arrears state — absence-tolerant because no account carries the
-//     aspect until an evaluation has run on it, and a required read's
-//     absence would HydrationMiss the very first evaluation of each one.
-//     That declaration is what auto-conditions the op's own .arrears write on
-//     the revision it was hydrated at (Contract #3 §3.2); the account DDL's
-//     derive_reads returns the same key whatever a dispatcher declares, so
-//     this states the read set and that guarantees it. Enumerations declares
-//     the bounded postedTo replay the op runs to recompute the head and the
-//     heldFor walk that resolves the identity — both nameable up front off
-//     the row's own account; the per-transaction .entry reads and the
-//     per-credit settlesRefund → reverses hops the replay discovers are not,
-//     which is exactly the class-(e) split (read_drift_baseline.txt carries
-//     the two link-discovered walks).
+//   - ArrearsRemindersTarget's missing_evaluation / missing_replay_a /
+//     missing_replay_b → the same directOp(EvaluateWellnessArrears) over the
+//     account (arrearsEvaluationGap below — the same Params/Reads/
+//     OptionalReads/Enumerations whichever column dispatches it). The op
+//     recomputes the FIFO-oldest open charge over a resumable, page-per-
+//     dispatch replay of the account's postedTo history, rewrites .arrears,
+//     and — where the recomputed due date has passed and nothing has gone
+//     out for it — fires the notification. missing_evaluation opens on
+//     never evaluated, marked stale by a posted entry, a timer fired at a
+//     due date nothing was reminded for, or a historyTooLong flag recorded
+//     under a smaller replay budget than the current one, and dispatches the
+//     FIRST page. A history longer than one page leaves a checkpoint on
+//     .arrears.replay whose phase flips on every page; the lens projects one
+//     continuation gap per phase (missing_replay_a / missing_replay_b) so
+//     each page closes the gap that dispatched it and opens the other — the
+//     op does not know which gap dispatched it, it just reads the checkpoint
+//     and continues or starts. Params{accountKey: row.entityKey} names only
+//     the anchor's own key: the member the reminder addresses is NOT routed
+//     through Params — an optional-hop column is null on every row where the
+//     hop misses, and the strategist refuses to dispatch any row whose
+//     Params reference a null column (internal/weaver/strategist.go), which
+//     would silently starve exactly the accounts most worth aging. The op
+//     resolves the identity itself, live, off the account's own heldFor
+//     out-link. Reads[row.entityKey] routes the account ROOT (the liveness
+//     guard's hydration); OptionalReads[row.entityKey.arrears] routes the
+//     account's own arrears state — absence-tolerant because no account
+//     carries the aspect until an evaluation has run on it, and a required
+//     read's absence would HydrationMiss the very first evaluation of each
+//     one. That declaration is what auto-conditions the op's own .arrears
+//     write on the revision it was hydrated at (Contract #3 §3.2); the
+//     account DDL's derive_reads returns the same key whatever a dispatcher
+//     declares, so this states the read set and that guarantees it.
+//     Enumerations declares the bounded postedTo replay the op runs to
+//     recompute the head and the heldFor walk that resolves the identity —
+//     both nameable up front off the row's own account; the per-transaction
+//     .entry reads and the per-credit settlesRefund → reverses hops the
+//     replay discovers are not, which is exactly the class-(e) split
+//     (read_drift_baseline.txt carries the two link-discovered walks).
 //
 // The three settlement dispatches of WellnessDebitAccount / WellnessCreditAccount
 // each declare OptionalReads[row.accountKey.arrears] beside their Reads: every
@@ -212,24 +223,51 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				"about the charge that has actually been sitting unpaid the longest. Paying it off ends the " +
 				"episode; a new charge after that starts a fresh one.",
 			LensRef: ArrearsRemindersTarget,
+			// Three gaps, one op. missing_evaluation opens on an account that
+			// needs evaluating (never evaluated, stale, or a recorded lapse at
+			// its due date) and dispatches the FIRST page of the op's postedTo
+			// replay. A history longer than one page leaves a checkpoint on
+			// .arrears.replay whose phase flips on every page, and the lens
+			// projects one gap per phase: the page written under phase a closes
+			// missing_replay_a and opens missing_replay_b, whose dispatch
+			// writes phase a again, and so on until the finalize page writes no
+			// checkpoint and every gap is false. Each gap episode is therefore
+			// exactly one dispatch — its mark and dispatch count are cleared by
+			// the page it dispatched — so the engine's default retry budget
+			// stands and a REJECTED page (a wall breach) is reclaimed up to
+			// that budget, then parked loud under GapBudgetExhausted. The op
+			// itself does not know which gap dispatched it: it reads the
+			// checkpoint and continues, or starts. The three entries are
+			// identical in every field; they differ only in which column
+			// dispatches them.
 			Gaps: map[string]pkgmgr.GapActionSpec{
-				"missing_evaluation": {
-					Action:    "directOp",
-					Operation: arrearsOp,
-					// EvaluateWellnessArrears is unique to this package's
-					// wellnessaccount vertexType DDL, but pinned regardless — the
-					// same defensive shape the three targets above use, and the
-					// operationType namespace is global (permissions.go).
-					Class:         "wellnessaccount",
-					Params:        map[string]string{"accountKey": "row.entityKey"},
-					Reads:         []string{"row.entityKey"},
-					OptionalReads: []string{"row.entityKey.arrears"},
-					Enumerations: []pkgmgr.EnumerationSpec{
-						{Hub: "row.entityKey", Relation: "postedTo", Direction: "in"},
-						{Hub: "row.entityKey", Relation: "heldFor", Direction: "out"},
-					},
-				},
+				"missing_evaluation": arrearsEvaluationGap(),
+				"missing_replay_a":   arrearsEvaluationGap(),
+				"missing_replay_b":   arrearsEvaluationGap(),
 			},
+		},
+	}
+}
+
+// arrearsEvaluationGap is the directOp(EvaluateWellnessArrears) every gap on
+// the wellnessArrearsReminders target dispatches — the same params, reads and
+// enumerations whichever column opened, because the op reads its own
+// checkpoint to decide where in the replay it is.
+func arrearsEvaluationGap() pkgmgr.GapActionSpec {
+	return pkgmgr.GapActionSpec{
+		Action:    "directOp",
+		Operation: arrearsOp,
+		// EvaluateWellnessArrears is unique to this package's
+		// wellnessaccount vertexType DDL, but pinned regardless — the
+		// same defensive shape the three targets above use, and the
+		// operationType namespace is global (permissions.go).
+		Class:         "wellnessaccount",
+		Params:        map[string]string{"accountKey": "row.entityKey"},
+		Reads:         []string{"row.entityKey"},
+		OptionalReads: []string{"row.entityKey.arrears"},
+		Enumerations: []pkgmgr.EnumerationSpec{
+			{Hub: "row.entityKey", Relation: "postedTo", Direction: "in"},
+			{Hub: "row.entityKey", Relation: "heldFor", Direction: "out"},
 		},
 	}
 }

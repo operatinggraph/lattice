@@ -54,12 +54,16 @@
 //     date and reminder timestamp beside it for the statement and the desk.
 //
 //   - The `wellnessArrearsReminders` weaver-target lens + its §10.8 playbook
-//     (targets.go) — the cafe-ledger arrears mechanism applied to this
-//     ledger: one row per account, freshUntil = the recorded dueAt arms
+//     (targets.go) — clinic-ledger's resumable arrears mechanism applied to
+//     this ledger: one row per account, freshUntil = the recorded dueAt arms
 //     Weaver's @at, the fired timer's recorded lapse (and a stale mark, and a
 //     never-evaluated account) opens missing_evaluation, and the playbook
-//     dispatches directOp(EvaluateWellnessArrears), which ages the account
-//     with the same FIFO the member's statement runs, stamps .arrears, and
+//     dispatches directOp(EvaluateWellnessArrears), which replays the
+//     account's postedTo history ONE PAGE PER DISPATCH — a history longer
+//     than one page records a checkpoint on .arrears.replay and the lens's
+//     missing_replay_a / missing_replay_b gaps chain the next page — ages
+//     the account with the same FIFO the member's statement runs, stamps
+//     .arrears, and
 //     fires ONE external.notification per arrears episode to the bridge's
 //     "notification" adapter, keyed on (accountKey, dueAt).
 //     `RecordWellnessArrearsReminderNotification` records the outcome as an
@@ -123,7 +127,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-ledger",
-	Version: "0.2.26",
+	Version: "0.3.0",
 	Description: "Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount, independently-minted " +
 		"id, one per member identity via a .wellnessLedgerAccount guard aspect on the identity) + the wellnesstransaction " +
 		"vertex type (WellnessDebitAccount/WellnessCreditAccount, append-only entries linked to the account via postedTo, WellnessDebitAccount " +
@@ -139,8 +143,10 @@ var Package = pkgmgr.Definition{
 		"wellnessrefund marker vertex rather than the already-tombstoned booking). " +
 		"Also ships the arrears reminder: the account's .arrears episode aspect (minted by evaluation; every posted " +
 		"entry marks it stale, since no balance is stored) + the wellnessArrearsReminders weaver-target convergence " +
-		"lens, whose §10.8 playbook dispatches EvaluateWellnessArrears — that op ages the account with the same FIFO " +
-		"the member's statement runs and fires ONE external.notification per arrears episode to the bridge's " +
+		"lens, whose §10.8 playbook dispatches EvaluateWellnessArrears — that op replays the account's postedTo " +
+		"history one page per dispatch (a history longer than one page leaves a resumable .arrears.replay checkpoint " +
+		"the lens's missing_replay_a/missing_replay_b gaps chain across dispatches), ages the account with the same " +
+		"FIFO the member's statement runs and fires ONE external.notification per arrears episode to the bridge's " +
 		"\"notification\" adapter, keyed on (accountKey, dueAt). RecordWellnessArrearsReminderNotification records " +
 		"the outcome; wellnessMemberAccounts projects the due date and reminder timestamp for the statement and the " +
 		"desk. Depends wellness-domain + orchestration-base.",

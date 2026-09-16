@@ -1,5 +1,5 @@
 name: wellness-ledger
-version: 0.2.26
+version: 0.3.0
 description: |
   Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount,
   independently-minted id, one per member identity via a .wellnessLedgerAccount
@@ -25,9 +25,12 @@ description: |
   Also ships the arrears reminder: the account's .arrears episode aspect
   (minted by evaluation; every posted entry marks it stale, since no balance
   is stored) + the wellnessArrearsReminders weaver-target convergence lens,
-  whose playbook dispatches EvaluateWellnessArrears — that op ages the
-  account with the same FIFO the member's statement runs and fires ONE
-  external.notification per arrears episode to the bridge's "notification"
+  whose playbook dispatches EvaluateWellnessArrears — that op replays the
+  account's postedTo history ONE PAGE PER DISPATCH (recording a resumable
+  .arrears.replay checkpoint across as many dispatches as the history has
+  pages, the lens's missing_replay_a/missing_replay_b gaps chaining them),
+  ages the account with the same FIFO the member's statement runs and fires
+  ONE external.notification per arrears episode to the bridge's "notification"
   adapter, keyed on (accountKey, dueAt). RecordWellnessArrearsReminderNotification
   records the outcome; wellnessMemberAccounts projects the due date and
   reminder timestamp for the statement and the desk.
