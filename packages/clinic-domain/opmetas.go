@@ -135,7 +135,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
-				// refusal-courtesy(facet): AppointmentTooLong, OutsideHours, PatientDoubleBook, ProviderNotAtSite, ProviderUnavailable, ScheduleInPast, SlotConflict, SlotGridViolation: none — edgeEntityProvidersTail (packages/edge-manifest/lenses.go) is CreateAppointment's browse target (dispatch.targetType: provider) and projects no availability column; Facet offers every provider row regardless of hours, time-off, or existing bookings.
+				// refusal-courtesy(facet): AppointmentTooLong, OutsideHours, PatientDoubleBook, ProviderNotAtSite, ProviderUnavailable, ScheduleInPast, SelfBookingLimit, SlotConflict, SlotGridViolation: none — edgeEntityProvidersTail (packages/edge-manifest/lenses.go) is CreateAppointment's browse target (dispatch.targetType: provider) and projects no availability column; Facet offers every provider row regardless of hours, time-off, existing bookings, or a self-booked visit already held that day.
 			},
 		},
 		{
@@ -199,7 +199,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
-				// refusal-courtesy(facet): AppointmentTooLong, InvalidState, LateReschedule, OutsideHours, PatientDoubleBook, ProviderUnavailable, ScheduleInPast, SlotConflict, SlotGridViolation, TerminalStatus, VisitStarted, WrongPatient, WrongProvider: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), RescheduleAppointment's browse target (dispatch.targetType: appointment), projects title/subtitle/startsAt/endsAt/providerKey only, no availability or status-droppable column; Facet offers every appointment row regardless.
+				// refusal-courtesy(facet): AppointmentTooLong, InvalidState, LateReschedule, OutsideHours, PatientDoubleBook, ProviderUnavailable, ScheduleInPast, SelfBookingLimit, SlotConflict, SlotGridViolation, TerminalStatus, VisitStarted, WrongPatient, WrongProvider: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), RescheduleAppointment's browse target (dispatch.targetType: appointment), projects title/subtitle/startsAt/endsAt/providerKey only, no availability, selfBooked, or status-droppable column; Facet offers every appointment row regardless.
 			},
 		},
 		{

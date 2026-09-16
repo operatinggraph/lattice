@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.37.0
+version: 0.38.0
 depends:
   - location-domain
 description: |
@@ -55,7 +55,11 @@ description: |
   deterministic providerSlotClaim/patientSlotClaim aspect per covered 15-minute
   grid cell — the write-path key collision (CreateOnly/expectedRevision) IS the
   lock, no read-time enumeration — and an out-of-hours booking (OutsideHours) via
-  the provider's opt-in .hours availability windows (SetProviderHours).
+  the provider's opt-in .hours availability windows (SetProviderHours). A
+  patient booking for themselves (consumer scope=self) additionally holds one
+  open visit per provider per UTC day — a patientSelfDayClaim marker on the
+  patient hub, released with the cells; SelfBookingLimit refuses the second —
+  while the front desk books freely.
   @every recurring schedules are the separate deferred item
   this vertical forces — out of scope here. The Vault plane it forces is fully
   wired for contact (identifiedBy link + Secure-Lens display) and, for the
@@ -135,6 +139,8 @@ declares:
     - canonicalName: providerSlotClaim
       class: meta.ddl.aspectType
     - canonicalName: patientSlotClaim
+      class: meta.ddl.aspectType
+    - canonicalName: patientSelfDayClaim
       class: meta.ddl.aspectType
     - canonicalName: appointmentEncounter
       class: meta.ddl.aspectType

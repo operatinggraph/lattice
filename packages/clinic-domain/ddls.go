@@ -46,8 +46,9 @@ const (
 	documentationAspectDDL  = "appointmentDocumentation"
 	siteAssignmentAspectDDL = "appointmentSiteAssignment"
 
-	providerSlotClaimAspectDDL = "providerSlotClaim"
-	patientSlotClaimAspectDDL  = "patientSlotClaim"
+	providerSlotClaimAspectDDL   = "providerSlotClaim"
+	patientSlotClaimAspectDDL    = "patientSlotClaim"
+	patientSelfDayClaimAspectDDL = "patientSelfDayClaim"
 
 	identityPatientClaimAspectDDL  = "identityPatientClaim"
 	patientIdentityClaimAspectDDL  = "patientIdentityClaim"
@@ -120,6 +121,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		timeOffAspectTypeDDL(),
 		providerSlotClaimAspectTypeDDL(),
 		patientSlotClaimAspectTypeDDL(),
+		patientSelfDayClaimAspectTypeDDL(),
 		encounterAspectTypeDDL(),
 		documentationAspectTypeDDL(),
 		siteAssignmentAspectTypeDDL(),
@@ -562,7 +564,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"terminal call — the move SetAppointmentStatus refuses (an auto no-show on a patient who was actually " +
 			"seen). It transitions ONLY between the terminal values (NotTerminal if the appointment never reached one; " +
 			"InvalidArgument for a non-terminal target; NotYetStarted for a completed / noShow target ahead of the " +
-			"visit's startsAt), touches no slot-claim cells (the first terminal transition " +
+			"visit's startsAt), touches no slot-claim cells and no patientSelfDayClaim (the first terminal transition " +
 			"already released them, so it takes no provider/patient), and REQUIRES an audit note. A correction onto " +
 			"noShow carries noShowFeeCents exactly as SetAppointmentStatus does (caller-supplied positive number or the " +
 			"2500 default), so the ledger charges it; a correction onto completed / cancelled writes no fee, and " +
@@ -589,7 +591,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"signals are the payload's. An amendment that changes nothing (same three texts, same followUpRequested, " +
 			"same normalized followUpDate) writes nothing and emits nothing; a change to the follow-up signals alone " +
 			"rewrites .documentation (amendedAt carried, .encounter not written); past 40 superseded versions " +
-			"(MAX_ENCOUNTER_AMENDMENTS) a text amendment is refused AmendmentLimit; a text longer than 4000 bytes is InvalidArgument. TombstoneAppointment soft-deletes the appointment. The " +
+			"(MAX_ENCOUNTER_AMENDMENTS) a text amendment is refused AmendmentLimit; a text longer than 4000 bytes is InvalidArgument. TombstoneAppointment soft-deletes the appointment, releasing its held cells and day claim unless it already reached a terminal status (that transition released them, and another visit may hold them since). The " +
 			"clinic's booking grid is a mandatory 15-minute cadence (:00/:15/:30/:45; SlotGridViolation if startsAt/endsAt " +
 			"misalign, AppointmentTooLong past 24h/96 cells): CreateAppointment AND RescheduleAppointment discretize " +
 			"[startsAt,endsAt) into its covered 15-minute cells and CLAIM a deterministic slot-claim aspect per cell on " +
@@ -599,7 +601,14 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"PatientDoubleBook (patient) (Capability-KV §06 — the op's own Starlark logic). RescheduleAppointment releases " +
 			"the cells the appointment no longer needs and claims the new ones in the same atomic batch (a collision leaves " +
 			"the original booking fully intact); SetAppointmentStatus releases all held cells on a terminal transition " +
-			"(cancelled/completed/noShow). Both also enforce the provider's opt-in availability windows (the .hours aspect, " +
+			"(cancelled/completed/noShow). A patient booking for THEMSELVES (the consumer scope=self path) additionally " +
+			"holds ONE open visit per provider per UTC calendar day: CreateAppointment on that path records " +
+			".schedule.selfBooked = true and claims a patientSelfDayClaim existence marker on the patient hub " +
+			"(vtx.patient.<pt>.selfday<yyyymmdd><providerId>, the same CreateOnly-is-the-lock idiom as the cells), so a " +
+			"second self-booked open visit with the same provider on the same day is rejected SelfBookingLimit; the front " +
+			"desk is unrestricted (its bookings never claim a day). The claim follows the visit: RescheduleAppointment " +
+			"moves a self-booked visit's claim to the new day (SelfBookingLimit if that day is already held), and every " +
+			"terminal transition / tombstone releases it alongside the cells. Both also enforce the provider's opt-in availability windows (the .hours aspect, " +
 			"set by SetProviderHours): a booking outside a provider's business hours is rejected (OutsideHours); a provider " +
 			"with no .hours is unconstrained. Both also enforce the provider's opt-in date-specific time-off (the .timeOff " +
 			"aspect, set by SetProviderTimeOff): a booking overlapping any blackout range is rejected (ProviderUnavailable), " +
@@ -717,10 +726,13 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"startsAt/endsAt align to the 15-minute grid. Atomically commits vtx.appointment.<NanoID> (root {}) + " +
 					".schedule {startsAt, endsAt, remindAt, reason} (remindAt = startsAt − 24h, derived) + .status " +
 					"{value: scheduled} + the forPatient + withProvider links + one providerSlotClaim/patientSlotClaim " +
-					"aspect per covered 15-minute cell. Returns primaryKey (the appointment key). Rejects with ScriptError " +
+					"aspect per covered 15-minute cell. On the consumer scope=self path .schedule also carries selfBooked: true " +
+					"and one patientSelfDayClaim aspect (vtx.patient.<pt>.selfday<yyyymmdd><providerId>) is claimed; the " +
+					"desk path records neither. Returns primaryKey (the appointment key). Rejects with ScriptError " +
 					"if the patient or provider is absent / dead / the wrong class, a misaligned start/end " +
-					"(SlotGridViolation), a provider double-book (SlotConflict), or a patient double-book across " +
-					"providers (PatientDoubleBook).",
+					"(SlotGridViolation), a provider double-book (SlotConflict), a patient double-book across " +
+					"providers (PatientDoubleBook), or — self path only — a second open self-booked visit with the same " +
+					"provider on the same UTC day (SelfBookingLimit).",
 			},
 			{
 				Name: "RescheduleAppointment — move an appointment to a new time",
@@ -739,7 +751,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"clinic-reminders @at re-arms for a not-yet-sent reminder. In the same atomic batch it releases the " +
 					"provider/patient slot-claim cells the appointment no longer needs and claims the newly-covered ones, " +
 					"conflict-checked against both the provider's book (SlotConflict) and the patient's book " +
-					"(PatientDoubleBook) — a collision leaves the original booking's claims fully intact. The forPatient / " +
+					"(PatientDoubleBook) — a collision leaves the original booking's claims fully intact. A self-booked visit " +
+					"(.schedule.selfBooked, carried forward unchanged) moving to another UTC day releases its old day's " +
+					"patientSelfDayClaim and claims the new day's in the same batch (SelfBookingLimit if the patient already " +
+					"holds that day with this provider — for any mover, staff included); a same-day move touches no day " +
+					"claim. The forPatient / " +
 					"withProvider links are untouched; a confirmed or checkedIn .status is reset to {value: scheduled} in " +
 					"the same batch (the event carries statusReset: true), a scheduled one is re-stamped unchanged, an " +
 					"absent one is left alone. An " +
@@ -771,8 +787,8 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"Requires the CURRENT status to be terminal (NotTerminal otherwise — the first terminal " +
 					"transition is SetAppointmentStatus's job) and the target status to be one of the three terminal " +
 					"values (InvalidArgument otherwise — this op never re-opens an appointment). Requires a note. " +
-					"Upserts .status {value: completed, note, correctedFrom: noShow} — no slot-claim cell moves, " +
-					"since the first terminal transition already released them — and no noShowFeeCents, so " +
+					"Upserts .status {value: completed, note, correctedFrom: noShow} — no slot-claim cell or self-day " +
+					"claim moves, since the first terminal transition already released them — and no noShowFeeCents, so " +
 					"clinic-ledger's missing_reversal gap credits back the fee the wrong no-show charged. (A " +
 					"correction onto noShow instead carries noShowFeeCents: caller-supplied or the 2500 default, " +
 					"charged the same way.) Emits clinic.appointmentStatusCorrected. Returns primaryKey.",
@@ -928,23 +944,25 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment"},
 		Description: "Appointment schedule aspect (clinic). Stored as vtx.appointment.<NanoID>.schedule (class " +
-			"appointmentSchedule) = {startsAt, endsAt, remindAt, reason?}. Non-sensitive. Written by CreateAppointment " +
-			"(initial) and RescheduleAppointment (new times) — whose appointment vertexType DDL owns the script; this " +
+			"appointmentSchedule) = {startsAt, endsAt, remindAt, reason?, selfBooked?}. Non-sensitive. Written by CreateAppointment " +
+			"(initial) and RescheduleAppointment (new times; selfBooked carried forward) — whose appointment vertexType DDL owns the script; this " +
 			"aspect-type DDL is the step-6 write gate. Declaration-only: no op handler. remindAt = startsAt − 24h is a " +
 			"precomputed reminder deadline the " +
 			"clinic-reminders package's convergence lens reads (it is not a caller input). CreateAppointment " +
 			"conflict-checks the booking by claiming a slot-claim aspect per covered 15-minute cell on the provider and " +
 			"patient hubs (double-book rejection) and the provider's opt-in .hours availability windows (OutsideHours " +
-			"rejection).",
+			"rejection). selfBooked = true records that the visit was booked on the consumer scope=self path (the " +
+			"patient themselves, never the desk) — the fact the patientSelfDayClaim lock and its release are keyed on.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"startsAt":{"type":"string"},"endsAt":{"type":"string"},"remindAt":{"type":"string"},"reason":{"type":"string"}}}`,
+			`{"startsAt":{"type":"string"},"endsAt":{"type":"string"},"remindAt":{"type":"string"},"reason":{"type":"string"},"selfBooked":{"type":"boolean"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"startsAt": "Appointment start (RFC3339).",
-			"endsAt":   "Appointment end (RFC3339).",
-			"remindAt": "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateAppointment, not a caller input; the clinic-reminders convergence lens projects it as freshUntil to arm the @at reminder timer.",
-			"reason":   "Visit reason / chief complaint.",
+			"startsAt":   "Appointment start (RFC3339).",
+			"endsAt":     "Appointment end (RFC3339).",
+			"remindAt":   "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateAppointment, not a caller input; the clinic-reminders convergence lens projects it as freshUntil to arm the @at reminder timer.",
+			"reason":     "Visit reason / chief complaint.",
+			"selfBooked": "true when the visit was booked on the consumer scope=self path (the patient's own login, self-scoped); absent on a front-desk / operator booking. Recorded by CreateAppointment, carried unchanged by RescheduleAppointment; it selects whether the visit holds a patientSelfDayClaim for its provider + UTC day.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -1155,6 +1173,44 @@ func patientSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "patient slot-claim aspect",
 				Payload:         map[string]any{},
 				ExpectedOutcome: "Stored as vtx.patient.<NanoID>.slot<cellcode>; claimed by CreateAppointment/RescheduleAppointment, released by RescheduleAppointment (vacated cells) / SetAppointmentStatus (terminal transition).",
+			},
+		},
+	}
+}
+
+// patientSelfDayClaimAspectTypeDDL declares the .selfday<yyyymmdd><providerId>
+// aspect on a PATIENT (class patientSelfDayClaim) — the one-open-self-booked-
+// visit-per-provider-per-day lock. Same CreateOnly-is-the-lock property as the
+// slot claims, keyed on the visit's provider + the UTC calendar day of its
+// startsAt rather than on a 15-minute cell. Only a visit booked on the consumer
+// scope=self path (.schedule.selfBooked) ever claims one; a front-desk booking
+// never does, so the desk is unrestricted. Declaration-only; NON-sensitive;
+// carries no relationship field.
+func patientSelfDayClaimAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     patientSelfDayClaimAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
+		Description: "Patient self-booking day-claim aspect (clinic). Stored as vtx.patient.<NanoID>.selfday<yyyymmdd><providerId> " +
+			"(class patientSelfDayClaim) = {} — a pure existence marker, no relationship field; the KEY is the claim: " +
+			"the patient hub + the UTC calendar day of the visit's startsAt (8 digits) + the provider's NanoID. Claimed " +
+			"by CreateAppointment on the consumer scope=self path only (the desk's bookings never claim) and by " +
+			"RescheduleAppointment when a self-booked visit moves to another day (the old day's claim is released in the " +
+			"same batch); a live claim rejects the booking SelfBookingLimit — one open self-booked visit per provider per " +
+			"day. Released (unconditioned tombstone) by SetAppointmentStatus's first terminal transition, " +
+			"MarkPastDueNoShow, and TombstoneAppointment, alongside the slot-claim cells; a tombstoned claim is OCC-revived " +
+			"by the next self booking on that day. Non-sensitive; created on demand. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"data": "Always {} — a pure existence marker. The claim's job is done by the KEY (patient hub + UTC day + provider id), never by a field in data.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "patient self-booking day-claim aspect",
+				Payload:         map[string]any{},
+				ExpectedOutcome: "Stored as vtx.patient.<NanoID>.selfday<yyyymmdd><providerId>; claimed by CreateAppointment (self path) / RescheduleAppointment (cross-day move of a self-booked visit), released by RescheduleAppointment (the vacated day) / SetAppointmentStatus (terminal transition) / MarkPastDueNoShow / TombstoneAppointment.",
 			},
 		},
 	}
@@ -3202,6 +3258,35 @@ def claim_cell(hub, cellcode, cls, conflict_code, who):
         return make_aspect_upsert_occ(hub, "slot" + cellcode, cls, {}, existing.revision)
     return make_aspect(hub, "slot" + cellcode, cls, {})
 
+def self_day_localname(starts_at, provider_id):
+    # The localName of a patient's self-booking day claim: "selfday" + the UTC
+    # calendar day of the visit's startsAt as 8 digits + the provider's NanoID.
+    # starts_at is canonical whole-second UTC (time.rfc3339_utc, fixed-width
+    # YYYY-MM-DDTHH:MM:SSZ), so the day is the first 10 chars with the dashes
+    # dropped; the NanoID alphabet is [A-Za-z1-9], so the whole localName is
+    # legal ([a-z][a-zA-Z0-9]*). Deterministic and identical across every
+    # writer competing for the same (patient, provider, day).
+    return "selfday" + starts_at[0:10].replace("-", "") + provider_id
+
+def claim_self_day(patient, starts_at, provider_id):
+    # One open self-booked visit per provider per UTC day: the claim is a pure
+    # existence marker on the patient hub, and — exactly as claim_cell — the
+    # kv.Read here only decides which mutation verb to emit (create / OCC-revive /
+    # reject); the safety property is the batch's CreateOnly / expectedRevision
+    # conditioning at commit, so two concurrent self bookings for the same day
+    # commit exactly once. Only the consumer scope=self path ever calls this
+    # (CreateAppointment's self branch; RescheduleAppointment moving a
+    # selfBooked visit across days) — the desk's bookings never claim a day.
+    local = self_day_localname(starts_at, provider_id)
+    # read-posture: (d) optionalReads — derived server-side by this script's
+    # own derive_reads(op) for CreateAppointment/RescheduleAppointment.
+    existing = kv.Read(patient + "." + local)
+    if existing != None and not existing.isDeleted:
+        fail("SelfBookingLimit: patient " + patient + " already holds an open self-booked visit with provider vtx.provider." + provider_id + " on " + starts_at[0:10] + "; cancel it first or pick another day (the front desk can book more)")
+    if existing != None and existing.isDeleted:
+        return make_aspect_upsert_occ(patient, local, "patientSelfDayClaim", {}, existing.revision)
+    return make_aspect(patient, local, "patientSelfDayClaim", {})
+
 def require_matching_provider(appt_id, provider):
     # Validates the caller-supplied provider is THIS appointment's actual provider by
     # reading the deterministic withProvider link (kv.Read, §2.5) — a live link proves
@@ -3237,8 +3322,13 @@ def release_cells_mutations(provider, patient, sched):
     # stored back-reference) and tombstone both hubs' claim aspects for each — an
     # UNCONDITIONED tombstone (no expectedRevision): a stale-tombstone race here can
     # only ever free a cell a step early, never silently keep two live claims open,
-    # so it is not a correctness hole (design §2.6). Returns [] if the schedule is
-    # missing/malformed (defensive — should not happen for a live appointment).
+    # so it is not a correctness hole (design §2.6). A self-booked visit
+    # (.schedule.selfBooked) also holds the patient's day claim for its provider
+    # (claim_self_day); it is released here the same unconditioned way, so every
+    # caller of this seam — SetAppointmentStatus's first terminal transition,
+    # MarkPastDueNoShow, TombstoneAppointment — frees the day with the cells.
+    # Returns [] if the schedule is missing/malformed (defensive — should not
+    # happen for a live appointment).
     if sched == None or sched.isDeleted:
         return []
     s_starts = sched.data.get("startsAt")
@@ -3250,6 +3340,9 @@ def release_cells_mutations(provider, patient, sched):
         cc = slot_cellcode(c)
         out.append(make_tombstone(provider + ".slot" + cc))
         out.append(make_tombstone(patient + ".slot" + cc))
+    if sched.data.get("selfBooked"):
+        _, provider_id = parts_of(provider, "provider", "provider")
+        out.append(make_tombstone(patient + "." + self_day_localname(s_starts, provider_id)))
     return out
 
 def valid_vertex_key(key, want_type):
@@ -3265,7 +3358,8 @@ def valid_vertex_key(key, want_type):
     return True, parts[2]
 
 def derive_reads(op):
-    # Contract #2 §2.5 class (g). CreateAppointment/RescheduleAppointment's
+    # Contract #2 §2.5 class (g), for CreateAppointment, RescheduleAppointment
+    # and TombstoneAppointment. CreateAppointment/RescheduleAppointment's
     # providerSlotClaim/patientSlotClaim cells are entirely a function of the
     # payload (provider/patient/startsAt/endsAt — both required on both ops,
     # unlike wellness's ReassignSession, which this pattern deliberately does
@@ -3282,9 +3376,10 @@ def derive_reads(op):
     # declared or derived" apart, so an undeclared submitter would see a live
     # endpoint refused as unknown.
     #
-    # RescheduleAppointment's OLD cells need no declaration at all: the script
-    # releases them via an unconditioned tombstone (release_cells_mutations
-    # above), never a kv.Read. Its appointment root, .status, .schedule and the
+    # RescheduleAppointment's OLD cells — and a self-booked visit's OLD day
+    # claim — need no declaration at all: the script releases them via an
+    # unconditioned tombstone (release_cells_mutations / the cross-day move
+    # in execute()), never a kv.Read. Its appointment root, .status, .schedule and the
     # withProvider/forPatient links it re-validates ride this declaration too —
     # each is a pure function of payload.appointmentKey/provider/patient, and
     # .schedule's own upsert (execute(), below) is a bare update auto-
@@ -3294,8 +3389,22 @@ def derive_reads(op):
     # commit against the same prior schedule. Only the NEW span's cells ever
     # reach claim_cell's kv.Read, so declaring the full new-span set (a superset
     # of to_claim) is exact, not merely safe.
+    #
+    # The patient's self-booking day claim for the new startsAt's UTC day +
+    # provider (claim_self_day) rides the same declaration on both ops. Only
+    # the consumer scope=self path ever reads it (CreateAppointment's self
+    # branch; RescheduleAppointment moving a selfBooked visit across days), so
+    # for the desk path it is a superset — a declared key the script never
+    # reads, harmless.
+    #
+    # TombstoneAppointment reads only keys that are a pure function of
+    # payload.appointmentKey/provider/patient: the appointment root, its
+    # .status (terminal ⇒ the cells and day claim were already released and
+    # must not be released again) and .schedule (the cell set to release), and
+    # the withProvider/forPatient links it validates. Its releases are
+    # unconditioned tombstones, never reads.
     ot = op.operationType
-    if ot != "CreateAppointment" and ot != "RescheduleAppointment":
+    if ot != "CreateAppointment" and ot != "RescheduleAppointment" and ot != "TombstoneAppointment":
         return {}
     p = op.payload
     # optional_string, never required_string: a malformed/empty/whitespace-only
@@ -3315,7 +3424,7 @@ def derive_reads(op):
     if patient_ok:
         keys.append(patient)
 
-    if ot == "RescheduleAppointment":
+    if ot == "RescheduleAppointment" or ot == "TombstoneAppointment":
         appt_key = optional_string(p, "appointmentKey")
         appt_ok, appt_id = valid_vertex_key(appt_key, "appointment")
         if appt_ok:
@@ -3326,6 +3435,10 @@ def derive_reads(op):
                 keys.append("lnk.appointment." + appt_id + ".withProvider.provider." + provider_id)
             if patient_ok:
                 keys.append("lnk.appointment." + appt_id + ".forPatient.patient." + patient_id)
+    if ot == "TombstoneAppointment":
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
 
     if provider == None or patient == None or starts_at_raw == None or ends_at_raw == None:
         if len(keys) == 0:
@@ -3349,6 +3462,8 @@ def derive_reads(op):
         cc = slot_cellcode(c)
         keys.append(provider + ".slot" + cc)
         keys.append(patient + ".slot" + cc)
+    if provider_ok and patient_ok:
+        keys.append(patient + "." + self_day_localname(starts_at, provider_id))
     if len(keys) == 0:
         return {}
     return {"optionalReads": keys}
@@ -3467,6 +3582,27 @@ def execute(state, op):
         if reason != None:
             sched["reason"] = reason
 
+        # Who booked it is a fact recorded at the event: a visit booked on the
+        # consumer scope=self path (the same selector the identifiedBy binding
+        # above keys on — the self-service caller sets authContextTarget; a
+        # scope=any caller that names the patient's own identity takes the
+        # stricter branch too — never an exemption) records selfBooked = true
+        # and holds the patient's one-open-self-booked-visit-per-provider-per-
+        # day claim (claim_self_day; SelfBookingLimit if the day is already
+        # held). The desk / operator path records nothing here and claims
+        # nothing, so the desk is unrestricted. claim_self_day is called here,
+        # ahead of the cell claims below, so a self booking that overlaps the
+        # patient's own open visit with this provider reads SelfBookingLimit
+        # rather than PatientDoubleBook — that precedence is by call order and
+        # intended (the day rule is the broader statement of the same fact).
+        self_day_mutation = None
+        # authcontext-target: (selector) its presence selects the self-booking
+        # limit — a stricter branch, never an exemption; ownership was proven
+        # by the identifiedBy binding above.
+        if op.authContextTarget != "":
+            sched["selfBooked"] = True
+            self_day_mutation = claim_self_day(patient, starts_at, provider_id)
+
         # Resident-visit confinement: an optional leaseAppKey, mirroring
         # wellness-domain's CreateBooking residentRate check, qualifies the
         # appointment for a residentVisit link (appointment→leaseapp) only
@@ -3553,6 +3689,8 @@ def execute(state, op):
         for c in cells:
             cc = slot_cellcode(c)
             mutations.append(claim_cell(patient, cc, "patientSlotClaim", "PatientDoubleBook", "patient"))
+        if self_day_mutation != None:
+            mutations.append(self_day_mutation)
         events = [{"class": "clinic.appointmentCreated",
                    "data": {"appointmentKey": appt_key, "patient": patient, "provider": provider}}]
         return {"mutations": mutations, "events": events,
@@ -3734,6 +3872,23 @@ def execute(state, op):
         if reason != None:
             sched["reason"] = reason
 
+        # selfBooked is a recorded fact about the booking event, carried
+        # forward unchanged by every move (a desk move of a self-booked visit
+        # keeps it self-booked; a self move of a desk-booked visit never makes
+        # it self-booked). The day claim follows the visit: when a self-booked
+        # visit moves to a different UTC calendar day, the old day's claim is
+        # released (unconditioned tombstone, known-live like the old cells)
+        # and the new day's is claimed (claim_self_day — SelfBookingLimit for
+        # ANY mover, staff included, if the patient already holds that day
+        # with this provider). A same-day move touches no claim.
+        self_day_mutations = []
+        if old_sched.data.get("selfBooked"):
+            sched["selfBooked"] = True
+            _, provider_id = parts_of(provider, "provider", "provider")
+            if starts_at[0:10] != old_starts[0:10]:
+                self_day_mutations.append(make_tombstone(patient + "." + self_day_localname(old_starts, provider_id)))
+                self_day_mutations.append(claim_self_day(patient, starts_at, provider_id))
+
         # Unconditioned upsert of the WHOLE .schedule aspect (the caller round-trips
         # the reason; an omitted reason clears it; forPatient / withProvider links
         # untouched — the move keeps the same provider / patient; .status is
@@ -3757,6 +3912,7 @@ def execute(state, op):
         for c in to_claim:
             cc = slot_cellcode(c)
             mutations.append(claim_cell(patient, cc, "patientSlotClaim", "PatientDoubleBook", "patient"))
+        mutations = mutations + self_day_mutations
         event_data = {"appointmentKey": appt_key, "startsAt": starts_at, "endsAt": ends_at}
         if status_reset:
             event_data["statusReset"] = True
@@ -4460,10 +4616,25 @@ def execute(state, op):
         require_matching_provider(appt_id, provider)
         patient = required_string(p, "patient")
         require_matching_patient(appt_id, patient)
-        # read-posture: (a) declared in contextHint.reads by TombstoneAppointment's
-        # dispatcher (packages/clinic-domain/integration_test.go clSubmit calls, its
-        # only caller — operator-only op, no FE dispatcher)
-        mutations = [make_tombstone(appt_key)] + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
+        # An appointment already in a terminal status released its cells AND
+        # its self-booking day claim at that first terminal transition, and
+        # those keys may since have been re-claimed by ANOTHER live visit (a
+        # later booking on the freed cells; the next self booking on the freed
+        # day, which OCC-revives the same claim key). Re-releasing them here
+        # would tombstone that other visit's claims out from under it, so the
+        # release runs only for a non-terminal appointment. Absence of .status
+        # is the never-set (scheduled) case, so the read is absence-tolerant.
+        # read-posture: (d) optionalReads — derived server-side by this script's
+        # own derive_reads(op) for TombstoneAppointment.
+        cur_status = kv.Read(appt_key + ".status")
+        cur_val = None
+        if cur_status != None and not cur_status.isDeleted:
+            cur_val = cur_status.data.get("value")
+        mutations = [make_tombstone(appt_key)]
+        if cur_val not in TERMINAL_STATUSES:
+            # read-posture: (d) optionalReads — derived server-side by this
+            # script's own derive_reads(op) for TombstoneAppointment.
+            mutations = mutations + release_cells_mutations(provider, patient, kv.Read(appt_key + ".schedule"))
         events = [{"class": "clinic.appointmentTombstoned", "data": {"appointmentKey": appt_key}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": appt_key}}
