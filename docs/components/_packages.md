@@ -700,7 +700,11 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   the relation tying it to the op's target and read that link — deterministic keys through `derive_reads`,
   walk-resolved ones as the `(e)` follow-up with a `read_drift_baseline` row — grepping the `authContextTarget`
   branch for every optional field the descriptor exposes; a sampled-evaluator invariant is proven with events interleaved BETWEEN
-  the samples, never one entry per evaluation.
+  the samples, never one entry per evaluation. Sighting (café `MarkLineServed`, 2026-09-16, caught cold): the
+  confinement VECTOR mirrored `VoidCharge`'s and dropped its two forged-`authContext.target` legs, and the "writes
+  nothing else" pin named the keys the op touches but not the three the OCC upsert carries — a mirrored test drops a
+  precedent's leg the way a mirrored script drops a conjunct; a carry pin enumerates every key of the dict,
+  revert-proven by dropping one.
 
 ## Related contracts
 

@@ -107,3 +107,25 @@ no fork).
 7. **Non-goals:** a push transport (SSE/watch) for the desk; refusing `Settle` with unserved lines (the
    resident's call); a kitchen/bar station split; Facet showing per-line state (its tab browse projects no
    line column; the descriptor form takes a `lineId`).
+
+### Build note (2026-09-16)
+
+Shipped `0cfa1e11` (merge `0a751db3`, CI green on a rerun of `unit-4` — the first run failed on
+`internal/substrate`'s `TestKVMarkerProvenance_ExpiryIsTheOnlyMaxAgeMarker`, untouched by this fire and a
+prior flake at run 35028877187); brief `206fc691`. Live on the shared stack (cafe-domain 0.16.0 diff-applied,
+`bin/cafe-app` cycled): Riley Chen self-ordered a Latte through the Gateway and the line read
+`orderedAt: 2026-09-16T13:44:38Z`, no `servedAt`; the desk's queue held exactly that line; Dana Whitfield
+(frontOfHouse, confined) submitted `MarkLineServed` through the Gateway and the line read
+`servedAt: 2026-09-16T13:45:20Z, servedBy: vtx.identity.noNa5Fc2vrkBojZ2QPAv`; a second submission was refused
+`LineAlreadyServed`; the void kept all four keys and the probe tab settled at $0.
+
+Deviations from the brief: none in scope. `residentsByLease` was dropped from `renderFrontDeskOrders` (who
+ordered resolves from the line's own `orderedBy`); the poll holds while a serve is in flight and repaints only
+when its rows changed. Review classification (one cold pass, three lenses, over the whole diff): **test-gap** —
+the "writes nothing else" pin covered total/memo/lines but not `openedAt`/`staleAt`/`leaseAppKey` (a dropped
+`staleAt` passed the suite; now pinned, revert-proven); the confinement vector mirrored VoidCharge's without its
+two forged-`authContext.target` legs (added). **implementation-bug** — the "to make" tag rode a settled tab's
+receipt forever (a settled tab's unserved line is done; the tag now needs the tab open). **convention** — the
+descriptor path had no vector (VoidCharge's own precedent debt; `TestDescriptorDrivenMarkLineServed` added);
+stale five-key prose in the lens/DDL/app comments and the package description. Nits fixed: numeric `lineId`
+tie-break, in-flight counter, repaint signature. Adjacent finds: none beyond the absorbed XS row (`6e038e54`).
