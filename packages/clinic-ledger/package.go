@@ -53,7 +53,26 @@
 //
 //   - The `clinicPatientAccounts` lens (one row per patient, accountKey null
 //     until one is opened) — the FE's only way to resolve a patient's account
-//     key, since it can no longer be derived from patientKey.
+//     key, since it can no longer be derived from patientKey. It also carries
+//     the account's arrears due date and reminder timestamp, which is what
+//     lets the desk's arrears grid, the appointment card and the patient's
+//     statement say when a reminder went out without a second read model.
+//
+//   - The `clinicAccountArrears` aspect type — vtx.clinicaccount.<NanoID>.arrears
+//     = {evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?, historyTooLong?},
+//     the account's arrears-episode state. post_entry opens an episode on a
+//     charge that takes the balance from zero-or-below to owing, ends one on
+//     an entry that leaves zero or below, and marks the recorded state stale
+//     on a partial payment; `EvaluateClinicArrears` (the `clinicArrearsReminders`
+//     actorAggregate lens + its Weaver playbook, targets.go) recomputes the
+//     FIFO head with the same rule the patient's statement runs and, once per
+//     episode, fires the external.notification the bridge turns into a real
+//     message. `.arrears.sentAt` is what says a reminder already went out for
+//     THIS episode, so a re-dispatched or redelivered evaluation sends nothing.
+//     `RecordClinicArrearsReminderNotification` records the outcome as an
+//     audit-only aspect (notifications.go) and does not gate the lens. No
+//     clinic op refuses a debtor: the reminder changes what the desk and the
+//     patient see, never what they may do.
 //
 //   - The `clinicNoShowSettlement` actorAggregate lens + its Weaver playbook
 //     (targets.go): a noShow appointment carrying a noShowFeeCents (set by
@@ -79,7 +98,9 @@
 // (internal/pkgmgr/installer.go checkCanonicalNameCollision), so the two
 // ledger packages could not otherwise both install onto one kernel.
 //
-// Depends clinic-domain (the patient vertex type an account is heldFor).
+// Depends clinic-domain (the patient vertex type an account is heldFor) and
+// orchestration-base (MarkExpired and the freshnessExpiry marker the arrears
+// @at firing writes onto the account).
 package clinicledger
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
@@ -87,7 +108,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-ledger",
-	Version: "0.5.3",
+	Version: "0.6.0",
 	Description: "Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount, independently-minted " +
 		"id, one per patient via a .ledgerAccount guard aspect on the patient) + the clinictransaction vertex type " +
 		"(ClinicDebitAccount/ClinicCreditAccount, append-only entries linked to the account via postedTo, ClinicDebitAccount " +
@@ -102,8 +123,14 @@ var Package = pkgmgr.Definition{
 		"ops grant front-of-house staff alongside the operator, unconfined. ClinicCreditAccount ALSO grants a patient scope=self " +
 		"(pay down their own balance, never waive it — reason:\"waiver\" is rejected server-side for a self-scoped " +
 		"submit), ownership proven server-side and the amount capped at the account's maintained .balance. " +
-		"Depends clinic-domain.",
-	Depends:       []string{"clinic-domain"},
+		"Also ships the arrears reminder: the account's .arrears episode aspect (a charge against an account that " +
+		"owed nothing records the due date its own postedAt implies; a payment that clears the balance ends the " +
+		"episode; a partial one marks it stale) + the clinicArrearsReminders weaver-target convergence lens, whose " +
+		"playbook dispatches EvaluateClinicArrears — that op ages the account with the same FIFO the patient's " +
+		"statement runs and fires ONE external.notification per arrears episode to the bridge's \"notification\" " +
+		"adapter, keyed on (accountKey, dueAt). RecordClinicArrearsReminderNotification records the outcome. No " +
+		"clinic op refuses a debtor. Depends clinic-domain + orchestration-base.",
+	Depends:       []string{"clinic-domain", "orchestration-base"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),
 	Permissions:   Permissions(),

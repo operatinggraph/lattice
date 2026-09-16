@@ -101,6 +101,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"capabilityRead":                 oneKey,
 	"capabilityServiceAccess":        walkIncompleteIndex,
 	"clauseSatisfaction":             walkMultiPosition,
+	"clinicArrearsReminders":         oneKey,
 	"clinicNoShowSettlement":         oneKey,
 	"clinicSiteBackfill":             oneKey,
 	"capabilityRoles":                oneKey,

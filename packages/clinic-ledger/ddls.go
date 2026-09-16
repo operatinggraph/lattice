@@ -3,28 +3,33 @@ package clinicledger
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // DDLs returns the package's DDL meta-vertex declarations: `clinicaccount`
-// (ClinicCreateAccount), `clinictransaction` (ClinicDebitAccount, ClinicCreditAccount), the
-// `clinicLedgerAccountGuard` aspect-type declaration (the patient-anchored
-// uniqueness guard ClinicCreateAccount writes), and the `clinicAccountBalance`
-// aspect-type declaration (the account-anchored running-balance cache
-// ClinicCreateAccount mints and ClinicDebitAccount/ClinicCreditAccount keep
-// updated). Vertical-prefixed: a DDL canonicalName is global across every
-// installed package (internal/pkgmgr/installer.go checkCanonicalNameCollision),
-// and loftspace-ledger already owns the bare `account` / `transaction` names.
+// (ClinicCreateAccount, EvaluateClinicArrears), `clinictransaction`
+// (ClinicDebitAccount, ClinicCreditAccount), the `clinicLedgerAccountGuard`
+// aspect-type declaration (the patient-anchored uniqueness guard
+// ClinicCreateAccount writes), the `clinicAccountBalance` aspect-type
+// declaration (the account-anchored running-balance cache ClinicCreateAccount
+// mints and ClinicDebitAccount/ClinicCreditAccount keep updated), the
+// `clinicAccountArrears` aspect-type declaration (the account's
+// arrears-episode state), and the notification-outcome DDL pair
+// (notifications.go) the bridge replies onto. Vertical-prefixed: a DDL
+// canonicalName is global across every installed package
+// (internal/pkgmgr/installer.go checkCanonicalNameCollision), and
+// loftspace-ledger already owns the bare `account` / `transaction` names.
 func DDLs() []pkgmgr.DDLSpec {
-	return []pkgmgr.DDLSpec{
+	return append([]pkgmgr.DDLSpec{
 		accountDDL(),
 		accountGuardAspectTypeDDL(),
 		accountBalanceAspectTypeDDL(),
+		accountArrearsAspectTypeDDL(),
 		transactionDDL(),
-	}
+	}, notificationDDLs()...)
 }
 
 func accountDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "clinicaccount",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"ClinicCreateAccount"},
+		PermittedCommands: []string{"ClinicCreateAccount", arrearsOp},
 		Description: "Ledger account DDL. Vertex shape: vtx.clinicaccount.<NanoID>, class=clinicaccount, root data = {} " +
 			"(minimal, D5). ClinicCreateAccount{patientKey} mints the account under its OWN independently-generated NanoID " +
 			"(never reused from the patient — Core KV NanoIDs are unique platform-wide identifiers, not scoped per vertex " +
@@ -36,17 +41,55 @@ func accountDDL() pkgmgr.DDLSpec {
 			"(patientKey+\".ledgerAccount\", clinicLedgerAccountGuard DDL) instead: a second ClinicCreateAccount for the same " +
 			"patient conflicts on that already-existing aspect key. Writes the heldFor link (account→patient, the account is " +
 			"the later-arriving vertex so it is the source — Contract #1 §1.1). Requires the patientKey be a live patient " +
-			"(no orphan accounts).",
+			"(no orphan accounts). " +
+			"EvaluateClinicArrears{accountKey} is the second operation on this DDL, dispatched by " +
+			"Weaver's clinicArrearsReminders playbook rather than by a person: it replays the account's own postedTo " +
+			"history under a bounded budget, ages it with the same FIFO the patient's statement runs (credits offset " +
+			"the oldest still-open charge first; a credit that names the charge it reverses retires that charge; an " +
+			"unapplied credit carries forward as surplus), and records the resulting due date — the oldest open " +
+			"charge's postedAt plus the package's net term — on the account's .arrears aspect (clinicAccountArrears " +
+			"DDL). Once that date has passed the evaluation records remindedFor = that date, and where NO reminder has " +
+			"yet gone out in this arrears episode (sentAt ABSENT) the same commit also stamps sentAt and fires an " +
+			"external.notification to the bridge's \"notification\" adapter keyed on (accountKey, dueAt). The send " +
+			"condition is sentAt's absence, not remindedFor's value: the unit is the EPISODE — from the charge that " +
+			"took the account from square to owing until the balance returns to zero — and a partial payment moves " +
+			"the head from one overdue charge to the next without starting a new episode, so exactly ONE notification " +
+			"goes out per episode however often the evaluation is re-dispatched, redelivered, or re-run over a moved " +
+			"head. An account whose history outruns the replay budget is not refused: the evaluation DEGRADES, " +
+			"recording historyTooLong (carrying dueAt/remindedFor/sentAt as they stood, clearing stale) and sending " +
+			"nothing, which holds the row quiet and visible rather than re-dispatching a doomed evaluation on every " +
+			"window; the next entry that rewrites the aspect — a credit, or a charge that opens an episode — clears the flag and buys one more attempt. The patient the notification " +
+			"addresses is resolved LIVE off the account's own heldFor out-link, never from the payload; an account " +
+			"with no live heldFor patient is still evaluated (the arrears fact is about the account), and the " +
+			"notification's params carry a patientKey only where one resolves. Restricted to Weaver's dispatch " +
+			"actor: the account it names is forwarded into a message a patient actually receives. No clinic " +
+			"operation refuses a debtor — the reminder changes what the desk and the patient see, never what they " +
+			"may do.",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"patientKey":{"type":"string","description":"vtx.patient.<NanoID> of the patient this account is for (ClinicCreateAccount; required, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per patient) is enforced via the patient's .ledgerAccount guard aspect, not the account's own id."}},` +
-			`"required":["patientKey"]}`,
+			`{"patientKey":{"type":"string","description":"ClinicCreateAccount only, and required there. vtx.patient.<NanoID> of the patient this account is for (validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per patient) is enforced via the patient's .ledgerAccount guard aspect, not the account's own id."},` +
+			`"accountKey":{"type":"string","description":"EvaluateClinicArrears only: vtx.clinicaccount.<NanoID> of the account whose arrears are being aged (required there, validated alive)."}},` +
+			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.clinicaccount.<NanoID> of the created account (the operation's principal key) — the caller must read this from the ACCEPTED reply, since the id can no longer be derived from patientKey."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.clinicaccount.<NanoID> — the created account on ClinicCreateAccount (the caller must read it from the ACCEPTED reply, since the id can no longer be derived from patientKey), or the evaluated account on EvaluateClinicArrears."}}}`,
 		FieldDescription: map[string]string{
-			"patientKey": "Full vtx.patient.<NanoID> key of the patient the account is opened for. ClinicCreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the patient's .ledgerAccount guard aspect (one account per patient) and the heldFor link (account→patient).",
+			"patientKey": "ClinicCreateAccount only, and required there. Full vtx.patient.<NanoID> key of the patient the account is opened for. ClinicCreateAccount validates it is alive, mints the account under a fresh independent NanoID, writes the patient's .ledgerAccount guard aspect (one account per patient) and the heldFor link (account→patient). EvaluateClinicArrears takes no patientKey field: the patient is resolved live off that same heldFor link, and carried into the notification params only where one resolves.",
+			"accountKey": "EvaluateClinicArrears only, and required there. Full vtx.clinicaccount.<NanoID> key of the account to age. Validated alive; its postedTo history is replayed under a bounded budget and the FIFO-oldest open charge's due date is recorded on the account's .arrears aspect.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:    "EvaluateClinicArrears — age a patient's balance and remind once it is overdue",
+				Payload: map[string]any{"accountKey": "vtx.clinicaccount.<NanoID>"},
+				ExpectedOutcome: "Validates the account is alive, replays its postedTo history under the evaluation budget and ages it " +
+					"FIFO. Writes vtx.clinicaccount.<NanoID>.arrears = {evaluatedAt, dueAt?, remindedFor?, sentAt?} — {evaluatedAt} " +
+					"alone when nothing is owed. When the oldest open charge's due date has passed it stamps remindedFor = " +
+					"that date, and where no reminder has yet gone out in this episode (sentAt absent) ALSO stamps sentAt and " +
+					"emits external.notification keyed <accountKey>:<dueAt>, with a patientKey in its params only where " +
+					"the account's own heldFor link resolves to a live patient. A re-run recomputes the head, finds sentAt " +
+					"already recorded, and sends nothing. A history past the replay budget records historyTooLong instead, " +
+					"carrying what was already recorded and sending nothing. Rejects AuthDenied for any actor but Weaver's " +
+					"dispatch actor and UnknownAccount for an absent or tombstoned account.",
+			},
 			{
 				Name:    "ClinicCreateAccount — open the ledger account for a registered patient",
 				Payload: map[string]any{"patientKey": "vtx.patient.<NanoID>"},
@@ -138,9 +181,103 @@ func accountBalanceAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
-// aspectDeclarationOnlyScript is the declaration-only Starlark for
-// clinicLedgerAccountGuard — written by ClinicCreateAccount's own op handler, never
-// dispatched as an operation in its own right.
+// accountArrearsAspectTypeDDL declares the .arrears aspect (class
+// clinicAccountArrears) on the ACCOUNT — the arrears-episode state the
+// clinicArrearsReminders convergence lens reads, and the marker that records
+// which episode a reminder has already gone out for.
+//
+// Its LIFETIME, end to end. There is none at ClinicCreateAccount: a brand-new
+// account owes nothing, and its missing evaluatedAt is exactly what opens the
+// convergence gap once, so the first evaluation writes the aspect. From there
+// THREE writers maintain it, each conditioned on one hydrated revision (the key
+// is declared optionalReads by both DDLs' derive_reads and by every dispatcher,
+// so a bare update is auto-conditioned and retry-eligible rather than
+// last-write-wins):
+//
+//   - ClinicDebitAccount that takes the balance from zero-or-below to owing
+//     opens an episode: {dueAt = this charge's postedAt + the net term,
+//     evaluatedAt}, dropping any finished episode's remindedFor/sentAt/stale. A
+//     debit against an account that ALREADY owes writes nothing — the head is
+//     an older charge, and re-stamping dueAt would push a weeks-old debt's due
+//     date back to today. Nor does a debit that leaves the account still IN
+//     CREDIT (an over-waiver or a reversal of a paid charge took it below zero
+//     and this charge only eats into that surplus) — the surplus prepays the
+//     charge outright, so there is no open debit to age.
+//   - ClinicCreditAccount that takes the balance to zero or below ends the
+//     episode: {evaluatedAt} alone, so no timer stays armed.
+//   - ClinicCreditAccount that leaves a balance marks the state stale
+//     (carrying every other field): a partial payment can move the FIFO head
+//     to a later charge with a later due date, which no single entry can
+//     compute. A legacy account (no .balance, so the entry op has no before/
+//     after balance at all) can ONLY ever mark stale, never mint.
+//   - EvaluateClinicArrears recomputes the head from the account's own history
+//     and rewrites the aspect outright — which is what the stale mark asks for,
+//     so stale is never carried across an evaluation, and neither is
+//     historyTooLong. It carries sentAt forward for as long as the episode
+//     runs: that field, not remindedFor, is what says a reminder has already
+//     gone out for THIS episode, so a head that a partial payment moved to
+//     another overdue charge is recorded (remindedFor) without sending again.
+//   - The one evaluation that does NOT recompute is the degraded one: an
+//     account whose postedTo history outran the replay budget records
+//     historyTooLong, carrying dueAt/remindedFor/sentAt untouched and dropping
+//     stale, and sends nothing. The flag suppresses both the convergence gap
+//     and the timer, so the row goes quiet rather than re-dispatching a doomed
+//     evaluation on every window; it is dropped by the carry of the next entry
+//     that rewrites the aspect — a credit, or an episode-opening charge (a
+//     charge against an already-owing balance writes nothing) — which buys
+//     exactly one more attempt.
+//
+// Non-sensitive: dates and two booleans on a vtx.clinicaccount (not an
+// identity), no money and no PII. Declaration-only: written by the three ops
+// above, never dispatched as an operation in its own right.
+func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "clinicAccountArrears",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"ClinicDebitAccount", "ClinicCreditAccount", arrearsOp},
+		Description: "Per-account arrears-episode aspect. Stored as vtx.clinicaccount.<NanoID>.arrears " +
+			"(class clinicAccountArrears) = {evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?, historyTooLong?}. Non-sensitive. " +
+			"dueAt is the FIFO-oldest still-open charge's postedAt plus the ledger's net term — a RECORDED time " +
+			"fact, written by the op, never a clock a lens reads. remindedFor names the dueAt the evaluation has " +
+			"acknowledged as passed — it is what closes the convergence gap; sentAt is when a reminder actually went " +
+			"out, and its ABSENCE is the send condition, which is what makes the notification once-per-EPISODE rather " +
+			"than once-per-head or once-per-convergence-window. historyTooLong means the account's history outran the " +
+			"evaluation's replay budget, so no head could be computed: it suppresses both the gap and the timer (the " +
+			"row stays visible but quiet for an operator) and is dropped by the next entry that rewrites the aspect — a credit, or a charge that opens an episode — which buys one " +
+			"further attempt. stale means what is recorded may no longer " +
+			"describe the account (a partial payment moved the head, or the account carries no .balance to reason " +
+			"with) and is a request for a fresh EvaluateClinicArrears, which rewrites the aspect and so never carries " +
+			"it forward. Written by ClinicDebitAccount (opens an episode on an account that owed nothing), " +
+			"ClinicCreditAccount (ends the episode at zero, else marks stale) and EvaluateClinicArrears " +
+			"(recomputes the head). Read by the clinicArrearsReminders convergence lens and projected for the front " +
+			"desk and the patient's statement by clinicPatientAccounts. Declaration-only: no op handler.",
+		Script:       aspectDeclarationOnlyScript,
+		InputSchema:  `{"type":"object","properties":{"evaluatedAt":{"type":"string"},"dueAt":{"type":"string"},"remindedFor":{"type":"string"},"sentAt":{"type":"string"},"stale":{"type":"boolean"},"historyTooLong":{"type":"boolean"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"evaluatedAt":    "RFC3339 instant (canonical UTC) the arrears state was last written — by an evaluation or by the entry that changed the episode. Its ABSENCE is what opens the convergence gap for an account nothing has ever evaluated.",
+			"dueAt":          "RFC3339 instant (canonical UTC) the FIFO-oldest still-open charge falls overdue: that charge's own postedAt plus the ledger's net term. Absent when the account owes nothing.",
+			"remindedFor":    "The dueAt the last evaluation acknowledged as passed. Equal to dueAt closes the convergence gap; different (or absent) leaves it open for a recorded lapse to re-open.",
+			"sentAt":         "RFC3339 instant (canonical UTC) a reminder for this arrears episode was sent — the timestamp the front desk and the patient's statement show. Its ABSENCE is what lets the next passed deadline send; it is carried across every write of a live episode and dropped only where the episode itself ends.",
+			"stale":          "True when what is recorded may no longer describe the account (a partial payment moved the FIFO head, or the account carries no .balance). Opens the convergence gap; cleared by the evaluation that recomputes the head.",
+			"historyTooLong": "True when the account's postedTo history outran the evaluation's bounded replay budget, so no FIFO head could be computed. Suppresses BOTH the convergence gap and the freshness timer — the row stays in the read model for an operator to see, without re-dispatching an evaluation that cannot succeed. Dropped by the next entry that rewrites the aspect — a credit, or a charge that opens an episode; a charge against an already-owing balance writes nothing — which also marks the state stale, buying exactly one more attempt.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "account arrears aspect — overdue, reminded once",
+				Payload:         map[string]any{"evaluatedAt": "2026-08-22T09:00:00Z", "dueAt": "2026-08-06T14:20:00Z", "remindedFor": "2026-08-06T14:20:00Z", "sentAt": "2026-08-22T09:00:00Z"},
+				ExpectedOutcome: "Stored as vtx.clinicaccount.<NanoID>.arrears; written by EvaluateClinicArrears on the commit that also emitted the notification. remindedFor = dueAt closes the gap, so no second reminder goes out for this episode.",
+			},
+		},
+	}
+}
+
+// aspectDeclarationOnlyScript is the declaration-only Starlark for the
+// package's aspect-type DDLs — clinicLedgerAccountGuard, clinicAccountBalance,
+// clinicAccountArrears and clinicAccountArrearsNotification are written by
+// ClinicCreateAccount's, the transaction ops', EvaluateClinicArrears' and the
+// notification replyOp's own handlers, never dispatched as operations in their
+// own right.
 const aspectDeclarationOnlyScript = `
 def execute(state, op):
     fail("aspect-type DDL: not an operation handler: " + op.operationType)
@@ -162,6 +299,11 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"by the signed amount — auto-conditioned on the step-4 hydrated revision since this DDL's own derive_reads declares " +
 			".balance on every dispatch, which " +
 			"is what makes it retry-eligible: a lost race re-hydrates and retries the whole op rather than hard-conflicting. " +
+			"Each entry also keeps the account's .arrears episode state (clinicAccountArrears DDL) coarse but current, under " +
+			"the same declared-key conditioning: a charge that takes the balance from zero-or-below to owing opens an episode " +
+			"(dueAt = its own postedAt plus the net term), a credit that takes it to zero or below ends one ({evaluatedAt} " +
+			"alone), a credit that leaves a balance carries the recorded state and marks it stale for EvaluateClinicArrears to " +
+			"recompute, and an entry against a legacy account (no .balance) can only ever mark existing state stale. " +
 			"An account opened before that aspect existed carries none, and only a self-scoped (patient) ClinicCreditAccount " +
 			"backfills it, by replaying that account's own postedTo history once under a bounded budget: a charge, a staff " +
 			"payment and a waiver against such an account post without writing .balance, so the account stays legacy until a " +

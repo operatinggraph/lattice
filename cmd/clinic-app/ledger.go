@@ -323,17 +323,24 @@ func deriveStatement(rows []ledgerEntryRow, balanceCents int64, now time.Time) (
 // ClinicCreateAccount has opened one. The account carries its OWN
 // independently-minted NanoID (never derived from the patient's — see
 // packages/clinic-ledger/scripts.go), so this lens read is the only way to
-// resolve it.
+// resolve it. ArrearsDueAt/ArrearsRemindedFor/ArrearsReminderSentAt come off
+// the account's own `.arrears` aspect (patientAccountsSpec's own doc
+// comment, packages/clinic-ledger/lenses.go) — empty for a patient with no
+// account, or for an account nothing has yet aged.
 type patientAccountProjection struct {
-	PatientKey string `json:"patientKey"`
-	AccountKey string `json:"accountKey"`
+	PatientKey            string `json:"patientKey"`
+	AccountKey            string `json:"accountKey"`
+	ArrearsDueAt          string `json:"arrearsDueAt"`
+	ArrearsRemindedFor    string `json:"arrearsRemindedFor"`
+	ArrearsReminderSentAt string `json:"arrearsReminderSentAt"`
 }
 
 // resolvePatientAccount scans the clinicPatientAccounts lens rows for the
-// one matching patientKey, returning its account key ("" if the patient has
-// none yet, including when no row projected at all — a patient the Refractor
-// hasn't caught up to yet reads the same as one with no account).
-func resolvePatientAccount(keys []string, get kvGetter, patientKey string) string {
+// one matching patientKey, returning its projection (the zero value if the
+// patient has none yet, including when no row projected at all — a patient
+// the Refractor hasn't caught up to yet reads the same as one with no
+// account).
+func resolvePatientAccount(keys []string, get kvGetter, patientKey string) patientAccountProjection {
 	for _, k := range keys {
 		raw, ok := get(k)
 		if !ok {
@@ -343,18 +350,18 @@ func resolvePatientAccount(keys []string, get kvGetter, patientKey string) strin
 		if json.Unmarshal(raw, &p) != nil || p.PatientKey != patientKey {
 			continue
 		}
-		return p.AccountKey
+		return p
 	}
-	return ""
+	return patientAccountProjection{}
 }
 
 // resolvePatientAccounts indexes the clinicPatientAccounts lens rows by
 // patientKey in one pass — the arrears grid needs every visible patient's
-// account key at once, and calling resolvePatientAccount (a full rescan)
-// once per patient found in the ledger bucket would redecode the same rows
-// N times over.
-func resolvePatientAccounts(keys []string, get kvGetter) map[string]string {
-	out := make(map[string]string, len(keys))
+// account projection at once, and calling resolvePatientAccount (a full
+// rescan) once per patient found in the ledger bucket would redecode the
+// same rows N times over.
+func resolvePatientAccounts(keys []string, get kvGetter) map[string]patientAccountProjection {
+	out := make(map[string]patientAccountProjection, len(keys))
 	for _, k := range keys {
 		raw, ok := get(k)
 		if !ok {
@@ -364,20 +371,59 @@ func resolvePatientAccounts(keys []string, get kvGetter) map[string]string {
 		if json.Unmarshal(raw, &p) != nil || p.PatientKey == "" {
 			continue
 		}
-		out[p.PatientKey] = p.AccountKey
+		out[p.PatientKey] = p
 	}
 	return out
+}
+
+// recordedOrDerivedDueDate prefers the account's own RECORDED arrears due
+// date (EvaluateClinicArrears' stamp) over deriveStatement's FIFO-derived
+// one — a stamp that names a date reads the recorded one when it exists
+// (clinic-arrears-reminder-2026-09-15.md verdict item 5). deriveStatement's
+// derivation is the fallback for an account no evaluation has touched yet.
+func recordedOrDerivedDueDate(recorded, derived string) string {
+	if recorded != "" {
+		return recorded
+	}
+	return derived
+}
+
+// computeOverdue reports whether dueDate (RFC3339) has been reached by now,
+// and by how many whole days — the same "reached, then +1" rule
+// deriveStatement applies. Re-derived here, rather than reused from
+// deriveStatement's own return, because the due date actually rendered may
+// be the RECORDED one (recordedOrDerivedDueDate), not deriveStatement's own
+// FIFO computation — isOverdue/daysOverdue must agree with whichever date is
+// shown. A due date that fails to parse fails closed (not overdue), the same
+// posture deriveStatement takes on a malformed postedAt.
+func computeOverdue(dueDate string, now time.Time) (bool, int) {
+	if dueDate == "" {
+		return false, 0
+	}
+	due, err := time.Parse(time.RFC3339, dueDate)
+	if err != nil {
+		return false, 0
+	}
+	// Same boundary as clinic-ledger's own evaluation (`due_at <=
+	// evaluated_at`, packages/clinic-ledger/scripts.go): due AT the instant
+	// counts.
+	if now.Before(due) {
+		return false, 0
+	}
+	days := int(now.Sub(due).Hours()/24) + 1
+	return true, days
 }
 
 // arrearsRow is one patient's balance/due-date/overdue statement for the
 // front-desk debtor grid — GET /api/staff/arrears.
 type arrearsRow struct {
-	PatientKey   string `json:"patientKey"`
-	AccountKey   string `json:"accountKey"`
-	BalanceCents int64  `json:"balanceCents"`
-	DueDate      string `json:"dueDate"`
-	IsOverdue    bool   `json:"isOverdue"`
-	DaysOverdue  int    `json:"daysOverdue"`
+	PatientKey     string `json:"patientKey"`
+	AccountKey     string `json:"accountKey"`
+	BalanceCents   int64  `json:"balanceCents"`
+	DueDate        string `json:"dueDate"`
+	IsOverdue      bool   `json:"isOverdue"`
+	DaysOverdue    int    `json:"daysOverdue"`
+	ReminderSentAt string `json:"reminderSentAt,omitempty"`
 }
 
 // computeArrears groups the ledgerHistory lens rows by patientKey — RESTRICTED
@@ -393,7 +439,16 @@ type arrearsRow struct {
 // group at all. Sorted worst-first — isOverdue desc, then daysOverdue desc,
 // then balanceCents desc, then patientKey asc as a stable tiebreaker so the
 // grid's order never depends on Go's randomized map iteration.
-func computeArrears(keys []string, get kvGetter, visible map[string]bool, acctByPatient map[string]string, now time.Time) []arrearsRow {
+//
+// Recorded-wins applies per row before the sort, off the same
+// recordedOrDerivedDueDate/computeOverdue rule handleLedger uses: a patient
+// account carrying a RECORDED arrears due date (EvaluateClinicArrears'
+// stamp) shows that date, with isOverdue/daysOverdue recomputed against it,
+// rather than deriveStatement's own FIFO derivation — so the grid orders on
+// what is rendered, not on a derivation the recorded stamp has superseded.
+// ReminderSentAt threads through from the same account projection
+// unconditionally, as the account's own recorded SEND INTENT.
+func computeArrears(keys []string, get kvGetter, visible map[string]bool, acctByPatient map[string]patientAccountProjection, now time.Time) []arrearsRow {
 	byPatient := make(map[string][]ledgerEntryRow)
 	for _, k := range keys {
 		raw, ok := get(k)
@@ -427,14 +482,18 @@ func computeArrears(keys []string, get kvGetter, visible map[string]bool, acctBy
 		if balance <= 0 {
 			continue
 		}
-		dueDate, isOverdue, daysOverdue := deriveStatement(entries, balance, now)
+		dueDate, _, _ := deriveStatement(entries, balance, now)
+		acct := acctByPatient[patientKey]
+		dueDate = recordedOrDerivedDueDate(acct.ArrearsDueAt, dueDate)
+		isOverdue, daysOverdue := computeOverdue(dueDate, now)
 		rows = append(rows, arrearsRow{
-			PatientKey:   patientKey,
-			AccountKey:   acctByPatient[patientKey],
-			BalanceCents: balance,
-			DueDate:      dueDate,
-			IsOverdue:    isOverdue,
-			DaysOverdue:  daysOverdue,
+			PatientKey:     patientKey,
+			AccountKey:     acct.AccountKey,
+			BalanceCents:   balance,
+			DueDate:        dueDate,
+			IsOverdue:      isOverdue,
+			DaysOverdue:    daysOverdue,
+			ReminderSentAt: acct.ArrearsReminderSentAt,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -551,7 +610,8 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	acctGet := func(key string) ([]byte, bool) { v, ok := acctValues[key]; return v, ok }
-	accountKey := resolvePatientAccount(acctKeys, acctGet, patientKey)
+	acct := resolvePatientAccount(acctKeys, acctGet, patientKey)
+	accountKey := acct.AccountKey
 
 	bucket := clinicledger.LedgerHistoryBucket
 	keys, err := conn.KVListKeys(ctx, bucket)
@@ -574,15 +634,33 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	}
 	get := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
 	rows, balance := computeLedgerHistory(keys, get, patientKey)
-	dueDate, isOverdue, daysOverdue := deriveStatement(rows, balance, time.Now().UTC())
+
+	// A due date (recorded or derived) only means something over an actual
+	// open balance — mirrors deriveStatement's own "nothing to age" case,
+	// applied whichever dueDate ends up rendered. reminderSentAt threads
+	// through unconditionally: it is the account's own recorded SEND
+	// INTENT, unrelated to whatever this request's own balance
+	// recomputation finds. deriveStatement itself still runs unconditionally
+	// (its per-row OpenCents/DueAt/IsOverdue/DaysOverdue annotation on rows
+	// is needed regardless of the statement-level balance).
+	now := time.Now().UTC()
+	derivedDue, _, _ := deriveStatement(rows, balance, now)
+	var dueDate string
+	var isOverdue bool
+	var daysOverdue int
+	if balance > 0 {
+		dueDate = recordedOrDerivedDueDate(acct.ArrearsDueAt, derivedDue)
+		isOverdue, daysOverdue = computeOverdue(dueDate, now)
+	}
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"patientKey":   patientKey,
-		"accountKey":   accountKey,
-		"transactions": rows,
-		"balanceCents": balance,
-		"dueDate":      dueDate,
-		"isOverdue":    isOverdue,
-		"daysOverdue":  daysOverdue,
+		"patientKey":     patientKey,
+		"accountKey":     accountKey,
+		"transactions":   rows,
+		"balanceCents":   balance,
+		"dueDate":        dueDate,
+		"isOverdue":      isOverdue,
+		"daysOverdue":    daysOverdue,
+		"reminderSentAt": acct.ArrearsReminderSentAt,
 	})
 }
 

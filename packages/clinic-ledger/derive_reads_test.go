@@ -1,16 +1,20 @@
 // derive_reads bare-submitter vectors (Contract #2 §2.5 class (g)) for the
-// transactionDDL's ClinicDebitAccount and ClinicCreditAccount — each envelope
-// below declares no contextHint at all, proving the script's own
-// derive_reads(op) is what hydrates the account root (and its .balance)
-// rather than a caller's own declaration. Neither op runs a confinement walk
-// (post_entry's own doc comment: no workplace check here, unlike cafe-ledger's
-// staff-voice ops), so no Enumerations declaration is needed either.
+// transactionDDL's ClinicDebitAccount and ClinicCreditAccount and the
+// accountDDL's EvaluateClinicArrears — each envelope below declares no reads
+// at all, proving the script's own derive_reads(op) is what hydrates the
+// account root (and its .balance / .arrears) rather than a caller's own
+// declaration. Neither entry op runs a confinement walk (post_entry's own doc
+// comment: no workplace check here, unlike cafe-ledger's staff-voice ops), so
+// no Enumerations declaration is needed for those two; the evaluation always
+// walks postedTo and heldFor, and only a read can be derived, so its vector
+// declares exactly those two walks and nothing else.
 package clinicledger_test
 
 import (
 	"encoding/json"
 	"testing"
 
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
@@ -84,5 +88,48 @@ func TestClinicCreditAccount_UndeclaredSubmitter_PostsPayment(t *testing.T) {
 	}
 	if got := balanceCents(t, ctx, conn, acctKey); got != 600 {
 		t.Fatalf("balance = %v, want 600 (1000 charged - 400 paid) — the payment must actually post", got)
+	}
+}
+
+// TestEvaluateClinicArrears_UndeclaredSubmitter_AgesAccount: an
+// EvaluateClinicArrears, submitted by Weaver's own dispatch actor declaring
+// only the two Enumerations the evaluation always walks (postedTo, to replay
+// the account's history, and heldFor, to resolve the notification's patient)
+// and no Reads/OptionalReads, ages the account and writes .arrears. This DDL's
+// own derive_reads carries the account root alongside .arrears, so
+// vertex_alive sees the live account rather than misreading an undeclared
+// root as absent.
+func TestEvaluateClinicArrears_UndeclaredSubmitter_AgesAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsnodecl")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "clndclpat00000003", "Riley Chen")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "clndclacct0000003", patientKey)
+	debitAt(t, ctx, conn, cp, cons, "clndclarrearschrg001", acctKey, "2026-07-01T00:00:00Z", 2500)
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("clarrearsnodeclsub01"),
+		Lane:          processor.LaneDefault,
+		OperationType: "EvaluateClinicArrears",
+		Actor:         bootstrap.WeaverIdentityKey,
+		SubmittedAt:   "2026-08-01T00:00:00Z",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Enumerations: []processor.EnumerationHint{
+				{Hub: acctKey, Relation: "postedTo", Direction: "in"},
+				{Hub: acctKey, Relation: "heldFor", Direction: "out"},
+			},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	data := arrearsData(t, ctx, conn, acctKey)
+	if data == nil {
+		t.Fatalf("no .arrears aspect written — the derivation must hydrate the account root for the evaluation to run at all")
+	}
+	if got, _ := data["remindedFor"].(string); got != dueFor(t, "2026-07-01T00:00:00Z") {
+		t.Fatalf("remindedFor = %q, want %q — the evaluation must see and rewrite the hydrated aspect", got, dueFor(t, "2026-07-01T00:00:00Z"))
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/testutil"
 	clinicdomain "github.com/operatinggraph/lattice/packages/clinic-domain"
 	clinicledger "github.com/operatinggraph/lattice/packages/clinic-ledger"
+	orchestrationbase "github.com/operatinggraph/lattice/packages/orchestration-base"
 )
 
 const (
@@ -52,6 +53,13 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "ClinicCreateAccount", Scope: "any"},
 			{OperationType: "ClinicDebitAccount", Scope: "any"},
 			{OperationType: "ClinicCreditAccount", Scope: "any"},
+			// The same Scope:"any" EvaluateClinicArrears row Weaver's dispatch
+			// actor holds (arrearsWeaverCapDoc, arrears_test.go). That is what
+			// makes TestArrears_ForgedSendRefused attributable to the script's
+			// own actor guard: step 3 authorizes this operator, and only
+			// `op.actor != primordialActor["weaver"]` turns it away.
+			{OperationType: "EvaluateClinicArrears", Scope: "any"},
+			{OperationType: "RecordClinicArrearsReminderNotification", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -71,6 +79,11 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	// install identity-domain (the lease-signing lsConsumerRoleID idiom).
 	const ledConsumerRoleID = "LEDConsumerRoZeHJKMN"
 	inst.RoleIDs = map[string]string{"operator": bootstrap.RoleOperatorID, "consumer": ledConsumerRoleID, "frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"), "backOfHouse": pkgmgr.RoleID("identity-domain", "backOfHouse"), "provider": pkgmgr.RoleID("identity-domain", "provider")}
+	// orchestration-base first: clinic-ledger depends on it for the
+	// freshnessExpiry marker the arrears reminder's fired timer writes.
+	if _, err := inst.Install(ctx, orchestrationbase.Package); err != nil {
+		t.Fatalf("install orchestration-base: %v", err)
+	}
 	if _, err := inst.Install(ctx, clinicdomain.Package); err != nil {
 		t.Fatalf("install clinic-domain: %v", err)
 	}
@@ -78,6 +91,7 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install clinic-ledger: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, ledgerCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, arrearsWeaverCapDoc())
 	// CreateAppointment's workplace-confinement guard reads the holdsRole LINK to
 	// decide whether its caller is root (actor_holds_operator), not the cap doc's
 	// Roles — so the operator actor needs the link, exactly as clinic-domain's own
@@ -1835,8 +1849,8 @@ func TestDeriveReads_BalanceKey(t *testing.T) {
 			t.Fatalf("derive_reads does not mention %q — that op's .balance update would be unconditioned whenever its submitter omits the declaration", want)
 		}
 	}
-	if !strings.Contains(derive, `optional_reads = [acct_key, acct_key + ".balance"]`) || !strings.Contains(derive, `{"optionalReads": optional_reads}`) {
-		t.Fatalf("derive_reads no longer returns the account root and its .balance under optionalReads:\n%s", derive)
+	if !strings.Contains(derive, `optional_reads = [acct_key, acct_key + ".balance", acct_key + ".arrears"]`) || !strings.Contains(derive, `{"optionalReads": optional_reads}`) {
+		t.Fatalf("derive_reads no longer returns the account root, its .balance and its .arrears under optionalReads:\n%s", derive)
 	}
 	if !strings.Contains(derive, `optional_reads.append(appt_key + ".status")`) {
 		t.Fatalf("derive_reads no longer returns the appointmentRef's .status — the NoFeeToSettle guard would read a key the submitter never conditioned:\n%s", derive)
@@ -1910,12 +1924,12 @@ func runDeriveReads(t *testing.T, operationType string, payload map[string]any) 
 
 // TestDeriveReads_AppointmentStatus runs the derivation itself: a
 // ClinicDebitAccount whose appointmentRef is a well-formed appointment key
-// derives that appointment's .status beside the account's .balance; a
-// ClinicCreditAccount whose reversesRef is a well-formed transaction key
-// derives the postedTo link post_entry's WrongAccount check reads; a
-// malformed ref derives only .balance (post_entry's own parts_of raises the
-// InvalidArgument, never a DeriveReadsInvalid fault); neither op derives the
-// other's key. Behaviourally invisible
+// derives that appointment's .status beside the account's .balance and
+// .arrears; a ClinicCreditAccount whose reversesRef is a well-formed
+// transaction key derives the postedTo link post_entry's WrongAccount check
+// reads; a malformed ref derives only the account's own keys (post_entry's
+// own parts_of raises the InvalidArgument, never a DeriveReadsInvalid fault);
+// neither op derives the other's key. Behaviourally invisible
 // otherwise — an undeclared kv.Read falls through to a live GET that returns
 // the same document — so the derivation's output is what this pins.
 func TestDeriveReads_AppointmentStatus(t *testing.T) {
@@ -1928,16 +1942,16 @@ func TestDeriveReads_AppointmentStatus(t *testing.T) {
 		payload map[string]any
 		want    []string
 	}{
-		{"debit with appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey, acctKey + ".balance", apptKey + ".status"}},
-		{"debit with visitRef derives no status", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "visitRef": apptKey}, []string{acctKey, acctKey + ".balance"}},
-		{"debit with malformed appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.appointment.short"}, []string{acctKey, acctKey + ".balance"}},
-		{"debit with wrong-type appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.patient.CLDRAPPTHJKMNPQRSTUV"}, []string{acctKey, acctKey + ".balance"}},
-		{"plain debit", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500}, []string{acctKey, acctKey + ".balance"}},
-		{"credit with appointmentRef never derives status", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey, acctKey + ".balance"}},
+		{"debit with appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears", apptKey + ".status"}},
+		{"debit with visitRef derives no status", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "visitRef": apptKey}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears"}},
+		{"debit with malformed appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.appointment.short"}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears"}},
+		{"debit with wrong-type appointmentRef", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": "vtx.patient.CLDRAPPTHJKMNPQRSTUV"}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears"}},
+		{"plain debit", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears"}},
+		{"credit with appointmentRef never derives status", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "appointmentRef": apptKey}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears"}},
 		{"malformed accountKey derives nothing", "ClinicDebitAccount", map[string]any{"accountKey": "nope", "amountCents": 2500, "appointmentRef": apptKey}, nil},
-		{"credit with reversesRef derives the postedTo link", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey, acctKey + ".balance", "lnk.clinictransaction.CLDRTXNHJKMNPQRSTUVW.postedTo.clinicaccount.CLDRACCTHJKMNPQRSTUV"}},
-		{"credit with malformed reversesRef", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": "vtx.clinictransaction.short"}, []string{acctKey, acctKey + ".balance"}},
-		{"debit with reversesRef derives no link", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey, acctKey + ".balance"}},
+		{"credit with reversesRef derives the postedTo link", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears", "lnk.clinictransaction.CLDRTXNHJKMNPQRSTUVW.postedTo.clinicaccount.CLDRACCTHJKMNPQRSTUV"}},
+		{"credit with malformed reversesRef", "ClinicCreditAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": "vtx.clinictransaction.short"}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears"}},
+		{"debit with reversesRef derives no link", "ClinicDebitAccount", map[string]any{"accountKey": acctKey, "amountCents": 2500, "reversesRef": txKey}, []string{acctKey, acctKey + ".balance", acctKey + ".arrears"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
