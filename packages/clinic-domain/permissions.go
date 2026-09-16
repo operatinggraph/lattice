@@ -16,8 +16,10 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // identity (via the patient's identifiedBy link), since step 3 never sees the
 // payload and the patient vertex — not the identity — is the op's endpoint.
 // SetAppointmentStatus's self grant is further restricted, in-script, to
-// status=cancelled only — a self-service patient may cancel but never mark
-// confirmed/checkedIn/completed/noShow (those stay staff-only).
+// cancel or confirm — a self-service patient may cancel or confirm their own
+// visit but never mark checkedIn/completed/noShow (those stay staff-only), and
+// a self confirm is refused once the desk has checked them in or the visit
+// has started.
 //
 // RescheduleAppointment and SetAppointmentStatus additionally grant
 // `frontOfHouse` at scope=any — the front-desk schedule beat. This is the
@@ -155,7 +157,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "SetAppointmentStatus",
 			Scope:         "self",
-			Note:          "Grants a consumer the right to cancel THEIR OWN appointment (status=cancelled only; the appointment's forPatient must be a patient linked, via identifiedBy, to the caller's own identity).",
+			Note:          "Grants a consumer the right to cancel or confirm THEIR OWN appointment (status=cancelled or confirmed only — a self confirm is further refused once the desk has checked the patient in or once the visit has started; the appointment's forPatient must be a patient linked, via identifiedBy, to the caller's own identity).",
 			GrantsTo:      []string{"consumer"},
 		},
 		{

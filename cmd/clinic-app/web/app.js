@@ -5174,7 +5174,7 @@ function selectSchedAppt(a) {
     if ((a.status || "").toLowerCase() === "completed") {
       const doc = document.createElement("button");
       doc.className = "ghost";
-      doc.textContent = a.documentedAt ? "Edit documentation" : "Document visit";
+      doc.textContent = a.documentedAt ? "Amend documentation" : "Document visit";
       doc.addEventListener("click", () => openEncounter(a, loadSchedule));
       acts.append(doc);
     }
@@ -5395,6 +5395,18 @@ function renderApptCard(a, opts) {
     // reschedule refuses LateReschedule). Staff cards carry no clock.
     const clock = opts.asSelf ? selfVisitClock(a.startsAt, Date.now()) : "open";
 
+    // A patient confirms their own still-scheduled visit (SetAppointmentStatus's
+    // widened self grant) — a primary affordance beside Reschedule/Cancel, never
+    // on a staff card (opts.asSelf).
+    if (opts.asSelf && selfConfirmOffered(a.status, clock)) {
+      // No class — the base (unclassed) button style is this app's filled/
+      // primary look; every other action here is "ghost" (outline).
+      const confirmBtn = document.createElement("button");
+      confirmBtn.textContent = "Confirm";
+      confirmBtn.addEventListener("click", () => setStatus(a, "confirmed", onDone, { asSelf: true }));
+      btns.append(confirmBtn);
+    }
+
     if (clock !== "started") {
       if (clock === "open") {
         const reschedule = document.createElement("button");
@@ -5443,9 +5455,10 @@ function renderApptCard(a, opts) {
     actions.append(btns);
   }
 
-  // A completed visit can be documented (or its documentation corrected — the op is
-  // a re-runnable upsert). The note block above shows the clinical content when the
-  // signed-in actor may read it back; the modal is where it is written or corrected.
+  // A completed visit can be documented (or its documentation amended — the op is
+  // record-or-amend: once a record exists, a save keeps the prior text in the
+  // record's own history). The note block above shows the clinical content when
+  // the signed-in actor may read it back; the modal is where it is written or amended.
   // Clinical documentation stays staff-only — never offered in the self-service
   // (asSelf) patient view; a bound provider (opts.asSelf unset) reaches it from My
   // Schedule too.
@@ -5454,7 +5467,7 @@ function renderApptCard(a, opts) {
     btns.className = "card-btns";
     const doc = document.createElement("button");
     doc.className = "ghost";
-    doc.textContent = a.documentedAt ? "Edit documentation" : "Document visit";
+    doc.textContent = a.documentedAt ? "Amend documentation" : "Document visit";
     doc.addEventListener("click", () => openEncounter(a, onDone));
     btns.append(doc);
     // Care→Wellness referral: only offered when the patient has a linked
@@ -5512,6 +5525,10 @@ function encounterSummary(a) {
   let t = "✓ Visit documented" + (isNaN(d) ? "" : " · " + d.toLocaleDateString());
   if (a.followUpRequested) {
     t += " · follow-up" + (a.followUpDate ? " " + a.followUpDate.slice(0, 10) : " requested");
+  }
+  if (a.amendedAt) {
+    const ad = new Date(a.amendedAt);
+    if (!isNaN(ad)) t += " · amended " + ad.toLocaleDateString();
   }
   return t;
 }
@@ -5572,6 +5589,22 @@ function selfVisitClock(startsAt, nowMs) {
   return "open";
 }
 
+// selfConfirmOffered answers whether the patient self-service card offers
+// Confirm (SetAppointmentStatus's widened self grant, "cancel or confirm"):
+// only while the visit is still at its first-booked status — "scheduled",
+// or absent, which this app's read models never actually project (starts_at
+// and status are written atomically by CreateAppointment) but is treated the
+// same as "scheduled" defensively — and only before the visit has started
+// (the same self_visit_clock the server reads; confirming inside the 24h
+// late window is exactly what the reminder invites, so "late" still offers
+// it). Once staff have checked the patient in, or the visit is already
+// confirmed/terminal, Confirm no longer applies.
+function selfConfirmOffered(status, clock) {
+  if (clock === "started") return false;
+  const s = (status || "").toLowerCase();
+  return s === "" || s === "scheduled";
+}
+
 // setStatus drives SetAppointmentStatus to the given status and reloads via onDone.
 // noShow / cancelled prompt for an optional audit note (a reason recorded on the
 // .status aspect for records / billing); cancelling the prompt aborts. The FIRST
@@ -5581,9 +5614,10 @@ function selfVisitClock(startsAt, nowMs) {
 const TERMINAL_STATUS_VALUES = ["completed", "cancelled", "noShow"];
 
 async function setStatus(a, status, onDone, opts) {
-  // refusal-courtesy: SetAppointmentStatus/TerminalStatus: hide — renderApptCard's whole button block (lifecycleButtons + Cancel) renders only for ACTIVE_STATUSES.includes(a.status).
+  // refusal-courtesy: SetAppointmentStatus/TerminalStatus: hide — renderApptCard's whole button block (lifecycleButtons + Cancel + the self-service Confirm) renders only for ACTIVE_STATUSES.includes(a.status).
   // refusal-courtesy: SetAppointmentStatus/NotYetStarted: hide — lifecycleTransitions drops completed/noShow from the options whenever started===false (isPast(a.startsAt) supplies it), so those transitions never render before the visit starts.
-  // refusal-courtesy: SetAppointmentStatus/VisitStarted: hide — renderApptCard hides the self-service Cancel button once selfVisitClock(a.startsAt)==='started'; staff cards' clock is always "open", matching the script's own self-only gate (SetAppointmentStatus only reads self_visit_clock when op.authContextTarget is set, packages/clinic-domain/ddls.go).
+  // refusal-courtesy: SetAppointmentStatus/VisitStarted: hide — renderApptCard hides the self-service Cancel button, and selfConfirmOffered withholds Confirm, once selfVisitClock(a.startsAt)==='started'; staff cards' clock is always "open", matching the script's own self-only gate (SetAppointmentStatus only reads self_visit_clock when op.authContextTarget is set, packages/clinic-domain/ddls.go).
+  // refusal-courtesy: SetAppointmentStatus/AuthDenied: hide — selfConfirmOffered withholds Confirm off "scheduled"; a card drawn before the desk's check-in reaches the script's cur_val==='checkedIn' refusal, whose text the toast relays.
   // refusal-courtesy: SetAppointmentStatus/WrongPatient, WrongProvider: unreachable — payload.provider/payload.patient are read straight off the SAME appointment row (a.providerKey/a.patientKey), never user-selected, so require_matching_provider/patient's check against that appointment's own links always matches.
   // refusal-courtesy: SetAppointmentStatus/AppointmentTooLong: unreachable — the terminal branch's release_cells_mutations recomputes cells from the appointment's own persisted .schedule, which CreateAppointment/RescheduleAppointment already validated ≤96 cells before it could be written.
   // refusal-courtesy: SetAppointmentStatus/InvalidState: none — no read-model field signals a corrupted/missing .schedule; CreateAppointment always writes one and nothing removes it.
@@ -5593,16 +5627,25 @@ async function setStatus(a, status, onDone, opts) {
   // (optionalReads); the terminal-transition branch additionally reads (a)
   // appt.schedule + the withProvider/forPatient endpoint-validation links,
   // required only when this call can hit that branch (script-read-posture-
-  // design.md §13).
+  // design.md §13). The self path always declares them, plus the
+  // identifiedBy ownership probe: the schema requires provider/patient
+  // unconditionally and the self-scope binding reads the probe on every
+  // self dispatch, not only a terminal one — the descriptor's own
+  // per-hat declaration (packages/clinic-domain/opmetas.go).
   const reads = [a.appointmentKey];
   const optionalReads = [a.appointmentKey + ".status"];
-  if (TERMINAL_STATUS_VALUES.indexOf(status) !== -1 && status !== a.status) {
+  if ((TERMINAL_STATUS_VALUES.indexOf(status) !== -1 && status !== a.status) || asSelf) {
     payload.provider = a.providerKey;
     payload.patient = a.patientKey;
     reads.push(
       a.appointmentKey + ".schedule",
       "lnk.appointment." + bareId(a.appointmentKey) + ".withProvider.provider." + bareId(a.providerKey),
       "lnk.appointment." + bareId(a.appointmentKey) + ".forPatient.patient." + bareId(a.patientKey),
+    );
+  }
+  if (asSelf) {
+    optionalReads.push(
+      "lnk.patient." + bareId(a.patientKey) + ".identifiedBy.identity." + bareId(patientIdentityKey()),
     );
   }
   // Courtesy only — SetAppointmentStatus enforces the window itself. Asked
@@ -5818,7 +5861,13 @@ function openReschedule(a, opts) {
   state.reschedulingAsSelf = !!(opts && opts.asSelf);
   state.reschedulingOnDone = (opts && opts.onDone) || loadAppts;
   const who = a.providerName || shortKey(a.providerKey);
-  $("#reschedule-context").textContent = `${who} · currently ${fmtWhen(a.startsAt, a.endsAt)}`;
+  // A confirmed or checked-in visit that moves returns to scheduled
+  // (RescheduleAppointment's status-reset arm) — the mover needs to know
+  // before submitting, not just after (submitReschedule's own toast).
+  const rsStatus = (a.status || "").toLowerCase();
+  const rsBackToScheduled = rsStatus === "confirmed" || rsStatus === "checkedin";
+  $("#reschedule-context").textContent = `${who} · currently ${fmtWhen(a.startsAt, a.endsAt)}`
+    + (rsBackToScheduled ? " — moving a confirmed or checked-in visit returns it to scheduled." : "");
   $("#rs-startsAt").value = toLocalInputValue(a.startsAt);
   $("#rs-startsAt").min = nowLocalInputValue();
   const dur = durationMinutes(a.startsAt, a.endsAt);
@@ -5904,7 +5953,10 @@ async function submitReschedule(ev) {
     delete state.slotApptCache[a.providerKey];
     delete state.slotPatientApptCache[a.patientKey];
     closeReschedule();
-    toast("Appointment rescheduled.", "ok");
+    const movedStatus = (a.status || "").toLowerCase();
+    toast(movedStatus === "confirmed" || movedStatus === "checkedin"
+      ? "Appointment rescheduled — back to scheduled."
+      : "Appointment rescheduled.", "ok");
     onDone();
   } catch (e) {
     toast("Could not reschedule: " + e.message, "err");
@@ -6141,24 +6193,28 @@ async function submitWellnessBooking(ev) {
 // RecordEncounter upserts the appointment's .encounter aspect. The RAW clinical
 // content (summary / assessment / plan) is PHI, decrypted at projection only for
 // the treating provider (or a WildcardAnchor holder) through the protected
-// clinicEncountersRead read model (state.myEncounters, loadMyEncounters). The op
-// itself is a re-runnable upsert (re-saving replaces the whole aspect).
+// clinicEncountersRead read model (state.myEncounters, loadMyEncounters). Once a
+// visit already carries a record, a save is an amendment: the prior text is kept
+// in the record's own history and only the current text shown here is replaced.
 
 function openEncounter(a, onDone) {
   state.documenting = { a, onDone };
   const who = a.patientName || shortKey(a.patientKey);
+  $("#encounter-title").textContent = a.documentedAt ? "Amend documentation" : "Document visit";
   // A failed /api/my-encounters fetch (state.myEncountersLoaded false) makes
   // "this visit has no prior note" indistinguishable from "there IS a prior
   // note but this session could not read it back". For an already-documented
-  // visit that ambiguity must not reach the form: RecordEncounter is an
-  // unconditioned upsert of the whole .encounter aspect, so saving over a
-  // blank prefill would silently destroy the existing assessment/plan. Block
-  // Save until a reload actually confirms there is nothing to lose.
+  // visit that ambiguity must not reach the form: an amendment is built from
+  // the CURRENT text, so saving over a blank prefill would silently discard
+  // the existing assessment/plan from the record. Block Save until a reload
+  // actually confirms there is nothing to lose.
   const notesUnavailable = !!a.documentedAt && !state.myEncountersLoaded;
+  const docDate = a.documentedAt && !isNaN(new Date(a.documentedAt)) ? new Date(a.documentedAt).toLocaleDateString() : "";
+  const amendDate = a.amendedAt && !isNaN(new Date(a.amendedAt)) ? new Date(a.amendedAt).toLocaleDateString() : "";
   $("#encounter-context").textContent = notesUnavailable
-    ? `${who} · ${fmtWhen(a.startsAt, a.endsAt)} — could not load the existing note. Reload before editing — saving now would replace it with only what you type here.`
+    ? `${who} · ${fmtWhen(a.startsAt, a.endsAt)} — could not load the existing note. Reload before editing — saving now would replace the current text with only what you type here.`
     : a.documentedAt
-      ? `${who} · ${fmtWhen(a.startsAt, a.endsAt)} — re-documenting replaces the prior note`
+      ? `${who} · ${fmtWhen(a.startsAt, a.endsAt)} — an amendment keeps the prior note in the record — documented ${docDate}` + (amendDate ? `, amended ${amendDate}` : "")
       : `${who} · ${fmtWhen(a.startsAt, a.endsAt)}`;
   // Pre-fill from the fetched note when the signed-in actor is entitled to read
   // one back (state.myEncounters — absent for an undocumented visit, or when RLS
@@ -6193,6 +6249,7 @@ async function submitEncounter(ev) {
   // refusal-courtesy: RecordEncounter/VisitNotHeld, NotYetStarted: hide — "Document visit" renders only for status==='completed' (renderApptCard / the staff schedule terminal block), never cancelled/noShow/scheduled/confirmed/checkedIn; setFollowupDate's own re-open of openEncounter only fires for an already-documented visit.
   // refusal-courtesy: RecordEncounter/MissingFollowUpDate: disable — toggleFollowupDate marks #enc-followup-date required whenever #enc-followup is checked, so the browser blocks submit until a date is entered; this function's own check below is the backstop.
   // refusal-courtesy: RecordEncounter/InvalidState: none — no read-model field signals a corrupted/missing .schedule; CreateAppointment always writes one and nothing removes it.
+  // refusal-courtesy: RecordEncounter/AmendmentLimit: none — no lens column projects the superseded-entry count (verdict 2: no numeric-typed Postgres column exists in the corpus), so Save has no state to cap on; the toast below names the bound when the op refuses it.
   ev.preventDefault();
   const ctx = state.documenting;
   if (!ctx) {
@@ -6232,15 +6289,19 @@ async function submitEncounter(ev) {
   submit.disabled = true;
   try {
     const reply = await submitOp("RecordEncounter", "appointment", payload, [a.appointmentKey, a.appointmentKey + ".schedule"], {
-      optionalReads: [a.appointmentKey + ".status"],
+      optionalReads: [a.appointmentKey + ".status", a.appointmentKey + ".encounter", a.appointmentKey + ".documentation"],
     });
     const msg = rejectionMessage(reply);
     if (msg) {
+      if (msg.indexOf("AmendmentLimit") !== -1) {
+        toast("Could not save documentation — this record has reached its amendment bound.", "err");
+        return;
+      }
       toast("Could not save documentation — " + msg, "err");
       return;
     }
     // Write what was just saved into the cache synchronously, BEFORE onDone
-    // re-renders this card, so neither the card nor the next "Edit
+    // re-renders this card, so neither the card nor the next "Amend
     // documentation" prefill can ever show older text than what this session
     // just wrote (BLOCKER: a corrected note silently reverting, and a second
     // Save then overwriting the correction with the stale prefill).

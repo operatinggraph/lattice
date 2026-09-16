@@ -24,7 +24,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // CreateAppointment and the widened `status` enum on SetAppointmentStatus both
 // mirror wellness-domain's ReassignSession OPTIONAL-self-anchor idiom: one
 // op-meta serves both hats, and the actual authority stays entirely in-script
-// (workplace confinement + the self-scope status=cancelled restriction) —
+// (workplace confinement + the self-scope cancel-or-confirm restriction) —
 // widening the op-meta only makes it stop underselling what the script already
 // permits. The trusted admin tool still calls SetProviderHours/SetProviderTimeOff/
 // etc. directly for its true operator-only surface (no descriptor needed there).
@@ -234,17 +234,17 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// reason.
 			InputSchema: `{"type":"object","properties":` +
 				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment — auto-filled from the appointment being viewed."},` +
-				`"status":{"type":"string","title":"Status","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"default":"cancelled","description":"The appointment's new status. Self-service patients may only cancel; front-desk/provider staff may set any status. completed / noShow only once the visit has started."},` +
+				`"status":{"type":"string","title":"Status","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"default":"cancelled","description":"The appointment's new status. Self-service patients may only cancel or confirm; front-desk/provider staff may set any status. completed / noShow only once the visit has started."},` +
 				`"provider":{"type":"string","description":"vtx.provider.<NanoID> — must be the appointment's actual provider. Required to release the appointment's held slot-claim cells on a terminal transition."},` +
 				`"patient":{"type":"string","description":"vtx.patient.<NanoID> — must be the appointment's actual patient. Required to release the appointment's held slot-claim cells on a terminal transition."},` +
 				`"note":{"type":"string","title":"Note","description":"Optional status note (e.g. cancellation or no-show reason)."}},` +
 				`"required":["appointmentKey","status","provider","patient"]}`,
 			FieldDescriptions: map[string]string{
 				"appointmentKey": "The appointment being updated — auto-filled by the client from the appointment being viewed (dispatch.targetField), not user-entered.",
-				"status":         "The new status. A self-service patient may only cancel (the script enforces this); front-desk/provider staff may set any status. completed / noShow are accepted only once the visit's start time has passed (NotYetStarted before then); a staff cancel has no clock. A patient's own cancel is refused once the visit has started (VisitStarted) and, inside the 24 hours before it starts, still lands but carries the $25.00 no-show fee (lateCancel).",
+				"status":         "The new status. A self-service patient may only cancel or confirm (the script enforces this); front-desk/provider staff may set any status. completed / noShow are accepted only once the visit's start time has passed (NotYetStarted before then); a staff cancel has no clock. A patient's own cancel is refused once the visit has started (VisitStarted) and, inside the 24 hours before it starts, still lands but carries the $25.00 no-show fee (lateCancel). A patient's own confirm is refused once the visit has started (VisitStarted) or once the desk has checked them in (AuthDenied); confirming again is idempotent.",
 				"provider":       "The appointment's own provider — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual provider.",
 				"patient":        "The appointment's own patient — auto-filled by the client from the appointment being viewed, not user-entered. Must be the appointment's actual patient.",
-				"note":           "Optional status note, kept with the appointment.",
+				"note":           "Optional status note, kept with the appointment. A staff record: on a patient's own confirm the note is ignored (the write is exactly {value: confirmed}); on a patient's own cancel it is kept as the cancel reason.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "appointment",
@@ -425,16 +425,16 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "RecordEncounter",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Document visit",
-				Description: "Record the clinical note for a visit that has started. Refused for a cancelled or no-show appointment, or one that hasn't started yet.",
+				Description: "Record the clinical note for a visit that has started, or amend it — an amendment keeps the prior note in the record. Refused for a cancelled or no-show appointment, or one that hasn't started yet.",
 				Icon:        "clipboard",
 				Tone:        "primary",
 				SubmitLabel: "Save documentation",
 			},
 			InputSchema: `{"type":"object","properties":` +
 				`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of the appointment to document — auto-filled from the appointment being viewed."},` +
-				`"summary":{"type":"string","title":"Summary","description":"Visit summary / clinical note. Required."},` +
-				`"assessment":{"type":"string","title":"Assessment","description":"Optional clinical assessment / diagnosis."},` +
-				`"plan":{"type":"string","title":"Plan","description":"Optional treatment plan / orders."},` +
+				`"summary":{"type":"string","title":"Summary","maxLength":4000,"description":"Visit summary / clinical note. Required."},` +
+				`"assessment":{"type":"string","title":"Assessment","maxLength":4000,"description":"Optional clinical assessment / diagnosis."},` +
+				`"plan":{"type":"string","title":"Plan","maxLength":4000,"description":"Optional treatment plan / orders."},` +
 				`"followUpRequested":{"type":"boolean","title":"Follow-up needed","description":"Whether the visit calls for a follow-up."},` +
 				`"followUpDate":{"type":"string","format":"date","title":"Follow-up date","description":"Suggested follow-up date, when a follow-up is requested."}},` +
 				`"required":["appointmentKey","summary"]}`,
@@ -455,8 +455,16 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// (refuse_before_start's clock read). .status is an
 				// OPTIONAL read: absence is the legitimate still-scheduled
 				// case, not a correctness error (the VisitNotHeld probe).
-				Reads:         []string{"{payload.appointmentKey}", "{payload.appointmentKey}.schedule"},
-				OptionalReads: []string{"{payload.appointmentKey}.status"},
+				// .encounter + .documentation are OPTIONAL: absent is the
+				// first record; present, the op amends (the record-or-amend
+				// arm split), and the sensitive .encounter is decrypted at
+				// hydration so the amendment can carry the text it replaces.
+				Reads: []string{"{payload.appointmentKey}", "{payload.appointmentKey}.schedule"},
+				OptionalReads: []string{
+					"{payload.appointmentKey}.status",
+					"{payload.appointmentKey}.encounter",
+					"{payload.appointmentKey}.documentation",
+				},
 				// The operator-role confinement probe: the workplace-exempt
 				// short-circuit walks the actor's own holdsRole links to test
 				// for the operator role (actor_holds_operator).
@@ -464,6 +472,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 				// refusal-courtesy(facet): InvalidState, MissingFollowUpDate, NotYetStarted, VisitNotHeld: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), RecordEncounter's browse target (dispatch.targetType: appointment), projects no availability or status-droppable column; Facet offers every appointment row regardless of its current status or visit clock.
+				// refusal-courtesy(facet): AmendmentLimit: none — edgeProviderScheduleTail (packages/edge-manifest/lenses.go), RecordEncounter's browse target, projects no amendment count (the superseded list lives inside the encrypted .encounter and no lens projects its length), so Facet cannot hide or drop a row at the bound; the refusal is the answer.
 			},
 		},
 		{

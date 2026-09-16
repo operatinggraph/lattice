@@ -86,8 +86,8 @@ var clinicExpectedOps = []string{
 // each carry a scope=any vertex (operator, ALSO provider for the latter two —
 // a bound provider's own appointments) AND a scope=self vertex (consumer —
 // the real-actor-write-auth-e2e idiom: a patient books, reschedules, or
-// cancels their own appointment; SetAppointmentStatus's self grant is further
-// restricted in-script to status=cancelled only). SetProviderHours/
+// cancels or confirms their own appointment; SetAppointmentStatus's self grant
+// is further restricted in-script to cancel or confirm). SetProviderHours/
 // SetProviderTimeOff's single scope=any vertex is ALSO granted to provider (a
 // bound provider's own availability). BindProviderIdentity (the role-minting
 // bind ceremony) carries its own scope=any vertex, operator only — it mints
@@ -201,7 +201,7 @@ func main() {
 		{canonical: "patientDemographics", class: "meta.ddl.aspectType", ops: []string{"CreatePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"}},
 		{canonical: "providerProfile", class: "meta.ddl.aspectType", ops: []string{"CreateProvider", "SetProviderProfile"}},
 		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment"}},
-		{canonical: "appointmentStatus", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"}},
+		{canonical: "appointmentStatus", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "RescheduleAppointment"}},
 		{canonical: "providerHours", class: "meta.ddl.aspectType", ops: []string{"SetProviderHours"}},
 		{canonical: "providerTimeOff", class: "meta.ddl.aspectType", ops: []string{"SetProviderTimeOff"}},
 		{canonical: "providerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"}},

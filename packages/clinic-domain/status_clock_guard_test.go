@@ -3,6 +3,7 @@ package clinicdomain_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,6 +31,13 @@ import (
 //  4. TestClinic_RecordEncounterClock — RecordEncounter refuses a future visit
 //     (NotYetStarted) and a cancelled / noShow one (VisitNotHeld); a completed
 //     or checkedIn visit past its start is accepted and writes .documentation.
+//  5. TestClinic_RescheduleResetsConfirmedAndCheckedIn — a confirmed or
+//     checkedIn visit that is moved returns to scheduled (the event says
+//     statusReset); a scheduled one is re-stamped unchanged; a never-set one
+//     stays absent.
+//  6. TestClinic_PastDueBeforeEndNoOp — a MarkPastDueNoShow whose submittedAt
+//     precedes the visit's endsAt writes nothing (the schedule it hydrated was
+//     moved after the lapse it was armed on); at endsAt it sweeps.
 
 // clStaffReason submits op as the staff actor with an explicit submittedAt and
 // returns the script's failure text — the rejection REASON is what these tests
@@ -222,9 +230,7 @@ func TestClinic_PastDueCheckedInNoOp(t *testing.T) {
 
 	// endsAt has passed with no further staff update — the sweep dispatches and
 	// must no-op, leaving the recorded arrival and its held cells alone.
-	clSubmit(t, ctx, conn, cp, cons, "pdcisweep01", "MarkPastDueNoShow", "appointment",
-		`{"appointmentKey":"`+apptKey+`"}`,
-		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, processor.OutcomeAccepted)
+	clSweepAt(t, ctx, conn, cp, cons, "pdcisweep01", apptKey, "2026-07-21T09:30:00Z")
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	if st, _ := status["data"].(map[string]any); st["value"] != "checkedIn" {
 		t.Fatalf("status = %v, want checkedIn (the sweep must never overwrite a recorded arrival)", st["value"])
@@ -242,9 +248,7 @@ func TestClinic_PastDueCheckedInNoOp(t *testing.T) {
 		clSubmitOpt(t, ctx, conn, cp, cons, "pdciconf0001", "SetAppointmentStatus", "appointment",
 			`{"appointmentKey":"`+apptKey2+`","status":"confirmed"}`, reads, optionalReads, processor.OutcomeAccepted)
 	}
-	clSubmit(t, ctx, conn, cp, cons, "pdcisweep02", "MarkPastDueNoShow", "appointment",
-		`{"appointmentKey":"`+apptKey2+`"}`,
-		[]string{apptKey2, apptKey2 + ".schedule", apptKey2 + ".status"}, processor.OutcomeAccepted)
+	clSweepAt(t, ctx, conn, cp, cons, "pdcisweep02", apptKey2, "2026-07-23T09:30:00Z")
 	status2 := clReadDoc(t, ctx, conn, apptKey2+".status")
 	if st2, _ := status2["data"].(map[string]any); st2["value"] != "noShow" {
 		t.Fatalf("status2 = %v, want noShow (a confirmed, non-checkedIn visit still auto-no-shows normally)", st2["value"])
@@ -348,4 +352,163 @@ func TestClinic_RecordEncounterClock(t *testing.T) {
 	if doc4, _ := clReadDoc(t, ctx, conn, appt4Key+".documentation")["data"].(map[string]any); doc4["documentedAt"] != "2026-07-27T09:30:00Z" {
 		t.Fatalf(".documentation after RecordEncounter on a completed visit = %v, want documentedAt 2026-07-27T09:30:00Z", doc4)
 	}
+}
+
+// TestClinic_RescheduleResetsConfirmedAndCheckedIn — the confirmation was for
+// the old date and a recorded arrival must not exempt a moved visit from the
+// past-due sweep, so RescheduleAppointment writes .status {value: scheduled}
+// beside the new .schedule when the current value is confirmed or checkedIn
+// (the note dropped with the transition it belonged to; the event carries
+// statusReset: true). A scheduled or never-set .status is not written at all —
+// its revision does not move and the event carries no statusReset. The
+// terminal refusal (TestClinic_RescheduleTerminalRejected) is unchanged.
+func TestClinic_RescheduleResetsConfirmedAndCheckedIn(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "resched-reset")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "rrpat0001", "Moved Arrival")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "rrprv0001", "Dr. Reset", "Cardiology")
+	book := func(label, startsAt, endsAt string) string {
+		apptID := clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
+			`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"`+startsAt+`","endsAt":"`+endsAt+`"}`,
+			[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+		return "vtx.appointment." + apptID
+	}
+	setStatus := func(label, apptKey, status, note string) {
+		reads, optionalReads := clStatusReads(apptKey, false, providerKey, patientKey)
+		payload := `{"appointmentKey":"` + apptKey + `","status":"` + status + `","provider":"` + providerKey + `","patient":"` + patientKey + `"`
+		if note != "" {
+			payload += `,"note":"` + note + `"`
+		}
+		clSubmitOpt(t, ctx, conn, cp, cons, label, "SetAppointmentStatus", "appointment", payload+`}`, reads, optionalReads, processor.OutcomeAccepted)
+	}
+	move := func(label, apptKey, newStart, newEnd string) {
+		clSubmitOpt(t, ctx, conn, cp, cons, label, "RescheduleAppointment", "appointment",
+			`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"`+newStart+`","endsAt":"`+newEnd+`"}`,
+			clRescheduleReads(apptKey, providerKey, patientKey), clRescheduleOptionalReads(apptKey), processor.OutcomeAccepted)
+	}
+	// rescheduledEvent reads the committed clinic.appointmentRescheduled
+	// event off the op's own outbox aspect (the step-8 batch persists the
+	// faithful EventList there; no outbox consumer runs in this harness).
+	rescheduledEvent := func(label string) map[string]any {
+		entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(testutil.GenReqID(label)))
+		if err != nil {
+			t.Fatalf("%s: outbox aspect: %v", label, err)
+		}
+		aspect, err := processor.ParseOutboxAspect(entry.Value)
+		if err != nil {
+			t.Fatalf("%s: parse outbox aspect: %v", label, err)
+		}
+		if len(aspect.Data.Events) != 1 || aspect.Data.Events[0].EventType != "clinic.appointmentRescheduled" {
+			t.Fatalf("%s: events = %+v, want exactly one clinic.appointmentRescheduled", label, aspect.Data.Events)
+		}
+		return aspect.Data.Events[0].Payload
+	}
+
+	// checkedIn (with the desk's note) → moved → scheduled, note gone, statusReset.
+	arrived := book("rrappt0001", "2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z")
+	setStatus("rrarr0001", arrived, "checkedIn", "arrived early")
+	move("rrmove0001", arrived, "2026-07-27T09:00:00Z", "2026-07-27T09:30:00Z")
+	st := clStatusData(t, ctx, conn, arrived)
+	if st["value"] != "scheduled" {
+		t.Fatalf("checkedIn visit after the move: status = %v, want scheduled", st["value"])
+	}
+	if v, present := st["note"]; present {
+		t.Fatalf("the reset drops the note that belonged to the arrival, got %v", v)
+	}
+	if ev := rescheduledEvent("rrmove0001"); ev["statusReset"] != true {
+		t.Fatalf("checkedIn move event statusReset = %v, want true (payload %v)", ev["statusReset"], ev)
+	}
+	// The move itself landed: old cells released, new cells held.
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-27T09:00:00Z")
+
+	// confirmed → moved → scheduled, statusReset.
+	confirmed := book("rrappt0002", "2026-07-21T09:00:00Z", "2026-07-21T09:30:00Z")
+	setStatus("rrconf0001", confirmed, "confirmed", "")
+	move("rrmove0002", confirmed, "2026-07-28T09:00:00Z", "2026-07-28T09:30:00Z")
+	if st := clStatusData(t, ctx, conn, confirmed); st["value"] != "scheduled" {
+		t.Fatalf("confirmed visit after the move: status = %v, want scheduled", st["value"])
+	}
+	if ev := rescheduledEvent("rrmove0002"); ev["statusReset"] != true {
+		t.Fatalf("confirmed move event statusReset = %v, want true", ev["statusReset"])
+	}
+
+	// scheduled → moved: .status is re-stamped unchanged — the write is what
+	// makes a concurrent self confirm hydrated on the old schedule conflict
+	// under OCC — so its revision MOVES while its value does not, and the
+	// event carries no statusReset (nothing was reset).
+	scheduled := book("rrappt0003", "2026-07-22T09:00:00Z", "2026-07-22T09:30:00Z")
+	if st := clStatusData(t, ctx, conn, scheduled); st["value"] != "scheduled" {
+		t.Fatalf("precondition: CreateAppointment writes scheduled, got %v", st["value"])
+	}
+	rev := clRevision(t, ctx, conn, scheduled+".status")
+	move("rrmove0003", scheduled, "2026-07-29T09:00:00Z", "2026-07-29T09:30:00Z")
+	if got := clRevision(t, ctx, conn, scheduled+".status"); got == rev {
+		t.Fatalf("moving a scheduled visit must re-stamp .status (revision stayed %d)", rev)
+	}
+	if st := clStatusData(t, ctx, conn, scheduled); st["value"] != "scheduled" || len(st) != 1 {
+		t.Fatalf("re-stamped status = %v, want exactly {value: scheduled}", st)
+	}
+	if ev := rescheduledEvent("rrmove0003"); ev["statusReset"] != nil {
+		t.Fatalf("scheduled move event carries statusReset = %v, want absent", ev["statusReset"])
+	}
+
+	// never-set (.status tombstoned) → moved: stays absent, no statusReset.
+	unset := book("rrappt0004", "2026-07-23T09:00:00Z", "2026-07-23T09:30:00Z")
+	tomb := map[string]any{"class": "appointmentStatus", "isDeleted": true,
+		"vertexKey": unset, "localName": "status", "data": map[string]any{"value": "scheduled"}}
+	b, _ := json.Marshal(tomb)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, unset+".status", b); err != nil {
+		t.Fatalf("tombstone status: %v", err)
+	}
+	move("rrmove0004", unset, "2026-07-30T09:00:00Z", "2026-07-30T09:30:00Z")
+	if doc := clReadDoc(t, ctx, conn, unset+".status"); doc["isDeleted"] != true {
+		t.Fatalf("moving a visit with no live .status revived it: %v", doc)
+	}
+	if ev := rescheduledEvent("rrmove0004"); ev["statusReset"] != nil {
+		t.Fatalf("never-set move event carries statusReset = %v, want absent", ev["statusReset"])
+	}
+}
+
+// TestClinic_PastDueBeforeEndNoOp — the sweep's clock conjunct: a dispatch
+// that raced a RescheduleAppointment hydrates the MOVED .schedule, whose
+// endsAt is ahead of the dispatch's own submittedAt, so it must write nothing
+// (the lapse it was armed on belonged to the old date; the lens re-arms at the
+// new endsAt). The boundary is inclusive: submitted AT endsAt sweeps.
+func TestClinic_PastDueBeforeEndNoOp(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "status-pastdue-clock")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "pdclkpat01", "Moved Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "pdclkprv01", "Dr. Moved", "Family")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "pdclkappt01", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-21T09:00:00Z","endsAt":"2026-07-21T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+	// The visit is moved a week out; the sweep armed on the old endsAt
+	// dispatches one second before the old end passed — and reads the new.
+	clSubmitOpt(t, ctx, conn, cp, cons, "pdclkmove01", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"2026-07-28T09:00:00Z","endsAt":"2026-07-28T09:30:00Z"}`,
+		clRescheduleReads(apptKey, providerKey, patientKey), clRescheduleOptionalReads(apptKey), processor.OutcomeAccepted)
+	rev := clRevision(t, ctx, conn, apptKey+".status")
+	for i, at := range []string{"2026-07-21T09:29:59Z", "2026-07-21T09:30:00Z", "2026-07-28T09:29:59Z"} {
+		clSweepAt(t, ctx, conn, cp, cons, fmt.Sprintf("pdclkswp%02d", i+1), apptKey, at)
+		if got := clRevision(t, ctx, conn, apptKey+".status"); got != rev {
+			t.Fatalf("sweep at %s (endsAt 2026-07-28T09:30:00Z) wrote .status (%d → %d); want no-op", at, rev, got)
+		}
+	}
+	if st := clStatusData(t, ctx, conn, apptKey); st["value"] != "scheduled" {
+		t.Fatalf("status after early sweeps = %v, want scheduled", st["value"])
+	}
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-28T09:00:00Z")
+
+	// AT the new endsAt (inclusive): the sweep lands.
+	clSweepAt(t, ctx, conn, cp, cons, "pdclkswp04", apptKey, "2026-07-28T09:30:00Z")
+	if st := clStatusData(t, ctx, conn, apptKey); st["value"] != "noShow" {
+		t.Fatalf("status after the sweep at endsAt = %v, want noShow", st["value"])
+	}
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-28T09:00:00Z")
 }

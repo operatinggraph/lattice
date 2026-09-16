@@ -195,6 +195,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "reminder_sent_at", Type: "text"},
 				{Name: "follow_up_reminder_sent_at", Type: "text"},
 				{Name: "documented_at", Type: "text"},
+				{Name: "amended_at", Type: "text"},
 				{Name: "follow_up_requested", Type: "boolean"},
 				{Name: "follow_up_date", Type: "text"},
 			},
@@ -252,6 +253,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "reminder_sent_at", Type: "text"},
 				{Name: "follow_up_reminder_sent_at", Type: "text"},
 				{Name: "documented_at", Type: "text"},
+				{Name: "amended_at", Type: "text"},
 				{Name: "follow_up_requested", Type: "boolean"},
 				{Name: "follow_up_date", Type: "text"},
 			},
@@ -648,15 +650,18 @@ func Lenses() []pkgmgr.LensSpec {
 // @at reminder fires) — null until a follow-up reminder fires and null whenever
 // clinic-reminders is not installed.
 //
-// documentedAt / followUpRequested / followUpDate are the OPERATIONAL, non-PHI
-// signals of the appointment's .documentation aspect (written by RecordEncounter
-// alongside the sensitive .encounter aspect). The RAW clinical content (summary /
-// assessment / plan) lives on .encounter and is DELIBERATELY NOT projected — it is
-// SENSITIVE PHI (its DEK custodied on the clinicalRecord retention class), the same
+// documentedAt / amendedAt / followUpRequested / followUpDate are the OPERATIONAL,
+// non-PHI signals of the appointment's .documentation aspect (written by
+// RecordEncounter alongside the sensitive .encounter aspect). The RAW clinical
+// content (summary / assessment / plan, and the superseded history an amendment
+// keeps) lives on .encounter and is DELIBERATELY NOT projected — it is SENSITIVE
+// PHI (its DEK custodied on the clinicalRecord retention class), the same
 // name-only discipline clinicPatients applies to .demographics. A non-null
-// documentedAt IS the "visit documented" presence signal (mirrors reminderSentAt);
-// followUpDate is null unless a follow-up was requested. All null until a visit is
-// documented (and whenever no .documentation aspect exists), null-safe by key-shape.
+// documentedAt IS the "visit documented" presence signal (mirrors reminderSentAt)
+// and says when the visit was FIRST documented; amendedAt is null until the record
+// is amended and then says when the current text was recorded; followUpDate is
+// null unless a follow-up was requested. All null until a visit is documented (and
+// whenever no .documentation aspect exists), null-safe by key-shape.
 const clinicAppointmentsSpec = `MATCH (a:appointment)
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
@@ -678,6 +683,7 @@ RETURN
   a.reminder.data.sentAt AS reminderSentAt,
   a.followUpReminder.data.sentAt AS followUpReminderSentAt,
   a.documentation.data.documentedAt AS documentedAt,
+  a.documentation.data.amendedAt AS amendedAt,
   a.documentation.data.followUpRequested AS followUpRequested,
   a.documentation.data.followUpDate AS followUpDate`
 
@@ -1024,6 +1030,7 @@ RETURN
   a.reminder.data.sentAt                 AS reminder_sent_at,
   a.followUpReminder.data.sentAt         AS follow_up_reminder_sent_at,
   a.documentation.data.documentedAt      AS documented_at,
+  a.documentation.data.amendedAt         AS amended_at,
   a.documentation.data.followUpRequested AS follow_up_requested,
   a.documentation.data.followUpDate      AS follow_up_date,
   [nanoIdFromKey(p.key)]
@@ -1064,6 +1071,7 @@ RETURN
   a.reminder.data.sentAt                 AS reminder_sent_at,
   a.followUpReminder.data.sentAt         AS follow_up_reminder_sent_at,
   a.documentation.data.documentedAt      AS documented_at,
+  a.documentation.data.amendedAt         AS amended_at,
   a.documentation.data.followUpRequested AS follow_up_requested,
   a.documentation.data.followUpDate      AS follow_up_date,
   [nanoIdFromKey(pr.key)]                AS authz_anchors

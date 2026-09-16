@@ -112,6 +112,30 @@ func TestPastDue_CheckedIn(t *testing.T) {
 // with NO lapse recorded yet still arms the @at at endsAt, because
 // appointmentReminders closes its own gate on byTarget.pastDueAppointments and
 // the two lenses' terminal set must stay one list.
+// TestPastDue_CheckedInMovedBackToScheduledReopens — the checkedIn exclusion
+// is level-triggered on the CURRENT status, never latched: a checked-in visit
+// with the lapse recorded reads violating=false, and once the status moves back
+// to scheduled (RescheduleAppointment resets a moved checked-in visit) the same
+// recorded lapse re-opens the gap on the next projection with no clearing
+// write — so a moved visit that is then missed is swept like any other.
+func TestPastDue_CheckedInMovedBackToScheduledReopens(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkApptEnds(t, "appt", "2026-06-30T09:00:00Z", "2026-06-30T09:30:00Z", "checkedIn")
+	f.recordLapse(t, "appt", map[string]string{PastDueAppointmentsTarget: "2026-06-30T09:30:00Z"})
+
+	v := f.projectPastDue(t, "appt")
+	require.Equal(t, false, v["violating"], "checkedIn past its end: not swept")
+
+	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "scheduled"})
+	v = f.projectPastDue(t, "appt")
+	require.Equal(t, true, v["missing_noshow_transition"], "back to scheduled with the lapse still recorded → past-due again")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"], "the lapse is recorded → the violating row dispatches, no timer re-arms")
+}
+
 func TestPastDue_CheckedInStillArmsTheTimer(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

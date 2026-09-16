@@ -208,13 +208,18 @@ func TestClinicAppointments_ProjectsEncounterOperationalSignalsOnly(t *testing.T
 	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "completed"})
 	// A documented visit: RAW clinical PHI on the sensitive .encounter aspect,
 	// operational signals on the sibling .documentation aspect.
+	// An amended record: the current text plus the superseded history on
+	// .encounter, documentedAt (first documented) and amendedAt (current text
+	// recorded) on .documentation.
 	f.aspect(t, "appt", "encounter", "appointmentEncounter", map[string]any{
 		"summary":    "Patient seen for annual checkup; vitals normal.",
 		"assessment": "Essential hypertension, well-controlled.",
 		"plan":       "Continue medication; recheck in 6 months.",
+		"superseded": []any{map[string]any{"summary": "Seen.", "assessment": "", "plan": "", "recordedAt": "2026-07-01T15:30:00Z"}},
 	})
 	f.aspect(t, "appt", "documentation", "appointmentDocumentation", map[string]any{
 		"documentedAt":      "2026-07-01T15:30:00Z",
+		"amendedAt":         "2026-07-02T09:10:00Z",
 		"followUpRequested": true,
 		"followUpDate":      "2027-01-15T15:00:00Z",
 	})
@@ -227,10 +232,12 @@ func TestClinicAppointments_ProjectsEncounterOperationalSignalsOnly(t *testing.T
 	require.Equal(t, apptKey, v["key"])
 	// Operational signals project.
 	require.Equal(t, "2026-07-01T15:30:00Z", v["documentedAt"], "operational documentedAt presence signal projects")
+	require.Equal(t, "2026-07-02T09:10:00Z", v["amendedAt"], "operational amendedAt projects")
 	require.Equal(t, true, v["followUpRequested"], "operational followUpRequested projects")
 	require.Equal(t, "2027-01-15T15:00:00Z", v["followUpDate"], "operational followUpDate projects")
-	// RAW clinical PHI must NEVER appear in the read model (Vault-plane deferred).
-	for _, col := range []string{"summary", "assessment", "plan"} {
+	// RAW clinical PHI must NEVER appear in the read model (Vault-plane deferred)
+	// — the superseded history included.
+	for _, col := range []string{"summary", "assessment", "plan", "superseded"} {
 		_, present := v[col]
 		require.False(t, present, "clinicAppointments must NOT project the raw clinical PHI field %q", col)
 	}
@@ -264,6 +271,7 @@ func TestClinicAppointments_UndocumentedVisitNullEncounter(t *testing.T) {
 	rows := f.project(t, clinicAppointmentsSpec)
 	require.Len(t, rows, 1)
 	require.Nil(t, rows[0].Values["documentedAt"], "no .documentation aspect → null documentedAt (null-safe)")
+	require.Nil(t, rows[0].Values["amendedAt"], "no .documentation aspect → null amendedAt")
 	require.Nil(t, rows[0].Values["followUpRequested"], "no .documentation aspect → null followUpRequested")
 	require.Nil(t, rows[0].Values["followUpDate"], "no .documentation aspect → null followUpDate")
 }
@@ -297,6 +305,7 @@ func TestClinicAppointments_EncounterWithoutDocumentationProjectsNullOperational
 	rows := f.project(t, clinicAppointmentsSpec)
 	require.Len(t, rows, 1, "an appointment with .encounter but no .documentation still projects exactly one row")
 	require.Nil(t, rows[0].Values["documentedAt"], "no .documentation aspect → null documentedAt, even though .encounter exists")
+	require.Nil(t, rows[0].Values["amendedAt"], "no .documentation aspect → null amendedAt")
 	require.Nil(t, rows[0].Values["followUpRequested"], "no .documentation aspect → null followUpRequested")
 	require.Nil(t, rows[0].Values["followUpDate"], "no .documentation aspect → null followUpDate")
 }

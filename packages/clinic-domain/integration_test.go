@@ -405,13 +405,28 @@ func clSubmitAt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pro
 	return clNanoIDFromRequestID(reqID)
 }
 
+// clSweepAt is the pastDueAppointments playbook's MarkPastDueNoShow dispatch
+// for one appointment, with the reads the op's script annotates and a
+// submittedAt at or after the visit's endsAt — the sweep only ever fires on a
+// recorded lapse at that instant, and the op no-ops on a schedule still ahead
+// of its own submittedAt.
+func clSweepAt(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, apptKey, submittedAt string) {
+	t.Helper()
+	clSubmitAt(t, ctx, conn, cp, cons, label, "MarkPastDueNoShow", "appointment",
+		`{"appointmentKey":"`+apptKey+`"}`, submittedAt,
+		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, nil, processor.OutcomeAccepted)
+}
+
 // clRecordEncounterReads returns RecordEncounter's Reads/OptionalReads pair
 // (app.js's submitOp("RecordEncounter", ...)): .schedule is REQUIRED
 // (CreateAppointment always writes one — refuse_before_start's clock read);
 // .status is an OPTIONAL read (absence is the legitimate still-scheduled
-// case, not a correctness error — the VisitNotHeld probe).
+// case, not a correctness error — the VisitNotHeld probe); .encounter and
+// .documentation are OPTIONAL (absent is the first record; present, the op
+// amends).
 func clRecordEncounterReads(apptKey string) (reads, optionalReads []string) {
-	return []string{apptKey, apptKey + ".schedule"}, []string{apptKey + ".status"}
+	return []string{apptKey, apptKey + ".schedule"},
+		[]string{apptKey + ".status", apptKey + ".encounter", apptKey + ".documentation"}
 }
 
 // clRescheduleReads returns RescheduleAppointment's required Reads — the
@@ -1007,9 +1022,7 @@ func TestClinic_MarkPastDueNoShow(t *testing.T) {
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
 	clAssertSlotClaimLive(t, ctx, conn, patientKey, "2026-07-20T09:00:00Z")
 
-	clSubmit(t, ctx, conn, cp, cons, "pastdue001", "MarkPastDueNoShow", "appointment",
-		`{"appointmentKey":"`+apptKey+`"}`,
-		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, processor.OutcomeAccepted)
+	clSweepAt(t, ctx, conn, cp, cons, "pastdue001", apptKey, "2026-07-20T09:30:00Z")
 
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ := status["data"].(map[string]any)
@@ -1050,9 +1063,7 @@ func TestClinic_MarkPastDueNoShowSkipsAlreadyTerminal(t *testing.T) {
 			"2026-07-21T09:30:00Z", reads, optionalReads, processor.OutcomeAccepted)
 	}
 
-	clSubmit(t, ctx, conn, cp, cons, "pastdue021", "MarkPastDueNoShow", "appointment",
-		`{"appointmentKey":"`+apptKey+`"}`,
-		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, processor.OutcomeAccepted)
+	clSweepAt(t, ctx, conn, cp, cons, "pastdue021", apptKey, "2026-07-21T09:30:00Z")
 
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ := status["data"].(map[string]any)
@@ -1092,9 +1103,7 @@ func TestClinic_MarkPastDueNoShowSkipsProviderTimeOff(t *testing.T) {
 
 	// endsAt has "passed" (from Weaver's perspective) with no staff status
 	// update — the sweep dispatches, and must no-op rather than auto-no-show.
-	clSubmit(t, ctx, conn, cp, cons, "topastdue010", "MarkPastDueNoShow", "appointment",
-		`{"appointmentKey":"`+apptKey+`"}`,
-		[]string{apptKey, apptKey + ".schedule", apptKey + ".status"}, processor.OutcomeAccepted)
+	clSweepAt(t, ctx, conn, cp, cons, "topastdue010", apptKey, "2026-07-20T09:30:00Z")
 
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ := status["data"].(map[string]any)
@@ -1110,9 +1119,7 @@ func TestClinic_MarkPastDueNoShowSkipsProviderTimeOff(t *testing.T) {
 		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-22T09:00:00Z","endsAt":"2026-07-22T09:30:00Z"}`,
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey2 := "vtx.appointment." + apptID2
-	clSubmit(t, ctx, conn, cp, cons, "topastdue011", "MarkPastDueNoShow", "appointment",
-		`{"appointmentKey":"`+apptKey2+`"}`,
-		[]string{apptKey2, apptKey2 + ".schedule", apptKey2 + ".status"}, processor.OutcomeAccepted)
+	clSweepAt(t, ctx, conn, cp, cons, "topastdue011", apptKey2, "2026-07-22T09:30:00Z")
 	status2 := clReadDoc(t, ctx, conn, apptKey2+".status")
 	st2, _ := status2["data"].(map[string]any)
 	if st2["value"] != "noShow" {
@@ -1121,20 +1128,25 @@ func TestClinic_MarkPastDueNoShowSkipsProviderTimeOff(t *testing.T) {
 }
 
 // TestClinic_RecordEncounter proves the post-visit clinical-record path: a
-// RecordEncounter upserts two sibling aspects along the sensitivity boundary —
-// .encounter, SENSITIVE, carrying the RAW clinical content (summary / assessment
-// / plan), its DEK custodied on the clinicalRecord retention class (never the
-// patient's identity), and .documentation, non-sensitive, carrying the
-// operational signals (documentedAt = canonical-UTC op.submittedAt,
-// followUpRequested, followUpDate). A correction (re-run with
-// followUpRequested=false) overwrites both aspects and drops followUpDate
-// (unconditioned upsert). followUpRequested=true with no followUpDate is
-// rejected (MissingFollowUpDate). A non-appointment target is rejected
-// (WrongClass). The clock/status guards (NotYetStarted, VisitNotHeld) are
-// pinned separately in status_clock_guard_test.go's
-// TestClinic_RecordEncounterClock — every submission here is at or after the
-// visit's own startsAt, a started visit being the ordinary case this test
-// exercises.
+// RecordEncounter records or amends two sibling aspects along the sensitivity
+// boundary — .encounter, SENSITIVE, carrying the RAW clinical content (summary
+// / assessment / plan, plus the superseded history), its DEK custodied on the
+// clinicalRecord retention class (never the patient's identity), and
+// .documentation, non-sensitive, carrying the operational signals
+// (documentedAt = canonical-UTC op.submittedAt of the FIRST record, amendedAt
+// of the latest amendment, followUpRequested, followUpDate). The first record
+// writes superseded: [] and no amendedAt. An amendment keeps the first text
+// under superseded with its recordedAt, preserves documentedAt, stamps
+// amendedAt and re-evaluates the follow-up (a dropped follow-up drops
+// followUpDate); a second amendment appends in order; an identical re-submit is
+// accepted and writes nothing (neither aspect's revision moves).
+// followUpRequested=true with no followUpDate is rejected (MissingFollowUpDate).
+// A non-appointment target is rejected (WrongClass). The clock/status guards
+// (NotYetStarted, VisitNotHeld) are pinned separately in
+// status_clock_guard_test.go's TestClinic_RecordEncounterClock — every
+// submission here is at or after the visit's own startsAt, a started visit
+// being the ordinary case this test exercises; the legacy shapes and the
+// amendment bound are record_encounter_amend_test.go's.
 func TestClinic_RecordEncounter(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupClinicEnv(t)
@@ -1171,6 +1183,10 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	if data["plan"] != "Continue medication; recheck in 6 months." {
 		t.Fatalf("encounter plan = %v", data["plan"])
 	}
+	// The first record fixes the plaintext shape: superseded is present and empty.
+	if got := clSuperseded(t, data); len(got) != 0 {
+		t.Fatalf("first record superseded = %v, want []", got)
+	}
 
 	// Operational signals live on the non-sensitive .documentation aspect.
 	docAsp := clReadDoc(t, ctx, conn, apptKey+".documentation")
@@ -1182,6 +1198,9 @@ func TestClinic_RecordEncounter(t *testing.T) {
 	if docData["documentedAt"] != apptStartsAt {
 		t.Fatalf("documentation documentedAt = %v, want %s (= op.submittedAt)", docData["documentedAt"], apptStartsAt)
 	}
+	if v, present := docData["amendedAt"]; present {
+		t.Fatalf("first record must carry no amendedAt, got %v", v)
+	}
 	if docData["followUpRequested"] != true {
 		t.Fatalf("documentation followUpRequested = %v, want true", docData["followUpRequested"])
 	}
@@ -1189,44 +1208,85 @@ func TestClinic_RecordEncounter(t *testing.T) {
 		t.Fatalf("documentation followUpDate = %v", docData["followUpDate"])
 	}
 
-	// A correction (unconditioned upsert): no follow-up this time → followUpDate
-	// dropped, followUpRequested false. Both aspects are replaced whole.
+	// An AMENDMENT: new text, no follow-up this time. The first text moves onto
+	// superseded with the instant it was recorded (the documentedAt, since the
+	// record had never been amended), documentedAt is preserved, amendedAt is
+	// this op's submittedAt, followUpDate is dropped with the follow-up.
+	const firstAmendAt = "2026-07-10T10:00:00Z"
 	clSubmitAt(t, ctx, conn, cp, cons, "enc0002", "RecordEncounter", "appointment",
 		`{"appointmentKey":"`+apptKey+`","summary":"Corrected note.","followUpRequested":false,"followUpDate":"2027-01-15T15:00:00Z"}`,
-		apptStartsAt, encReads, encOptionalReads, processor.OutcomeAccepted)
+		firstAmendAt, encReads, encOptionalReads, processor.OutcomeAccepted)
 	data = clDecryptEncounter(t, ctx, conn, apptKey)
 	if data["summary"] != "Corrected note." {
-		t.Fatalf("after correction summary = %v", data["summary"])
+		t.Fatalf("after amendment summary = %v", data["summary"])
 	}
-	// The correction omitted assessment, so it is written as the empty string —
-	// the plaintext shape is fixed so clinicEncountersRead's per-field secure
-	// columns never see a missing field. The stale value being gone (rather than
-	// the key being gone) is what proves the whole aspect was replaced.
-	if data["assessment"] != "" {
-		t.Fatalf("correction must replace the whole aspect; stale assessment present: %v", data["assessment"])
+	// The amendment omitted assessment and plan, so the CURRENT text carries them
+	// as the empty string — the plaintext shape is fixed so clinicEncountersRead's
+	// per-field secure columns never see a missing field.
+	if data["assessment"] != "" || data["plan"] != "" {
+		t.Fatalf("current text must carry omitted fields as \"\"; assessment = %v plan = %v", data["assessment"], data["plan"])
 	}
-	if data["plan"] != "" {
-		t.Fatalf("correction must replace the whole aspect; stale plan present: %v", data["plan"])
+	superseded := clSuperseded(t, data)
+	if len(superseded) != 1 {
+		t.Fatalf("after one amendment superseded = %v, want exactly one entry", superseded)
 	}
+	clAssertSupersededEntry(t, superseded[0], "Annual checkup, vitals normal.", "Essential hypertension, well-controlled.", "Continue medication; recheck in 6 months.", apptStartsAt, "first superseded entry")
 	docData, _ = clReadDoc(t, ctx, conn, apptKey+".documentation")["data"].(map[string]any)
+	if docData["documentedAt"] != apptStartsAt {
+		t.Fatalf("amendment must preserve documentedAt; got %v, want %s", docData["documentedAt"], apptStartsAt)
+	}
+	if docData["amendedAt"] != firstAmendAt {
+		t.Fatalf("amendedAt = %v, want %s (= the amending op's submittedAt)", docData["amendedAt"], firstAmendAt)
+	}
 	if docData["followUpRequested"] != false {
-		t.Fatalf("after correction followUpRequested = %v, want false", docData["followUpRequested"])
+		t.Fatalf("after amendment followUpRequested = %v, want false", docData["followUpRequested"])
 	}
 	if _, hasDate := docData["followUpDate"]; hasDate {
 		t.Fatalf("followUpDate must be dropped when followUpRequested is false; got %v", docData["followUpDate"])
 	}
 
-	// A date-only followUpDate (the FE's <input type=date> value) is normalized to a
-	// full canonical-UTC RFC3339 instant anchored to 09:00:00Z, so the clinic-reminders
-	// follow-up reminder can arm an @at timer at it (Weaver's temporal lane needs a
-	// parseable RFC3339 freshUntil). The stored value stays date-prefixed, so the FE's
-	// .slice(0,10) renders the same day.
+	// A SECOND amendment appends in order: the entry it adds carries the text
+	// the first amendment recorded, with that amendment's amendedAt as its
+	// recordedAt. A date-only followUpDate (the FE's <input type=date> value) is
+	// normalized to a full canonical-UTC RFC3339 instant anchored to 09:00:00Z,
+	// so the clinic-reminders follow-up reminder can arm an @at timer at it
+	// (Weaver's temporal lane needs a parseable RFC3339 freshUntil). The stored
+	// value stays date-prefixed, so the FE's .slice(0,10) renders the same day.
+	const secondAmendAt = "2026-07-11T08:00:00Z"
+	secondPayload := `{"appointmentKey":"` + apptKey + `","summary":"Follow-up by date.","followUpRequested":true,"followUpDate":"2027-03-20"}`
 	clSubmitAt(t, ctx, conn, cp, cons, "enc0004", "RecordEncounter", "appointment",
-		`{"appointmentKey":"`+apptKey+`","summary":"Follow-up by date.","followUpRequested":true,"followUpDate":"2027-03-20"}`,
-		apptStartsAt, encReads, encOptionalReads, processor.OutcomeAccepted)
+		secondPayload, secondAmendAt, encReads, encOptionalReads, processor.OutcomeAccepted)
+	data = clDecryptEncounter(t, ctx, conn, apptKey)
+	superseded = clSuperseded(t, data)
+	if len(superseded) != 2 {
+		t.Fatalf("after two amendments superseded = %v, want exactly two entries", superseded)
+	}
+	clAssertSupersededEntry(t, superseded[0], "Annual checkup, vitals normal.", "Essential hypertension, well-controlled.", "Continue medication; recheck in 6 months.", apptStartsAt, "first superseded entry (unchanged)")
+	clAssertSupersededEntry(t, superseded[1], "Corrected note.", "", "", firstAmendAt, "second superseded entry")
 	docData, _ = clReadDoc(t, ctx, conn, apptKey+".documentation")["data"].(map[string]any)
+	if docData["documentedAt"] != apptStartsAt || docData["amendedAt"] != secondAmendAt {
+		t.Fatalf("after the second amendment documentedAt = %v amendedAt = %v, want %s / %s", docData["documentedAt"], docData["amendedAt"], apptStartsAt, secondAmendAt)
+	}
 	if docData["followUpDate"] != "2027-03-20T09:00:00Z" {
 		t.Fatalf("date-only followUpDate must normalize to 2027-03-20T09:00:00Z; got %v", docData["followUpDate"])
+	}
+
+	// An IDENTICAL re-submit — same three texts, same followUpRequested, same
+	// normalized followUpDate — is accepted and writes nothing: "amended" is a
+	// claim that something changed, so neither aspect's revision moves and
+	// amendedAt keeps the second amendment's instant.
+	encRev, docRev := clRevision(t, ctx, conn, apptKey+".encounter"), clRevision(t, ctx, conn, apptKey+".documentation")
+	clSubmitAt(t, ctx, conn, cp, cons, "enc0006", "RecordEncounter", "appointment",
+		secondPayload, "2026-07-12T08:00:00Z", encReads, encOptionalReads, processor.OutcomeAccepted)
+	if got := clRevision(t, ctx, conn, apptKey+".encounter"); got != encRev {
+		t.Fatalf("identical re-submit moved .encounter's revision %d → %d; want no write", encRev, got)
+	}
+	if got := clRevision(t, ctx, conn, apptKey+".documentation"); got != docRev {
+		t.Fatalf("identical re-submit moved .documentation's revision %d → %d; want no write", docRev, got)
+	}
+	docData, _ = clReadDoc(t, ctx, conn, apptKey+".documentation")["data"].(map[string]any)
+	if docData["amendedAt"] != secondAmendAt {
+		t.Fatalf("identical re-submit must not re-stamp amendedAt; got %v, want %s", docData["amendedAt"], secondAmendAt)
 	}
 
 	// A non-appointment target key is rejected (the vtx.appointment.<id> key-shape
@@ -1242,10 +1302,56 @@ func TestClinic_RecordEncounter(t *testing.T) {
 		apptStartsAt, encReads, encOptionalReads, processor.OutcomeRejected)
 }
 
+// clSuperseded returns the decrypted .encounter plaintext's superseded list,
+// failing when the key is absent or not a list — the plaintext shape is fixed
+// from the first record.
+func clSuperseded(t *testing.T, plaintext map[string]any) []any {
+	t.Helper()
+	raw, present := plaintext["superseded"]
+	if !present {
+		t.Fatalf("encounter plaintext carries no superseded key: %v", plaintext)
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("encounter superseded = %T %v, want a list", raw, raw)
+	}
+	return list
+}
+
+// clAssertSupersededEntry pins one superseded entry's four fields.
+func clAssertSupersededEntry(t *testing.T, entry any, summary, assessment, plan, recordedAt, what string) {
+	t.Helper()
+	m, ok := entry.(map[string]any)
+	if !ok {
+		t.Fatalf("%s: entry = %T %v, want an object", what, entry, entry)
+	}
+	if m["summary"] != summary || m["assessment"] != assessment || m["plan"] != plan {
+		t.Fatalf("%s: text = {%v, %v, %v}, want {%q, %q, %q}", what, m["summary"], m["assessment"], m["plan"], summary, assessment, plan)
+	}
+	if m["recordedAt"] != recordedAt {
+		t.Fatalf("%s: recordedAt = %v, want %s", what, m["recordedAt"], recordedAt)
+	}
+	if len(m) != 4 {
+		t.Fatalf("%s: entry carries %d keys %v, want exactly summary/assessment/plan/recordedAt", what, len(m), m)
+	}
+}
+
+// clRevision returns a Core KV key's current revision.
+func clRevision(t *testing.T, ctx context.Context, conn *substrate.Conn, key string) uint64 {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, key)
+	if err != nil {
+		t.Fatalf("KVGet %s: %v", key, err)
+	}
+	return entry.Revision
+}
+
 // TestClinic_RescheduleAppointment proves the move-an-appointment path: a
 // RescheduleAppointment rewrites the .schedule aspect with new startsAt/endsAt,
 // re-deriving remindAt = startsAt − 24h (so the clinic-reminders @at re-arms),
-// while leaving the .status aspect and the forPatient/withProvider links untouched.
+// while leaving a scheduled .status and the forPatient/withProvider links
+// untouched (a confirmed / checkedIn visit's reset to scheduled is
+// status_clock_guard_test.go's TestClinic_RescheduleResetsConfirmedAndCheckedIn).
 // A re-supplied reason is preserved; an omitted reason clears it; a non-Z offset is
 // normalized to canonical UTC; a tombstoned target is rejected.
 func TestClinic_RescheduleAppointment(t *testing.T) {
