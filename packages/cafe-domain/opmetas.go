@@ -234,6 +234,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{
 			OperationType: "Settle",
 			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a Settle target
+			// refusal-courtesy(facet): PaidMismatchesTab: unreachable — the self-voice InputSchema names no paidCents, and the script raises the code only when the field is present (a resident's self leg is refused AuthDenied before the equality check regardless)
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Close & settle tab",
 				Description: "Close your tab and post the total to your account.",
@@ -244,6 +245,11 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			InputSchema: `{"type":"object","properties":` +
 				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of the open tab to settle — auto-filled from the tab you opened."}},` +
 				`"required":["tabKey"]}`,
+			// The self slice names tabKey alone, the Charge precedent above:
+			// Settle's staff-only paidCents (cash the desk took at the counter,
+			// ddls.go) is refused AuthDenied on the self leg this descriptor
+			// describes, so describing it as an input would be a lie to the
+			// resident Facet renders for. The desk's own FE hardcodes it.
 			FieldDescriptions: map[string]string{
 				"tabKey": "The tab being closed — auto-filled by the client from the tab it opened (dispatch.targetField), not user-entered.",
 			},

@@ -510,6 +510,316 @@ func TestDebitAccount_UnknownTabRefRejected(t *testing.T) {
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
 }
 
+// --- CreditCafeAccount tabRef: the settlement playbook's counter payment ----
+
+// seedSettledTab seeds a cafe-domain tab in the exact .status shape a staff
+// Settle{paidCents} leaves behind (ddls.go, cafe-domain): settled, the total
+// frozen, leaseAppKey denormalized, and paidAtSettleCents recorded when
+// paidCents > 0. value overrides the status for the not-settled vector.
+func seedSettledTab(t *testing.T, ctx context.Context, conn *substrate.Conn, id, leaseKey string,
+	totalCents, paidCents int, value string) string {
+	t.Helper()
+	tabKey := "vtx.tab." + id
+	seedVertex(t, ctx, conn, tabKey, "tab", map[string]any{})
+	status := map[string]any{"value": value, "totalCents": totalCents, "leaseAppKey": leaseKey,
+		"openedAt": "2026-07-07T12:00:00Z", "settledAt": "2026-07-07T13:00:00Z"}
+	if paidCents > 0 {
+		status["paidAtSettleCents"] = paidCents
+		status["paidAtSettleBy"] = ledgerActorKey
+	}
+	seedAspect(t, ctx, conn, tabKey, "status", "tabStatus", status)
+	return tabKey
+}
+
+// postTabDebit posts the playbook's charge for a settled tab: DebitAccount
+// with tabRef, the settles link the counter payment's dedup walk reads.
+func postTabDebit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, acctKey, tabKey string, amountCents int) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "DebitAccount",
+		Actor:         ledgerActorKey,
+		SubmittedAt:   "2026-07-07T13:01:00Z",
+		Class:         "cafetransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
+			strconv.Itoa(amountCents) + `,"memo":"Settled tab","tabRef":"` + tabKey + `"}`),
+		ContextHint: debitHint(acctKey, tabKey),
+	}
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+}
+
+// counterPaymentEnv is the CreditCafeAccount the cafeTabSettlement playbook's
+// missing_payment gap dispatches (cafe-domain targets.go), declared exactly as
+// that gap declares it: the account and the tab + its .status in Reads, the
+// account's .balance/.arrears absence-tolerant, and the two walks
+// require_counter_payment runs — the account's heldFor lease and the tab's
+// inbound settles entries — beside the staff hint's own holdsRole and
+// postedTo walks.
+func counterPaymentEnv(label, actorKey, acctKey, tabKey string, amountCents int, reason string) (*processor.OperationEnvelope, string) {
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "CreditCafeAccount",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-07-07T13:05:00Z",
+		Class:         "cafetransaction",
+		Payload: json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` + strconv.Itoa(amountCents) +
+			`,"memo":"Paid at the counter","reason":"` + reason + `","tabRef":"` + tabKey + `"}`),
+		ContextHint: staffCreditHint(actorKey, acctKey),
+	}
+	env.ContextHint.Reads = append(env.ContextHint.Reads, tabKey, tabKey+".status")
+	env.ContextHint.Enumerations = append(env.ContextHint.Enumerations,
+		processor.EnumerationHint{Hub: acctKey, Relation: "heldFor", Direction: "out"},
+		processor.EnumerationHint{Hub: tabKey, Relation: "settles", Direction: "in"},
+	)
+	return env, "vtx.cafetransaction." + nanoIDFromRequestID(reqID)
+}
+
+// TestCreditCafeAccount_CounterPayment_WritesSettlesLink is the credit half of
+// the tab back-link (cafe-domain's cafeTabSettlement missing_payment
+// consumer): a CreditCafeAccount carrying a live tabRef writes the SAME
+// settles audit link (transaction→tab) a charge does, alongside the normal
+// postedTo link, and its .entry.type is "credit" — the type is what the lens
+// discriminates on, so a payment never satisfies missing_charge's count of
+// settling debits. The link key is asserted as the exact string the
+// cafe-domain lens matches on.
+func TestCreditCafeAccount_CounterPayment_WritesSettlesLink(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "credittabref")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFELEASEPAYTABHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecreateacctpaytab", leaseKey)
+	tabKey := seedSettledTab(t, ctx, conn, "BBCAFEPAYSFRHJKMNPQR", leaseKey, 950, 950, "settled")
+	postTabDebit(t, ctx, conn, cp, cons, "cafecredittabrefdeb", acctKey, tabKey, 950)
+
+	creditEnv, txKey := counterPaymentEnv("cafecredittabref0001", ledgerActorKey, acctKey, tabKey, 950, "payment")
+	testutil.PublishOp(t, conn, creditEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	txID := txKey[len("vtx.cafetransaction."):]
+	tabID := tabKey[len("vtx.tab."):]
+	settlesLnk := "lnk.cafetransaction." + txID + ".settles.tab." + tabID
+	if !keyExists(t, ctx, conn, settlesLnk) {
+		t.Fatalf("settles link must exist on the counter payment: %s", settlesLnk)
+	}
+	entryDoc := readDoc(t, ctx, conn, txKey+".entry")
+	entryData, _ := entryDoc["data"].(map[string]any)
+	if got, _ := entryData["type"].(string); got != "credit" {
+		t.Fatalf("the counter payment posts entry.type = %q, want credit — the lens tells it from the charge by this", got)
+	}
+	if got := entryReason(t, ctx, conn, txKey); got != "payment" {
+		t.Fatalf("the counter payment records reason = %q, want payment", got)
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after the charge and its counter payment = %v, want 0", got)
+	}
+}
+
+// TestCreditCafeAccount_CounterPayment_ExemptFromBalanceCap is the exemption's
+// positive vector, and what it is measured against. The account is already
+// 1000 in credit (a refund of a paid charge); a settled tab paid 1500 at the
+// counter has its charge posted (balance 500) — and then a resident-style
+// self-payment shape is not needed to show the race: the counter payment of
+// 1500 runs past the 500 owed, which the ordinary cap would refuse
+// PaymentExceedsBalance for cash the desk already holds. Tab-tied, it posts:
+// the balance lands at −1000 and cashCents rises by exactly the 1500 taken,
+// so the credit the account now holds is covered by cash paid in and a later
+// payout of it stays within the cash floor.
+func TestCreditCafeAccount_CounterPayment_ExemptFromBalanceCap(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "counterpayexempt")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECPEXMPTLEASEHJ")
+	acctKey := seedCreditAccount(t, ctx, conn, cp, cons, "cafecpexmpt", leaseKey, 1000)
+	cashBefore := cashCents(t, ctx, conn, acctKey)
+	tabKey := seedSettledTab(t, ctx, conn, "BBCAFECPEXMPTTABHJKM", leaseKey, 1500, 1500, "settled")
+	postTabDebit(t, ctx, conn, cp, cons, "cafecpexmptdebit0001", acctKey, tabKey, 1500)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 500 {
+		t.Fatalf("balance after the charge = %v, want 500", got)
+	}
+
+	// The same amount WITHOUT tabRef is what the cap refuses — the control
+	// that shows the exemption, not a loosened cap, is what admits the credit.
+	over, _ := creditEnvFor("cafecpexmptplain0001", ledgerActorKey, acctKey, 1500)
+	assertRejectedBecause(t, ctx, conn, cp, cons, over,
+		"PaymentExceedsBalance: a payment of $15.00 exceeds the outstanding balance of $5.00")
+
+	env, _ := counterPaymentEnv("cafecpexmptcredit001", ledgerActorKey, acctKey, tabKey, 1500, "payment")
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != -1000 {
+		t.Fatalf("balance after the counter payment = %v, want -1000 (further into credit, the cash is real)", got)
+	}
+	if got := cashCents(t, ctx, conn, acctKey); got != cashBefore+1500 {
+		t.Fatalf("cashCents after the counter payment = %v, want %v (+1500 — the credit is cash paid in)", got, cashBefore+1500)
+	}
+}
+
+// TestCreditCafeAccount_CounterPayment_Refusals pins every conjunct the
+// exemption leans on, each against a fresh tab so no refusal is explained by
+// an earlier one: a write-off may not name a tab; the amount must equal the
+// recorded counter payment (above AND below — a partial is not a counter
+// payment); the tab must be settled; the tab must record a counter payment
+// at all. Every refusal leaves the balance untouched.
+func TestCreditCafeAccount_CounterPayment_Refusals(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "counterpayrefusals")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECPREFSLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecprefsacct000001", leaseKey)
+	paid := seedSettledTab(t, ctx, conn, "BBCAFECPREFSPDTABHJK", leaseKey, 1200, 1200, "settled")
+	open := seedSettledTab(t, ctx, conn, "BBCAFECPREFSQPENHJKM", leaseKey, 1200, 1200, "open")
+	unpaid := seedSettledTab(t, ctx, conn, "BBCAFECPREFSUNPDHJKM", leaseKey, 1200, 0, "settled")
+	postTabDebit(t, ctx, conn, cp, cons, "cafecprefsdebitpaid1", acctKey, paid, 1200)
+	postTabDebit(t, ctx, conn, cp, cons, "cafecprefsdebitunpd1", acctKey, unpaid, 1200)
+
+	for _, tc := range []struct {
+		label, tab, reason string
+		amount             int
+		want               string
+	}{
+		{"cafecprefswaiver0001", paid, "waiver", 1200, "InvalidArgument: tabRef: a write-off pays for no tab"},
+		{"cafecprefsover000001", paid, "payment", 1300, "CounterPaymentMismatch: a counter payment of $13.00 does not match the $12.00 recorded on the tab"},
+		{"cafecprefsunder00001", paid, "payment", 1100, "CounterPaymentMismatch: a counter payment of $11.00 does not match the $12.00 recorded on the tab"},
+		{"cafecprefsopen000001", open, "payment", 1200, "TabNotSettled: tab " + open + " is not settled"},
+		{"cafecprefsnopay00001", unpaid, "payment", 1200, "NoCounterPayment: tab " + unpaid + " records no counter payment"},
+	} {
+		env, _ := counterPaymentEnv(tc.label, ledgerActorKey, acctKey, tc.tab, tc.amount, tc.reason)
+		assertRejectedBecause(t, ctx, conn, cp, cons, env, tc.want)
+	}
+	if got := balanceCents(t, ctx, conn, acctKey); got != 2400 {
+		t.Fatalf("balance after five refused counter payments = %v, want the untouched 2400", got)
+	}
+}
+
+// TestCreditCafeAccount_CounterPayment_PostedOnce is the dedup: a Weaver
+// redelivery or a duplicate submit of the same counter payment must not
+// credit cash taken once twice. The first posts (positive first); the second,
+// byte-identical in everything but its request id, is refused off the tab's
+// own settles entries, and the balance shows the cash once.
+func TestCreditCafeAccount_CounterPayment_PostedOnce(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "counterpayonce")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECPQNCELEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecponceacct000001", leaseKey)
+	tabKey := seedSettledTab(t, ctx, conn, "BBCAFECPQNCETABHJKMN", leaseKey, 900, 900, "settled")
+	postTabDebit(t, ctx, conn, cp, cons, "cafecponcedebit00001", acctKey, tabKey, 900)
+
+	first, _ := counterPaymentEnv("cafecponcecredit0001", ledgerActorKey, acctKey, tabKey, 900, "payment")
+	testutil.PublishOp(t, conn, first)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	second, _ := counterPaymentEnv("cafecponcecredit0002", ledgerActorKey, acctKey, tabKey, 900, "payment")
+	assertRejectedBecause(t, ctx, conn, cp, cons, second,
+		"CounterPaymentAlreadyPosted: tab "+tabKey+" already has its counter payment posted")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after a duplicate counter payment = %v, want 0 (credited once)", got)
+	}
+}
+
+// TestCreditCafeAccount_UndeclaredSubmitterTabRef_PostsPayment is the
+// derive_reads guarantee for the counter payment's own read: the tab's
+// .status is what require_counter_payment measures the amount against, and a
+// submitter that declares nothing beyond the account must still have it
+// hydrated — the script's own class-(g) derivation appends the tab and its
+// .status for every well-formed tabRef. The walks stay declared: only a read
+// can be derived server-side.
+func TestCreditCafeAccount_UndeclaredSubmitterTabRef_PostsPayment(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "counterpayundecl")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFECPUNDCLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecpundclacct00001", leaseKey)
+	tabKey := seedSettledTab(t, ctx, conn, "BBCAFECPUNDCTABHJKMN", leaseKey, 700, 700, "settled")
+	postTabDebit(t, ctx, conn, cp, cons, "cafecpundcldebit0001", acctKey, tabKey, 700)
+
+	env, _ := counterPaymentEnv("cafecpundclcredit001", ledgerActorKey, acctKey, tabKey, 700, "payment")
+	// The account alone in Reads — no tab, no .status, no .balance.
+	env.ContextHint.Reads = []string{acctKey}
+	env.ContextHint.OptionalReads = nil
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctKey); got != 0 {
+		t.Fatalf("balance after an undeclared counter payment = %v, want 0", got)
+	}
+}
+
+// TestCreditCafeAccount_ConsumerSelfScope_TabRefDenied: tabRef on a credit is
+// staff-only. The resident OWNS this account — the same payment without the
+// field is accepted first — so the refusal is the field alone. A settles link
+// on a resident's own payment would read to cafe-domain's cafeTabSettlement
+// lens as the desk's counter payment already posted, closing missing_payment
+// before the cash the desk recorded ever reached the ledger.
+func TestCreditCafeAccount_ConsumerSelfScope_TabRefDenied(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledgerSelfConsumerCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditselftabref")
+
+	seedIdentity(t, ctx, conn, ledgerSelfConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFESELFTABLEASEHJ", ledgerSelfConsumerID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "creditselftabacct001", leaseKey)
+	postDebit(t, ctx, conn, cp, cons, "creditselftabdebit01", acctKey, 1850, "Settled tab")
+	tabKey := "vtx.tab.BBCAFESELFTABHJKMNPQ"
+	seedVertex(t, ctx, conn, tabKey, "tab", map[string]any{})
+
+	selfEnv := func(label, payload string) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "CreditCafeAccount",
+			Actor:         ledgerSelfConsumerKey,
+			SubmittedAt:   "2026-07-08T09:00:00Z",
+			Class:         "cafetransaction",
+			Payload:       json.RawMessage(payload),
+			ContextHint:   selfCreditHint(acctKey),
+			AuthContext:   &processor.AuthContext{Target: ledgerSelfConsumerKey},
+		}
+	}
+
+	testutil.PublishOp(t, conn, selfEnv("creditselftabpay0001", `{"accountKey":"`+acctKey+`","amountCents":100}`))
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("the resident's own bare self-payment outcome = %v, want Accepted — the refusal below is the field alone", outcome)
+	}
+
+	withTab := selfEnv("creditselftabpay0002", `{"accountKey":"`+acctKey+`","amountCents":100,"tabRef":"`+tabKey+`"}`)
+	withTab.ContextHint.Reads = append(withTab.ContextHint.Reads, tabKey)
+	assertRejectedBecause(t, ctx, conn, cp, cons, withTab,
+		"AuthDenied: only staff record a tab's counter payment")
+	if got := balanceCents(t, ctx, conn, acctKey); got != 1750 {
+		t.Fatalf("balance after the refused self-payment = %v, want the untouched 1750", got)
+	}
+}
+
+// TestCreditCafeAccount_UnknownTabRefRejected rejects a tabRef naming a tab
+// that is not alive on the credit leg (no-orphan invariant on the settles
+// link, mirroring the debit's UnknownTab). The tab is TOMBSTONED rather than
+// absent: an absent declared read is refused by hydration before the script
+// runs (the debit's own vector), whereas a tombstone hydrates and it is the
+// script's vertex_alive check that refuses it — the refusal this pins.
+func TestCreditCafeAccount_UnknownTabRefRejected(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditunknowntab")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFELEASEBADPAYHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "cafecreateacctbadpay", leaseKey)
+	postDebit(t, ctx, conn, cp, cons, "cafecreditbadtabdeb", acctKey, 950, "Settled tab")
+	tabKey := "vtx.tab.BBGNEPAYTABHJKMNPQRS"
+	tomb, _ := json.Marshal(map[string]any{"class": "tab", "isDeleted": true, "data": map[string]any{}})
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, tabKey, tomb); err != nil {
+		t.Fatalf("seed tombstoned tab: %v", err)
+	}
+
+	env, _ := creditEnvWithPayload("cafecreditbadtabref1", ledgerActorKey, acctKey,
+		`{"accountKey":"`+acctKey+`","amountCents":950,"tabRef":"`+tabKey+`"}`)
+	env.ContextHint.Reads = append(env.ContextHint.Reads, tabKey)
+	assertRejectedBecause(t, ctx, conn, cp, cons, env, "UnknownTab: "+tabKey)
+}
+
 // TestDebitAccount_NonPositiveAmountRejected rejects amountCents <= 0
 // (InvalidArgument).
 func TestDebitAccount_NonPositiveAmountRejected(t *testing.T) {
@@ -1000,11 +1310,12 @@ func TestCreditCafeAccount_ReversesRefRejected(t *testing.T) {
 }
 
 // TestRefundCafeCharge_TabRefRejected is the mirror of the refusal above: a
-// tabRef sent to RefundCafeCharge is refused rather than ignored. The field is
-// DebitAccount's — a refund settles no tab — and a caller sending one means
-// "give back the charge that settled this tab". Silently dropping it commits a
-// credit with no settles link and no relation to the tab at all, which is the
-// same disagreement between what was asked for and what the ledger records.
+// tabRef sent to RefundCafeCharge is refused rather than ignored. The field
+// belongs to DebitAccount and CreditCafeAccount (both write settles) — a
+// refund settles no tab — and a caller sending one means "give back the charge
+// that settled this tab". Silently dropping it commits a credit with no
+// settles link and no relation to the tab at all, which is the same
+// disagreement between what was asked for and what the ledger records.
 func TestRefundCafeCharge_TabRefRejected(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "refundtabref")
@@ -1038,8 +1349,8 @@ func TestRefundCafeCharge_TabRefRejected(t *testing.T) {
 			},
 		},
 	}
-	testutil.PublishOp(t, conn, env)
-	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)
+	assertRejectedBecause(t, ctx, conn, cp, cons, env,
+		"InvalidArgument: tabRef: only valid on DebitAccount or CreditCafeAccount, not RefundCafeCharge")
 }
 
 const (
@@ -3503,7 +3814,7 @@ func TestPayoutCafeCredit_TabRefAndReversesRefRefused(t *testing.T) {
 		`{"accountKey":"`+acctKey+`","amountCents":100,"tabRef":"`+tabKey+`"}`, "")
 	withTab.ContextHint.Reads = append(withTab.ContextHint.Reads, tabKey)
 	assertRejectedBecause(t, ctx, conn, cp, cons, withTab,
-		"InvalidArgument: tabRef: only valid on DebitAccount, not PayoutCafeCredit")
+		"InvalidArgument: tabRef: only valid on DebitAccount or CreditCafeAccount, not PayoutCafeCredit")
 
 	withReverses, _ := payoutEnv("cafepayoutfldrev", ledgerActorKey, acctKey,
 		`{"accountKey":"`+acctKey+`","amountCents":100,"reversesRef":"`+chargeKey+`"}`, "")

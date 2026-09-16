@@ -109,11 +109,11 @@ func TestTransactionScript_RefundIsRefusedOnEveryValidatedPath(t *testing.T) {
 	if !strings.Contains(transactionDDLScript, guard) {
 		t.Errorf("transactionDDLScript must refuse RefundCafeCharge on BOTH the raw target and the validated bit: %s", guard)
 	}
-	// tabRef is DebitAccount's field, and the refund refuses it rather than
-	// ignoring it — symmetric with post_entry's refusal of reversesRef on every
+	// tabRef belongs to DebitAccount and CreditCafeAccount, and the refund
+	// refuses it rather than ignoring it — symmetric with post_entry's refusal of reversesRef on every
 	// op but this one. A silent drop commits a credit unrelated to the tab the
 	// caller named.
-	if !strings.Contains(transactionDDLScript, `fail("InvalidArgument: tabRef: only valid on DebitAccount, not RefundCafeCharge")`) {
+	if !strings.Contains(transactionDDLScript, `fail("InvalidArgument: tabRef: only valid on DebitAccount or CreditCafeAccount, not RefundCafeCharge")`) {
 		t.Error("transactionDDLScript must refuse a tabRef sent to RefundCafeCharge")
 	}
 }

@@ -3,11 +3,12 @@ package cafedomain
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // WeaverTargets returns the package's meta.weaverTarget playbook (Contract
-// #10 §10.8): cafeTabSettlement's two independent gaps, mirroring
+// #10 §10.8): cafeTabSettlement's three gaps, mirroring
 // semantic-contracts/targets.go's missing_charge → directOp(DebitAccount)
-// shape, plus a lazy account-open step ahead of it; and the independent
-// cafeStaleTabSettlement target's single gap, the pastDueAppointments idiom
-// (clinic-reminders/pastdue.go) applied to café's own tab shape:
+// shape, with a lazy account-open step ahead of it and a counter-payment
+// posting after it; and the independent cafeStaleTabSettlement target's
+// single gap, the pastDueAppointments idiom (clinic-reminders/pastdue.go)
+// applied to café's own tab shape:
 //
 //   - missing_account → directOp(CreateAccount) (cafe-ledger), opening the
 //     resident's café-ledger account on first settled tab. No Target: this
@@ -23,6 +24,20 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     aspect in optionalReads — cafe-ledger keeps that running total in
 //     lockstep with every entry posted to an account that carries one, and this
 //     dispatch's own update of it is conditioned on the revision it was read at.
+//   - missing_payment → directOp(CreditCafeAccount) (cafe-ledger) over the
+//     same account, posting the cash the desk took at settle
+//     (row.paidAtSettleCents, a staff Settle{paidCents} — ddls.go) as a
+//     payment with the tabRef back-link — the credit writes the same settles
+//     link the charge does, and the lens counts settling credits to converge
+//     the gap. cafe-ledger bounds a tab-tied credit by the tab's own recorded
+//     paidAtSettleCents (read off row.tabKey.status, declared here), not by
+//     the live balance, and dedups it off the tab's settles entries. The lens
+//     opens this gap only once a settling DEBIT exists (lenses.go), so the
+//     credit always lands inside the
+//     balance that charge opened and cafe-ledger's payment cap never refuses
+//     it for cash already handed over. memo and reason are plain string
+//     literals (an unprefixed Params value — internal/weaver/strategist.go);
+//     amountCents arrives as the row column's own number.
 //   - missing_settle → directOp(SettleStaleTab) (this package), auto-closing
 //     a tab whose own staleAt deadline passed with no staff Settle. Routes
 //     only entityKey + its own .status aspect — SettleStaleTab is a
@@ -39,7 +54,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		{
 			TargetID: TabSettlementTarget,
 			Description: "A settled tab that owes money is posted to the resident's house account. If their lease " +
-				"has no café account yet, one is opened, then the tab's total is charged to it.",
+				"has no café account yet, one is opened, then the tab's total is charged to it, and any cash " +
+				"the desk took at the counter when it was settled is credited against that charge.",
 			LensRef: TabSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_account": {
@@ -78,6 +94,45 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// that write is only auto-conditioned on the revision it was
 					// hydrated at because the key is declared. Absence-tolerant because
 					// no account carries the aspect until an episode opens on it.
+					OptionalReads: []string{"row.accountKey.balance", "row.accountKey.arrears"},
+				},
+				"missing_payment": {
+					Action:    "directOp",
+					Operation: "CreditCafeAccount",
+					// CreditCafeAccount is unique to cafe-ledger's cafetransaction
+					// DDL today, but pinned regardless (see missing_account).
+					Class: "cafetransaction",
+					// row.paidAtSettleCents is non-null on every violating row: the
+					// gap's own conjunct is paidAtSettleCents > 0 (lenses.go), so
+					// the dispatch never meets the strategist's null-column refusal.
+					Params: map[string]string{"accountKey": "row.accountKey", "amountCents": "row.paidAtSettleCents", "memo": "Paid at the counter", "reason": "payment", "tabRef": "row.tabKey"},
+					// row.tabKey.status (the row.<col>.<aspect> derived form) is the
+					// tab's own recorded counter payment — what cafe-ledger's
+					// require_counter_payment measures amountCents against instead
+					// of the live balance. Required, not optional: a settled tab
+					// always carries it, and its absence is a correctness error.
+					// cafe-ledger's own derive_reads returns the same key whatever a
+					// dispatcher declares.
+					Reads: []string{"row.accountKey", "row.tabKey", "row.tabKey.status"},
+					// The two walks require_counter_payment runs, both nameable up
+					// front off the row's own keys: the account's heldFor lease (the
+					// tab must be held by it) and the tab's inbound settles entries
+					// (a counter payment already posted refuses this one). The
+					// per-entry .entry reads the second walk discovers are the
+					// class-(e) follow-ups no dispatcher can name.
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "row.accountKey", Relation: "heldFor", Direction: "out"},
+						{Hub: "row.tabKey", Relation: "settles", Direction: "in"},
+					},
+					// OptionalReads on the same terms as missing_charge: .balance is
+					// the running total cafe-ledger's post_entry maintains and reads
+					// for the payment cap — declared here to state the read set
+					// truthfully, guaranteed hydrated by cafe-ledger's own
+					// derive_reads, absence-tolerant because a legacy account carries
+					// none until its first payment backfills it (this dispatch may be
+					// that payment). .arrears is the arrears-episode state a payment
+					// to zero closes or a partial payment marks stale; absence-
+					// tolerant because no account carries it until an episode opens.
 					OptionalReads: []string{"row.accountKey.balance", "row.accountKey.arrears"},
 				},
 			},

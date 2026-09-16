@@ -261,6 +261,15 @@ read	SetRenewalTerms	lnk.identity.<id>.manages.unit.<id>
 # can name up front.
 read	SetStudioProfile	lnk.identity.<id>.worksAt.building.<id>
 read	SetVisitSeriesSite	lnk.identity.<id>.worksAt.building.<id>
+# Settle's staff-standing confinement (leaseapp_unit -> require_workplace) is
+# the walk Charge/OpenTab/VoidCharge/MarkLineServed carry verbatim: the tab's
+# own lease resolves into a unit only the walk itself discovers, so the worksAt
+# key tested at each containedIn ancestor cannot be named by any dispatcher up
+# front. The op always had the walk; the first non-operator Settle vector (a
+# frontOfHouse Settle{paidCents}, workplace_confinement_test.go) is what first
+# exercised it -- an operator short-circuits before it runs.
+read	Settle	lnk.identity.<id>.worksAt.building.<id>
+read	Settle	lnk.identity.<id>.worksAt.unit.<id>
 read	Settle	vtx.leaseapp.<id>
 read	StartVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 read	StartVisitSeries	vtx.visitseries.<id>.paused
@@ -551,7 +560,12 @@ walk	SetVisitSeriesSite	vtx.building.<id> containedIn out
 walk	SetVisitSeriesSite	vtx.provider.<id> practicesAt out
 walk	SetVisitSeriesSite	vtx.visitseries.<id> atSite out
 walk	SetVisitSeriesSite	vtx.visitseries.<id> withProvider out
+# The link-discovered hops of Settle's confinement walk (see its read rows):
+# the unit off the lease's appliesToUnit target and each containedIn ancestor
+# off that -- the same shape OpenTab/VoidCharge/MarkLineServed carry.
+walk	Settle	vtx.building.<id> containedIn out
 walk	Settle	vtx.leaseapp.<id> appliesToUnit out
+walk	Settle	vtx.unit.<id> containedIn out
 walk	SettleStaleTab	vtx.tab.<id> chargedTo out
 walk	StartVisitSeries	vtx.building.<id> containedIn out
 walk	StartVisitSeries	vtx.provider.<id> practicesAt out

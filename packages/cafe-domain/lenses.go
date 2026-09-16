@@ -55,7 +55,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "tab",
 				OutputKeyPattern: TabSettlementTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "entityKey", "tabKey", "leaseAppKey", "accountKey", "totalCents", "itemsMemo", "lines", "status", "openedAt", "settledAt"},
+				BodyColumns:      []string{"violating", "missing_account", "missing_charge", "missing_payment", "entityKey", "tabKey", "leaseAppKey", "accountKey", "totalCents", "paidAtSettleCents", "itemsMemo", "lines", "status", "openedAt", "settledAt"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -287,10 +287,12 @@ RETURN
 
 // tabSettlementSpec is the one-row-per-tab convergence cypher: a settled tab
 // with a positive total needs its charge posted onto the resident's
-// cafe-ledger account, in two independent gap columns, never both live at
-// once for a given cause (missing_account clears the moment cafe-ledger's
-// CreateAccount writes the leaseapp's .cafeLedgerAccount guard aspect,
-// exposing missing_charge instead):
+// cafe-ledger account — and, when the desk took cash at settle, that payment
+// posted after it — in three gap columns, never two live at once for a given
+// tab (missing_account clears the moment cafe-ledger's CreateAccount writes
+// the leaseapp's .cafeLedgerAccount guard aspect, exposing missing_charge
+// instead; missing_charge clears the moment the charge's settles link lands,
+// exposing missing_payment instead):
 //
 //   - `missing_account` — the tab is settled, owes money, and the leaseapp
 //     has no café-ledger account yet (l.cafeLedgerAccount.data.accountKey is
@@ -298,14 +300,61 @@ RETURN
 //     targets.go) — "opening one via CreateAccount on first use"
 //     (cafe-ledger-design.md's Inc 2 note).
 //   - `missing_charge` — the tab is settled, owes money, the account exists,
-//     and no cafetransaction `settles` this tab yet (count(tx.key) collapses
-//     the fan to a single existence check — the objectLiveness/clauseSatisfaction
-//     idiom). Weaver dispatches DebitAccount{accountKey, amountCents, memo, tabRef}
-//     (cafe-ledger, targets.go) — the tabRef extension writes the settles
-//     audit link this OPTIONAL MATCH walks, so once posted the gap converges
-//     and stays converged (a tab is settled exactly once — Settle rejects a
-//     second call with TabNotOpen — so there is no re-open path to guard,
-//     unlike semantic-contracts' recurring-clause freshness lane).
+//     and no DEBIT cafetransaction `settles` this tab yet. Weaver dispatches
+//     DebitAccount{accountKey, amountCents, memo, tabRef} (cafe-ledger,
+//     targets.go) — the tabRef extension writes the settles audit link this
+//     OPTIONAL MATCH walks, so once posted the gap converges and stays
+//     converged (a tab is settled exactly once — Settle rejects a second call
+//     with TabNotOpen — so there is no re-open path to guard, unlike
+//     semantic-contracts' recurring-clause freshness lane).
+//   - `missing_payment` — the tab is settled, owes money, the account exists,
+//     the charge IS posted (txCount > 0), the tab records cash taken at the
+//     counter (`paidAtSettleCents > 0` — a staff Settle{paidCents}, ddls.go;
+//     absent on every other settle, and the full engine's compareAny reads a
+//     null operand as false, so no null guard is needed), and no CREDIT
+//     cafetransaction `settles` this tab yet. Weaver dispatches
+//     CreditCafeAccount{accountKey, amountCents: paidAtSettleCents, memo,
+//     reason: payment, tabRef} (cafe-ledger, targets.go) and the credit
+//     writes the same settles link. The `txCount > 0` conjunct is
+//     missing_charge's own closing predicate, verbatim, and it is what
+//     ORDERS the two postings: cafe-ledger's payment cap reads the account's
+//     live .balance, so a credit dispatched before the debit posts is refused
+//     PaymentExceedsBalance for cash the resident already handed over; opened
+//     only once the debit exists, the payment always lands inside the balance
+//     that debit opened. It also guarantees missing_payment and
+//     missing_charge are never both live.
+//
+// ONE settles hop serves both gaps. The charge and the counter payment carry
+// the same relation (cafe-ledger writes settles on a debit and a credit
+// alike), and the two counts discriminate by the entry's own type with a
+// `count(CASE WHEN … THEN tx.key ELSE null END)` conditional count (the
+// CASE-guarded count idiom of edge-manifest's seatsHeld and lease-signing's
+// readiness counts): a CASE with no truthy WHEN yields null and count()
+// skips nulls (ruleengine/full expr_eval.go, aggregate.go), so an unbound tx
+// (no settling entry at all) and an entry of the other type both contribute
+// nothing. That is a new dependency both gaps' closing predicates now carry:
+// they read the settling transaction's `.entry.data.type`, so a settles link
+// whose transaction has no readable .entry counts as NEITHER — missing_charge
+// would stay open past a posted charge and missing_payment past a posted
+// payment, and the Weaver would re-dispatch until the retry budget parks it.
+// Unreachable today: cafe-ledger's post_entry commits the .entry aspect and
+// the settles link in the SAME atomic batch (scripts.go, the mutations list
+// — make_aspect(tx_key, "entry", …) beside make_link(settles_lnk, …)), so
+// one never exists without the other; no cafe-ledger DDL marks the entry
+// aspect Sensitive (pkgmgr.DDLSpec.Sensitive — cafeLedgerHistory already
+// projects t.entry.data.type on the same plane), so this lens reads it as
+// freely as the link; and nothing tombstones an entry (the ledger is
+// append-only). The count is deliberately
+// NOT DISTINCT: the other optional hops
+// (cl, ol) bind at most one row each, so no tx is ever multiplied, and a
+// non-DISTINCT count keeps this stage a multiplicity-sensitive aggregator —
+// the engine evaluates the three sibling branches as one product, the
+// shipped verdict (branch_decomposition_corpus_census_pins_test.go); a
+// DISTINCT count would move the lens into the branch-decomposing population,
+// which needs its own equivalence differential in ruleengine/full. A second
+// relation name would have cost the lens its relation-narrowed consumer
+// filter (3 labels × (1 + 2·4 relations) = 27 > the 24-subject budget,
+// internal/refractor/subjects); one relation keeps it at 3 × 7 = 21.
 //
 // `itemsMemo` is a plain scalar pass-through of `t.status.data.itemsMemo`
 // (ddls.go's tab DDL builds it, comma-joined, as Charge/VoidCharge run) —
@@ -353,15 +402,17 @@ WITH
   t.key AS entityKey,
   t.status.data.value AS status,
   t.status.data.totalCents AS totalCents,
+  t.status.data.paidAtSettleCents AS paidAtSettleCents,
   t.status.data.itemsMemo AS itemsMemo,
   t.status.data.lines AS lines,
   t.status.data.openedAt AS openedAt,
   t.status.data.settledAt AS settledAt,
   (CASE WHEN t.status.data.value = 'open' THEN coalesce(cl, ol) ELSE cl END) AS l,
-  count(tx.key) AS txCount
+  count(CASE WHEN tx.entry.data.type = 'debit' THEN tx.key ELSE null END) AS txCount,
+  count(CASE WHEN tx.entry.data.type = 'credit' THEN tx.key ELSE null END) AS payCount
 WHERE l.key <> null
 WITH
-  entityKey, status, totalCents, itemsMemo, lines, openedAt, settledAt, txCount,
+  entityKey, status, totalCents, paidAtSettleCents, itemsMemo, lines, openedAt, settledAt, txCount, payCount,
   l.key AS leaseAppKey,
   l.cafeLedgerAccount.data.accountKey AS accountKey
 RETURN
@@ -371,6 +422,7 @@ RETURN
   leaseAppKey,
   accountKey,
   totalCents,
+  paidAtSettleCents,
   itemsMemo,
   lines,
   status,
@@ -378,9 +430,11 @@ RETURN
   settledAt,
   ((status = 'settled') AND (totalCents > 0) AND (accountKey = null)) AS missing_account,
   ((status = 'settled') AND (totalCents > 0) AND (accountKey <> null) AND (txCount = 0)) AS missing_charge,
+  ((status = 'settled') AND (totalCents > 0) AND (accountKey <> null) AND (txCount > 0) AND (paidAtSettleCents > 0) AND (payCount = 0)) AS missing_payment,
   (
     ((status = 'settled') AND (totalCents > 0) AND (accountKey = null))
     OR ((status = 'settled') AND (totalCents > 0) AND (accountKey <> null) AND (txCount = 0))
+    OR ((status = 'settled') AND (totalCents > 0) AND (accountKey <> null) AND (txCount > 0) AND (paidAtSettleCents > 0) AND (payCount = 0))
   ) AS violating
 `
 

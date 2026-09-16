@@ -119,11 +119,34 @@ func TestSummarizeToday_FoldsSettledTabsOfTheLocalDay(t *testing.T) {
 	}
 }
 
+// TestSummarizeToday_CounterPaidSumsOnlyTabsCarryingTheField pins
+// counterPaidCents: summed only from today's settled tabs that carry
+// paidAtSettleCents — a tab settled with no counter payment (the field
+// absent) contributes nothing, not a zero counted toward the sum.
+func TestSummarizeToday_CounterPaidSumsOnlyTabsCarryingTheField(t *testing.T) {
+	vm := summarizeTodayVM(t)
+	got := jsInt(t, vm, `
+(() => {
+  const now2 = new Date(2026, 8, 14, 12, 0, 0);
+  const at2 = (h) => new Date(2026, 8, 14, h, 0, 0).toISOString();
+  const mixed = [
+    { tabKey: "vtx.tab.P1", status: "settled", settledAt: at2(9), totalCents: 1949, paidAtSettleCents: 1949,
+      lines: [line("line-1", "Latte", 1949, false)] },
+    { tabKey: "vtx.tab.P2", status: "settled", settledAt: at2(10), totalCents: 700,
+      lines: [line("line-1", "Croissant", 700, false)] },
+  ];
+  return summarizeToday(mixed, now2).counterPaidCents;
+})()`)
+	if got != 1949 {
+		t.Fatalf("counterPaidCents = %d, want 1949 (only P1 carries paidAtSettleCents; P2's absence contributes nothing)", got)
+	}
+}
+
 // TestSummarizeToday_EmptyDayIsZero: a day with no settled tab folds to zero
 // counts and no items, which renderFrontDeskToday hides rather than paints.
 func TestSummarizeToday_EmptyDayIsZero(t *testing.T) {
 	vm := summarizeTodayVM(t)
-	if got := jsString(t, vm, `JSON.stringify(summarizeToday(tabs, new Date(2026, 8, 20, 12, 0, 0)))`); got != `{"tabs":0,"grossCents":0,"items":[],"voidCount":0,"voidCents":0,"unitemizedCents":0}` {
+	if got := jsString(t, vm, `JSON.stringify(summarizeToday(tabs, new Date(2026, 8, 20, 12, 0, 0)))`); got != `{"tabs":0,"grossCents":0,"items":[],"voidCount":0,"voidCents":0,"unitemizedCents":0,"counterPaidCents":0}` {
 		t.Fatalf("empty day = %s", got)
 	}
 	if got := jsString(t, vm, `JSON.stringify(summarizeToday([], now))`); !strings.HasPrefix(got, `{"tabs":0`) {

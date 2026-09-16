@@ -91,7 +91,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"cafeLeaseWorkplaces":               {"p", 0},
 	"cafeLedgerHistory":                 {"p", 0},
 	"cafeStaleTabSettlement":            {"p", 0},
-	"cafeTabSettlement":                 {"key(entityKey itemsMemo l lines openedAt settledAt status totalCents) p!l p!txCount", 0},
+	"cafeTabSettlement":                 {"key(entityKey itemsMemo l lines openedAt paidAtSettleCents settledAt status totalCents) p!l p!payCount", 0},
 	"capability":                        {"p", 0},
 	"capabilityAuthorContext":           {"p", 0},
 	"capabilityAuthorPackages":          {"p", 0},

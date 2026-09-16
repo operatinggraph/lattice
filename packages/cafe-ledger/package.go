@@ -90,6 +90,12 @@
 //   - The `cafeLedgerHistory` lens (one row per transaction, carrying the
 //     reverses and settles hops) the house-tab history FE reads (P5).
 //
+//   - The `tabRef` back-link cafe-domain's settlement playbook writes: a
+//     DebitAccount carrying one (the charge that settled the tab) and a
+//     CreditCafeAccount carrying one (the counter payment for the cash the
+//     desk took at settle, posted once the charge is) both write settles;
+//     the lens discriminates by the entry's type. Staff only on the credit.
+//
 //   - The `cafeLeaseAccounts` lens (one row per lease, accountKey null until
 //     one is opened) — the FE's only way to resolve a lease's café account
 //     key, since it can no longer be derived from leaseAppKey. It also carries
@@ -121,14 +127,16 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-ledger",
-	Version: "0.6.3",
+	Version: "0.7.0",
 	Description: "Café house-tab payment ledger: the cafeaccount vertex type (CreateAccount, independently-minted " +
 		"id, one per lease via a .cafeLedgerAccount guard aspect on the leaseapp) + the cafetransaction vertex type " +
 		"(DebitAccount/CreditCafeAccount/RefundCafeCharge/PayoutCafeCredit, entries linked to the account via " +
 		"postedTo, each keeping the account's .balance running-total aspect in lockstep, each entry's reason " +
 		"saying why it was posted — payment / waiver / refund on a credit, payout on a debit) " +
 		"+ the cafeLedgerHistory read-model lens (one row per transaction, carrying reason and the reverses and " +
-		"settles hops) + the cafeLeaseAccounts lens (lease -> account key lookup). CreditCafeAccount ALSO grants " +
+		"settles hops) + the cafeLeaseAccounts lens (lease -> account key lookup). DebitAccount and " +
+		"CreditCafeAccount accept cafe-domain's settlement tabRef, each writing settles to the tab (a charge, or " +
+		"a staff-only counter payment). CreditCafeAccount ALSO grants " +
 		"a resident scope=self (pay down their own house tab), ownership proven server-side and the amount " +
 		"capped at the account's outstanding balance on every leg; its staff-only reason \"waiver\" writes the " +
 		"balance off under the same cap. RefundCafeCharge gives " +

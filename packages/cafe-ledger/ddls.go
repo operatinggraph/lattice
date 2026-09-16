@@ -328,7 +328,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 		Description: "House-tab ledger transaction DDL. Vertex shape: vtx.cafetransaction.<NanoID>, " +
 			"class=cafetransaction, root data = {} (minimal, D5 — the entry detail is a .entry aspect). " +
 			"DebitAccount{accountKey, amountCents, memo?, tabRef?} records a café charge (a settled tab); " +
-			"CreditCafeAccount{accountKey, amountCents, memo?, reason?} records a payment received (reason " +
+			"CreditCafeAccount{accountKey, amountCents, memo?, reason?, tabRef?} records a payment received (reason " +
 			"\"payment\", the default) or writes off what is owed (reason \"waiver\", staff only); " +
 			"RefundCafeCharge{accountKey, reversesRef, amountCents, memo?} gives back part or all of a charge " +
 			"already posted; PayoutCafeCredit{accountKey, amountCents, memo?} hands back, in cash, credit the " +
@@ -352,10 +352,20 @@ func transactionDDL() pkgmgr.DDLSpec {
 			".entry.reason is a complete classification: a credit is payment / waiver / refund, a debit carries " +
 			"none (a charge) or payout. Only CreditCafeAccount accepts a payload reason; every other op writes " +
 			"its own and refuses one (InvalidArgument). Requires the accountKey be a live account and amountCents " +
-			"be a positive number. DebitAccount-only optional tabRef (the cafe-domain Settle consumer, mirroring loftspace-ledger's " +
-			"clauseRef): when present and the referenced tab is alive, writes the settles audit link " +
-			"(cafetransaction→tab) the cafeTabSettlement Weaver target reads to detect the charge is posted; a plain " +
-			"human-submitted DebitAccount omitting tabRef is byte-for-byte unaffected. " +
+			"be a positive number. Optional tabRef on DebitAccount and CreditCafeAccount (the cafe-domain settlement " +
+			"consumers, mirroring loftspace-ledger's clauseRef): when present and the referenced tab is alive, a " +
+			"DebitAccount or a CreditCafeAccount writes the settles audit link (cafetransaction→tab) the " +
+			"cafeTabSettlement Weaver target reads — its missing_charge gap counts the settling debits to detect " +
+			"the charge is posted, its missing_payment gap the settling credits to detect the counter payment " +
+			"recorded at settle is posted (one relation, discriminated by .entry.type). A tab-tied credit is bounded " +
+			"by the TAB's recorded fact rather than by the balance cap: it must be a payment (a waiver with tabRef " +
+			"is InvalidArgument), the tab's .status (a declared read, derived by this DDL's own derive_reads) must be " +
+			"settled (TabNotSettled) and record a counter payment (NoCounterPayment) of exactly amountCents " +
+			"(CounterPaymentMismatch), the tab must be held by this account's own heldFor lease (AuthDenied), and no " +
+			"credit may already settle it (CounterPaymentAlreadyPosted); with those holding it posts even past the " +
+			"outstanding balance — the cash is real and cashCents rises with it, so the cash floor still bounds a " +
+			"later payout. A tabRef on a self-scoped CreditCafeAccount is refused AuthDenied: only staff record a " +
+			"tab's counter payment. A plain human-submitted entry omitting tabRef is byte-for-byte unaffected. " +
 			"RefundCafeCharge-only REQUIRED reversesRef: the vtx.cafetransaction.<NanoID> of the posted charge " +
 			"being given back. It posts an ordinary credit entry — so every balance consumer sums it unchanged — " +
 			"plus a reverses link (cafetransaction→cafetransaction, the refund is the later-arriving vertex so it " +
@@ -389,7 +399,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			`"amountCents":{"type":"integer","description":"The transaction amount in whole cents; required, must be > 0. A debit is a charge (increases what the resident owes on the house tab) or a payout (cash handed back, bounded by the credit the account holds); a credit is a payment or write-off (decreases it) and may never exceed what is owed; a refund is a credit bounded instead by the charge it reverses."},` +
 			`"memo":{"type":"string","description":"Optional free-text description of the charge, payment, refund or payout (e.g. \"Settled tab — table 4\", \"House tab payment\", \"Wrong item charged\", \"Paid from till\"). Optional."},` +
 			`"reason":{"type":"string","enum":["payment","waiver"],"description":"CreditCafeAccount only: why the credit is posted — \"payment\" (cash collected, the default) or \"waiver\" (debt written off; staff only, refused AuthDenied on a self-scoped submit). Refused (InvalidArgument) on every other op, each of which writes its own reason: a refund \"refund\", a payout \"payout\", a charge none."},` +
-			`"tabRef":{"type":"string","description":"DebitAccount only: vtx.tab.<NanoID> of the cafe-domain tab this charge settles (optional, validated alive when supplied). Writes the settles audit link."},` +
+			`"tabRef":{"type":"string","description":"DebitAccount and CreditCafeAccount only: vtx.tab.<NanoID> of the cafe-domain tab this entry settles (optional, validated alive when supplied; staff only — refused AuthDenied on a self-scoped CreditCafeAccount). Writes the settles audit link, on a charge and on a counter payment alike. On CreditCafeAccount the amount must equal the counter payment the settled tab's .status records, the tab must be held by the account's lease, and the tab may not already carry a settling credit; it is then exempt from the balance cap. Refused on RefundCafeCharge and PayoutCafeCredit."},` +
 			`"reversesRef":{"type":"string","description":"RefundCafeCharge only: vtx.cafetransaction.<NanoID> of the posted charge being given back (required, validated alive, must be a debit on the same account). Writes the reverses link."}},` +
 			`"required":["accountKey","amountCents"]}`,
 		OutputSchema: `{"type":"object","properties":` +
@@ -399,7 +409,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"amountCents": "The transaction amount in integer cents; required, must be a positive number. Stored on the .entry aspect and projected verbatim by the cafeLedgerHistory lens — a refund never alters the charge's own amountCents. On CreditCafeAccount it is additionally capped by the account's own outstanding balance (server-verified against the maintained .balance aspect, on the resident and staff legs alike, payment and write-off alike), and refused outright on an account that owes nothing. On RefundCafeCharge it is capped instead by what the reversed charge still has un-refunded (its amountCents minus its refundedCents tally). On PayoutCafeCredit it is capped by the credit the account holds (a negative .balance): refused NoCreditToPayOut when the account owes or is square, PayoutExceedsCredit past the credit.",
 			"memo":        "Optional free-text description of the charge, payment, refund or payout (e.g. \"Settled tab — table 4\", \"House tab payment\", \"Wrong item charged\", \"Paid from till\"). Stored on the .entry aspect when supplied; projected by the cafeLedgerHistory lens.",
 			"reason":      "CreditCafeAccount only. \"payment\" (default) records cash collected; \"waiver\" writes off what is owed and is staff-only — refused AuthDenied on a self-scoped submit. Both are capped at the outstanding balance. Stored on the .entry aspect as reason and projected by the cafeLedgerHistory lens, alongside the reasons the other ops write for themselves (RefundCafeCharge \"refund\", PayoutCafeCredit \"payout\"; a DebitAccount charge carries none). Sending the field to any op but CreditCafeAccount is refused (InvalidArgument) rather than ignored.",
-			"tabRef":      "DebitAccount only. Full vtx.tab.<NanoID> key of the cafe-domain tab this charge settles. Validated alive when supplied; writes the settles audit link (transaction→tab) the cafeTabSettlement Weaver target's missing_charge gap reads. Omitted on a plain human-submitted DebitAccount, and refused outright (InvalidArgument) on RefundCafeCharge and PayoutCafeCredit, neither of which settles a tab.",
+			"tabRef":      "DebitAccount and CreditCafeAccount only. Full vtx.tab.<NanoID> key of the cafe-domain tab this entry settles. Validated alive when supplied; writes the settles audit link (transaction→tab) on a charge and on a counter payment alike — the cafeTabSettlement Weaver target's missing_charge gap counts the settling debits, its missing_payment gap the settling credits (the cash the desk took at settle), discriminating by .entry.type. Staff only on the credit: a self-scoped CreditCafeAccount carrying one is refused AuthDenied (a resident pays their account down but never names a tab — a settles link on their credit would read to the lens as the desk's counter payment already posted). A tab-tied credit is bounded by the tab, not the balance: reason must be payment (a waiver with tabRef is InvalidArgument); the tab's .status — a declared read (row.tabKey.status on the playbook dispatch, derived by this DDL's derive_reads for any submitter) — must be settled (TabNotSettled) and record paidAtSettleCents (NoCounterPayment) equal to amountCents (CounterPaymentMismatch); the tab's leaseAppKey must be the account's own heldFor lease (AuthDenied); and no credit may already settle the tab (CounterPaymentAlreadyPosted, the replay dedup). With those proven the credit is exempt from NoBalanceToPay / PaymentExceedsBalance and may take the account further into credit — cashCents rises by the same amount, so the cash floor still bounds any later payout. Omitted on a plain human-submitted entry, and refused outright (InvalidArgument) on RefundCafeCharge and PayoutCafeCredit, neither of which settles a tab.",
 			"reversesRef": "RefundCafeCharge only, and required there. Full vtx.cafetransaction.<NanoID> key of the posted charge being given back — validated alive, required to be a DEBIT with NO reason (a charge — a payout is a debit too and is refused, so a refund can never hand a payout back) posted to the same accountKey, and the ceiling on amountCents (its own amountCents minus its refundedCents). Writes the reverses link (refund→charge) the cafeLedgerHistory lens projects as reversesKey, and adds this refund to the charge's refundedCents tally under a compare-and-set on that .entry aspect's hydrated revision.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
@@ -417,6 +427,20 @@ func transactionDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Same as the plain DebitAccount, plus (tabRef alive) the settles link " +
 					"(transaction→tab) — the cafeTabSettlement Weaver target's missing_charge gap templates this from " +
 					"row.tabKey. Rejects UnknownTab if the referenced tab is absent or tombstoned.",
+			},
+			{
+				Name:    "CreditCafeAccount — Weaver-dispatched counter payment (tabRef)",
+				Payload: map[string]any{"accountKey": "vtx.cafeaccount.<NanoID>", "amountCents": 1850, "memo": "Paid at the counter", "reason": "payment", "tabRef": "vtx.tab.<NanoID>"},
+				ExpectedOutcome: "Same as the plain CreditCafeAccount (the balance cap included), plus (tabRef alive) " +
+					"the settles link (transaction→tab), the same link a charge writes — the cafeTabSettlement " +
+					"Weaver target's missing_payment gap templates this from row.tabKey and row.paidAtSettleCents " +
+					"once the settling charge has posted, and tells the two apart by .entry.type. The amount is bounded " +
+					"by the tab's own recorded paidAtSettleCents (read off its .status) rather than by the balance " +
+					"cap, so a resident's self-payment racing the playbook never makes the desk's cash refusable. " +
+					"Rejects UnknownTab if the referenced tab is absent or tombstoned, AuthDenied on a self-scoped " +
+					"submit carrying tabRef or a tab another lease holds, TabNotSettled / NoCounterPayment / " +
+					"CounterPaymentMismatch when the tab's .status does not record this exact counter payment, " +
+					"CounterPaymentAlreadyPosted on a replay, InvalidArgument on reason waiver.",
 			},
 			{
 				Name:    "CreditCafeAccount — record a house-tab payment",

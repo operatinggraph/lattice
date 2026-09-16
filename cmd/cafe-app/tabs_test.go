@@ -75,6 +75,76 @@ func TestComputeTabs_SkipsRowWithNoLeaseAppKey(t *testing.T) {
 	}
 }
 
+// A settled tab's paidAtSettleCents passes through computeTabs unchanged
+// when the lens row carries it (cash the desk took at settle), and stays
+// absent (zero-valued, omitempty on the wire) when the row never recorded
+// one — a settle with no counter payment, or a row predating the field.
+func TestComputeTabs_PaidAtSettleCentsPresentAndAbsent(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"cafeTabSettlement.paid": map[string]any{
+			"tabKey": "vtx.tab.paid", "leaseAppKey": "vtx.leaseapp.a", "accountKey": "vtx.cafeaccount.1",
+			"totalCents": 1949.0, "status": "settled", "openedAt": "2026-09-16T10:00:00Z", "settledAt": "2026-09-16T11:00:00Z",
+			"paidAtSettleCents": 1949.0, "missing_account": false, "missing_charge": false,
+		},
+		"cafeTabSettlement.unpaid": map[string]any{
+			"tabKey": "vtx.tab.unpaid", "leaseAppKey": "vtx.leaseapp.a", "accountKey": "vtx.cafeaccount.1",
+			"totalCents": 800.0, "status": "settled", "openedAt": "2026-09-16T09:00:00Z", "settledAt": "2026-09-16T09:30:00Z",
+			"missing_account": false, "missing_charge": false,
+		},
+	})
+	rows := computeTabs(keys, get, "")
+	byKey := map[string]tabRow{}
+	for _, r := range rows {
+		byKey[r.TabKey] = r
+	}
+	if got, want := byKey["vtx.tab.paid"].PaidAtSettleCents, int64(1949); got != want {
+		t.Errorf("paid tab PaidAtSettleCents = %d, want %d", got, want)
+	}
+	if got := byKey["vtx.tab.unpaid"].PaidAtSettleCents; got != 0 {
+		t.Errorf("unpaid tab PaidAtSettleCents = %d, want 0 (absent)", got)
+	}
+}
+
+// Posted waits on missing_payment the same way it already waits on
+// missing_charge: a settled row whose charge landed but whose counter
+// payment has not yet posted is not Posted, one where both have posted is,
+// and a row carrying no missing_payment key at all (no counter payment was
+// ever taken, or the row predates the field) falls back to missing_charge
+// alone.
+func TestComputeTabs_PostedWaitsOnMissingPayment(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"cafeTabSettlement.chargedNotPaid": map[string]any{
+			"tabKey": "vtx.tab.chargedNotPaid", "leaseAppKey": "vtx.leaseapp.a", "accountKey": "vtx.cafeaccount.1",
+			"totalCents": 1949.0, "status": "settled", "openedAt": "2026-09-16T10:00:00Z", "settledAt": "2026-09-16T11:00:00Z",
+			"paidAtSettleCents": 1949.0, "missing_account": false, "missing_charge": false, "missing_payment": true,
+		},
+		"cafeTabSettlement.chargedAndPaid": map[string]any{
+			"tabKey": "vtx.tab.chargedAndPaid", "leaseAppKey": "vtx.leaseapp.a", "accountKey": "vtx.cafeaccount.1",
+			"totalCents": 1949.0, "status": "settled", "openedAt": "2026-09-16T09:00:00Z", "settledAt": "2026-09-16T09:30:00Z",
+			"paidAtSettleCents": 1949.0, "missing_account": false, "missing_charge": false, "missing_payment": false,
+		},
+		"cafeTabSettlement.noCounterPayment": map[string]any{
+			"tabKey": "vtx.tab.noCounterPayment", "leaseAppKey": "vtx.leaseapp.a", "accountKey": "vtx.cafeaccount.1",
+			"totalCents": 800.0, "status": "settled", "openedAt": "2026-09-16T08:00:00Z", "settledAt": "2026-09-16T08:30:00Z",
+			"missing_account": false, "missing_charge": false,
+		},
+	})
+	rows := computeTabs(keys, get, "")
+	byKey := map[string]tabRow{}
+	for _, r := range rows {
+		byKey[r.TabKey] = r
+	}
+	if got := byKey["vtx.tab.chargedNotPaid"].Posted; got {
+		t.Errorf("charge posted but payment gap still open: Posted = %v, want false", got)
+	}
+	if got := byKey["vtx.tab.chargedAndPaid"].Posted; !got {
+		t.Errorf("charge and payment both posted: Posted = %v, want true", got)
+	}
+	if got := byKey["vtx.tab.noCounterPayment"].Posted; !got {
+		t.Errorf("no counter payment ever taken (no missing_payment key): Posted = %v, want true (follows missing_charge alone)", got)
+	}
+}
+
 // A line's orderedAt/servedAt/servedBy pass through computeTabs unchanged —
 // the desk's orders queue and the receipt's per-line state tag both read
 // these straight off tabChargeLine, so a silently dropped or renamed field

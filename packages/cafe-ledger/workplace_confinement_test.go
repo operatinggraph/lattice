@@ -195,6 +195,37 @@ func TestCreditWorkplace_StaffConfinedToWorkplace(t *testing.T) {
 		wcStaffKey, acctB, "", processor.OutcomeRejected)
 }
 
+// TestCreditWorkplace_CounterPaymentTabMustBeHeldByTheAccountsLease: the
+// counter payment's tab must belong to the account it is credited to. The
+// staffer is frontOfHouse at building A and credits account A — the
+// confinement walk passes — but names a settled, paid tab of lease B. Without
+// the heldFor tie, lease B's resident's cash would land as credit on lease
+// A's account; the tie refuses it AuthDenied off the account's OWN heldFor
+// lease, never the payload. The same staffer's counter payment for lease A's
+// own tab posts first, so the refusal is the tie and not the workplace.
+func TestCreditWorkplace_CounterPaymentTabMustBeHeldByTheAccountsLease(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "creditwctabtie")
+
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+	acctA := createAccount(t, ctx, conn, cp, cons, "cafewctieaccta000001", leaseA)
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+	tabA := seedSettledTab(t, ctx, conn, "BBCAFEWCTABAHJKMNPQR", leaseA, 1850, 1850, "settled")
+	tabB := seedSettledTab(t, ctx, conn, "BBCAFEWCTABBHJKMNPQR", leaseB, 1850, 1850, "settled")
+	postTabDebit(t, ctx, conn, cp, cons, "cafewctiedebita00001", acctA, tabA, 1850)
+
+	own, _ := counterPaymentEnv("cafewctiecredita0001", wcStaffKey, acctA, tabA, 1850, "payment")
+	testutil.PublishOp(t, conn, own)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	other, _ := counterPaymentEnv("cafewctiecreditb0001", wcStaffKey, acctA, tabB, 1850, "payment")
+	assertRejectedBecause(t, ctx, conn, cp, cons, other,
+		"AuthDenied: tab "+tabB+" is not held by this account's lease")
+	if got := balanceCents(t, ctx, conn, acctA); got != 0 {
+		t.Fatalf("balance after the refused cross-lease counter payment = %v, want the untouched 0", got)
+	}
+}
+
 // TestCreditWorkplace_CoversDeeperContainment exercises the containment LOOP
 // rather than its first iteration. Every other vector resolves in one hop
 // (unit → building), which would pass just as well against a guard that never

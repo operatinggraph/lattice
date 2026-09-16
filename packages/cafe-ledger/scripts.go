@@ -1302,6 +1302,91 @@ def reversed_charge(state, p, acct_key, amount_cents):
                                    tally_data, entry.revision)
     return reverses_id, tally
 
+SETTLES_PAGE_LIMIT = 4
+SETTLES_MAX_PAGES = 4
+
+def require_counter_payment(state, tab_key, acct_key, amount_cents, reason):
+    # A CREDIT that names a tab is the settlement playbook posting the cash the
+    # desk took as that tab closed (cafe-domain's Settle{paidCents}, recorded on
+    # the tab's .status as paidAtSettleCents). It is bounded by THAT recorded
+    # fact rather than by the account's live balance (the cap exemption in
+    # post_entry), so every conjunct the exemption leans on is proven here,
+    # before any money is read: the credit is a payment, the tab is settled
+    # and records a counter payment of exactly this amount, the tab is held by
+    # this account's own lease, and no counter payment for it has posted yet.
+    #
+    # reason: a write-off pays for no tab. Refused rather than ignored — the
+    # reversesRef / tabRef cross-refusal shape — so a caller cannot forgive
+    # debt under the counter-payment exemption.
+    if reason != "payment":
+        fail("InvalidArgument: tabRef: a write-off pays for no tab")
+
+    # The tab's own .status is a DECLARED read: the cafeTabSettlement Weaver
+    # target lists row.tabKey.status in the gap's Reads, and this script's own
+    # derive_reads appends it for every CreditCafeAccount whose tabRef is a
+    # well-formed tab key, so it is hydrated whatever a submitter declared. A
+    # key nothing derived it for (a payload shape mismatched against that
+    # pre-pass) is refused the SettleStaleTab way rather than read live.
+    status_key = tab_key + ".status"
+    if status_key not in state:
+        fail("InvalidArgument: tabRef: caller must declare " + status_key + " in contextHint.reads")
+    status = state[status_key]
+    if status == None or (hasattr(status, "isDeleted") and status.isDeleted):
+        fail("TabNotSettled: tab " + tab_key + " carries no status")
+    if status.data.get("value") != "settled":
+        fail("TabNotSettled: tab " + tab_key + " is not settled")
+    recorded_cents = status.data.get("paidAtSettleCents")
+    if recorded_cents == None:
+        fail("NoCounterPayment: tab " + tab_key + " records no counter payment")
+    if amount_cents != recorded_cents:
+        fail("CounterPaymentMismatch: a counter payment of " + dollars(amount_cents) +
+             " does not match the " + dollars(int(recorded_cents)) + " recorded on the tab")
+
+    # The tab must be held by THIS account's lease: the lease is recovered
+    # from the account's OWN heldFor topology (never the payload), exactly as
+    # the resident-self ownership proof does, and compared with the lease the
+    # tab's .status denormalizes. A tab of another lease credited here would
+    # move one resident's cash onto another's account.
+    # read-posture: (e) relation=heldFor epoch=none -- a cafeaccount carries
+    # exactly one heldFor link, so this is never a keyspace scan.
+    held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
+    lease_key = None
+    for lk in held_for_page:
+        if not lk.isDeleted:
+            lease_key = lk.targetVertex
+    if lease_key == None or status.data.get("leaseAppKey") != lease_key:
+        fail("AuthDenied: tab " + tab_key + " is not held by this account's lease")
+
+    # Dedup: cash taken once is credited once. A redelivered or replayed
+    # dispatch (the Weaver's retry, a duplicate submit) must not post the
+    # counter payment twice, so the tab's existing settling entries are read
+    # and a credit among them refuses this one. The page is bounded by the
+    # relation's own cardinality, never a keyspace scan.
+    # A tab carries one charge and at most one counter payment through the
+    # playbook; the page limit is not that cardinality claim, so the cursor
+    # is followed (the arrears replay's loop shape) up to SETTLES_MAX_PAGES
+    # pages, and a credit found on any page refuses. Only an operator-only
+    # raw DebitAccount replay can put more than two entries on a tab, and a
+    # credit hidden behind a page of those must still be found.
+    cursor = None
+    for _page in range(SETTLES_MAX_PAGES):
+        # read-posture: (e) relation=settles epoch=none -- bounded by
+        # SETTLES_PAGE_LIMIT x SETTLES_MAX_PAGES, never a keyspace scan.
+        settles_page, cursor = kv.Links(tab_key, "settles", "in", cursor, SETTLES_PAGE_LIMIT)
+        for lk in settles_page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the enumeration
+            # above -- the settling transaction's own .entry aspect, data-derived
+            # and unknowable client-side.
+            tx_entry = kv.Read(lk.sourceVertex + ".entry")
+            if tx_entry == None or tx_entry.isDeleted:
+                continue
+            if tx_entry.data.get("type") == "credit":
+                fail("CounterPaymentAlreadyPosted: tab " + tab_key + " already has its counter payment posted")
+        if cursor == None:
+            break
+
 def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses_ref, confine, reason):
     # reason is the classification the dispatching op asserts for its entry:
     # None on a charge (DebitAccount), "refund" on RefundCafeCharge, "payout" on
@@ -1398,6 +1483,42 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
         application_for = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id)
         if application_for == None or application_for.isDeleted:
             fail("AuthDenied: a resident may only pay down their own lease's account")
+
+    # tabRef (DebitAccount and CreditCafeAccount — the cafe-domain settlement
+    # consumers): the tab this entry settles. On a debit it is the charge that
+    # settles the tab; on a credit it is the counter payment settling the cash
+    # the desk took as the tab closed, posted once the charge is. Both write
+    # the same settles link — the cafeTabSettlement lens tells them apart by
+    # the entry's own type. A tab-settlement playbook dispatch (cafe-domain's
+    # cafeTabSettlement Weaver target) always declares row.tabKey in Reads, so
+    # the tab is hydrated here; a plain human-submitted entry omits it
+    # entirely (nothing below runs) — the loftspace-ledger clauseRef
+    # precedent. RefundCafeCharge and PayoutCafeCredit refuse the field before
+    # reaching here (execute).
+    #
+    # Sits AFTER the confinement walk and the resident-ownership proof (the
+    # caller's standing) and BEFORE the .balance read: everything a tab-tied
+    # credit is checked against is a handful of bounded reads, and a refused
+    # one must never spend a legacy account's replay budget first.
+    tab_key = None
+    tab_id = None
+    if allow_tab_ref:
+        tab_key = optional_string(p, "tabRef")
+        if tab_key != None:
+            _, tab_id = parts_of(tab_key, "tabRef", "tab")
+            # Staff only: a resident's self-scoped submit may pay their own
+            # account down but never name a tab — a settles link on a
+            # resident's credit would read to the lens as the desk's counter
+            # payment already posted, closing that gap before the cash the
+            # desk recorded ever reaches the ledger.
+            # authcontext-target: (selector) selects the refusal branch and
+            # only that -- presence never grants anything here.
+            if op.authContextTarget != "":
+                fail("AuthDenied: only staff record a tab's counter payment")
+            if not vertex_alive(state, tab_key):
+                fail("UnknownTab: " + tab_key)
+            if entry_type == "credit":
+                require_counter_payment(state, tab_key, acct_key, amount_cents, reason)
 
     # Everything above this line is the caller's standing and the payload's
     # shape; everything below it touches the ACCOUNT's own money. The order is
@@ -1507,7 +1628,26 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
     # staffer or at the resident, and a raw vtx key is not something either can
     # act on. The amounts are the actionable half, so they are spelled as
     # money.
-    if is_payment:
+    #
+    # A TAB-TIED credit (tabRef, the playbook's counter payment) is exempt from
+    # this cap, and bounded by a different fact instead: require_counter_payment
+    # (above) has already proven the amount EQUALS the paidAtSettleCents the
+    # tab's own settled .status records — cash the desk took, in one act, and
+    # bounded at Settle to exactly the tab's total — that the tab is held by
+    # this account's lease, and that no counter payment for it has posted
+    # yet. Measuring that cash against the live balance instead is exactly
+    # the race this exemption closes: the playbook posts the charge first,
+    # but a resident's own self-payment can land between the charge and the
+    # counter payment and shrink the balance below the cash already taken,
+    # and the cap would then refuse (or a "fit it" variant silently shrink)
+    # money that is real. An account in credit legitimately goes further into
+    # credit here, and the cash floor still holds: the payment raises
+    # cashCents by the same amount it lowers the balance (the .balance write
+    # below), so a later PayoutCafeCredit of that credit stays within the cash
+    # paid in — the credit IS cash. Every credit without tabRef keeps the cap
+    # byte-for-byte: nothing verifies a hand-keyed amount, so the balance is
+    # the only bound it has.
+    if is_payment and tab_key == None:
         owed_cents = balance_cents
         if owed_cents <= 0:
             fail("NoBalanceToPay: this account has no outstanding balance to pay")
@@ -1542,20 +1682,6 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
         if amount_cents > cash_cents:
             fail("PayoutExceedsCash: a payout of " + dollars(amount_cents) +
                  " exceeds the " + dollars(cash_cents) + " this account has paid in")
-
-    # tabRef (DebitAccount only — the cafe-domain Settle consumer): the tab
-    # this charge settles. A tab-settlement playbook dispatch (cafe-domain's
-    # cafeTabSettlement Weaver target) always declares row.tabKey in Reads, so
-    # the tab is hydrated here; a plain human-submitted DebitAccount omits it
-    # entirely (nothing below runs) — the loftspace-ledger clauseRef precedent.
-    tab_key = None
-    tab_id = None
-    if allow_tab_ref:
-        tab_key = optional_string(p, "tabRef")
-        if tab_key != None:
-            _, tab_id = parts_of(tab_key, "tabRef", "tab")
-            if not vertex_alive(state, tab_key):
-                fail("UnknownTab: " + tab_key)
 
     # reversesRef (RefundCafeCharge only): the posted charge this credit gives
     # back, REQUIRED on that op — a refund with no charge named is just a
@@ -1741,8 +1867,11 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
     if tab_key != None:
         # settles: the transaction (later-arriving) is the source, the
         # pre-existing tab is the target (Contract #1 §1.1) — the "which tab
-        # did this charge settle?" chain of custody the cafeTabSettlement
-        # lens's missing_charge gate reads to detect the charge is posted.
+        # did this entry settle?" chain of custody the cafeTabSettlement lens
+        # reads: its missing_charge gap counts the settling DEBITS to detect
+        # the charge is posted, its missing_payment gap the settling CREDITS
+        # to detect the counter payment is. One relation for both; the entry's
+        # own .entry.type is what the lens discriminates on.
         settles_lnk = "lnk.cafetransaction." + tx_id + ".settles.tab." + tab_id
         mutations.append(make_link(settles_lnk, tx_key, tab_key, "settles", "settles", {}))
 
@@ -1794,6 +1923,21 @@ def is_cafetransaction_key(key):
         return False
     parts = key.split(".")
     if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "cafetransaction":
+        return False
+    if len(parts[2]) != 20:
+        return False
+    for ch in parts[2].elems():
+        if ch not in NANOID_ALPHABET:
+            return False
+    return True
+
+def is_tab_key(key):
+    # Same Contract #1 grammar check, for the cafe-domain tab type tabRef
+    # names.
+    if key == None or type(key) != type(""):
+        return False
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "tab":
         return False
     if len(parts[2]) != 20:
         return False
@@ -1873,6 +2017,18 @@ def derive_reads(op):
         if is_cafetransaction_key(reverses_key):
             keys.append(reverses_key)
             keys.append(reverses_key + ".entry")
+    # tabRef and its .status (CreditCafeAccount only): require_counter_payment
+    # reads the tab's recorded counter payment off its .status, a pure function
+    # of payload.tabRef under this DDL's own grammar exactly like the account
+    # root, so it is hydrated whatever the submitter declared. A malformed
+    # tabRef derives neither key; post_entry's parts_of raises the real
+    # InvalidArgument. (A DebitAccount's tabRef needs only the tab root, which
+    # the playbook declares in Reads and vertex_alive checks as before.)
+    if ot == "CreditCafeAccount":
+        tab_key = optional_string(op.payload, "tabRef")
+        if is_tab_key(tab_key):
+            keys.append(tab_key)
+            keys.append(tab_key + ".status")
     return {"optionalReads": keys}
 
 def execute(state, op):
@@ -1903,7 +2059,13 @@ def execute(state, op):
         # "payment" is the reason the op asserts; it is the one op whose caller
         # may override it (to "waiver", staff only — post_entry refuses it on
         # the self-scoped leg).
-        return post_entry(state, op, "credit", "account.credited", False, False, True, "payment")
+        #
+        # tabRef is accepted here as on DebitAccount: the cafeTabSettlement
+        # playbook's missing_payment dispatch names the tab whose counter
+        # payment this credit posts, and post_entry writes the same settles
+        # link a charge does (staff only — post_entry refuses it on the
+        # self-scoped leg).
+        return post_entry(state, op, "credit", "account.credited", True, False, True, "payment")
 
     if ot == "RefundCafeCharge":
         # A refund is never self-scoped. permissions.go grants it scope=any to
@@ -1946,14 +2108,15 @@ def execute(state, op):
         # which require_workplace binds.
         if op.authContextTarget != "" or op.authTargetValidated:
             fail("AuthDenied: RefundCafeCharge is a front-desk act, never self-scoped")
-        # tabRef is DebitAccount's field and is refused here rather than
-        # ignored, the mirror of post_entry's own refusal of reversesRef on
-        # every op but this one. A caller that sends one means "refund the
-        # charge that settled this tab" and would instead get a credit with no
-        # settles link and no relation to the tab at all -- a silent drop is
-        # the shape that leaves a ledger disagreeing with what was asked for.
+        # tabRef belongs to DebitAccount and CreditCafeAccount (both write
+        # settles) and is refused here rather than ignored, the mirror of
+        # post_entry's own refusal of reversesRef on every op but this one. A
+        # caller that sends one means "refund the charge that settled this
+        # tab" and would instead get a credit with no settles link and no
+        # relation to the tab at all -- a silent drop is the shape that leaves
+        # a ledger disagreeing with what was asked for.
         if hasattr(op.payload, "tabRef") and getattr(op.payload, "tabRef") != None:
-            fail("InvalidArgument: tabRef: only valid on DebitAccount, not RefundCafeCharge")
+            fail("InvalidArgument: tabRef: only valid on DebitAccount or CreditCafeAccount, not RefundCafeCharge")
         # workplace-exempt: (per-call-site) confine=True below hands the
         # discharge to post_entry's own require_workplace site — a frontOfHouse
         # staffer may refund only a charge on an account whose lease sits
@@ -1990,13 +2153,14 @@ def execute(state, op):
         # which require_workplace binds.
         if op.authContextTarget != "" or op.authTargetValidated:
             fail("AuthDenied: PayoutCafeCredit is a front-desk act, never self-scoped")
-        # tabRef is DebitAccount's field: a payout is a debit, but it settles
-        # no tab, and a caller that sends one means "charge this tab" and would
-        # instead get cash recorded as leaving the till. Refused rather than
-        # dropped, the RefundCafeCharge mirror; reversesRef is refused inside
-        # post_entry itself (allow_reverses_ref is False).
+        # tabRef belongs to DebitAccount and CreditCafeAccount (both write
+        # settles): a payout is a debit, but it settles no tab, and a caller
+        # that sends one means "charge this tab" and would instead get cash
+        # recorded as leaving the till. Refused rather than dropped, the
+        # RefundCafeCharge mirror; reversesRef is refused inside post_entry
+        # itself (allow_reverses_ref is False).
         if hasattr(op.payload, "tabRef") and getattr(op.payload, "tabRef") != None:
-            fail("InvalidArgument: tabRef: only valid on DebitAccount, not PayoutCafeCredit")
+            fail("InvalidArgument: tabRef: only valid on DebitAccount or CreditCafeAccount, not PayoutCafeCredit")
         # workplace-exempt: (per-call-site) confine=True below hands the
         # discharge to post_entry's own require_workplace site — a frontOfHouse
         # staffer may pay out only an account whose lease sits somewhere they

@@ -15,6 +15,13 @@ package cafedomain
 //     missing_account false.
 //   - SETTLED_CHARGED: settled, owes money, account exists, a cafetransaction
 //     settles this tab — both gaps false, converged.
+//   - SETTLED_PAID_*: the counter-payment gap. A tab recording
+//     paidAtSettleCents opens missing_payment only once a DEBIT
+//     cafetransaction settles it (the charge is posted), and closes it once a
+//     CREDIT one settles it too; a settled tab recording no paidAtSettleCents
+//     never opens it. Both entries carry the same settles hop — the lens
+//     tells them apart by .entry.type, so every settling fixture here seeds
+//     a typed .entry (settlesEntry).
 
 import (
 	"context"
@@ -95,6 +102,19 @@ func (f *cdFixture) edge(t *testing.T, name, fromName, toName string) {
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType}))
 }
 
+// settlesEntry seeds one cafetransaction with a typed .entry aspect and a
+// settles link to the tab — the exact shape cafe-ledger's post_entry leaves
+// behind for a playbook-posted charge (type debit) or counter payment (type
+// credit). The type is load-bearing: the lens counts settling debits and
+// settling credits separately, and an entry with no .entry at all counts as
+// neither.
+func (f *cdFixture) settlesEntry(t *testing.T, name, tabName, entryType string) {
+	t.Helper()
+	f.vtx(t, name, "cafetransaction")
+	f.aspect(t, name, "entry", "transactionEntry", map[string]any{"type": entryType, "amountCents": 1200.0})
+	f.edge(t, "settles", name, tabName)
+}
+
 // projectAt runs the anchored cafeTabSettlement spec for one tab. NO clock
 // parameter is supplied — the cypher references none.
 func (f *cdFixture) projectAt(t *testing.T, tabName string) []ruleengine.ProjectionResult {
@@ -166,8 +186,7 @@ func TestCafeTabSettlement_SettledStatusAndTimestampsProjected(t *testing.T) {
 	f.vtx(t, "settledtab_lease", "leaseapp")
 	f.edge(t, "chargedTo", "settledtab", "settledtab_lease")
 	f.aspect(t, "settledtab_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
-	f.vtx(t, "settledtab_tx", "cafetransaction")
-	f.edge(t, "settles", "settledtab_tx", "settledtab")
+	f.settlesEntry(t, "settledtab_tx", "settledtab", "debit")
 
 	v := f.valuesAt(t, "settledtab")
 	require.Equal(t, "settled", v["status"])
@@ -253,12 +272,134 @@ func TestCafeTabSettlement_SettledAndCharged_Converged(t *testing.T) {
 	f := newCdFixture(t)
 	f.mkTab(t, "chargedtab", "settled", 1200)
 	f.aspect(t, "chargedtab_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
-	f.vtx(t, "chargedtab_tx", "cafetransaction")
-	f.edge(t, "settles", "chargedtab_tx", "chargedtab")
+	f.settlesEntry(t, "chargedtab_tx", "chargedtab", "debit")
 
 	v := f.valuesAt(t, "chargedtab")
 	require.Equal(t, false, v["missing_account"])
 	require.Equal(t, false, v["missing_charge"], "a cafetransaction settles this tab — converged")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestCafeTabSettlement_PaidNoDebit_MissingChargeOnly is the ORDERING pin: a
+// settled tab that records cash taken at the counter still opens ONLY
+// missing_charge until the debit posts. cafe-ledger's payment cap reads the
+// account's live .balance, so a credit dispatched before the charge is
+// refused PaymentExceedsBalance for money the resident already handed over —
+// the txCount > 0 conjunct on missing_payment is what keeps the two gaps in
+// sequence and never both live. Dropping that conjunct fails this pin.
+func TestCafeTabSettlement_PaidNoDebit_MissingChargeOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.mkTab(t, "paidnodebit", "settled", 1200)
+	f.aspect(t, "paidnodebit", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 1200.0, "openedAt": "2026-07-07T12:00:00Z",
+		"paidAtSettleCents": 1200.0, "paidAtSettleBy": "vtx.identity.BBFAKESTAFFHJKMNPQRS",
+	})
+	f.aspect(t, "paidnodebit_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
+
+	v := f.valuesAt(t, "paidnodebit")
+	require.Equal(t, 1200.0, v["paidAtSettleCents"], "the recorded counter payment projects through")
+	require.Equal(t, false, v["missing_account"])
+	require.Equal(t, true, v["missing_charge"], "no cafetransaction settles this tab yet — the debit comes first")
+	require.Equal(t, false, v["missing_payment"], "the payment gap must not open before the debit is posted")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestCafeTabSettlement_PaidAndDebited_MissingPayment: once the debit is
+// posted (a cafetransaction settles the tab), the recorded counter payment is
+// the one posting still owed — missing_payment opens, missing_charge closes.
+func TestCafeTabSettlement_PaidAndDebited_MissingPayment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.mkTab(t, "paiddebited", "settled", 1200)
+	f.aspect(t, "paiddebited", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 1200.0, "openedAt": "2026-07-07T12:00:00Z",
+		"paidAtSettleCents": 1200.0, "paidAtSettleBy": "vtx.identity.BBFAKESTAFFHJKMNPQRS",
+	})
+	f.aspect(t, "paiddebited_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
+	f.settlesEntry(t, "paiddebited_tx", "paiddebited", "debit")
+
+	v := f.valuesAt(t, "paiddebited")
+	require.Equal(t, false, v["missing_account"])
+	require.Equal(t, false, v["missing_charge"], "the debit is posted")
+	require.Equal(t, true, v["missing_payment"], "cash was taken at settle and no credit settles this tab yet — violating")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestCafeTabSettlement_PaidCreditAlone_MissingChargeOnly is the type
+// discrimination pin: the charge and the counter payment share one settles
+// hop, so a CREDIT settling the tab with no DEBIT must satisfy neither
+// count the wrong way — missing_charge stays open (no debit yet) and
+// missing_payment stays closed (its debit conjunct is unmet, and the credit
+// is not a charge). A count over the bare hop, blind to type, would read the
+// credit as the charge and mark the tab converged with nothing charged.
+func TestCafeTabSettlement_PaidCreditAlone_MissingChargeOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.mkTab(t, "creditalone", "settled", 1200)
+	f.aspect(t, "creditalone", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 1200.0, "openedAt": "2026-07-07T12:00:00Z",
+		"paidAtSettleCents": 1200.0, "paidAtSettleBy": "vtx.identity.BBFAKESTAFFHJKMNPQRS",
+	})
+	f.aspect(t, "creditalone_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
+	f.settlesEntry(t, "creditalone_px", "creditalone", "credit")
+
+	v := f.valuesAt(t, "creditalone")
+	require.Equal(t, true, v["missing_charge"], "a settling CREDIT is not the charge — the debit is still owed")
+	require.Equal(t, false, v["missing_payment"], "no debit yet, so the payment gap cannot open")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestCafeTabSettlement_PaidDebitedAndCredited_Converged: the credit the
+// Weaver posts writes the same settles hop with .entry.type credit, and the
+// row converges on every gap.
+func TestCafeTabSettlement_PaidDebitedAndCredited_Converged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.mkTab(t, "paidconverged", "settled", 1200)
+	f.aspect(t, "paidconverged", "status", "tabStatus", map[string]any{
+		"value": "settled", "totalCents": 1200.0, "openedAt": "2026-07-07T12:00:00Z",
+		"paidAtSettleCents": 1200.0, "paidAtSettleBy": "vtx.identity.BBFAKESTAFFHJKMNPQRS",
+	})
+	f.aspect(t, "paidconverged_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
+	f.settlesEntry(t, "paidconverged_tx", "paidconverged", "debit")
+	f.settlesEntry(t, "paidconverged_px", "paidconverged", "credit")
+
+	v := f.valuesAt(t, "paidconverged")
+	require.Equal(t, false, v["missing_account"])
+	require.Equal(t, false, v["missing_charge"])
+	require.Equal(t, false, v["missing_payment"], "a credit settles this tab — converged")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestCafeTabSettlement_UnpaidAndDebited_NoPaymentGap: a settled tab that
+// records NO paidAtSettleCents never opens missing_payment, debit posted or
+// not — absent means no counter payment was taken, never "unpaid" (the
+// resident pays later against the ledger). This is also the null-comparison
+// pin: the full engine reads `paidAtSettleCents > 0` as false when the field
+// is absent (ruleengine/full/values.go compareAny), so no null guard is
+// needed in the spec.
+func TestCafeTabSettlement_UnpaidAndDebited_NoPaymentGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	f.mkTab(t, "unpaiddebited", "settled", 1200)
+	f.aspect(t, "unpaiddebited_lease", "cafeLedgerAccount", "cafeLedgerAccountGuard", map[string]any{"accountKey": "vtx.cafeaccount.BBFAKEACCTHJKMNPQRST"})
+	f.settlesEntry(t, "unpaiddebited_tx", "unpaiddebited", "debit")
+
+	v := f.valuesAt(t, "unpaiddebited")
+	require.Nil(t, v["paidAtSettleCents"], "no counter payment recorded")
+	require.Equal(t, false, v["missing_charge"])
+	require.Equal(t, false, v["missing_payment"], "no paidAtSettleCents — nothing to post; absent is not unpaid")
 	require.Equal(t, false, v["violating"])
 }
 

@@ -30,18 +30,20 @@ type tabChargeLineProjection struct {
 // tabSettlementProjection is one row of the cafe-domain `cafeTabSettlement`
 // convergence lens.
 type tabSettlementProjection struct {
-	TabKey         string                    `json:"tabKey"`
-	LeaseAppKey    string                    `json:"leaseAppKey"`
-	AccountKey     string                    `json:"accountKey"`
-	TotalCents     *float64                  `json:"totalCents"`
-	ItemsMemo      string                    `json:"itemsMemo"`
-	Lines          []tabChargeLineProjection `json:"lines"`
-	Status         string                    `json:"status"`
-	OpenedAt       string                    `json:"openedAt"`
-	SettledAt      string                    `json:"settledAt"`
-	MissingAccount bool                      `json:"missing_account"`
-	MissingCharge  bool                      `json:"missing_charge"`
-	Violating      bool                      `json:"violating"`
+	TabKey            string                    `json:"tabKey"`
+	LeaseAppKey       string                    `json:"leaseAppKey"`
+	AccountKey        string                    `json:"accountKey"`
+	TotalCents        *float64                  `json:"totalCents"`
+	ItemsMemo         string                    `json:"itemsMemo"`
+	Lines             []tabChargeLineProjection `json:"lines"`
+	Status            string                    `json:"status"`
+	OpenedAt          string                    `json:"openedAt"`
+	SettledAt         string                    `json:"settledAt"`
+	PaidAtSettleCents *float64                  `json:"paidAtSettleCents"`
+	MissingAccount    bool                      `json:"missing_account"`
+	MissingCharge     bool                      `json:"missing_charge"`
+	MissingPayment    bool                      `json:"missing_payment"`
+	Violating         bool                      `json:"violating"`
 }
 
 // tabChargeLine is one itemized entry a receipt renders — the same shape as
@@ -67,25 +69,30 @@ type tabChargeLine struct {
 
 // tabRow is the tab card the POS/front-desk views render.
 type tabRow struct {
-	TabKey      string          `json:"tabKey"`
-	LeaseAppKey string          `json:"leaseAppKey"`
-	AccountKey  string          `json:"accountKey,omitempty"`
-	TotalCents  int64           `json:"totalCents"`
-	ItemsMemo   string          `json:"itemsMemo,omitempty"`
-	Lines       []tabChargeLine `json:"lines,omitempty"`
-	Status      string          `json:"status"`
-	OpenedAt    string          `json:"openedAt"`
-	SettledAt   string          `json:"settledAt,omitempty"`
-	Posted      bool            `json:"posted"`
+	TabKey            string          `json:"tabKey"`
+	LeaseAppKey       string          `json:"leaseAppKey"`
+	AccountKey        string          `json:"accountKey,omitempty"`
+	TotalCents        int64           `json:"totalCents"`
+	ItemsMemo         string          `json:"itemsMemo,omitempty"`
+	Lines             []tabChargeLine `json:"lines,omitempty"`
+	Status            string          `json:"status"`
+	OpenedAt          string          `json:"openedAt"`
+	SettledAt         string          `json:"settledAt,omitempty"`
+	PaidAtSettleCents int64           `json:"paidAtSettleCents,omitempty"`
+	Posted            bool            `json:"posted"`
 }
 
 // computeTabs decodes every cafeTabSettlement row keyed under this package's
 // TabSettlementTarget prefix, optionally filtered to one lease. "Posted"
-// (fully settled and its charge landed on the café ledger) is true exactly
-// when the row is settled and neither gap is open — a settled, zero-total tab
-// (never violates either gap) counts as posted too, since it never needed a
-// posting. A row that fails to decode or carries no tabKey (a tombstoned
-// projection entry) is skipped.
+// (fully settled, its charge landed on the café ledger, AND — when the desk
+// took cash at settle — that payment has posted too) is true exactly when
+// the row is settled and none of the three gaps is open: missing_account,
+// missing_charge, and missing_payment. A row with no missing_payment key at
+// all (a tab settled with no counter payment, or one predating the field)
+// decodes it false, so Posted there still follows the first two gaps alone
+// — a settled, zero-total tab (never violates any of the three) counts as
+// posted too, since it never needed a posting. A row that fails to decode or
+// carries no tabKey (a tombstoned projection entry) is skipped.
 func computeTabs(keys []string, get kvGetter, leaseAppKey string) []tabRow {
 	prefix := cafedomain.TabSettlementTarget + "."
 	rows := make([]tabRow, 0)
@@ -112,6 +119,10 @@ func computeTabs(keys []string, get kvGetter, leaseAppKey string) []tabRow {
 		if p.TotalCents != nil {
 			total = int64(*p.TotalCents)
 		}
+		var paidAtSettle int64
+		if p.PaidAtSettleCents != nil {
+			paidAtSettle = int64(*p.PaidAtSettleCents)
+		}
 		var lines []tabChargeLine
 		for _, l := range p.Lines {
 			var amount int64
@@ -124,16 +135,17 @@ func computeTabs(keys []string, get kvGetter, leaseAppKey string) []tabRow {
 			})
 		}
 		rows = append(rows, tabRow{
-			TabKey:      p.TabKey,
-			LeaseAppKey: p.LeaseAppKey,
-			AccountKey:  p.AccountKey,
-			TotalCents:  total,
-			ItemsMemo:   p.ItemsMemo,
-			Lines:       lines,
-			Status:      p.Status,
-			OpenedAt:    p.OpenedAt,
-			SettledAt:   p.SettledAt,
-			Posted:      p.Status == "settled" && !p.MissingAccount && !p.MissingCharge,
+			TabKey:            p.TabKey,
+			LeaseAppKey:       p.LeaseAppKey,
+			AccountKey:        p.AccountKey,
+			TotalCents:        total,
+			ItemsMemo:         p.ItemsMemo,
+			Lines:             lines,
+			Status:            p.Status,
+			OpenedAt:          p.OpenedAt,
+			SettledAt:         p.SettledAt,
+			PaidAtSettleCents: paidAtSettle,
+			Posted:            p.Status == "settled" && !p.MissingAccount && !p.MissingCharge && !p.MissingPayment,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
