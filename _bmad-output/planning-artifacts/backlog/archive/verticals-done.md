@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-15 · `a0ba03a2` · A reminded debtor opens no new tab — `OpenTab` refuses `CreditHold` off `.arrears.sentAt` (heldFor in-walk, both legs); picker badge "owes $X · N days overdue · credit hold", hold panel, confirm; refused live.
 - 2026-09-15 · `a0ba03a2` · A tab's total always equals its live lines — `VoidCharge` voids by `lineId` only (amount-only form retired), itemsMemo re-derived, workplace confined before the line lookup; proven live at $0.
 - 2026-09-14 · `aa48d51f` · A live read decides no bare mutation on its key — `lint-live-read-pinned-mutation`; 7 sites pinned; dossier class retired ([census](../../../docs/reviews/verticals-packages-occ-gates-2026-09-14.md)).
 - 2026-09-14 · `284ffc66` · Every `derive_reads` op has a bare-envelope vector — `lint-derive-reads-bare-vector` (21 ops); seven derive_reads now derive the vertex root; dossier class retired; live.

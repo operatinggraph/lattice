@@ -55,7 +55,8 @@ warned. Winston-adjudicated (implementation-level; no contract surface, no fork)
 5. **Lens `cafeHousePolicies`** → NATS-KV `cafe-house-policies`, one row per location carrying a policy:
    `{locationKey, tabLimitCents, name}` (`name` off `.presentation`).
 6. **`cmd/cafe-app`:** `/api/residents` rows gain `tabLimitCents` (null = none) = min over the lease's
-   `coveringLocations` ∩ policies; `/api/house-policies` (staff: the workplace-covered policies; operator: all).
+   `coveringLocations` ∩ policies; `/api/house-policies` (staff: every policy on the chains of the leases the workplace
+   covers — the op binds the tightest, so the panel names a tighter one above; operator: all; resident: their chain).
    Resident view: the tab card says "House limit $X · $Y left"; the self-order picker disables an item that would
    push past it; Open Tab hides at limit 0 with a "self-service tabs are closed" panel. POS: the open-tab card says
    the limit and warns "at / over the house limit" once `totalCents >= limit`. Manage Menu: a "House tab limit"
@@ -117,3 +118,37 @@ warned. Winston-adjudicated (implementation-level; no contract surface, no fork)
 7. **Non-goals:** a limit on the ledger balance (the credit hold's lane); a per-resident limit; a way to delete a
    recorded policy (mirrors the wellness profile — a policy is edited, never removed; a large value lifts it);
    Facet's descriptor form (courtesy `none` — the edge lenses project no tab limit).
+
+### Build note (2026-09-16)
+
+Shipped `71b71bc5` (merge `c6136985`); brief `9d1f05e5`. One commit, both increments. Live on the shared stack
+(cafe-domain 0.17.0 → 0.18.0 diff-applied, `bin/cafe-app` cycled): Dana Whitfield recorded `SetCafePolicy{Riverside,
+900}` through the Gateway and `cafeHousePolicies` projected the row within 6 s; Riley Chen's `/api/residents` row read
+`tabLimitCents: 900`; Riley opened a tab and self-ordered two croissants ($7.00), the third was refused
+`TabLimitExceeded: this house limits a self-service tab to $9.00; the tab stands at $7.00 and this item is $3.50; ask
+the desk` (step 5 wall 45 ms, 8 live reads, 5 listings; the accepted self-orders 61–65 ms), Dana rang a fourth past the
+limit ($10.50); after Riley settled, `SetCafePolicy{…, 0}` closed the house and Riley's `OpenTab` was refused
+`TabLimitExceeded: self-service tabs are closed at this house`; the limit was then set to $50.00 and left there. Rendered:
+the Manage Menu panel reads *House tab limit at Riverside Building: $50.00 per tab* with the input prefilled, the POS
+and resident cards read *House limit $50.00 · $46.50 left* over Riley's $3.50 tab.
+
+**Deviations from the brief.** (1) The lens head is `MATCH (loc:location*)` — the corpus's first EXHAUSTIVE `*` sigil
+lens: the label-cap gate prices it (0 concrete labels + location's LeafBudget 5) and the pkgmgr sigil-corpus pins were
+re-stated; anchor derivation refuses the sigil head (no single key prefix), so the lens runs on the enumerator, and its
+seven refractor census verdicts are pinned as derived (no neighbour, so no retraction-transport debt). (2) `SetCafePolicy`
+lives in the menuitem script (the desk's house-configuration script), dispatched `class: menuitem`. (3) The staff read
+of `/api/house-policies` returns the covered chains, not only the workplace's own row (review F1). (4) Starlark `class`
+is a keyword — the policy's class check is `getattr(policy, "class", None)`. (5) `lint-app-op-descriptors`' café ceiling
+10 → 11 (the panel is a single prefilled input beside the hand-built Add-item form; the wellness `SetStudioProfile`
+shape). (6) `parseDollarsOrZero` refuses a fraction of a cent rather than rounding it.
+
+**Close-pass classification.** Cold review (opus): nothing blocking. F1 panel promised the workplace's own row as the
+rule (design-gap — the FE-promise class, sixth sighting, `vertical-apps.md`); F2 second chain walk on the self Charge
+(perf — measured live at 45–65 ms under the 250 ms wall, no fold; the walk stays a sibling of `location_covers`); F3
+class filter parity op ↔ lens (implementation-bug, fixed); F4 missing vectors (test-gap — tombstoned node on the chain,
+foreign-class and malformed values, `SetCafePolicy` on a unit, OpenTab under a positive limit / on a property chain, all
+added); NITs: fail-open bounds documented, whole-cent parse, README op count, one `cafe-lease-workplaces` list per
+residents request (all fixed); the operator has no `worksAt` anchor so cannot set a policy from the UI (left: the
+operator sets it by CLI, the desk from the panel). CI: `unit-4` failed on `internal/substrate`'s
+`TestKVMarkerProvenance_ExpiryIsTheOnlyMaxAgeMarker` (untouched, the same flake the previous two café fires met; a
+whetstone chip already stands) and was rerun.

@@ -72,7 +72,11 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   now "of which up to $min(balance, held)". **Fifth (café counter payment, 2026-09-16, caught cold):** the app's
   `Posted` boolean enumerated two of the lens's three gap columns after a third was added — a derived FE boolean over
   gap columns lists every gap the lens's `violating` OR-s; and a button that pays "the total" sent the rendered
-  total, so a stale card became a silent partial — the op now refuses a mismatch and the card re-renders.
+  total, so a stale card became a silent partial — the op now refuses a mismatch and the card re-renders. **Sixth
+  (café house tab limit, 2026-09-16, caught cold):** the desk's policy panel read only the workplace's OWN row and
+  said "residents may self-order any total" while the op binds the tightest policy on the whole chain — a panel
+  that names a rule states the op's composition, not one input to it; the read now returns the covered chains and
+  the sentence names the tighter policy that binds.
 - **An op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`** — a
   rationale comment naming an exemption-less op (the instructor identity bind) reddened `lint-static` after
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats

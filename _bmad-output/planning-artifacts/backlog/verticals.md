@@ -21,7 +21,6 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **No ledger reminds a debtor past ~30 lines** | The arrears replay walks the account's history inside the op (≈300 round trips for 98 entries) and the 250 ms script wall aborts it; clinic degrades honestly at 30 entries, café/wellness/loftspace still promise 500. Live: Riley Chen, the one clinic debtor, is never reminded. | Cross-vertical | pkg + platform | ★★ | M | 📐 needs designer pass · no-pattern: a one-round-trip read of an enumeration's follow-up aspects, or a per-op script wall · [note](../../../docs/reviews/clinic-arrears-reminder-2026-09-15.md) |
 | **Facet on a literal iOS device** | The SwiftUI renderer builds + runs as a macOS proxy only. A real iOS/simulator build proves platform packaging (App Store viability), which FORK-1's freeze no longer waits on. Also unblocks real `swift test` in place of the hand-mirrored `swift run` harness. | Cross-vertical | Sally + FE Engineer | ★ | M | 🗄️ shelved (revive: a machine with full Xcode — this host has CommandLineTools only) · [design §7.10](../../implementation-artifacts/edge-showcase-app-design.md) |
 | **A just-minted applicant with no application is on no staffer's roster** | `applicantRosterRead` anchors an identity on its own key + the landlord/buildings of units it has a live application against ([lenses.go:250](../../../packages/loftspace-domain/lenses.go:250)); a claim secret lost before the first application has no roster row to re-issue from. Live: 0. | LoftSpace | pkg | ★ | S | 🗄️ shelved (revive: a PO-observed instance or a second lens needing a mint-site anchor; re-mint → merge recovers it) · [triage §4](../../../docs/reviews/verticals-designer-triage-2026-09-10.md) |
-| **A house tab has no limit** | Self-order is capped only by the credit hold, which arms 15 days + a reminder after the first unpaid debit; a new resident can run any total in the meantime. No recorded tab limit anywhere. | Café | pkg + FE Engineer | ★★ | S | 🏗️ building · [design](../../../docs/reviews/cafe-house-tab-limit-2026-09-16.md) · next: Inc 1 package |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -61,6 +60,7 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 
 One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` past ~25.
 
+- 2026-09-16 · `71b71bc5` · A house tab has a recorded limit — `SetCafePolicy` on the location, tightest on the chain; self leg refused `TabLimitExceeded`, the desk rings past ([design](../../../docs/reviews/cafe-house-tab-limit-2026-09-16.md)).
 - 2026-09-16 · `1144aec5` · The desk settles and takes the cash at once — `Settle{paidCents}`, `missing_payment` posts the tab-tied credit after the debit; Settle & pay; live ([design](../../../docs/reviews/cafe-counter-payment-2026-09-16.md)).
 - 2026-09-16 · `1144aec5` · The arrears row takes a payment — *Take payment* beside *Write off*, a confirmed `CreditCafeAccount{reason: payment}` prefilled to the balance shown.
 - 2026-09-16 · `6e038e54` · Tab and visit times render as the viewer's local date-time — one `localDateTime` formatter on every card's `openedAt`/`settledAt`/`startsAt`; goja-pinned.
@@ -85,6 +85,5 @@ One line per shipped item (`date · SHA · title`). Oldest roll to `archive/` pa
 - 2026-09-15 · `c6b25579` · `lint-refusal-courtesy` — every dispatch site declares its courtesy per state refusal (52 ops, Facet incl.); six siblings fixed; [census](../../../docs/reviews/verticals-refusal-courtesy-gate-2026-09-15.md).
 - 2026-09-15 · `fd9cd157` · The desk takes an item off the menu for the day — `SetMenuItemAvailability` sets `.price.available`, both lenses project it, all three pickers grey it, `Charge` refuses `ItemUnavailable`; refused live.
 - 2026-09-15 · `fd9cd157` · A posted charge opens to its receipt — `receiptLines` joins a ledger row to its settled tab by `tabKey`; the statement renders the lines (price, who ordered, voids) collapsed, resident and desk alike; live.
-- 2026-09-15 · `a0ba03a2` · A reminded debtor opens no new tab — `OpenTab` refuses `CreditHold` off `.arrears.sentAt` (heldFor in-walk, both legs); picker badge "owes $X · N days overdue · credit hold", hold panel, confirm; refused live.
 
 - *(older entries rolled to [archive/verticals-done.md](archive/verticals-done.md))*
