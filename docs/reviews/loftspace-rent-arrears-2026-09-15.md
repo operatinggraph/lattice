@@ -172,3 +172,33 @@ the lease the way a café tab or a class seat does). A future hold is its own ro
 7. **Non-goals:** a `CreditHold` on any LoftSpace op; a stored balance; stamping `dueAt` on `LoftspaceRecordCharge`
    (due-on-receipt is the read rule); café-side age on the one-bill (the café ledger has its own); the notice /
    early-end row; the deposit row; the wellness/café mechanisms themselves.
+
+### Build note (2026-09-15)
+
+Shipped `c44e1f44` (merge of `33e5177f`; CI green); brief `ec82086c`. Live on the shared stack (loftspace-ledger 0.7.5 +
+wellness-ledger 0.2.26 diff-applied, `bin/loftspace-app` / `bin/wellness-app` cycled): the seven standing rent accounts
+opened the never-evaluated gap and `EvaluateLoftspaceArrears` ran once each after a `lattice weaver revoke` + `enable`
+cleared the first-dispatch `AuthDenied` (`_packages.md` §5, not a defect of this build) — five heads past their grace
+stamped `sentAt 00:36:50Z` and the bridge's `notification` adapter posted `RecordLoftspaceArrearsReminderNotification`
+for each; two armed `freshUntil` at their `remindAt`. Nora's portfolio ranks 10 Riverside ($3,300 · 45 days overdue ·
+reminded) above 40 Riverside ($2,400 · 2 days overdue), the ledger line reads "Balance owed: $3,300 · rent due Aug 1,
+2026 · 45 days overdue · a reminder was sent Sep 16, 2026", and Priya's one-bill statement carries `rentBalanceCents`
+240000 · due 09-13 · 2 days overdue. Priya's head is the period-09-08 rent charge posted 2026-09-13 BEFORE `4fe3ecef`
+stamped `dueAt` on entries, so it records no due and is due on receipt (09-13), not the 09-08 the PO read off the clause —
+the recorded fact, by design; charges posted since carry their grid due.
+
+Deviations from the brief: the notification key is `<accountKey>:<dueAt>:<headTransactionKey>` (recorded due dates
+repeat across a lease's charges, so `accountKey:dueAt` was not episode-unique — caught cold); the episode boundary is the
+OPENER's `postedAt` (the debit appended onto an empty open queue), tracked in `arrears_head`, not the head's — the head
+is the opener only until a partial payment retires it exactly, and the head-based drop re-reminded a never-square tenant
+against the DDL's one-per-episode rule (caught cold; inherited from wellness, fixed there too, wellness-ledger 0.2.25 →
+0.2.26; café ends episodes at write time on `.balance → 0` and is unaffected); LoftSpace compares `sentAt <
+episodeStart` (a late-posted head evaluated in its own posting second is this episode's send), wellness keeps `<=`; the
+app's derivation applies the same boundary to the recorded `reminderSentAt` / `arrearsDueAt` and lets the recorded
+stamp win only while a debit is open. Review classification (one cold 3-layer pass over the package diff, lead pass
+over the app diff): **design-gap** — the two SHOULD-FIXes above, both a mirror carrying a premise (`dueAt` per-head
+unique; head = opener) that café's stored balance / posting-based term satisfied and a recorded due date does not
+(`_packages.md` dossier, third sighting of *a mirror that drops a check drops the invariant*, folded with the mandated
+exact-retirement vector); **convention** — one history-narrating comment in `app.js` (lead review); **inherited, not
+changed** — the reply op carries no actor guard (audit-only aspect), the dead `remindAt <> null` conjunct on
+`freshUntil` (documentary in all three ledgers). Adjacent finds: none.

@@ -649,8 +649,13 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   `reversesRef` kept café's liveness check and dropped its ownership check (a desk waiver could disarm another
   patient's `missing_reversal`; the descriptor field then reached the self leg, 2026-09-14); wellness's arrears
   evaluator kept café's stale/carry branch and dropped `.balance → 0`, and the episode boundary went with it (two
-  entries inside one Weaver window fused two episodes, 2026-09-15, BLOCKING). Check: for every precedent branch or
-  conjunct the mirror omits, write what it enforced and name the new site that enforces it; for every `<x>Ref`, name
+  entries inside one Weaver window fused two episodes, 2026-09-15, BLOCKING); the loftspace mirror of that fix inherited
+  its head-as-episode-start approximation (an exact payment of the reminded month re-reminded a never-square tenant)
+  and its `accountKey:dueAt` notification key, whose per-head uniqueness was a property of café's `postedAt + term`
+  that a RECORDED due date lacks (2026-09-15, both SHOULD-FIX). Check: for every precedent branch or
+  conjunct the mirror omits, write what it enforced and name the new site that enforces it; for every key component,
+  compare and boundary the mirror KEEPS, name what makes it unique / ordered in THIS package's data (mandated vector
+  for an episode mechanism: the reminded item retired exactly while the episode continues); for every `<x>Ref`, name
   the relation tying it to the op's target and read that link — deterministic keys through `derive_reads`,
   walk-resolved ones as the `(e)` follow-up with a `read_drift_baseline` row — grepping the `authContextTarget`
   branch for every optional field the descriptor exposes; a sampled-evaluator invariant is proven with events interleaved BETWEEN
