@@ -27,6 +27,7 @@ type listingProjection struct {
 	Sqft            *float64 `json:"sqft"`
 	AvailableFrom   string   `json:"availableFrom"`
 	LeaseTermMonths *float64 `json:"leaseTermMonths"`
+	DepositAmount   *float64 `json:"depositAmount"`
 	AddrLine1       string   `json:"addrLine1"`
 	AddrLine2       string   `json:"addrLine2"`
 	AddrCity        string   `json:"addrCity"`
@@ -102,6 +103,9 @@ func (p listingProjection) toRow() listingRow {
 	}
 	if p.LeaseTermMonths != nil {
 		listing["leaseTermMonths"] = *p.LeaseTermMonths
+	}
+	if p.DepositAmount != nil {
+		listing["depositAmount"] = *p.DepositAmount
 	}
 
 	address := map[string]any{}

@@ -159,6 +159,20 @@ def optional_number(p, name):
         return None
     return v
 
+def two_decimals(v, name):
+    # A dollar amount carries at most two decimals: v × 100 must sit within a
+    # millionth of an integer. The ledger keeps integer cents, and a figure
+    # with a fractional cent here would become a clause the reader refuses on
+    # every convergence pass — so it is refused once, at the source.
+    scaled = v * 100
+    nearest = int(scaled + 0.5)
+    d = scaled - nearest
+    if d < 0:
+        d = -d
+    if d > 0.000001:
+        fail("InvalidArgument: " + name + ": at most two decimal places")
+    return v
+
 def as_rfc3339_instant(s):
     # A bare "YYYY-MM-DD" (the FE's <input type=date> shape, and what
     # seed-showcase / seed-classic-demo write for moveInDate / availableFrom)
@@ -672,6 +686,7 @@ def execute(state, op):
                 req_rent = optional_number(p, "requestedRent")
                 if req_rent == None or req_rent <= 0:
                     fail("InvalidTerms: requestedRent must be a positive amount, got " + str(getattr(p, "requestedRent")))
+                req_rent = two_decimals(req_rent, "requestedRent")
             if req_rent == None:
                 # No rent offer from the applicant — fall back to the unit's own
                 # listed rent, so leaseRentSettlementSpec (semantic-contracts) has
@@ -1007,6 +1022,22 @@ def execute(state, op):
                     tenancy_data["rentAmount"] = rent
 
                 mutations.append(make_aspect(app_key, "tenancy", "tenancy", tenancy_data))
+
+                # .deposit: the security-deposit figure the tenancy owes,
+                # recorded at THIS approval event from the listing's own
+                # depositAmount — CREATE-ONLY, in the same mutation batch as
+                # .tenancy (one event, both or neither). It is its own
+                # aspect, not a .tenancy field: SignRenewal rewrites .tenancy
+                # wholesale from a fixed five-field list, and a field bolted
+                # on there would vanish on the first renewal. The listing is
+                # a mutable relation a landlord can edit after approval, so
+                # the figure is captured here rather than read live at
+                # return time — a later listing edit must not re-price a
+                # signed lease's deposit. No aspect when the listing carries
+                # no positive depositAmount (the unit takes no deposit).
+                deposit_amount = listing.data.get("depositAmount")
+                if deposit_amount != None and (type(deposit_amount) == type(0) or type(deposit_amount) == type(0.0)) and deposit_amount > 0:
+                    mutations.append(make_aspect(app_key, "deposit", "leaseDeposit", {"amount": deposit_amount, "recordedAt": decided_at}))
 
         # .decidedProfileSnapshot: the fair-housing preservation record —
         # stamped exactly once, on the FIRST .decision write of EITHER value

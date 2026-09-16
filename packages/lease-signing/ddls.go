@@ -39,6 +39,12 @@ import (
 //     once, at signing, snapshotting the applicant identity's own .name;
 //     absent when the applicant had no live .name to snapshot. See
 //     RetentionClasses().
+//   - `leaseDeposit` — the security-deposit aspect-type DDL
+//     DecideLeaseApplication write-gates on the SAME first-approve branch as
+//     .tenancy (the leaseapp vertexType script owns the write). NOT
+//     sensitive: a dollar figure and when it was recorded, not personal
+//     data. CREATE-ONLY-stamped once, from the unit's listing.depositAmount,
+//     when that figure is a positive number; absent otherwise.
 //   - `leaseServiceInstance` — CreateLeaseServiceInstance, the externalTask
 //     instanceOp Loom submits: mints the claim vertex vtx.service.<handle>,
 //     records its family + the providedTo link, and emits external.<adapter>.
@@ -81,6 +87,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		decidedProfileSnapshotAspectDDL(),
 		tenantNameAspectDDL(),
 		tenancyNoticeAspectDDL(),
+		leaseDepositAspectDDL(),
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
 		leaseServiceDispatchDDL(),
@@ -148,6 +155,13 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"landlord who approved, and a tenant who later signs a renewal extending leaseEnd, is never silently " +
 			"truncated back to the original term. (SignRenewal also records termStart on .tenancy and may rewrite " +
 			"rentAmount; this op writes rentAmount only from the sources above.) " +
+			"On that SAME first approve, it also CREATE-ONLY-stamps a .deposit aspect (class leaseDeposit) " +
+			"{amount, recordedAt (canonical-UTC RFC3339, the same instant as decidedAt)} from the unit's own " +
+			"listing.depositAmount when it is a positive number — recorded at THIS approval event rather than read " +
+			"live at return time, so a landlord editing the listing's deposit after approval never re-prices a " +
+			"signed lease. No .deposit aspect is written when the listing carries no positive depositAmount (the " +
+			"unit takes no deposit). It is its own aspect, not a .tenancy field, because SignRenewal rewrites " +
+			".tenancy wholesale from a fixed field list that a bolted-on deposit would not survive. " +
 			"On the FIRST decision of EITHER value (approve or decline), it also CREATE-ONLY-stamps a .decidedProfileSnapshot " +
 			"aspect (class decidedProfileSnapshot, SENSITIVE, same underwritingRecord retention class as .profile) copying the " +
 			"then-current .profile / .underwritingParties / .applicationSignals data maps (each keyed under its own name, " +
@@ -257,7 +271,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"unit":{"type":"string","description":"vtx.unit.<NanoID> of the location-domain unit this application is to lease (CreateLeaseApplication; required, validated alive). Also required on the FIRST DecideLeaseApplication approve (verified via the appliesToUnit link) so the op can read the unit's .listing as the fallback source for the .tenancy aspect (derived from the application's own .terms first)."},` +
 			`"moveInDate":{"type":"string","description":"Requested move-in date, RFC3339 or a bare YYYY-MM-DD read as midnight UTC (CreateLeaseApplication; optional — present ⇒ writes the .terms aspect and requires leaseTermMonths). Stored normalized to the RFC3339 instant; a value that parses as neither is refused."},` +
 			`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months — a whole number ≥ 1 (CreateLeaseApplication; required when moveInDate is supplied; a zero, negative or fractional count is refused InvalidTerms, as is one read back at the first approve)."},` +
-			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent, > 0 when supplied (CreateLeaseApplication; optional, only with moveInDate; zero or negative is refused InvalidTerms). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
+			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent, > 0 with at most two decimals when supplied (CreateLeaseApplication; optional, only with moveInDate; zero or negative is refused InvalidTerms, a third decimal InvalidArgument). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
 			`"leaseAppId":{"type":"string","description":"Optional bare NanoID for the application vertex (CreateLeaseApplication); absent → minted. The write-ahead seam, mirroring service-domain's instanceId."},` +
 			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), backfill (BackfillLeaseTerms), re-point at a different unit (ReassignLeaseUnit), whose lease term to record as ended (EndTenancy), whose tenancy to give notice on (GiveNotice), or whose loss of its unit to another applicant to record (RecordApplicationLoss); required, validated alive."},` +
 			`"moveOutDate":{"type":"string","description":"The date the tenant moves out — a DATE-ONLY fact: a bare YYYY-MM-DD, or an RFC3339 instant read as its UTC calendar day (the clock part is dropped; 2027-04-01T00:00:00-07:00 records 2027-04-01) (GiveNotice; required). Stored as .notice.moveOutAt = that day's midnight UTC. Must be today (the UTC calendar day of submittedAt) or later, after the term's leaseStart and before its leaseEnd; a value that parses as neither shape is refused InvalidArgument."},` +
@@ -283,7 +297,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"unit":                  "Full vtx.unit.<NanoID> key of the location-domain unit being applied for. CreateLeaseApplication requires it, validates it is alive, and writes the appliesToUnit link (leaseapp→unit). The convergence lens walks it and projects the unit's address / rent as informational columns. Required (no unit-less application). WithdrawLeaseApplication also requires it (verified via the appliesToUnit link) to reconstruct + free the per-(applicant, unit) guard link. DecideLeaseApplication requires it on the FIRST approve only (verified the same way) as the fallback source for the .tenancy aspect {leaseStart, leaseEnd, renewalOpensAt, rentAmount?} — derived from the application's own .terms first, the unit's .listing.availableFrom/leaseTermMonths/rentAmount only where .terms carries nothing — omitted on a decline or a re-approve (the .tenancy write is create-only).",
 			"moveInDate":            "Optional requested move-in date — RFC3339, or a bare YYYY-MM-DD read as midnight UTC; stored normalized to the RFC3339 instant, and a value that parses as neither is refused. When supplied, CreateLeaseApplication writes the .terms aspect {moveInDate, leaseTermMonths, requestedRent?} and requires leaseTermMonths. The first approve signs the lease on these terms (leaseStart = moveInDate).",
 			"leaseTermMonths":       "Requested lease term in months — a whole number ≥ 1 (a zero, negative or fractional count is refused InvalidTerms at CreateLeaseApplication, and again at the first approve if a stored value fails the test). Required when moveInDate is supplied; written to the .terms aspect and signed on at the first approve (leaseEnd = moveInDate + this many calendar months).",
-			"requestedRent":         "Optional monthly rent the applicant offers, > 0 when supplied (zero or negative is refused InvalidTerms). Written to the .terms aspect when supplied (only meaningful alongside moveInDate); the first approve records it as .tenancy.rentAmount, falling back to the unit's listed rent where it is absent or non-positive.",
+			"requestedRent":         "Optional monthly rent the applicant offers, > 0 with at most two decimals when supplied (zero or negative is refused InvalidTerms, a third decimal InvalidArgument — the ledger keeps whole cents). Written to the .terms aspect when supplied (only meaningful alongside moveInDate); the first approve records it as .tenancy.rentAmount, falling back to the unit's listed rent where it is absent or non-positive.",
 			"leaseAppId":            "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
 			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent; ReassignLeaseUnit validates it is alive and re-points its appliesToUnit link at newUnitKey; EndTenancy validates it is alive and rewrites its .tenancy aspect with endedAt = leaseEnd (the .tenancy is a required declared read too); RecordApplicationLoss validates it is alive and writes .decision {value: lost, decidedAt} once its unit has leased to another applicant (the .decision is a declared optionalReads). The caller lists it in ContextHint.Reads.",
 			"newUnitKey":            "Full vtx.unit.<NanoID> key of the unit ReassignLeaseUnit re-points the application at (required, validated alive). The operator names the unit directly — the application's OWN appliesToUnit / applicationFor links, never payload fields, are what the op reads to find the CURRENT unit and the applicant.",
@@ -846,6 +860,52 @@ func tenancyNoticeAspectDDL() pkgmgr.DDLSpec {
 				Name:            "tenancy-notice aspect",
 				Payload:         map[string]any{"moveOutAt": "2027-03-31T00:00:00Z", "givenAt": "2027-02-14T09:30:00Z", "givenBy": "tenant"},
 				ExpectedOutcome: "Stored as vtx.leaseapp.<NanoID>.notice, written CREATE-ONLY by GiveNotice. The tenancyEnd lens now arms its timer on 2027-03-31T00:00:00Z (if that precedes leaseEnd) and EndTenancy records endedAt there; SignRenewal refuses NoticeGiven; leaseExpiry opens no cycle.",
+			},
+		},
+	}
+}
+
+// leaseDepositAspectDDL declares the leaseapp's .deposit aspect — the security
+// deposit a tenancy owes, recorded at approval. Written ONCE by
+// DecideLeaseApplication, on the SAME first-approve branch that CREATE-ONLY-
+// stamps .tenancy (one event, both or neither), from the unit's own
+// listing.depositAmount when it is a positive number; never rewritten. It is
+// its own aspect rather than a .tenancy field because .tenancy already has
+// two whole-aspect writers (DecideLeaseApplication, SignRenewal) and
+// SignRenewal rewrites it from a fixed field list a bolted-on deposit would
+// not survive (the "mirror drops the invariant" class). The listing is a
+// mutable relation a landlord can edit after approval, so the figure is
+// captured at the approval event rather than read live at return time. Not
+// sensitive: a dollar figure and when it was recorded, not personal data.
+func leaseDepositAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "leaseDeposit",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"DecideLeaseApplication"},
+		Description: "Security-deposit aspect (lease-signing). Stored as vtx.leaseapp.<NanoID>.deposit (class leaseDeposit) " +
+			"= {amount, recordedAt}: the deposit figure the tenancy owes, captured from the unit's listing.depositAmount " +
+			"at the SAME first-approve event that CREATE-ONLY-stamps .tenancy (recordedAt = that same op.submittedAt " +
+			"instant, canonical-UTC RFC3339) — never on a decline, a re-approve, or any later listing edit. Written " +
+			"only when the listing carries a positive depositAmount; no aspect when it does not (the unit takes no " +
+			"deposit). Read by the leaseApplicationsRead / landlordLeaseApplicationsRead read models (depositAmount) " +
+			"and by semantic-contracts' leaseRentSettlement lens, whose missing_deposit gap mints the one-time " +
+			"purpose=deposit clause for this amount once the lease has its ledger account (and whose " +
+			"missing_depositReturn returns it on .tenancy.endedAt); renewalsRead does NOT project it — a renewal " +
+			"keeps the deposit, nothing there reads it. Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"amount":{"type":"number"},"recordedAt":{"type":"string"}},` +
+			`"required":["amount","recordedAt"]}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"amount":     "The security-deposit figure, a number > 0 in the listing's currency, copied verbatim from the unit's listing.depositAmount at approval.",
+			"recordedAt": "When the deposit was recorded — the SAME op.submittedAt instant .tenancy's leaseStart derivation uses on this first approve, canonical UTC.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "lease-deposit aspect",
+				Payload:         map[string]any{"amount": 1500, "recordedAt": "2027-02-14T09:30:00Z"},
+				ExpectedOutcome: "Stored as vtx.leaseapp.<NanoID>.deposit, written CREATE-ONLY by DecideLeaseApplication on the first approve, alongside .tenancy. leaseApplicationsRead / landlordLeaseApplicationsRead now project depositAmount.",
 			},
 		},
 	}

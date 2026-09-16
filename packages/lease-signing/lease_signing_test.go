@@ -2548,6 +2548,30 @@ func setListingAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, u
 	}
 }
 
+// seedUnitWithListingDeposit is seedUnitWithListing's sibling for a vector
+// that needs a listing carrying depositAmount — the Decide .deposit-recording
+// vectors below.
+func seedUnitWithListingDeposit(t *testing.T, ctx context.Context, conn *substrate.Conn, id, availableFrom string, leaseTermMonths int, rentAmount, depositAmount float64) string {
+	t.Helper()
+	key := "vtx.unit." + id
+	seedVertex(t, ctx, conn, key, "location", map[string]any{})
+	listing := map[string]any{
+		"class": "listing", "isDeleted": false, "vertexKey": key, "localName": "listing",
+		"data": map[string]any{
+			"availableFrom":   availableFrom,
+			"leaseTermMonths": leaseTermMonths,
+			"rentAmount":      rentAmount,
+			"rentCurrency":    "USD",
+			"depositAmount":   depositAmount,
+		},
+	}
+	lb, _ := json.Marshal(listing)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key+".listing", lb); err != nil {
+		t.Fatalf("set unit .listing %s: %v", key, err)
+	}
+	return key
+}
+
 // createApplicationWithTerms submits CreateLeaseApplication with an
 // applicant-supplied moveInDate/leaseTermMonths/requestedRent? against an
 // ALREADY-SEEDED unit, so the Decide tenancy-derivation vectors below have a
@@ -2700,6 +2724,70 @@ func TestDecideLeaseApplication_TenancyNoTerms_FallsBackToListing(t *testing.T) 
 	}
 	if got, _ := tdata["rentAmount"].(float64); got != 2050 {
 		t.Fatalf("tenancy.rentAmount = %v, want 2050 (the listing's own rent)", tdata["rentAmount"])
+	}
+}
+
+// TestDecideLeaseApplication_RecordsDepositFromListing: a listing carrying a
+// positive depositAmount gets it CREATE-ONLY-stamped onto .deposit on the
+// same first approve that stamps .tenancy.
+func TestDecideLeaseApplication_RecordsDepositFromListing(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-deposit-recorded")
+
+	applicantKey := seedApplicant(t, ctx, conn, "LLdepoapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListingDeposit(t, ctx, conn, "LLdepount1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050, 1500)
+	appKey := createApplicationForUnit(t, ctx, conn, cp, cons, applicantKey, unitKey)
+	signLease(t, ctx, conn, cp, cons, "decDepoSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decDepoApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	ddoc := readDoc(t, ctx, conn, appKey+".deposit")
+	if ddoc["class"] != "leaseDeposit" {
+		t.Fatalf("deposit class = %v, want leaseDeposit", ddoc["class"])
+	}
+	ddata, _ := ddoc["data"].(map[string]any)
+	if got, _ := ddata["amount"].(float64); got != 1500 {
+		t.Fatalf("deposit.amount = %v, want 1500 (the listing's own depositAmount)", ddata["amount"])
+	}
+	if got, _ := ddata["recordedAt"].(string); got != "2026-06-26T10:00:00Z" {
+		t.Fatalf("deposit.recordedAt = %q, want 2026-06-26T10:00:00Z (the same instant as decidedAt)", got)
+	}
+}
+
+// TestDecideLeaseApplication_NoDepositWhenListingHasNone: a listing with no
+// depositAmount at all leaves .deposit unwritten — the unit takes no deposit.
+func TestDecideLeaseApplication_NoDepositWhenListingHasNone(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-deposit-absent")
+
+	applicantKey := seedApplicant(t, ctx, conn, "JJdepoapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListing(t, ctx, conn, "JJdepount1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050)
+	appKey := createApplicationForUnit(t, ctx, conn, cp, cons, applicantKey, unitKey)
+	signLease(t, ctx, conn, cp, cons, "decNoDepSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decNoDepApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, appKey+".deposit") {
+		t.Fatalf("an approve against a listing with no depositAmount must stamp no .deposit aspect")
+	}
+}
+
+// TestDecideLeaseApplication_NoDepositWhenListingDepositZero: a listing whose
+// depositAmount is 0 is not a positive figure — .deposit stays unwritten,
+// mirroring .tenancy.rentAmount's own non-positive-offer guard.
+func TestDecideLeaseApplication_NoDepositWhenListingDepositZero(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "decide-deposit-zero")
+
+	applicantKey := seedApplicant(t, ctx, conn, "KKdepoapp1cntHJKMNPQ")
+	unitKey := seedUnitWithListingDeposit(t, ctx, conn, "KKdepount1cntHJKMNPQ", "2026-08-23T00:00:00Z", 12, 2050, 0)
+	appKey := createApplicationForUnit(t, ctx, conn, cp, cons, applicantKey, unitKey)
+	signLease(t, ctx, conn, cp, cons, "decZeroDepSign1", appKey, "2026-06-26T09:30:00Z")
+	decide(t, ctx, conn, cp, cons, "decZeroDepApp1", appKey, "approved", unitKey, "2026-06-26T10:00:00Z", processor.OutcomeAccepted)
+
+	if keyExists(t, ctx, conn, appKey+".deposit") {
+		t.Fatalf("an approve against a listing with depositAmount=0 must stamp no .deposit aspect")
 	}
 }
 
@@ -3230,5 +3318,64 @@ func TestDecideLeaseApplication_StoredZeroTermRefused(t *testing.T) {
 	}
 	if got, _ := tdata["rentAmount"].(float64); got != 2050 {
 		t.Fatalf("tenancy.rentAmount = %v, want the listing's 2050 — a non-positive offer is not an agreed rent", tdata["rentAmount"])
+	}
+}
+
+// TestCreateLeaseApplication_RequestedRent_AtMostTwoDecimals — the
+// applicant's offered rent is a dollar figure the ledger keeps as whole
+// cents: a third decimal is refused at this source (InvalidArgument), two
+// decimals and a whole figure are recorded verbatim on .terms.
+func TestCreateLeaseApplication_RequestedRent_AtMostTwoDecimals(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-rent-decimals")
+
+	unitKey := seedUnit(t, ctx, conn, "CCrentdecvtxHJKMNPQR")
+	cases := []struct {
+		name, applicantID, label string
+		rent                     string
+		want                     processor.MessageOutcome
+		stored                   float64
+	}{
+		{"two-decimals", "CCrentdecapp1HJKMNPQ", "appRentDec01", "2300.55", processor.OutcomeAccepted, 2300.55},
+		{"whole", "CCrentdecapp2HJKMNPQ", "appRentDec02", "2300", processor.OutcomeAccepted, 2300},
+		{"three-decimals", "CCrentdecapp3HJKMNPQ", "appRentDec03", "2300.555", processor.OutcomeRejected, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			applicantKey := seedApplicant(t, ctx, conn, tc.applicantID)
+			reqID := testutil.GenReqID(tc.label)
+			env := &processor.OperationEnvelope{
+				RequestID:     reqID,
+				Lane:          processor.LaneDefault,
+				OperationType: "CreateLeaseApplication",
+				Actor:         lsActorKey,
+				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+				Class:         "leaseapp",
+				Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `","moveInDate":"2026-08-01","leaseTermMonths":12,"requestedRent":` + tc.rent + `}`),
+				ContextHint: &processor.ContextHint{
+					Reads:         []string{applicantKey, unitKey},
+					OptionalReads: []string{guardLinkKey(applicantKey, unitKey), unitKey + ".listing"},
+				},
+			}
+			outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+			if outcome != tc.want {
+				t.Fatalf("%s: outcome = %v, want %v (reply: %+v)", tc.name, outcome, tc.want, reply.Error)
+			}
+			appKey := "vtx.leaseapp." + nanoIDFromRequestID(reqID)
+			if tc.want == processor.OutcomeRejected {
+				if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: requestedRent: at most two decimal places") {
+					t.Fatalf("%s: want the two-decimal InvalidArgument, got %+v", tc.name, reply.Error)
+				}
+				if keyExists(t, ctx, conn, appKey) {
+					t.Fatalf("%s: a refused application mints nothing", tc.name)
+				}
+				return
+			}
+			tdata, _ := readDoc(t, ctx, conn, appKey+".terms")["data"].(map[string]any)
+			if got, _ := tdata["requestedRent"].(float64); got != tc.stored {
+				t.Fatalf("%s: terms.requestedRent = %v, want %v", tc.name, tdata["requestedRent"], tc.stored)
+			}
+		})
 	}
 }

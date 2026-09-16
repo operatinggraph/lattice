@@ -1464,6 +1464,21 @@ function money(listing) {
   return cur === "USD" ? `$${n}` : `${n} ${cur}`.trim();
 }
 
+// listingDepositLine renders a listing's optional security deposit as its
+// own browse-card line — "Security deposit $1,500" — in the same currency
+// shape money() uses (a bare $ for USD, "<amount> <CUR>" otherwise). ""
+// when the listing carries no deposit at all (SetListing's own absent-field
+// "no deposit" state, never a misleading $0), so a caller can skip the
+// element entirely when this is empty.
+function listingDepositLine(listing) {
+  const amt = listing && typeof listing.depositAmount === "number" ? listing.depositAmount : null;
+  if (amt === null) return "";
+  const cur = (listing && listing.rentCurrency) || "";
+  const n = amt.toLocaleString();
+  const fig = cur === "USD" ? `$${n}` : `${n} ${cur}`.trim();
+  return "Security deposit " + fig;
+}
+
 function fmtDate(s) {
   if (!s) return "";
   const d = new Date(s);
@@ -1518,6 +1533,32 @@ function entryPeriodLabel(e) {
   return label;
 }
 
+// depositRowTag stands in for entryPeriodLabel on a deposit clause's own
+// transaction row — a one-time clause carries no period at all, so
+// entryPeriodLabel already reads "" for it, and a bare "" would leave the
+// row looking like an unexplained charge. "Security deposit" for the
+// charge, "Security deposit returned" for the credit (t.clausePurpose ===
+// "deposit", the ledgerHistory lens's own authorizedBy hop). Any other row
+// — rent, a plain human charge, a row whose source carries no
+// clausePurpose at all — falls straight through to entryPeriodLabel
+// unchanged.
+function depositRowTag(e) {
+  if (!e || e.clausePurpose !== "deposit") return entryPeriodLabel(e);
+  return e.type === "credit" ? " · Security deposit returned" : " · Security deposit";
+}
+
+// entryMemoSuffix renders a transaction row's own " — <memo>" suffix,
+// EXCEPT on a deposit row (clausePurpose === "deposit"): DebitAccount's
+// charge carries no memo of its own, but ReturnDeposit posts a fixed
+// "Security deposit returned" memo — the exact phrase depositRowTag already
+// renders as the row's tag, so appending the memo too would state it twice.
+// The tag wins; the memo is dropped entirely for a deposit row, whatever it
+// says.
+function entryMemoSuffix(e) {
+  if (!e || !e.memo || e.clausePurpose === "deposit") return "";
+  return " — " + customerMemo(e.memo);
+}
+
 function customerMemo(memo) {
   if (!memo) return memo;
   // derived-key: not a key derivation — this alphabet builds a regex to
@@ -1553,6 +1594,19 @@ function customerMemo(memo) {
 // portfolio pulse all name the same instant regardless of the viewer's time
 // zone. Plain text: every call site assigns the result to .textContent,
 // never innerHTML.
+//
+// depositHeldCents (ledger.go's computeDepositSummary) is CUSTODY — charged
+// minus returned — never an UNPAID figure: a deposit is billed and, absent a
+// payment plan, typically paid in full immediately, so it is usually already
+// retired from balanceCents by the time any of it is "owed" in the ordinary
+// sense. The ledger's own running balance carries no earmarking of which
+// dollars paid down which charge (a payment retires the FIFO-oldest open
+// debit, rent or deposit, whichever that is), so this can only ever state an
+// UPPER BOUND on how much of a genuinely open balance could still be the
+// deposit — min(balanceCents, depositHeldCents) — worded "up to", never a
+// flat inclusion claim. No suffix at all while nothing is owed (the balance
+// is zero or a credit) or while the deposit is fully retired
+// (depositHeldCents <= 0, whether never charged or already returned).
 function rentBalanceLine(data) {
   const cents = (data && data.balanceCents) || 0;
   if (cents < 0) return "Credit balance: " + moneyAmount(-cents / 100);
@@ -1579,7 +1633,30 @@ function rentBalanceLine(data) {
   if (data && data.reminderSentAt) {
     line += " · a reminder was sent " + fmtUTCDate(data.reminderSentAt);
   }
+  if (data && Number(data.depositHeldCents) > 0) {
+    const attributable = Math.min(cents, Number(data.depositHeldCents));
+    line += " · of which up to " + moneyAmount(attributable / 100) + " is the security deposit";
+  }
   return line;
+}
+
+// depositLine renders the security-deposit strip a statement shows apart
+// from the rent balance above — "Security deposit $D · held since <date>"
+// once a deposit clause has charged, "Security deposit $D · returned
+// <date>" once ReturnDeposit has credited it back, or "" when the lease's
+// ledger carries no deposit row at all (a deposit-less unit, or one whose
+// deposit hasn't billed yet) — the depositHeldCents/depositChargedCents/
+// depositChargedAt/depositReturnedAt fields ledger.go's computeDepositSummary
+// threads onto both /api/ledger and /api/one-bill. D is always the
+// CHARGED figure (depositChargedCents), even once returned — a returned
+// deposit nets to zero held, but the line still names what it was. Every
+// date renders through fmtUTCDate, matching rentBalanceLine.
+function depositLine(data) {
+  if (!data || !data.depositChargedAt) return "";
+  const fig = moneyAmount(Number(data.depositChargedCents) / 100);
+  return data.depositReturnedAt
+    ? "Security deposit " + fig + " · returned " + fmtUTCDate(data.depositReturnedAt)
+    : "Security deposit " + fig + " · held since " + fmtUTCDate(data.depositChargedAt);
 }
 
 // rentAgeText renders one portfolio-pulse lease-balance row's rent age —
@@ -1671,6 +1748,10 @@ function renderCard(row) {
   if (typeof L.leaseTermMonths === "number") m.push(`${L.leaseTermMonths}-mo term`);
   meta.textContent = m.join("  ·  ");
 
+  const deposit = document.createElement("div");
+  deposit.className = "meta";
+  deposit.textContent = listingDepositLine(L);
+
   const actions = document.createElement("div");
   actions.className = "card-actions";
   const badge = document.createElement("span");
@@ -1687,6 +1768,7 @@ function renderCard(row) {
   card.append(addr, addrSub, rent);
   if (facts.textContent) card.append(facts);
   if (meta.textContent) card.append(meta);
+  if (deposit.textContent) card.append(deposit);
   card.append(actions);
   return card;
 }
@@ -2160,6 +2242,7 @@ function renderLeaseTermsPanel(row) {
     addTerm("Lease", `${fmtUTCDate(row.tenancyLeaseStart)} → ${row.tenancyLeaseEnd ? fmtUTCDate(row.tenancyLeaseEnd) : "—"}`);
     if (row.tenancyTermStart) addTerm("Current term", "from " + fmtUTCDate(row.tenancyTermStart));
     if (typeof row.tenancyRentAmount === "number") addTerm("Rent", `${fmtMoney(row.tenancyRentAmount, row.unitCurrency)} / month`);
+    if (typeof row.depositAmount === "number") addTerm("Security deposit", fmtMoney(row.depositAmount, row.unitCurrency));
     head = row.tenancyEndedAt ? "Lease ended " + fmtUTCDate(row.tenancyEndedAt) : "Lease terms";
   } else {
     // Pre-approval — states what the signature commits to.
@@ -3755,6 +3838,14 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
   balance.textContent = rentBalanceLine(data);
   body.append(balance);
 
+  const depositText = depositLine(data);
+  if (depositText) {
+    const deposit = document.createElement("div");
+    deposit.className = "ledger-deposit";
+    deposit.textContent = depositText;
+    body.append(deposit);
+  }
+
   const txs = data.transactions || [];
   if (txs.length === 0) {
     const none = document.createElement("div");
@@ -3769,8 +3860,8 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
       li.className = "ledger-entry " + t.type;
       const sign = t.type === "debit" ? "+" : "−";
       li.textContent =
-        fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + entryPeriodLabel(t) +
-        (t.memo ? " — " + customerMemo(t.memo) : "");
+        fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + depositRowTag(t) +
+        entryMemoSuffix(t);
       // "Why was I charged this?" (Fire V4) — a semantic-contracts clause
       // authorized this transaction (t.clauseProse from the ledgerHistory
       // lens's optional authorizedBy hop); a plain human-recorded charge
@@ -3888,6 +3979,14 @@ async function refreshStatementBody(body, leaseAppKey, noticeMoveOutAt) {
   balance.textContent = rentBalanceLine(data);
   body.append(balance);
 
+  const depositText = depositLine(data);
+  if (depositText) {
+    const deposit = document.createElement("div");
+    deposit.className = "ledger-deposit";
+    deposit.textContent = depositText;
+    body.append(deposit);
+  }
+
   const entries = data.entries || [];
   if (entries.length === 0) {
     const none = document.createElement("div");
@@ -3914,8 +4013,8 @@ async function refreshStatementBody(body, leaseAppKey, noticeMoveOutAt) {
         const sign = e.type === "debit" ? "+" : "−";
         const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
         li.textContent =
-          fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) + entryPeriodLabel(e) +
-          (e.memo ? " — " + customerMemo(e.memo) : "");
+          fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) + depositRowTag(e) +
+          entryMemoSuffix(e);
         list.append(li);
       }
       period.append(list);
@@ -4727,6 +4826,12 @@ function renderRLSApplicantRow(a, unit) {
     const rent = typeof a.tenancyRentAmount === "number" ? ` · ${fmtMoney(a.tenancyRentAmount, a.unitCurrency)}/mo` : "";
     lease.textContent = `Lease ${fmtUTCDate(a.tenancyLeaseStart)} → ${end}${rent}`;
     row.append(lease);
+    if (typeof a.depositAmount === "number") {
+      const deposit = document.createElement("div");
+      deposit.className = "applicant-note";
+      deposit.textContent = `Security deposit ${fmtMoney(a.depositAmount, a.unitCurrency)}`;
+      row.append(deposit);
+    }
   }
 
   // End lease early — the landlord's own path into the SAME GiveNotice op
@@ -5011,13 +5116,28 @@ function renderUnitCard(u) {
   addr.textContent = u.unitAddress || "Unit " + shortKey(u.unitKey);
   const sub = document.createElement("div");
   sub.className = "unit-sub";
+  // currency is the listing's own rentCurrency (the same field the terms
+  // panel/landlord application card read via fmtMoney) — undefined for a
+  // unit with no listing, which fmtMoney renders as a bare $ figure, the
+  // same fallback moneyAmount gave every unit before this.
+  const currency = u.listing && u.listing.rentCurrency;
   const rent = document.createElement("span");
-  rent.textContent = u.unitRent != null ? moneyAmount(u.unitRent) + " / month" : "—";
+  rent.textContent = u.unitRent != null ? fmtMoney(u.unitRent, currency) + " / month" : "—";
   const status = u.unitStatus || "—";
   const badge = document.createElement("span");
   badge.className = "badge " + status;
   badge.textContent = status;
   sub.append(rent, badge);
+  // Deposit beside the rent — the same listing economics u.listing pre-fills
+  // the Edit form from (openEditListing), absent entirely for a unit whose
+  // listing carries none. Same currency as the rent line above (one listing,
+  // one currency).
+  if (u.listing && typeof u.listing.depositAmount === "number") {
+    const deposit = document.createElement("span");
+    deposit.className = "unit-deposit";
+    deposit.textContent = "Deposit " + fmtMoney(u.listing.depositAmount, currency);
+    sub.append(deposit);
+  }
   head.append(addr, sub);
 
   const count = document.createElement("div");
@@ -5347,6 +5467,7 @@ function openEditListing(u) {
   $("#li-leaseterm").value = li.leaseTermMonths != null ? li.leaseTermMonths : "";
   $("#li-bathrooms").value = li.bathrooms != null ? li.bathrooms : "";
   $("#li-sqft").value = li.sqft != null ? li.sqft : "";
+  $("#li-deposit").value = li.depositAmount != null ? li.depositAmount : "";
   $("#listing-title").textContent = "Edit listing";
   $("#listing-sub").textContent = u.unitAddress || shortKey(u.unitKey);
   $("#listing-submit").textContent = "Save changes";
@@ -5421,6 +5542,7 @@ async function submitPostListing(ev) {
   const leaseTerm = $("#li-leaseterm").value;
   const bathrooms = $("#li-bathrooms").value;
   const sqft = $("#li-sqft").value;
+  const deposit = $("#li-deposit").value;
 
   if (!line1 || !city || !region || !postal) {
     toast("Fill in the full address (line 1, city, region, postal).", "err");
@@ -5516,6 +5638,12 @@ async function submitPostListing(ev) {
     };
     if (bathrooms !== "") listing.bathrooms = Number(bathrooms);
     if (sqft !== "") listing.sqft = Number(sqft);
+    // An empty field OMITS depositAmount — SetListing REPLACES the whole
+    // listing, so an omitted field is how a landlord clears an existing
+    // deposit (the hint under the input says so). Zero/negative never
+    // round-trips (the server refuses it; nothing here is a security
+    // boundary), so only a genuinely positive figure is sent.
+    if (deposit !== "" && Number(deposit) > 0) listing.depositAmount = Number(deposit);
     await opOrThrow(
       {
         operationType: "SetListing",

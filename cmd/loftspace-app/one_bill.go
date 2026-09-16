@@ -27,6 +27,12 @@ type oneBillEntryProjection struct {
 	PeriodEnd   string `json:"periodEnd"`
 	DueAt       string `json:"dueAt"`
 	Source      string `json:"source"`
+	// ClausePurpose is the authorizing clause's own recorded purpose token
+	// (rentEntriesSpec's authorizedBy hop, packages/one-bill) — "deposit"
+	// for a security-deposit charge or its return, empty otherwise
+	// (including on every café/clinic/wellness row, which never authorizes
+	// off a semantic-contracts clause at all).
+	ClausePurpose string `json:"clausePurpose"`
 }
 
 // oneBillEntryRow is the statement row the FE renders.
@@ -40,12 +46,14 @@ type oneBillEntryRow struct {
 	PeriodEnd      string `json:"periodEnd,omitempty"`
 	DueAt          string `json:"dueAt,omitempty"`
 	Source         string `json:"source"`
+	ClausePurpose  string `json:"clausePurpose,omitempty"`
 }
 
 // computeOneBillHistory filters the one-bill-history lens rows to one lease,
 // sorts them chronologically, and derives the combined rent+café running
-// balance in cents — mirrors computeLedgerHistory (ledger.go), minus the
-// clause fields the one-bill lens does not project.
+// balance in cents — mirrors computeLedgerHistory (ledger.go); ClauseKey/
+// ClauseProse ("why was I charged this?") are the one clause field the
+// one-bill lens still does not project, unlike ClausePurpose.
 func computeOneBillHistory(keys []string, get kvGetter, leaseAppKey string) ([]oneBillEntryRow, int64) {
 	rows := make([]oneBillEntryRow, 0)
 	for _, k := range keys {
@@ -74,6 +82,7 @@ func computeOneBillHistory(keys []string, get kvGetter, leaseAppKey string) ([]o
 			PeriodEnd:      p.PeriodEnd,
 			DueAt:          p.DueAt,
 			Source:         p.Source,
+			ClausePurpose:  p.ClausePurpose,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -212,16 +221,26 @@ func (s *server) handleOneBillStatement(w http.ResponseWriter, r *http.Request) 
 	ledgerGet := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
 	rentRows, rentBalance := computeLedgerHistory(ledgerKeys, ledgerGet, leaseAppKey)
 	arrears := deriveRentArrears(rentRows, acctRow.ArrearsDueAt, acctRow.ArrearsReminderSentAt, time.Now().UTC())
+	// The deposit is a rent-account transaction (DebitAccount/ReturnDeposit
+	// both post to the lease's loftspace-ledger account), never a one-bill
+	// entry of its own — so its summary is derived from the SAME rentRows
+	// read above for the rent age, not from the combined `rows` this
+	// endpoint otherwise renders.
+	deposit := computeDepositSummary(rentRows)
 
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"leaseAppKey":      leaseAppKey,
-		"entries":          rows,
-		"balanceCents":     balance,
-		"rentBalanceCents": rentBalance,
-		"dueDate":          arrears.DueDate,
-		"isOverdue":        arrears.IsOverdue,
-		"daysOverdue":      arrears.DaysOverdue,
-		"daysUntilDue":     arrears.DaysUntilDue,
-		"reminderSentAt":   arrears.ReminderSentAt,
+		"leaseAppKey":         leaseAppKey,
+		"entries":             rows,
+		"balanceCents":        balance,
+		"rentBalanceCents":    rentBalance,
+		"dueDate":             arrears.DueDate,
+		"isOverdue":           arrears.IsOverdue,
+		"daysOverdue":         arrears.DaysOverdue,
+		"daysUntilDue":        arrears.DaysUntilDue,
+		"reminderSentAt":      arrears.ReminderSentAt,
+		"depositHeldCents":    deposit.DepositHeldCents,
+		"depositChargedCents": deposit.DepositChargedCents,
+		"depositChargedAt":    deposit.DepositChargedAt,
+		"depositReturnedAt":   deposit.DepositReturnedAt,
 	})
 }

@@ -306,6 +306,12 @@ func TestSetRenewalTerms_ValidatesAndLocksAfterSignature(t *testing.T) {
 
 	// Non-positive rentAmount rejected.
 	setRenewalTerms(t, ctx, conn, cp, cons, "termsBadRent", renewalKey, -100, 12, processor.OutcomeRejected)
+	// A third decimal rejected (the ledger keeps whole cents); two decimals accepted.
+	setRenewalTerms(t, ctx, conn, cp, cons, "terms3decRnt", renewalKey, 2300.555, 12, processor.OutcomeRejected)
+	setRenewalTerms(t, ctx, conn, cp, cons, "terms2decRnt", renewalKey, 2300.55, 12, processor.OutcomeAccepted)
+	if got, _ := readDoc(t, ctx, conn, renewalKey+".terms")["data"].(map[string]any)["rentAmount"].(float64); got != 2300.55 {
+		t.Fatalf("terms.rentAmount = %v, want 2300.55 stored verbatim", got)
+	}
 	// Too-short termMonths rejected (60-day window floors at 2 months: ceil(1440/730)=2).
 	setRenewalTerms(t, ctx, conn, cp, cons, "termsTooShrt", renewalKey, 2500, 1, processor.OutcomeRejected)
 

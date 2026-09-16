@@ -18,8 +18,9 @@
 //     lease-anchored key is the uniqueness guard.
 //
 //   - The `transaction` vertex type (DDL `transaction`) — DebitAccount (a
-//     charge: rent, a late fee, a deposit) and CreditAccount (a payment
-//     received) each mint vtx.transaction.<NanoID> (root data {} per D5) with a
+//     charge: rent, a late fee, a deposit), CreditAccount (a payment
+//     received) and ReturnDeposit (a charged security deposit credited back
+//     once the tenancy has ended) each mint vtx.transaction.<NanoID> (root data {} per D5) with a
 //     .entry aspect {type, amountCents, memo?, postedAt, periodStart?,
 //     periodEnd?, dueAt?} — the three optional stamps are a recurring charge's
 //     own billing period and due date — linked to the account via postedTo.
@@ -30,10 +31,18 @@
 //     → clause) and updates the clause's .status — completed for a one-time
 //     clause, or chargeValidUntil re-armed for a period="monthly" clause
 //     (Fire V3) — the semantic-contracts Executable Paper package's canonical
-//     directOp consumer.
+//     directOp consumer. ReturnDeposit{leaseAppKey, clauseKey, accountKey}
+//     is that package's leaseRentSettlement missing_depositReturn dispatch:
+//     it reads the deposit clause's own .terms (purpose=deposit, the
+//     amount) and .status (completed = charged), the lease's .tenancy
+//     (endedAt), and the clause's deterministic chargesTo / governs links,
+//     posts the credit authorizedBy the clause and marks its .status
+//     returned under OCC; a clause already returned is a no-op.
 //
 //   - The `ledgerHistory` lens (§10.2-style read model, one row per
-//     transaction) the payment-history FE reads (P5).
+//     transaction) the payment-history FE reads (P5), projecting the
+//     authorizing clause's prose and purpose beside each entry so a
+//     statement holds the deposit apart from rent.
 //
 //   - The `leaseAccounts` lens (one row per lease, accountKey null until one
 //     is opened) — the FE's only way to resolve a lease's account key, since
@@ -78,12 +87,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "loftspace-ledger",
-	Version: "0.7.5",
+	Version: "0.8.2",
 	Description: "Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount, independently-minted " +
 		"id, one per lease via a .ledgerAccount guard aspect on the leaseapp) + the transaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo; DebitAccount's " +
 		"optional clauseRef writes the authorizedBy audit link + updates the clause status: completed one-time, " +
-		"or chargeValidUntil re-armed if period=monthly, Fire V3; LoftspaceRecordCharge is a person's manual " +
+		"or chargeValidUntil re-armed if period=monthly, Fire V3; ReturnDeposit credits a charged purpose=deposit " +
+		"clause back once the lease's tenancy has ended and marks it returned — Weaver's leaseRentSettlement " +
+		"dispatch; LoftspaceRecordCharge is a person's manual " +
 		"charge, never clause-authorized; it and CreditAccount also grant a consumer scope=self, " +
 		"ownership-checked off the account's own heldFor topology — a resident paying down their own " +
 		"balance, credit only and amount-capped at the account's own recomputed outstanding balance, or a " +

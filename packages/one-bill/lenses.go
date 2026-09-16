@@ -70,9 +70,19 @@ func Lenses() []pkgmgr.LensSpec {
 // recurring charge's own recorded billing period and due date (loftspace-
 // ledger's DebitAccount stamps them on the .entry), null on a payment or a
 // one-time charge; the other three sources project no such columns.
+//
+// The trailing OPTIONAL MATCH walks authorizedBy to a semantic-contracts
+// clause exactly as loftspace-ledger's own ledgerHistorySpec does — OPTIONAL
+// because a plain human-submitted DebitAccount/CreditAccount carries no
+// clauseRef. clausePurpose is the clause's recorded .terms.purpose (null on
+// every clause minted without one): the combined statement's own entry-row
+// deposit tag reads it, apart from rent by this column, never by the memo.
+// Café/clinic/wellness never authorizedBy a semantic-contracts clause, so
+// only the rent source carries it.
 const rentEntriesSpec = `MATCH (t:transaction)
 MATCH (t)-[:postedTo]->(a:account)
 MATCH (a)-[:heldFor]->(l:leaseapp)
+OPTIONAL MATCH (t)-[:authorizedBy]->(c:clause)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -85,6 +95,7 @@ RETURN
   t.entry.data.periodStart AS periodStart,
   t.entry.data.periodEnd AS periodEnd,
   t.entry.data.dueAt AS dueAt,
+  c.terms.data.purpose AS clausePurpose,
   'rent' AS source`
 
 // cafeEntriesSpec re-projects cafe-ledger's posted transactions tagged

@@ -209,6 +209,7 @@ RETURN
   u.listing.data.sqft AS sqft,
   u.listing.data.availableFrom AS availableFrom,
   u.listing.data.leaseTermMonths AS leaseTermMonths,
+  u.listing.data.depositAmount AS depositAmount,
   u.address.data.line1 AS addrLine1,
   u.address.data.line2 AS addrLine2,
   u.address.data.city AS addrCity,

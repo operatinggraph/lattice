@@ -58,6 +58,7 @@ func bcCapDoc() *processor.CapabilityDoc {
 			{OperationType: "SupersedeClause", Scope: "any"},
 			{OperationType: "BackfillClauseTerm", Scope: "any"},
 			{OperationType: "ShortenClauseTerm", Scope: "any"},
+			{OperationType: "ReturnDeposit", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -926,7 +927,7 @@ func TestSupersedeClause_TombstonesOldWritesAmendsLinkMintsNew(t *testing.T) {
 		Class:         "clause",
 		Payload: json.RawMessage(`{"clauseKey":"` + oldClauseKey + `","leaseAppKey":"` + leaseKey +
 			`","accountKey":"` + acctKey + `","prose":"Tenant agrees to a $55 lockout fee (amended).","amountCents":5500}`),
-		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, leaseKey, acctKey}},
+		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, oldClauseKey + ".terms", oldClauseKey + ".status", leaseKey, acctKey}},
 	}
 	testutil.PublishOp(t, conn, supersedeEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1023,7 +1024,7 @@ func TestSupersedeClause_DoubleSupersede_SecondRejected(t *testing.T) {
 		Class:         "clause",
 		Payload: json.RawMessage(`{"clauseKey":"` + oldClauseKey + `","leaseAppKey":"` + leaseKey +
 			`","accountKey":"` + acctKey + `","prose":"$55 amended.","amountCents":5500}`),
-		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, leaseKey, acctKey}},
+		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, oldClauseKey + ".terms", oldClauseKey + ".status", leaseKey, acctKey}},
 	}
 	testutil.PublishOp(t, conn, firstEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
@@ -1037,7 +1038,7 @@ func TestSupersedeClause_DoubleSupersede_SecondRejected(t *testing.T) {
 		Class:         "clause",
 		Payload: json.RawMessage(`{"clauseKey":"` + oldClauseKey + `","leaseAppKey":"` + leaseKey +
 			`","accountKey":"` + acctKey + `","prose":"$60 amended again.","amountCents":6000}`),
-		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, leaseKey, acctKey}},
+		ContextHint: &processor.ContextHint{Reads: []string{oldClauseKey, oldClauseKey + ".terms", oldClauseKey + ".status", leaseKey, acctKey}},
 	}
 	testutil.PublishOp(t, conn, secondEnv)
 	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeRejected)

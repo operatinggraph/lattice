@@ -1,5 +1,5 @@
 name: semantic-contracts
-version: 0.6.0
+version: 0.7.3
 description: |
   LoftSpace "Executable Paper" reference package (fixed/one-time,
   conditioned, judgment, recurring monthly — termed to a calendar-month
@@ -18,8 +18,10 @@ description: |
   termed clause to a recorded early move-out (missing_account
   → directOp(LoftspaceCreateAccount), missing_clause → directOp(CreateClause)
   with the term, missing_term → directOp(BackfillClauseTerm),
-  missing_termShortened → directOp(ShortenClauseTerm), dollars→cents
-  conversion in the lens). Depends lease-signing + loftspace-ledger.
+  missing_termShortened → directOp(ShortenClauseTerm), missing_deposit →
+  directOp(CreateClause) with purpose=deposit, missing_depositReturn →
+  directOp(ReturnDeposit), dollars→cents conversion in the lens). Depends
+  lease-signing + loftspace-ledger.
 depends:
   - lease-signing
   - loftspace-ledger
