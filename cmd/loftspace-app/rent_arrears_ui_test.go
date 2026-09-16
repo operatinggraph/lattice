@@ -182,12 +182,30 @@ func TestRentBalanceLine_EverySuffix(t *testing.T) {
 			"Balance owed: $50 · rent due Sep 8, 2026 · 7 days overdue",
 		},
 		{
-			"a held deposit appends its own inclusion clause, last",
+			// depositHeldCents is CUSTODY (charged minus returned), never an
+			// unpaid figure — a $1500 deposit held against a $50 open balance
+			// means at most $50 of the OPEN balance could be the deposit
+			// (min(balanceCents, depositHeldCents)), never the full $1500: the
+			// rest of the deposit was already retired by an earlier payment.
+			"a deposit larger than the open balance is capped BY the balance",
 			map[string]interface{}{"balanceCents": 5000.0, "depositHeldCents": 150000.0},
-			"Balance owed: $50 · incl. security deposit $1500",
+			"Balance owed: $50 · of which up to $50 is the security deposit",
 		},
 		{
-			"a returned (zero-held) deposit adds no inclusion clause",
+			// The fire brief's own partial-payment vector: $1500 charged, $1000
+			// paid down, $500 still open — the suffix must read "up to $500",
+			// never the full $1500 the deposit was charged at.
+			"partial payment: the open balance is smaller than the deposit",
+			map[string]interface{}{"balanceCents": 50000.0, "depositHeldCents": 150000.0},
+			"Balance owed: $500 · of which up to $500 is the security deposit",
+		},
+		{
+			"the open balance exceeds the deposit — capped BY the deposit instead",
+			map[string]interface{}{"balanceCents": 300000.0, "depositHeldCents": 150000.0},
+			"Balance owed: $3000 · of which up to $1500 is the security deposit",
+		},
+		{
+			"a returned (zero-held) deposit adds no suffix at all",
 			map[string]interface{}{"balanceCents": 5000.0, "depositHeldCents": 0.0},
 			"Balance owed: $50",
 		},
@@ -351,5 +369,42 @@ func TestRentArrearsUI_ReachesDOMViaTextContentOnly(t *testing.T) {
 	unsafeSinks := regexp.MustCompile(`\.(?:innerHTML|outerHTML)\s*(?:\+?=)[^;\n]*\b(?:rentBalanceLine|rentAgeText|ageText|depositLine|depositText)\b`)
 	if m := unsafeSinks.FindString(text); m != "" {
 		t.Errorf("app.js: %q reaches an innerHTML/outerHTML sink — must be .textContent", m)
+	}
+}
+
+// TestRenderUnitCard_RentAndDepositAreCurrencyAware is a grep-style pin
+// (renderUnitCard builds real DOM elements — document.createElement — so it
+// cannot run headless in goja the way the pure formatters above do; the
+// source text itself is what ships). It isolates the function body and
+// checks BOTH money figures — the rent span and the deposit span — go
+// through fmtMoney(amount, currency), never the USD-only moneyAmount, so a
+// non-USD unit's rent and deposit both render in the listing's own
+// rentCurrency instead of a misleading bare "$" figure.
+func TestRenderUnitCard_RentAndDepositAreCurrencyAware(t *testing.T) {
+	src, err := webFS.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatalf("read embedded app.js: %v", err)
+	}
+	text := string(src)
+
+	fnRe := regexp.MustCompile(`(?s)\nfunction renderUnitCard\(u\) \{\n.*?\n\}\n`)
+	body := fnRe.FindString(text)
+	if body == "" {
+		t.Fatal("app.js: no top-level renderUnitCard(u) declaration found — the extraction regex no longer matches this file")
+	}
+
+	for _, want := range []string{
+		"fmtMoney(u.unitRent, currency)",
+		"fmtMoney(u.listing.depositAmount, currency)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renderUnitCard: want the currency-aware call %q, not found", want)
+		}
+	}
+	if strings.Contains(body, "moneyAmount(u.unitRent)") {
+		t.Error("renderUnitCard: the rent span still calls the USD-only moneyAmount(u.unitRent)")
+	}
+	if strings.Contains(body, "moneyAmount(u.listing.depositAmount)") {
+		t.Error("renderUnitCard: the deposit span still calls the USD-only moneyAmount(u.listing.depositAmount)")
 	}
 }

@@ -357,6 +357,8 @@ func TestReturnDeposit_Refusals(t *testing.T) {
 			opts: []depositOption{withChargesToTombstoned()}},
 		{name: "returned-but-misaddressed-lease", label: "bbretdepref000000013", leaseID: "BBRETDEPREFLEASEDHJK", clauseID: "BBRETDEPREFCLAUSEDHJ", code: "ClauseLeaseMismatch",
 			opts: []depositOption{withStatus(map[string]any{"state": "returned", "returnedAt": "2027-07-02T09:00:00Z"}), withGoverns(otherLease)}},
+		{name: "returned-but-misaddressed-account", label: "bbretdepref000000015", leaseID: "BBRETDEPREFLEASEFHJK", clauseID: "BBRETDEPREFCLAUSEFHJ", code: "ClauseAccountMismatch",
+			opts: []depositOption{withStatus(map[string]any{"state": "returned", "returnedAt": "2027-07-02T09:00:00Z"}), withChargesTo(otherAcct)}},
 		{name: "returned-but-tenancy-not-ended", label: "bbretdepref000000014", leaseID: "BBRETDEPREFLEASEEHJK", clauseID: "BBRETDEPREFCLAUSEEHJ", code: "TenancyNotEnded",
 			opts: []depositOption{withStatus(map[string]any{"state": "returned", "returnedAt": "2027-07-02T09:00:00Z"}), withEndedAt("")}},
 		{name: "not-a-deposit-no-purpose", label: "bbretdepref000000003", leaseID: "BBRETDEPREFLEASE3HJK", clauseID: "BBRETDEPREFCLAUSE3HJ", code: "NotADeposit",

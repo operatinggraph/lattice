@@ -70,14 +70,14 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 		Script: loftspaceListingDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"unit":{"type":"string","description":"vtx.unit.<NanoID> of an existing location unit (required; validated alive + a vtx.unit.<NanoID> key)."},` +
-			`"rentAmount":{"type":"number","description":"Monthly rent (SetListing; required, > 0)."},` +
+			`"rentAmount":{"type":"number","description":"Monthly rent (SetListing; required, > 0, at most two decimals — the ledger keeps whole cents)."},` +
 			`"rentCurrency":{"type":"string","description":"ISO currency code for rentAmount, e.g. USD (SetListing; required)."},` +
 			`"bedrooms":{"type":"integer","description":"Bedroom count (SetListing; required, >= 0)."},` +
 			`"bathrooms":{"type":"number","description":"Bathroom count, may be fractional e.g. 1.5 (SetListing; optional, >= 0)."},` +
 			`"sqft":{"type":"integer","description":"Floor area in square feet (SetListing; optional, > 0)."},` +
 			`"availableFrom":{"type":"string","description":"Earliest move-in date, RFC3339 (SetListing; required)."},` +
 			`"leaseTermMonths":{"type":"integer","description":"Lease term in months (SetListing; required, > 0)."},` +
-			`"depositAmount":{"type":"number","description":"Security deposit, a number > 0 in the listing's currency (SetListing; optional; absent = the unit takes no deposit)."},` +
+			`"depositAmount":{"type":"number","description":"Security deposit, a number > 0 with at most two decimals in the listing's currency (SetListing; optional; absent = the unit takes no deposit)."},` +
 			`"status":{"type":"string","enum":["available","pending","leased","withdrawn"],"description":"Listing availability state (SetListing / SetListingStatus; required). 'withdrawn' = off-market (hidden from applicant Browse; relist by flipping back to 'available')."},` +
 			`"line1":{"type":"string","description":"Street address line 1 (SetUnitAddress; required)."},` +
 			`"line2":{"type":"string","description":"Street address line 2 (SetUnitAddress; optional)."},` +
@@ -89,14 +89,14 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			`{"primaryKey":{"type":"string","description":"The aspect key the operation wrote: vtx.unit.<NanoID>.listing (SetListing) or vtx.unit.<NanoID>.address (SetUnitAddress)."}}}`,
 		FieldDescription: map[string]string{
 			"unit":            "Full vtx.unit.<NanoID> key of an existing location unit. Both ops validate it is alive + a vtx.unit.<NanoID> key and write their aspect on it. The caller MUST list this key in ContextHint.Reads.",
-			"rentAmount":      "Monthly rent as a number (> 0). Stored on the .listing aspect (SetListing).",
+			"rentAmount":      "Monthly rent as a number (> 0, at most two decimals — InvalidArgument otherwise; the ledger keeps whole cents). Stored on the .listing aspect (SetListing).",
 			"rentCurrency":    "ISO currency code (e.g. USD) for rentAmount. Stored on the .listing aspect (SetListing).",
 			"bedrooms":        "Bedroom count, integer >= 0. Stored on the .listing aspect (SetListing).",
 			"bathrooms":       "Optional bathroom count (number, may be fractional e.g. 1.5), >= 0. Stored on the .listing aspect when present (SetListing).",
 			"sqft":            "Optional floor area in square feet (integer > 0). Stored on the .listing aspect when present (SetListing).",
 			"availableFrom":   "Earliest move-in date, RFC3339. Stored verbatim on the .listing aspect (SetListing).",
 			"leaseTermMonths": "Lease term in months (integer > 0). Stored on the .listing aspect (SetListing).",
-			"depositAmount":   "Security deposit, a number > 0 in the listing's currency. Absent = the unit takes no deposit. Stored on the .listing aspect when present (SetListing REPLACES the stored value on every write — a re-submit without it clears it).",
+			"depositAmount":   "Security deposit, a number > 0 with at most two decimals in the listing's currency (InvalidArgument otherwise). Absent = the unit takes no deposit. Stored on the .listing aspect when present (SetListing REPLACES the stored value on every write — a re-submit without it clears it).",
 			"status":          "Listing availability, one of {available, pending, leased, withdrawn}. 'withdrawn' takes the unit off-market (hidden from applicant Browse; relist via SetListingStatus status=available). Stored on the .listing aspect (SetListing sets it alongside the economics; SetListingStatus rewrites only this field, preserving the rest).",
 			"line1":           "Street address line 1. Stored on the .address aspect (SetUnitAddress).",
 			"line2":           "Optional street address line 2. Stored on the .address aspect when present (SetUnitAddress).",
@@ -295,6 +295,20 @@ def optional_number(p, name, allow_zero):
             fail("InvalidArgument: " + name + ": must be > 0")
     return v
 
+def two_decimals(v, name):
+    # A dollar amount carries at most two decimals: v × 100 must sit within a
+    # millionth of an integer. The ledger keeps integer cents, and a figure
+    # with a fractional cent here would become a clause the reader refuses on
+    # every convergence pass — so it is refused once, at the source.
+    scaled = v * 100
+    nearest = int(scaled + 0.5)
+    d = scaled - nearest
+    if d < 0:
+        d = -d
+    if d > 0.000001:
+        fail("InvalidArgument: " + name + ": at most two decimal places")
+    return v
+
 LISTING_STATUSES = ["available", "pending", "leased", "withdrawn"]
 
 def required_status(p):
@@ -416,7 +430,7 @@ def execute(state, op):
         require_live_unit(state, unit)
 
         data = {
-            "rentAmount": required_number(p, "rentAmount", False),
+            "rentAmount": two_decimals(required_number(p, "rentAmount", False), "rentAmount"),
             "rentCurrency": required_string(p, "rentCurrency"),
             "bedrooms": required_number(p, "bedrooms", True),
             "availableFrom": required_string(p, "availableFrom"),
@@ -431,7 +445,7 @@ def execute(state, op):
             data["sqft"] = sqft
         deposit_amount = optional_number(p, "depositAmount", False)
         if deposit_amount != None:
-            data["depositAmount"] = deposit_amount
+            data["depositAmount"] = two_decimals(deposit_amount, "depositAmount")
 
         listing_key = unit + ".listing"
         mutations = [make_aspect_upsert(unit, "listing", "listing", data)]

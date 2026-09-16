@@ -3320,3 +3320,62 @@ func TestDecideLeaseApplication_StoredZeroTermRefused(t *testing.T) {
 		t.Fatalf("tenancy.rentAmount = %v, want the listing's 2050 — a non-positive offer is not an agreed rent", tdata["rentAmount"])
 	}
 }
+
+// TestCreateLeaseApplication_RequestedRent_AtMostTwoDecimals — the
+// applicant's offered rent is a dollar figure the ledger keeps as whole
+// cents: a third decimal is refused at this source (InvalidArgument), two
+// decimals and a whole figure are recorded verbatim on .terms.
+func TestCreateLeaseApplication_RequestedRent_AtMostTwoDecimals(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupLeaseEnv(t)
+	cp, cons := newLeasePipeline(t, ctx, conn, "create-app-rent-decimals")
+
+	unitKey := seedUnit(t, ctx, conn, "CCrentdecvtxHJKMNPQR")
+	cases := []struct {
+		name, applicantID, label string
+		rent                     string
+		want                     processor.MessageOutcome
+		stored                   float64
+	}{
+		{"two-decimals", "CCrentdecapp1HJKMNPQ", "appRentDec01", "2300.55", processor.OutcomeAccepted, 2300.55},
+		{"whole", "CCrentdecapp2HJKMNPQ", "appRentDec02", "2300", processor.OutcomeAccepted, 2300},
+		{"three-decimals", "CCrentdecapp3HJKMNPQ", "appRentDec03", "2300.555", processor.OutcomeRejected, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			applicantKey := seedApplicant(t, ctx, conn, tc.applicantID)
+			reqID := testutil.GenReqID(tc.label)
+			env := &processor.OperationEnvelope{
+				RequestID:     reqID,
+				Lane:          processor.LaneDefault,
+				OperationType: "CreateLeaseApplication",
+				Actor:         lsActorKey,
+				SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+				Class:         "leaseapp",
+				Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `","moveInDate":"2026-08-01","leaseTermMonths":12,"requestedRent":` + tc.rent + `}`),
+				ContextHint: &processor.ContextHint{
+					Reads:         []string{applicantKey, unitKey},
+					OptionalReads: []string{guardLinkKey(applicantKey, unitKey), unitKey + ".listing"},
+				},
+			}
+			outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+			if outcome != tc.want {
+				t.Fatalf("%s: outcome = %v, want %v (reply: %+v)", tc.name, outcome, tc.want, reply.Error)
+			}
+			appKey := "vtx.leaseapp." + nanoIDFromRequestID(reqID)
+			if tc.want == processor.OutcomeRejected {
+				if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: requestedRent: at most two decimal places") {
+					t.Fatalf("%s: want the two-decimal InvalidArgument, got %+v", tc.name, reply.Error)
+				}
+				if keyExists(t, ctx, conn, appKey) {
+					t.Fatalf("%s: a refused application mints nothing", tc.name)
+				}
+				return
+			}
+			tdata, _ := readDoc(t, ctx, conn, appKey+".terms")["data"].(map[string]any)
+			if got, _ := tdata["requestedRent"].(float64); got != tc.stored {
+				t.Fatalf("%s: terms.requestedRent = %v, want %v", tc.name, tdata["requestedRent"], tc.stored)
+			}
+		})
+	}
+}

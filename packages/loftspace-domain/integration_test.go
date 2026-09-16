@@ -618,3 +618,44 @@ func TestLoftspace_SetListingDepositAmount(t *testing.T) {
 		t.Fatalf("status = %v, want leased", ldata["status"])
 	}
 }
+
+// TestLoftspace_SetListingAmounts_AtMostTwoDecimals — rentAmount and
+// depositAmount are dollar figures the ledger keeps as whole cents: a third
+// decimal is refused at this source (InvalidArgument naming the field) rather
+// than becoming a clause the reader refuses on every convergence pass; two
+// decimals and a whole figure are stored verbatim.
+func TestLoftspace_SetListingAmounts_AtMostTwoDecimals(t *testing.T) {
+	ctx, conn := setupLoftspaceEnv(t)
+	cp, cons := newLoftspacePipeline(t, ctx, conn, "twodecimals")
+
+	rest := `"rentCurrency":"USD","bedrooms":2,"availableFrom":"2026-08-01T00:00:00Z","leaseTermMonths":12,"status":"available"`
+
+	twoDec := createUnitLabeled(t, ctx, conn, cp, cons, "mk2dec0001")
+	setListing(t, ctx, conn, cp, cons, "twoDec00001", twoDec,
+		`{"unit":"`+twoDec+`","rentAmount":2300.55,"depositAmount":2300.55,`+rest+`}`, processor.OutcomeAccepted)
+	ldata, _ := lsReadDoc(t, ctx, conn, twoDec+".listing")["data"].(map[string]any)
+	if ldata["rentAmount"] != float64(2300.55) || ldata["depositAmount"] != float64(2300.55) {
+		t.Fatalf("two decimals are stored verbatim, got rent=%v deposit=%v", ldata["rentAmount"], ldata["depositAmount"])
+	}
+
+	whole := createUnitLabeled(t, ctx, conn, cp, cons, "mkwhole001")
+	setListing(t, ctx, conn, cp, cons, "whole000001", whole,
+		`{"unit":"`+whole+`","rentAmount":2300,"depositAmount":2300,`+rest+`}`, processor.OutcomeAccepted)
+
+	for _, tc := range []struct{ name, label, payload, field string }{
+		{"rent-three-decimals", "rent3dec001", `"rentAmount":2300.555,"depositAmount":2300`, "rentAmount"},
+		{"deposit-three-decimals", "dep3dec0001", `"rentAmount":2300,"depositAmount":2300.555`, "depositAmount"},
+	} {
+		unit := createUnitLabeled(t, ctx, conn, cp, cons, "mk"+tc.label[:8])
+		got, why := setListingWithReason(t, ctx, conn, cp, cons, tc.label, unit, `{"unit":"`+unit+`",`+tc.payload+`,`+rest+`}`)
+		if got != processor.OutcomeRejected {
+			t.Fatalf("%s: SetListing = %v, want Rejected", tc.name, got)
+		}
+		if !strings.Contains(why, "InvalidArgument: "+tc.field+": at most two decimal places") {
+			t.Errorf("%s: refused with %q, want an InvalidArgument naming %s's two-decimal rule", tc.name, why, tc.field)
+		}
+		if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, unit+".listing"); err == nil {
+			t.Fatalf("%s: a refused SetListing writes no listing", tc.name)
+		}
+	}
+}

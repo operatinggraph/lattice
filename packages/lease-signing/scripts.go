@@ -159,6 +159,20 @@ def optional_number(p, name):
         return None
     return v
 
+def two_decimals(v, name):
+    # A dollar amount carries at most two decimals: v × 100 must sit within a
+    # millionth of an integer. The ledger keeps integer cents, and a figure
+    # with a fractional cent here would become a clause the reader refuses on
+    # every convergence pass — so it is refused once, at the source.
+    scaled = v * 100
+    nearest = int(scaled + 0.5)
+    d = scaled - nearest
+    if d < 0:
+        d = -d
+    if d > 0.000001:
+        fail("InvalidArgument: " + name + ": at most two decimal places")
+    return v
+
 def as_rfc3339_instant(s):
     # A bare "YYYY-MM-DD" (the FE's <input type=date> shape, and what
     # seed-showcase / seed-classic-demo write for moveInDate / availableFrom)
@@ -672,6 +686,7 @@ def execute(state, op):
                 req_rent = optional_number(p, "requestedRent")
                 if req_rent == None or req_rent <= 0:
                     fail("InvalidTerms: requestedRent must be a positive amount, got " + str(getattr(p, "requestedRent")))
+                req_rent = two_decimals(req_rent, "requestedRent")
             if req_rent == None:
                 # No rent offer from the applicant — fall back to the unit's own
                 # listed rent, so leaseRentSettlementSpec (semantic-contracts) has

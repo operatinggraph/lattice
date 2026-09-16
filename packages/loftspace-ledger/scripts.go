@@ -1701,6 +1701,12 @@ def return_deposit(state, op):
     # dispatch hydrated: a concurrent writer of .status must conflict rather
     # than be overwritten by a return computed from a stale state, and a
     # second return racing this one conflicts here instead of crediting twice.
+    # The trade of an EXPLICIT pin: commit_path.go's applyHydratedRevisions
+    # (:682-683) skips a mutation that carries its own expectedRevision, so it
+    # is not in the defaulted set the §3.2 re-hydrate retry replays — a
+    # conflict here is a terminal rejection, not a retry. Chosen on purpose:
+    # the loser of the race is a second credit of the same deposit, and must
+    # never be replayed as a second write; Weaver re-evaluates the row instead.
     status_data = {}
     for k, v in status_doc.data.items():
         status_data[k] = v
@@ -1764,9 +1770,14 @@ def derive_reads(op):
         # template (a link key spans two payload fields), so this is the one
         # channel that hydrates them. All optionalReads, so the handler's own
         # refusals (UnknownAccount, UnknownClause, UnknownLeaseApplication,
-        # TenancyNotEnded, ClauseAccountMismatch, ClauseLeaseMismatch) name what is absent
-        # instead of an opaque hydration miss; a dispatcher that declares a
-        # key required keeps it required (weakest wins).
+        # TenancyNotEnded, ClauseAccountMismatch, ClauseLeaseMismatch) name
+        # what is absent instead of an opaque hydration miss. The merge rule
+        # (Contract #2 §2.5 class (g), internal/processor/derive_reads.go
+        # mergeDerivedReads) is that a derivation never HARDENS the envelope's
+        # disposition: a key the envelope already declared keeps the
+        # envelope's own reads / optionalReads placement, so Weaver's required
+        # declarations stay required and an undeclared submitter gets these
+        # as optional.
         keys = []
         acct_key = optional_string(op.payload, "accountKey")
         clause_key = optional_string(op.payload, "clauseKey")

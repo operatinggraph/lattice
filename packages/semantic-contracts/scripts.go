@@ -378,22 +378,27 @@ def execute(state, op):
         if old_state != "active":
             fail("ClauseNotActive: " + old_key + " is " + str(old_state) + "; only an active clause can be superseded")
 
-        # The purpose token is inherited: an amendment that names none keeps
-        # the amended clause's own, read from its hydrated .terms (a REQUIRED
-        # declared read for the inheriting shape — mint_clause writes .terms
-        # unconditionally, so its absence here means the dispatcher never
-        # declared it, and an amendment that silently dropped a deposit's
-        # token would let leaseRentSettlement mint a second deposit). A
-        # payload that names a purpose overrides it; one that names the
-        # token itself is validated exactly as at mint.
-        if optional_purpose(p) == None:
-            old_terms_key = old_key + ".terms"
-            if not vertex_alive(state, old_terms_key):
-                fail("InvalidState: " + old_key + "'s .terms was not hydrated; declare it in reads")
-            inherited = state[old_terms_key].data.get("purpose")
-            minted = mint_clause(state, p, inherited)
-        else:
-            minted = mint_clause(state, p, None)
+        # The purpose token is inherited and may not CHANGE: the amended
+        # clause's own token, read from its hydrated .terms (a REQUIRED
+        # declared read — mint_clause writes .terms unconditionally, so its
+        # absence here means the dispatcher never declared it), is what the
+        # replacement carries. A payload that names none inherits it; one
+        # that names the same token is accepted; any difference — tagging an
+        # untagged clause deposit, re-tagging a deposit as a fee — is refused,
+        # because the token is what leaseRentSettlement reads the clause back
+        # by: dropping it would mint a second deposit, adding it would make a
+        # fee returnable. A clause with a different purpose is a new clause.
+        old_terms_key = old_key + ".terms"
+        if not vertex_alive(state, old_terms_key):
+            fail("InvalidState: " + old_key + "'s .terms was not hydrated; declare it in reads")
+        inherited = state[old_terms_key].data.get("purpose")
+        supplied = optional_purpose(p)
+        if supplied != None and supplied != inherited:
+            recorded = inherited
+            if recorded == None:
+                recorded = "none"
+            fail("InvalidArgument: purpose: a superseding clause keeps the amended clause's purpose (" + recorded + "); mint a new clause to change it")
+        minted = mint_clause(state, p, inherited)
         new_key = minted["clause_key"]
         new_id = minted["clause_id"]
 
@@ -403,7 +408,14 @@ def execute(state, op):
         # a DebitAccount completing this clause between hydration and commit
         # (the charge that would make it un-amendable) must conflict with this
         # write rather than be overwritten by a status computed from the
-        # pre-charge state — the ShortenClauseTerm / EndTenancy OCC shape.
+        # pre-charge state — the ShortenClauseTerm / EndTenancy OCC shape. The
+        # trade of an EXPLICIT pin: commit_path.go's applyHydratedRevisions
+        # (:682-683) skips a mutation carrying its own expectedRevision, so it
+        # is not in the defaulted set the §3.2 re-hydrate retry replays — a
+        # conflict is a terminal rejection, not a retry. Chosen on purpose: a
+        # replay would re-run the active check against the charged clause and
+        # refuse anyway, and the loser must never be re-applied as a second
+        # amendment; the submitter re-reads and decides.
         mutations = minted["mutations"] + [
             make_link(amends_lnk, new_key, old_key, "amends", "amends", {}),
             make_vtx_tombstone(old_key, "clause"),

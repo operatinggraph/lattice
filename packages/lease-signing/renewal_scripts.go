@@ -71,6 +71,20 @@ def require_number(p, name):
         fail("InvalidArgument: " + name + ": required number")
     return v
 
+def two_decimals(v, name):
+    # A dollar amount carries at most two decimals: v × 100 must sit within a
+    # millionth of an integer. The ledger keeps integer cents, and a figure
+    # with a fractional cent here would become a clause the reader refuses on
+    # every convergence pass — so it is refused once, at the source.
+    scaled = v * 100
+    nearest = int(scaled + 0.5)
+    d = scaled - nearest
+    if d < 0:
+        d = -d
+    if d > 0.000001:
+        fail("InvalidArgument: " + name + ": at most two decimal places")
+    return v
+
 def parts_of(key, name, want_type):
     parts = key.split(".")
     if len(parts) != 3 or parts[0] != "vtx":
@@ -279,6 +293,7 @@ def execute(state, op):
         rent_amount = require_number(p, "rentAmount")
         if rent_amount <= 0:
             fail("InvalidArgument: rentAmount: required positive number")
+        rent_amount = two_decimals(rent_amount, "rentAmount")
         term_months = require_number(p, "termMonths")
         if term_months != int(term_months):
             fail("InvalidTermMonths: termMonths must be a whole number of months; got " + str(term_months))

@@ -224,28 +224,54 @@ func TestSupersedeClause_PurposeInheritedWhenOmitted(t *testing.T) {
 	}
 }
 
-// TestSupersedeClause_PurposeOverridden — a payload that names a purpose
-// wins over the amended clause's, and one naming a purpose the deposit
-// shape refuses is refused the same way CreateClause refuses it.
-func TestSupersedeClause_PurposeOverridden(t *testing.T) {
+// TestSupersedeClause_PurposeNeverChanges — an amendment keeps the amended
+// clause's purpose: a payload naming the SAME token is accepted; one naming
+// a different token — re-tagging a deposit as a fee, tagging an untagged
+// clause deposit — is refused InvalidArgument and mints nothing. A clause
+// with a different purpose is a new clause, never an amendment.
+func TestSupersedeClause_PurposeNeverChanges(t *testing.T) {
 	ctx, conn := setupBcEnv(t)
-	cp, cons := newBcPipeline(t, ctx, conn, "supersedeoverride")
+	cp, cons := newBcPipeline(t, ctx, conn, "supersedepurposefixed")
 
 	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPQVRHJKMNPQ")
 	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsupovr001", leaseKey)
-	oldClauseKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesupovr1", leaseKey, acctKey,
-		`,"amountCents":4500,"purpose":"lockout"`, processor.OutcomeAccepted)
-
-	_, newKey := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride01", oldClauseKey, leaseKey, acctKey,
-		`,"amountCents":5500,"purpose":"lateFee"`, processor.OutcomeAccepted)
-	if got, _ := readData(t, ctx, conn, newKey+".terms")["purpose"].(string); got != "lateFee" {
-		t.Fatalf("the payload's purpose overrides the amended clause's, got %q", got)
-	}
-
-	// A plain clause (no token) amended without a purpose stays untagged.
+	depositKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesupovr1", leaseKey, acctKey,
+		`,"amountCents":250000,"purpose":"deposit"`, processor.OutcomeAccepted)
 	plainKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesupovr2", leaseKey, acctKey,
 		`,"amountCents":4500`, processor.OutcomeAccepted)
-	_, plainNew := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride02", plainKey, leaseKey, acctKey,
+
+	// deposit → fee: refused, naming the recorded token.
+	reply, refused := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride01", depositKey, leaseKey, acctKey,
+		`,"amountCents":300000,"purpose":"lateFee"`, processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: purpose: a superseding clause keeps the amended clause's purpose (deposit)") {
+		t.Fatalf("re-tagging a deposit must be refused naming the recorded token, got %+v", reply.Error)
+	}
+	if keyExists(t, ctx, conn, refused) {
+		t.Fatalf("a refused amendment mints nothing")
+	}
+	if !keyExists(t, ctx, conn, depositKey) {
+		t.Fatalf("a refused amendment leaves the amended clause live")
+	}
+
+	// none → deposit: refused, naming "none".
+	reply, refused = submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride02", plainKey, leaseKey, acctKey,
+		`,"amountCents":4600,"purpose":"deposit"`, processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "keeps the amended clause's purpose (none)") {
+		t.Fatalf("tagging an untagged clause must be refused naming none, got %+v", reply.Error)
+	}
+	if keyExists(t, ctx, conn, refused) {
+		t.Fatalf("a refused amendment mints nothing")
+	}
+
+	// deposit → deposit, explicit: accepted, the token carried.
+	_, newKey := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride03", depositKey, leaseKey, acctKey,
+		`,"amountCents":300000,"purpose":"deposit"`, processor.OutcomeAccepted)
+	if got, _ := readData(t, ctx, conn, newKey+".terms")["purpose"].(string); got != "deposit" {
+		t.Fatalf("an explicit same-token amendment carries the token, got %q", got)
+	}
+
+	// none → none: a plain clause amended without a purpose stays untagged.
+	_, plainNew := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride04", plainKey, leaseKey, acctKey,
 		`,"amountCents":4600`, processor.OutcomeAccepted)
 	if v, ok := readData(t, ctx, conn, plainNew+".terms")["purpose"]; ok {
 		t.Fatalf("a clause with no token stays untagged through an amendment, got %v", v)
@@ -253,12 +279,12 @@ func TestSupersedeClause_PurposeOverridden(t *testing.T) {
 
 	// The deposit shape is closed at mint on this path too: amending a
 	// deposit to a monthly clause is refused.
-	reply, refusedKey := submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride03", newKey, leaseKey, acctKey,
-		`,"amountCents":5500,"period":"monthly","purpose":"deposit"`, processor.OutcomeRejected)
-	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: purpose") {
-		t.Fatalf("purpose=deposit on a monthly clause must be refused, got %+v", reply.Error)
+	reply, refused = submitSupersede(t, ctx, conn, cp, cons, "supersedeoverride05", newKey, leaseKey, acctKey,
+		`,"amountCents":300000,"period":"monthly"`, processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: purpose: deposit is a oneTime computational clause") {
+		t.Fatalf("an inherited deposit token on a monthly amendment must be refused, got %+v", reply.Error)
 	}
-	if keyExists(t, ctx, conn, refusedKey) {
+	if keyExists(t, ctx, conn, refused) {
 		t.Fatalf("a refused amendment mints nothing")
 	}
 }
