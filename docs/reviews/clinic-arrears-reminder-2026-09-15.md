@@ -211,7 +211,9 @@ wall, not taste. The same 500-entry claim stands, unmeasured, in café, wellness
 are smaller today. Filed as one row (the shared mechanism's honest ceiling is ~30 entries under the production wall;
 past it no ledger reminds): `📐 needs designer pass · no-pattern: a script read that fetches an enumeration's
 follow-up aspects in one round trip, or a per-op script wall budget` — the demand side is the three siblings'
-resizing plus the clinic instance above.
+resizing plus the clinic instance above. **Resolved 2026-09-16 without the primitive:** the replay pages across
+dispatches ([design](verticals-arrears-resumable-replay-2026-09-16.md)); Riley Chen's account chained four pages
+live and recorded `sentAt`, and every ledger's ceiling is 600 entries.
 
 Deviations from the brief: the two settlement gaps declare `row.accountKey.arrears` (the brief's part-5 gotcha,
 missed by the builder, caught cold); the replyOp checks the id segment's NanoID grammar, not just the type
