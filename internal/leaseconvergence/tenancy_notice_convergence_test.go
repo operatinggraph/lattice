@@ -239,6 +239,14 @@ func TestLeaseConvergence_NoticeEndsTheTenancyEarly(t *testing.T) {
 	}, 45*time.Second, 200*time.Millisecond, "the shortened clause must read completed; status=%v", h.aspectData(clauseKey, "status"))
 
 	// --- leg 6: steady state ---
+	// The relist landed in Core KV (leg 4 read the aspect); the tenancyEnd row
+	// re-projects it on the fan-out from the unit's .listing change, which can
+	// still be in flight when the steady-state window opens — wait for the
+	// read model to carry the relist before asserting nothing moves.
+	require.Eventuallyf(t, func() bool {
+		tRow := h.weaverTargetRow(leasesigning.TenancyEndTarget, appID)
+		return tRow != nil && tRow["unitStatus"] == "available" && !rowBool(tRow, "missing_relist")
+	}, 45*time.Second, 200*time.Millisecond, "the tenancyEnd row must project the relist; tenancyEnd row=%v", h.weaverTargetRow(leasesigning.TenancyEndTarget, appID))
 	cut := time.Now().Add(5 * time.Second)
 	for time.Now().Before(cut) {
 		tRow := h.weaverTargetRow(leasesigning.TenancyEndTarget, appID)
