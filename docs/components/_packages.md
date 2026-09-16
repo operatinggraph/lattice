@@ -596,12 +596,10 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   the run's extreme, pin a re-projection after the op's write) — Weaver has no episode boundary of its own; for every
   ARM of the op (no-op, collapse, complete) pin the gap FALSE over the state that arm leaves. Sighting: a lens-computed
   param the dispatched op can refuse on SHAPE (`whole_cents` on a fractional-dollar `depositAmount`) is a gap refused on every
-  pass — pin the param's admissible domain at its source (loftspace deposit, 2026-09-15, caught cold). Sighting: a
-  replay budget mirrored as a NUMBER (500 entries) was sized against the live-read budget, not the 250 ms script wall
-  — a 98-entry account aborted at the wall, and a ScriptTimeout is a rejection the gap re-dispatches every window,
-  the loop the `historyTooLong` degrade exists to prevent; size every paged walk with a per-candidate follow-up read
-  by round trips (≈2.5 ms/entry + 50 ms fixed, measured live; CI's 5000 ms wall proves nothing) and hold the same
-  number in café / wellness / loftspace (clinic arrears, 2026-09-16, surfaced only by the live install).
+  pass — pin the param's admissible domain at its source (loftspace deposit, 2026-09-15, caught cold). Sighting: a replay budget mirrored as a NUMBER (500) was sized against the live-read budget, not the 250 ms wall — a
+  98-entry account aborted, and a ScriptTimeout is a rejection the gap re-dispatches forever (clinic arrears, 2026-09-16,
+  live install); size by round trips (≈2.5 ms/entry; CI's 5000 ms wall hides it) and PAGE the walk across dispatches,
+  each page closing the gap that dispatched it via alternating phase gaps (arrears resumable replay, 2026-09-16).
 - **A standing `scope=any` write on an entity with no workplace confines by the target's STATE MACHINE, not by
   liveness** — a bind accepting any live identity lets a desk actor attach a stranger's record to their own login and
   inherit its grants (identity-domain confines to `unclaimed` for this reason). Minted: clinic `BindPatientIdentity`
@@ -636,6 +634,7 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   brief's part-5 copy: for a value released through a shared seam, list the seam's callers and the state each runs in.
   Fifth minter (café counter payment, 2026-09-16, caught cold): a PLAYBOOK-dispatched leg inherited the human
   leg's balance cap and parked real cash — a dispatcher is a leg, bounded by the fact it dispatches from.
+  Sixth minter (arrears checkpoint, 2026-09-16): a writer that writes NOTHING is still a leg of a value it must clear.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
@@ -696,7 +695,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   entries inside one Weaver window fused two episodes, 2026-09-15, BLOCKING); the loftspace mirror of that fix inherited
   its head-as-episode-start approximation (an exact payment of the reminded month re-reminded a never-square tenant)
   and its `accountKey:dueAt` notification key, whose per-head uniqueness was a property of café's `postedAt + term`
-  that a RECORDED due date lacks (2026-09-15, both SHOULD-FIX). Check: for every precedent branch or
+  that a RECORDED due date lacks (2026-09-15, both SHOULD-FIX); a checkpoint mirrored from a head that returns
+  postedAt + balance was wrong for a head that also returns the order-sensitive `episodeStart` (wellness/loftspace,
+  2026-09-16). Check: for every precedent branch or
   conjunct the mirror omits, write what it enforced and name the new site that enforces it; for every key component,
   compare and boundary the mirror KEEPS, name what makes it unique / ordered in THIS package's data (mandated vector
   for an episode mechanism: the reminded item retired exactly while the episode continues); for every `<x>Ref`, name

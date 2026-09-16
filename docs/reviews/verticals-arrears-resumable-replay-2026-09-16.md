@@ -120,8 +120,21 @@ re-opens, the next evaluation starts at page 1.
 |---|---|---|---|
 | clinic-ledger | yes (`reverses`, uncapped) | full (`debits`, `reversed`, `creditCents`) | 0.6.1 → 0.7.0 |
 | cafe-ledger | yes (`reverses`, refund capped at the charge) | full — mirror clinic verbatim; the cap does not make the key-free form exact for legacy data | 0.7.0 → 0.8.0 |
-| wellness-ledger | none | `debits` + `creditCents` (no `reversed` map, no netting) | 0.2.26 → 0.3.0 |
-| loftspace-ledger | none (`scripts.go:402`) | as wellness; its lens names `remindAt`, not `dueAt` | 0.8.2 → 0.9.0 |
+| wellness-ledger | yes — two hops (credit → `settlesRefund` → `wellnessrefund` marker → `reverses` → charge) | `entries: {id: {postedAt, type, amountCents, reversesKey}}` — every debit AND credit under its own id (see below) | 0.2.26 → 0.3.0 |
+| loftspace-ledger | none (`scripts.go:402`) | as wellness, each entry also carrying the `dueAt` its `arrears_head` reads off every debit row; its lens names `remindAt` beside `dueAt` | 0.8.2 → 0.9.0 |
+
+**Two aggregate forms, one per `arrears_head` shape.** Clinic's and café's `arrears_head` return only the head's
+`postedAt` and the balance — pure functions of the per-debit net faces and the credit total, so the collapsed
+aggregate (`debits`, `reversed`, `creditCents`) reproduces them exactly (the cold review constructed no
+counterexample). Wellness's and loftspace's `arrears_head` ALSO derive `episodeStart` — the postedAt of the debit
+that opened the current run of open debits, which the evaluation compares against `sentAt` to end an episode — and
+that quantity is ORDER-sensitive: a single synthetic credit row sorted first can retire an earlier debit with a
+credit that really posted later, moving the opener and dropping a `sentAt` that should carry (found by the
+loftspace mirror's own existing vector, `TestArrears_ExactRetirementMovesTheHeadWithinTheEpisode`). Those two
+ledgers therefore checkpoint every entry — debit and credit alike — under its transaction id with its real
+`postedAt` (wellness with the id of the charge a refund's marker reverses; loftspace with the `dueAt` its head reads), and `arrears_rows` flattens the map back into exactly the rows a whole-history execution reads; the
+checkpoint grows with the page count either way (≤ 600 × ~60 bytes), and `arrears_head` is byte-identical in all
+four packages.
 
 The three siblings drop their 50 × 10 budget for clinic's 30 × 20 constants, bound into the prelude from Go
 (`ArrearsPageLimit` / `ArrearsMaxPages`), the way clinic's `a3b8e12d` did — the number the wall refutes leaves
@@ -202,3 +215,45 @@ the corpus.
 7. **Non-goals:** any change to `internal/processor` or `internal/weaver`; the apps (recorded-wins already reads
    the record); the notification adapters; a faster page (the constant is the knob, sized by the wall
    arithmetic); the FIFO semantics themselves.
+
+### Build note (2026-09-16)
+
+Shipped in four units, each merged and CI-green before the next: clinic `b2416f11` (`f74b0b71`, 0.7.0), café
+`fec4e67b` (`31e21987`, 0.8.0), loftspace `9ad3dda4` (`61a994dc`, 0.9.0), wellness `bf1df2a3` (`4e446c1f`,
+0.3.0); brief `7415d0ba`. **Live** (each package diff-applied on the shared stack, no restart): clinic-ledger
+0.7.0 landed at 12:56:06 local and Riley Chen's 98-entry account — the row's own instance, flagged
+`historyTooLong` under the 30-entry budget with no `historyBudget` — re-armed on the recorded-budget arm and
+chained **four pages in 600 ms** (dispatches at 12:56:06.68 / .84 / 07.07 / 07.20; script wall per page
+103 / 189 / 79 / 57 ms — the widest page 75 % of the 250 ms wall, so 30 stays the constant), recorded
+`dueAt 2026-08-25T15:30:00Z`, `sentAt 19:56:07Z`, and the bridge's `.arrearsNotification` reply landed
+`completed`; the other eight clinic rows, both café rows, seven loftspace rows and eight wellness rows
+re-projected unchanged and closed. No sibling account is past one page today, so the phase chain is proven live
+on the clinic instance and by every ledger's paged vectors.
+
+**Verdicts amended where the build falsified them:** §2's lifetime table said `post_entry` drops the checkpoint
+"on EVERY branch" — the two clinic/café debit shapes that write no `.arrears` at all (a charge queued behind an
+open head; a charge on an account still in credit) did not, and a mid-replay charge would have resumed an old
+cursor over a changed set and understated `balanceCents` in the patient's notification (caught cold; the
+branches now drop a live checkpoint and mark `stale`, and only then). §4 said wellness has no `reverses`
+relation — it has a two-hop one through the refund marker, and the collapsed aggregate was not exact for
+wellness or loftspace at all, because their `arrears_head` derives `episodeStart` (the table above and the
+two-forms paragraph record the correction; each ledger's pre-existing exact-retirement vector is what refused
+the collapsed form). Also hardened at review: a malformed checkpoint restarts at page 1 and re-opens
+`missing_evaluation` (never a silent stall); `freshUntil` keeps the plain `historyTooLong` suppression while only
+the gap is budget-aware; the phase literals are Go constants bound into prelude, cypher and DDL.
+
+Review classification (one cold pass over the clinic diff — a state-machine increment; lead passes over the
+three mirrors; one cold cumulative pass over the mirrors at close): **design-gap** — the "every branch" reset
+claim (the no-write debit shapes), and the collapsed aggregate's exactness premise for the `episodeStart`
+ledgers (a census that said "none" for a relation wellness has); **brief-gap** — "no new refusal" (the id
+parser's `InvalidArgument` on a malformed link is one, reachable only on corrupt data); **convention** — two
+narrating comments rephrased. Adjacent: the ratified round-trip design's follow-up-read term (§1.2) stays
+unfiled — no consumer is follow-up-bound after this fire.
+
+**Close pass (one cold pass over the three mirrors):** BLOCKING in café — the new mid-replay debit branch is reached by
+`PayoutCafeCredit` (a debit that always leaves the balance ≤ 0), which the `.arrears` DDL's `PermittedCommands` did not
+admit, so a cash payout on a replaying account was a `DDLViolation` for the life of the checkpoint — clinic has no payout,
+so its lifetime walk never reached that writer (fixed at `bd722499` — 0.8.1, with the payout-mid-replay vector, live; **design-gap**: a
+writer that writes NOTHING is still a leg, and a leg gained by a mirror must be admitted by the DDL it now writes).
+SHOULD-FIX — loftspace's order-sensitivity claim had no cross-page vector (ported from wellness); wellness comments
+narrating the fire (**convention**). §4's wellness row corrected: it has a two-hop `reverses` relation.
