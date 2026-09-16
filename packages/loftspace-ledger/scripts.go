@@ -31,17 +31,50 @@ const RecurringChargePeriod = "720h"
 // lands on the same second.
 const ArrearsGraceDays = 5
 
+// ArrearsPageLimit is the number of postedTo entries ONE dispatch of
+// EvaluateLoftspaceArrears consumes — one kv.Links page — and ArrearsMaxPages
+// the number of such pages an account's history may run to before the op
+// records historyTooLong instead. The replay is RESUMABLE: a history longer
+// than one page is folded page by page across successive dispatches, each
+// recording its running aggregate and the cursor to resume from on the
+// account's own .arrears.replay checkpoint, and Weaver chaining the
+// dispatches through the lens's two phase gaps (lenses.go). The page, not the
+// history, is what one execution pays for — the same round-trip arithmetic
+// against the Processor's production script wall that sizes
+// clinic-ledger's ArrearsPageLimit / ArrearsMaxPages (scripts.go there);
+// this ledger runs no per-credit netting walk, so the same page limit carries
+// more headroom here, not less.
+const (
+	ArrearsPageLimit = 30
+	ArrearsMaxPages  = 20
+)
+
+// ArrearsPhaseA / ArrearsPhaseB are the two values of the replay checkpoint's
+// phase, which flips on every page. The lens projects one continuation gap
+// per value (lenses.go), so the page written under one phase closes the gap
+// that dispatched it and opens the other; the op, the lens's cypher and the
+// aspect DDL's schema all read the literal from here.
+const (
+	ArrearsPhaseA = "a"
+	ArrearsPhaseB = "b"
+)
+
 // arrearsGracePrelude binds ArrearsGraceDays into Starlark, once, as the Go
-// duration string time.rfc3339_add takes. Only the account DDL computes an
-// arrears reminder instant (EvaluateLoftspaceArrears — this ledger stores no
-// balance, so post_entry never names a head and never derives a date), so
-// only that script opens with it.
+// duration string time.rfc3339_add takes, together with the replay's page
+// constants and phase literals. Only the account DDL computes an arrears
+// reminder instant (EvaluateLoftspaceArrears — this ledger stores no balance,
+// so post_entry never names a head and never derives a date), so only that
+// script opens with it.
 //
 // Prepended rather than interpolated with a format verb, so no future edit to
 // the script body is responsible for escaping a literal '%'.
 var arrearsGracePrelude = fmt.Sprintf(`
 ARREARS_GRACE_DURATION = "%dh"
-`, ArrearsGraceDays*24)
+ARREARS_PAGE_LIMIT = %d
+ARREARS_MAX_PAGES = %d
+ARREARS_PHASE_A = %q
+ARREARS_PHASE_B = %q
+`, ArrearsGraceDays*24, ArrearsPageLimit, ArrearsMaxPages, ArrearsPhaseA, ArrearsPhaseB)
 
 // accountDDLScript is the account DDL's Starlark, opened by the grace binding
 // above.
@@ -70,12 +103,14 @@ var accountDDLScript = arrearsGracePrelude + accountDDLScriptBody
 // It ALSO handles EvaluateLoftspaceArrears, the Weaver-dispatched arrears
 // evaluation (the wellness-ledger EvaluateWellnessArrears mechanism applied
 // to this ledger, which likewise stores no balance): it recomputes the
-// account's FIFO-oldest open charge over a bounded replay of the postedTo
-// history, records that charge's own recorded due date and the reminder
-// instant the grace puts after it in the account's own .arrears aspect, and —
-// once the reminder instant has passed and no reminder has gone out in this
-// episode — fires the external.notification the bridge turns into a real
-// message to the tenant. The FIFO is NOT maintained incrementally by
+// account's FIFO-oldest open charge over a resumable, page-per-dispatch
+// replay of the postedTo history (a history longer than one page records its
+// running aggregate as a checkpoint on .arrears.replay and Weaver dispatches
+// the next page), records that charge's own recorded due date and the
+// reminder instant the grace puts after it in the account's own .arrears
+// aspect, and — once the reminder instant has passed and no reminder has gone
+// out in this episode — fires the external.notification the bridge turns
+// into a real message to the tenant. The FIFO is NOT maintained incrementally by
 // post_entry: this ledger stores no balance, so a posted entry cannot even
 // tell an episode opening from one continuing, let alone name the head a
 // partial payment moved to. The head is recomputed once, here, only when it
@@ -367,74 +402,145 @@ def require_manages(unit_key, what):
         # would turn a denial into a lookup for a resource it does not manage.
         fail("AuthDenied: " + op.actor + " does not manage the unit this lease is on; " + what)
 
-# EvaluateLoftspaceArrears' replay budget over the account's postedTo history:
-# 10 pages of 50 entries covers many years of a monthly rent history. The
-# ceiling is not a taste judgement — it is what the Processor's production
-# script wall (250ms) affords for a live paged walk plus the per-candidate
-# follow-up reads, so raising it does not extend the reach, it just moves the
-# failure from this budget to the wall. The self-credit cap in
-# transactionDDLScript replays the same history under the same numbers
-# (SELF_CREDIT_PAGE_LIMIT / SELF_CREDIT_MAX_PAGES).
+# EvaluateLoftspaceArrears replays the account's postedTo history ONE PAGE PER
+# DISPATCH: arrears_entries consumes a single kv.Links page of
+# ARREARS_PAGE_LIMIT entries (bound from Go's ArrearsPageLimit via the prelude,
+# where the round-trip arithmetic against the Processor's 250 ms script wall
+# lives) and folds it into a running aggregate. A history that fits one page
+# finalizes in the same execution; a longer one records the aggregate and the
+# cursor to resume from on the account's .arrears.replay checkpoint, and the
+# next dispatch — Weaver's, through the lens's phase gaps — continues from
+# there. A page pays the same whatever the history's length, so any history up
+# to ARREARS_PAGE_LIMIT × ARREARS_MAX_PAGES entries is reached exactly. This
+# budget is independent of the self-credit balance-verification replay in
+# transactionDDLScript (SELF_CREDIT_PAGE_LIMIT / SELF_CREDIT_MAX_PAGES) — that
+# walk answers a different question (the amount owed, inside one op's own
+# script wall) and is unaffected by this one's constants.
 #
-# An account that exceeds it is not aged against a truncated FIFO — a partial
-# replay would name the wrong head and the reminder that went out would name a
-# charge the tenant had already paid. But it does not fail either: see the
-# degrade branch in execute(). A refusal here is a PERMANENT silent stop,
-# because the only thing that would re-drive the op is the very gap this
-# account's row opens, and a rejected op never closes it — Weaver would
-# re-dispatch a doomed evaluation on every window, forever, with no reminder
-# and no operator signal. Instead the exhaustion is RECORDED (historyTooLong)
-# so the row goes quiet, the operator can see it in the read model, and the
-# next posted entry re-arms one more attempt.
-ARREARS_PAGE_LIMIT = 50
-ARREARS_MAX_PAGES = 10
-
-def arrears_entries(acct_key):
-    # Every live entry posted to this account, as {postedAt, key, type,
-    # amountCents, dueAt}, and whether the page budget ran out before the walk
-    # did. dueAt is the entry's OWN recorded due date — DebitAccount stamps it
-    # on a clause-authorized recurring charge from the clause's anniversary
-    # grid; a payment or a landlord one-off (LoftspaceRecordCharge) records
-    # none and carries None here. An entry missing any of
-    # postedAt/type/amountCents is skipped rather than guessed at, exactly as
-    # the self-credit replay skips it.
+# The aggregate carries every entry EXACTLY, not a sum: unlike clinic-ledger's
+# checkpoint (which nets per-credit reversals against specific debits and so
+# collapses every plain credit into one running total, sortable anywhere ahead
+# of the debits it offsets), this ledger's arrears_head also derives the
+# EPISODE START — the postedAt of the debit that arrived when the open queue
+# was last empty — a quantity that depends on the REAL chronological
+# interleaving of every debit and credit, not only on their totals. Collapsing
+# the credits into one total and resorting it first would still name the right
+# head and balance (a credit total offsets the oldest open debits first
+# whichever page it was read on), but it can retire a debit with a credit that
+# in reality posted AFTER it, which erases the very debit whose postedAt was
+# the episode's start. So every entry — debit or credit — is folded into the
+# aggregate under its own transaction ID and its own postedAt, and arrears_rows
+# hands the unchanged arrears_head the exact same rows a single, whole-history
+# execution would have: no netting, no algebraic shortcut, no reverses
+# relation to walk (this ledger has none — there is no refund verb, README).
+# No entry in this ledger names another it reverses, so the fold has nothing
+# else to compute.
+#
+# Keyed by the transaction's bare ID, never its full vtx key: the checkpoint
+# carries an IDENTITY to re-derive from, not a relationship to stand in for
+# one (CLAUDE.md's no-key-list-index rule — the same reason clinic-ledger's
+# own checkpoint keys its debits/reversed maps by id, design doc §2). A page
+# reads the id off its own live kv.Links enumeration (parts_of), and
+# arrears_rows reconstructs the full vtx.transaction.<id> key the finalize
+# walk needs for its (postedAt, key) tie-break; the checkpoint itself is never
+# read as a substitute for enumerating postedTo.
+#
+# An account whose history runs past ARREARS_MAX_PAGES pages is not aged
+# against a truncated FIFO — a partial replay would name the wrong head and
+# the reminder that went out would name a charge the tenant had already paid.
+# But it does not fail either: see the degrade branch in execute(). A refusal
+# there is a PERMANENT silent stop, because the only thing that re-drives the
+# op is the very gap this account's row opens, and a rejected op never closes
+# it — Weaver would re-dispatch a doomed evaluation on every window, forever,
+# with no reminder and no operator signal. Instead the exhaustion is RECORDED
+# (historyTooLong, with the entry budget it exhausted as historyBudget) so the
+# row goes quiet, the operator can see it in the read model, the next posted
+# entry re-arms one more attempt, and a raised budget reaches the accounts the
+# smaller one parked, once.
+def arrears_entries(acct_key, cursor, agg):
+    # One page of the account's live postedTo entries, folded into agg =
+    # {"entries": {txId: {postedAt, type, amountCents, dueAt}}}: every debit
+    # and every credit recorded under its own transaction ID (never its full
+    # vtx key — the checkpoint carries identity, not a key-list index; see the
+    # comment above this function). dueAt is the entry's OWN recorded due date
+    # (DebitAccount stamps it on a clause-authorized recurring charge from the
+    # clause's anniversary grid; a payment or a landlord one-off records none)
+    # and carries no meaning on a credit — it is kept here (unlike the rest of
+    # the record) because arrears_head reads it off every DEBIT row to name
+    # the head's own recorded due date; dropping it would force arrears_rows
+    # to re-read it live, one round trip per debit, on every finalize. Returns
+    # (agg, next_cursor); next_cursor is None once the enumeration is
+    # exhausted. Keyed by id, not by postedAt: identity is what makes the fold
+    # exact across pages when two entries share a second. An entry missing any
+    # of postedAt/type/amountCents is skipped rather than guessed at, exactly
+    # as the self-credit replay skips it.
     #
-    # No entry in this ledger names another entry it reverses (there is no
-    # refund verb: a refund or void is an offsetting entry with a memo,
-    # README), so there is no netting pre-pass here — every credit offsets the
-    # oldest still-open charge under plain FIFO. The pre-pass the wellness and
-    # café ledgers run before their FIFO enforces that a credit naming the
-    # charge it reverses retires THAT charge and not the oldest one; that
-    # invariant has no writer in this ledger, and the day a refund verb lands
-    # here it lands with the pre-pass.
-    entries = []
-    cursor = None
-    budget_exhausted = True
-    for _page in range(ARREARS_MAX_PAGES):
-        # read-posture: (e) relation=postedTo epoch=none -- bounded by the page
-        # budget; the caller degrades when it is exhausted.
-        page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, ARREARS_PAGE_LIMIT)
-        for lk in page:
-            if lk.isDeleted:
-                continue
-            # read-posture: (e) per-candidate follow-up read off the enumeration
-            # above -- each transaction's own .entry aspect, data-derived and
-            # unknowable client-side.
-            tx_entry = kv.Read(lk.sourceVertex + ".entry")
-            if tx_entry == None or tx_entry.isDeleted:
-                continue
-            tx_amount = tx_entry.data.get("amountCents")
-            tx_posted_at = tx_entry.data.get("postedAt")
-            tx_type = tx_entry.data.get("type")
-            if tx_amount == None or tx_posted_at == None or tx_type == None:
-                continue
-            entries.append({"postedAt": tx_posted_at, "key": lk.sourceVertex,
-                            "type": tx_type, "amountCents": tx_amount,
-                            "dueAt": tx_entry.data.get("dueAt")})
-        if cursor == None:
-            budget_exhausted = False
-            break
-    return entries, budget_exhausted
+    # read-posture: (e) relation=postedTo epoch=none -- one page per dispatch;
+    # the cursor is carried on the account's .arrears.replay checkpoint and
+    # the caller degrades past ARREARS_MAX_PAGES pages.
+    page, next_cursor = kv.Links(acct_key, "postedTo", "in", cursor, ARREARS_PAGE_LIMIT)
+    for lk in page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above -- each transaction's own .entry aspect, data-derived and
+        # unknowable client-side.
+        tx_entry = kv.Read(lk.sourceVertex + ".entry")
+        if tx_entry == None or tx_entry.isDeleted:
+            continue
+        tx_amount = tx_entry.data.get("amountCents")
+        tx_posted_at = tx_entry.data.get("postedAt")
+        tx_type = tx_entry.data.get("type")
+        if tx_amount == None or tx_posted_at == None or tx_type == None:
+            continue
+        _, tx_id = parts_of(lk.sourceVertex, "postedTo source", "transaction")
+        agg["entries"][tx_id] = {"postedAt": tx_posted_at, "type": tx_type,
+                                 "amountCents": tx_amount, "dueAt": tx_entry.data.get("dueAt")}
+    return agg, next_cursor
+
+def arrears_checkpoint(prior):
+    # The replay checkpoint the recorded .arrears carries, or None when it
+    # carries none — or one this op cannot resume. A checkpoint is resumable
+    # only when every field the fold needs has the shape the fold wrote: a
+    # non-empty cursor string, a phase the lens projects a gap for, a page
+    # count of at least one, and a dict aggregate. Anything else is treated as
+    # ABSENT — the evaluation starts again at page 1 over a fresh aggregate —
+    # rather than resumed or refused: resuming would fold new pages onto a
+    # corrupt aggregate and name a wrong head, and a refusal would leave
+    # whichever gap dispatched this op open for Weaver to re-dispatch the same
+    # doomed read until its retry budget parked the row. Restarting costs one
+    # replay and records a well-formed checkpoint in its place.
+    replay = prior.get("replay")
+    if replay == None or type(replay) != type({}):
+        return None
+    cursor = replay.get("cursor")
+    phase = replay.get("phase")
+    pages = replay.get("pages")
+    entries = replay.get("entries")
+    if type(cursor) != type("") or cursor == "":
+        return None
+    if phase != ARREARS_PHASE_A and phase != ARREARS_PHASE_B:
+        return None
+    if type(pages) != type(0) or pages < 1:
+        return None
+    if type(entries) != type({}):
+        return None
+    return {"cursor": cursor, "phase": phase, "pages": pages, "entries": entries}
+
+def arrears_rows(agg):
+    # arrears_head's input, rebuilt from the finished aggregate: one row per
+    # entry, its full vtx.transaction.<id> key reconstructed from the
+    # checkpoint's bare id (the (postedAt, key) tie-break arrears_head sorts
+    # on needs the same key shape a live kv.Links page would have handed it),
+    # carrying its own postedAt — the exact rows a single, whole-history
+    # execution would have handed arrears_head, folded page by page instead of
+    # all at once. arrears_head's own FIFO walk, including its episode-start
+    # tracking, is unchanged.
+    rows = []
+    for tx_id, e in agg["entries"].items():
+        rows.append({"postedAt": e["postedAt"], "key": "vtx.transaction." + tx_id, "type": e["type"],
+                     "amountCents": e["amountCents"], "dueAt": e.get("dueAt")})
+    return rows
 
 def arrears_head(entries):
     # The FIFO the tenant's own statement runs, reproduced exactly
@@ -703,9 +809,22 @@ def execute(state, op):
                 fail("InvalidState: this account's arrears aspect is not a loftspaceAccountArrears")
             prior = carry_arrears(arrears_doc)
 
-        entries, history_too_long = arrears_entries(acct_key)
+        # The replay checkpoint, if a previous dispatch left one: the pages
+        # consumed so far, the cursor to resume from and the running
+        # aggregate. Absent, this dispatch starts at page 1 over a fresh
+        # aggregate. A recorded value is read as the fact it records — a
+        # checkpoint is progress through an enumeration, not an evaluation, so
+        # nothing here decides a send.
+        replay = arrears_checkpoint(prior)
+        cursor = None
+        agg = {"entries": {}}
+        pages = 1
+        if replay != None:
+            cursor = replay["cursor"]
+            agg = {"entries": replay["entries"]}
+            pages = replay["pages"] + 1
 
-        if history_too_long:
+        if pages > ARREARS_MAX_PAGES:
             # DEGRADE, never refuse. The account's history outran the replay
             # budget, so the FIFO head is unknown and no send can be justified —
             # but a rejection would be a permanent silent stop: the row's own
@@ -715,16 +834,23 @@ def execute(state, op):
             # Recording the exhaustion instead makes it OBSERVABLE and QUIET:
             # the lens suppresses both the gap and the timer on
             # historyTooLong, so the dispatch loop stops while the row stays
-            # in the weaver-targets bucket for an operator to find. What was
-            # already recorded is carried untouched — a reminder already sent
-            # stays recorded as sent, and a due date already armed is not
-            # erased by an evaluation that could not read the history. stale
-            # is dropped: it asks for a recomputation this op has just
-            # attempted, and re-asking would re-open the gap the degrade is
-            # closing. post_entry's own stale write drops historyTooLong in
-            # turn, so the next posted entry buys exactly one more attempt —
-            # bounded to one op per entry, never a loop.
-            data = {"evaluatedAt": evaluated_at, "historyTooLong": True}
+            # in the weaver-targets bucket for an operator to find. The budget
+            # exhausted is recorded beside the flag (historyBudget, in
+            # entries), so the lens can tell an account parked under a smaller
+            # budget from one parked under this one and re-arm the former
+            # exactly once. What was already recorded is carried untouched — a
+            # reminder already sent stays recorded as sent, and a due date
+            # already armed is not erased by an evaluation that could not read
+            # the history. stale is dropped: it asks for a recomputation this
+            # op has just attempted, and re-asking would re-open the gap the
+            # degrade is closing. The checkpoint is dropped with it: a degrade
+            # ends the replay, and a surviving checkpoint would keep a phase
+            # gap open under the flag. post_entry's own stale write drops
+            # historyTooLong in turn, so the next posted entry buys exactly
+            # one more attempt — bounded to one replay per entry, never a
+            # loop.
+            data = {"evaluatedAt": evaluated_at, "historyTooLong": True,
+                    "historyBudget": ARREARS_PAGE_LIMIT * ARREARS_MAX_PAGES}
             for carried in ["dueAt", "remindAt", "remindedFor", "sentAt"]:
                 carried_value = prior.get(carried)
                 if carried_value != None:
@@ -740,7 +866,47 @@ def execute(state, op):
                                          "historyTooLong": True}}],
                     "response": {"primaryKey": acct_key}}
 
-        head, balance_cents = arrears_head(entries)
+        agg, next_cursor = arrears_entries(acct_key, cursor, agg)
+
+        if next_cursor != None:
+            # MID-REPLAY: the enumeration has more pages. Every recorded field
+            # of the episode is carried verbatim — dueAt, remindAt,
+            # remindedFor, sentAt, stale, evaluatedAt all still describe the
+            # account exactly as the last COMPLETED evaluation or posted entry
+            # left them; this dispatch has evaluated nothing, so evaluatedAt is
+            # not re-stamped and nothing is sent — and the checkpoint is
+            # rewritten whole: the advanced cursor, the page count, the
+            # aggregate so far, and a phase that flips on every page. The
+            # phase is Weaver's continuation trigger: the lens projects one
+            # gap per phase, so the page that closes the gap that dispatched
+            # it opens the other, and each gap episode is exactly one dispatch
+            # (lenses.go). A redelivered dispatch reads the advanced
+            # checkpoint and consumes the NEXT page — progress, never
+            # repetition — and two dispatches racing one checkpoint serialize
+            # on the .arrears revision this write is conditioned on
+            # (make_aspect_update).
+            phase = ARREARS_PHASE_A
+            if replay != None and replay["phase"] == ARREARS_PHASE_A:
+                phase = ARREARS_PHASE_B
+            data = {}
+            for k, v in prior.items():
+                if k != "replay":
+                    data[k] = v
+            data["replay"] = {"phase": phase, "cursor": next_cursor, "pages": pages,
+                              "entries": agg["entries"]}
+            if arrears_absent:
+                mutations = [make_aspect(acct_key, "arrears", "loftspaceAccountArrears", data)]
+            else:
+                mutations = [make_aspect_update(acct_key, "arrears", "loftspaceAccountArrears", data)]
+            return {"mutations": mutations,
+                    "events": [{"class": "account.arrearsReplayPaged",
+                                "data": {"accountKey": acct_key, "pages": pages}}],
+                    "response": {"primaryKey": acct_key}}
+
+        # FINALIZE: the enumeration is exhausted, so the aggregate is the whole
+        # history and the head is computed over it. Nothing below carries the
+        # checkpoint — a finished evaluation has no replay in progress.
+        head, balance_cents = arrears_head(arrears_rows(agg))
 
         # evaluatedAt is written on EVERY outcome, including "owes nothing":
         # its absence is what opens the convergence gap for an account that
@@ -867,9 +1033,11 @@ def execute(state, op):
         #
         # stale is never carried on ANY path: recomputing the head from the
         # account's own history is precisely what stale asks for, and it has
-        # just happened. historyTooLong goes the same way for the same reason
-        # — this evaluation read the whole history, so whatever recorded that
-        # it once could not is answered, and the lens un-suppresses the row.
+        # just happened. historyTooLong and historyBudget go the same way for
+        # the same reason — this evaluation read the whole history, so
+        # whatever recorded that it once could not is answered, and the lens
+        # un-suppresses the row. The replay checkpoint is not carried either:
+        # the enumeration it recorded progress through is finished.
 
         if arrears_absent:
             mutations = [make_aspect(acct_key, "arrears", "loftspaceAccountArrears", data)]
@@ -1105,18 +1273,26 @@ def carry_arrears(doc):
     # reminded for, and dropping it while marking the state stale would send
     # twice for one debt.
     #
-    # historyTooLong is the exception, and only this script drops it. It
-    # records that an evaluation could not read the account's history inside
-    # its replay budget, and the lens holds the row QUIET while it stands —
-    # no gap, no timer. Carrying it across a posted entry would make that
-    # quiet permanent for the life of the account. Dropping it here is what
-    # buys exactly one more attempt per entry: this write also sets stale, so
-    # the gap re-opens once, the evaluation runs once, and if the history is
-    # still too long it records the mark again and the row goes quiet again.
-    # One op per entry, never a loop.
+    # historyTooLong (with the historyBudget recorded beside it) is the first
+    # exception, and only this script drops it. It records that an evaluation
+    # could not read the account's history inside its replay budget, and the
+    # lens holds the row QUIET while it stands — no gap, no timer. Carrying it
+    # across a posted entry would make that quiet permanent for the life of
+    # the account. Dropping it here is what buys exactly one more attempt per
+    # entry: this write also sets stale, so the gap re-opens once, the
+    # evaluation runs once, and if the history is still too long it records
+    # the mark again and the row goes quiet again. One op per entry, never a
+    # loop.
+    #
+    # replay is the second: the checkpoint of an evaluation part-way through
+    # the account's postedTo history — the pages consumed, the cursor, the
+    # running aggregate. This entry changes the enumerated set under that
+    # cursor, so the checkpoint no longer describes a prefix of the history
+    # and is dropped; the stale mark this write sets re-opens the evaluation
+    # gap, and the next evaluation starts again at page 1.
     out = {}
     for k, v in doc.data.items():
-        if k == "historyTooLong":
+        if k == "historyTooLong" or k == "historyBudget" or k == "replay":
             continue
         out[k] = v
     return out

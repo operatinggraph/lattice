@@ -83,10 +83,17 @@ The ledger stores no balance and no arrears state on the account root, so the we
 mechanism (a ledger that likewise stores no balance) is applied here, with one difference in where the
 dates come from. `EvaluateLoftspaceArrears{accountKey}` — dispatched by Weaver's
 `loftspaceArrearsReminders` playbook, and refused for any other actor — replays the account's own
-`postedTo` history under a bounded budget (50 × 10 entries; past it the evaluation records
-`historyTooLong` and goes quiet rather than refusing), runs the plain FIFO the tenant's statement runs
-(no netting pre-pass: no entry in this ledger names a charge it reverses), and writes
-`vtx.account.<id>.arrears`:
+`postedTo` history ONE PAGE PER DISPATCH (30 entries a page, `ArrearsPageLimit`; up to 20 pages,
+`ArrearsMaxPages` — 600 entries total; past it the evaluation records `historyTooLong` with the
+`historyBudget` it exhausted and goes quiet rather than refusing, and a later, larger budget re-arms an
+account a smaller one parked). A history longer than one page leaves a checkpoint on
+`.arrears.replay` (`{phase, cursor, pages, entries}` — every debit and credit read so far keyed by its
+bare transaction ID (never its full vtx key) and its own recorded postedAt, no netting or collapsed
+total, since the episode-start computation below needs each entry's real timing) that the next
+dispatch — chained by
+the lens's `missing_replay_a` / `missing_replay_b` gaps — resumes from; the finalize page runs the plain
+FIFO the tenant's statement runs (no netting pre-pass: no entry in this ledger names a charge it
+reverses) over the whole set, and writes `vtx.account.<id>.arrears`:
 
 - **`dueAt`** is the FIFO-oldest open charge's **own recorded `.entry.dueAt`** — the date a
   clause-authorized rent charge carries from its anniversary grid — or its `postedAt` when it recorded
