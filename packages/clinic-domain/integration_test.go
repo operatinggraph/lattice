@@ -795,6 +795,292 @@ func TestClinic_PatientDoubleBook(t *testing.T) {
 	clAssertSlotClaimLive(t, ctx, conn, patientKey, "2026-08-10T14:00:00Z")
 }
 
+// clSelfDayClaimKey builds the patient hub's self-booking day-claim key for a
+// canonical UTC startsAt and a provider — mirroring the package's
+// self_day_localname Starlark helper: "selfday" + the 8-digit UTC calendar day
+// + the provider's NanoID.
+func clSelfDayClaimKey(patientKey, startsAt, providerKey string) string {
+	day := strings.ReplaceAll(startsAt[:10], "-", "")
+	return patientKey + ".selfday" + day + providerKey[len("vtx.provider."):]
+}
+
+// clSelfSubmit publishes an op on the consumer scope=self path (actor = the
+// consumer identity, authContext.target = itself) and returns the outcome plus,
+// on a rejection, the script's failure text after "fail: " (empty when accepted
+// or when the reply carries no script failure). The minted key suffix is the
+// requestID-derived NanoID, as clSubmit's is.
+func clSelfSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, op, payload string, reads, optionalReads []string) (string, processor.MessageOutcome, string) {
+	t.Helper()
+	reqID := testutil.GenReqID(label)
+	env := &processor.OperationEnvelope{
+		RequestID:     reqID,
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         clConsumerKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(payload),
+		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads},
+		AuthContext:   &processor.AuthContext{Target: clConsumerKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	reason := ""
+	if reply != nil && reply.Error != nil {
+		msg := reply.Error.Message
+		if i := strings.Index(msg, "fail: "); i >= 0 {
+			reason = msg[i+len("fail: "):]
+		} else {
+			reason = msg
+		}
+	}
+	return clNanoIDFromRequestID(reqID), outcome, reason
+}
+
+// clStaffSubmitReason is clSubmitOpt's reply-capturing form: it publishes an op
+// on the staff/operator path (the same envelope clSubmit builds) and returns
+// the outcome plus, on a rejection, the script's failure text after "fail: ".
+func clStaffSubmitReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, op, class, payload string, reads, optionalReads []string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: op,
+		Actor:         clStaffActorKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         class,
+		Payload:       json.RawMessage(payload),
+		ContextHint:   &processor.ContextHint{Reads: reads, OptionalReads: optionalReads, Enumerations: testutil.DeclaredEnumerations(op, clStaffActorKey, clinicdomain.OpMetas())},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	reason := ""
+	if reply != nil && reply.Error != nil {
+		reason = reply.Error.Message
+		if i := strings.Index(reason, "fail: "); i >= 0 {
+			reason = reason[i+len("fail: "):]
+		}
+	}
+	return outcome, reason
+}
+
+// TestClinic_SelfBookingLimit proves the one-open-self-booked-visit-per-
+// provider-per-day rule: a patient booking for THEMSELVES (the consumer
+// scope=self path) claims a patientSelfDayClaim existence marker on their own
+// hub for (provider, UTC day of startsAt) — the same CreateOnly-is-the-lock
+// idiom as the slot cells — so a second self-booked open visit with the same
+// provider that day is refused SelfBookingLimit even with no cell overlap; a
+// different provider or another day is free; the front desk's own bookings
+// never claim a day and are never refused by it; every terminal transition
+// (staff cancel, the MarkPastDueNoShow sweep), a tombstone, and a cross-day
+// move release the day (a tombstoned claim is OCC-revived by the next self
+// booking); a cross-day move claims the new day (SelfBookingLimit if held); a
+// same-day move touches no claim; selfBooked is carried through every move;
+// and tombstoning an appointment that already reached a terminal status
+// releases nothing (its cells and day claim were released at that transition
+// and may since belong to another live visit).
+func TestClinic_SelfBookingLimit(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "self-booking-limit")
+
+	clSeedVertex(t, ctx, conn, clConsumerKey, "identity", false)
+	patientID := clSubmitOpt(t, ctx, conn, cp, cons, "sdlpat00001", "CreatePatient", "patient",
+		`{"fullName":"Self Day Patient","identityKey":"`+clConsumerKey+`"}`,
+		[]string{clConsumerKey}, []string{clConsumerKey + ".patientClaim"}, processor.OutcomeAccepted)
+	patientKey := "vtx.patient." + patientID
+	provP := createProvider(t, ctx, conn, cp, cons, "sdlprvP0001", "Dr. P", "Cardiology")
+	provQ := createProvider(t, ctx, conn, cp, cons, "sdlprvQ0001", "Dr. Q", "Pediatrics")
+	identifiedByLnk := "lnk.patient." + patientID + ".identifiedBy.identity." + clConsumerID
+
+	// selfBook is the consumer's own CreateAppointment: the endpoints declared
+	// as Reads, the identifiedBy link as an OptionalRead; the slot cells and the
+	// day claim ride derive_reads server-side.
+	selfBook := func(label, prov, start, end string) (string, processor.MessageOutcome, string) {
+		id, outcome, reason := clSelfSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment",
+			`{"patient":"`+patientKey+`","provider":"`+prov+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
+			[]string{patientKey, prov}, []string{identifiedByLnk})
+		return "vtx.appointment." + id, outcome, reason
+	}
+	mustSelfBook := func(label, prov, start, end string) string {
+		key, outcome, reason := selfBook(label, prov, start, end)
+		if outcome != processor.OutcomeAccepted {
+			t.Fatalf("%s: self booking %s %s→%s = %v (%s), want Accepted", label, prov, start, end, outcome, reason)
+		}
+		return key
+	}
+	mustRefuseSelfBook := func(label, prov, start, end string) {
+		_, outcome, reason := selfBook(label, prov, start, end)
+		if outcome != processor.OutcomeRejected {
+			t.Fatalf("%s: self booking %s %s→%s = %v, want Rejected", label, prov, start, end, outcome)
+		}
+		if !strings.Contains(reason, "SelfBookingLimit") {
+			t.Fatalf("%s: rejection reason = %q, want SelfBookingLimit", label, reason)
+		}
+	}
+	deskBook := func(label, prov, start, end string) string {
+		return "vtx.appointment." + clSubmit(t, ctx, conn, cp, cons, label, "CreateAppointment", "appointment",
+			`{"patient":"`+patientKey+`","provider":"`+prov+`","startsAt":"`+start+`","endsAt":"`+end+`"}`,
+			[]string{patientKey, prov}, processor.OutcomeAccepted)
+	}
+	selfBooked := func(apptKey string) (bool, bool) {
+		sched := clReadDoc(t, ctx, conn, apptKey+".schedule")
+		sd, _ := sched["data"].(map[string]any)
+		v, present := sd["selfBooked"]
+		b, _ := v.(bool)
+		return present, b
+	}
+	assertSelfBooked := func(apptKey string) {
+		if present, b := selfBooked(apptKey); !present || !b {
+			t.Fatalf("%s .schedule.selfBooked should be true, got present=%v value=%v", apptKey, present, b)
+		}
+	}
+	assertClaimLive := func(key, what string) {
+		if !clAlive(t, ctx, conn, key) {
+			t.Fatalf("%s: day claim %s should be LIVE", what, key)
+		}
+	}
+
+	dayP := clSelfDayClaimKey(patientKey, "2026-07-01T00:00:00Z", provP)
+	dayQ := clSelfDayClaimKey(patientKey, "2026-07-01T00:00:00Z", provQ)
+	dayP2 := clSelfDayClaimKey(patientKey, "2026-07-02T00:00:00Z", provP)
+	dayP3 := clSelfDayClaimKey(patientKey, "2026-07-03T00:00:00Z", provP)
+
+	// 1. Self-book A with P on day D → accepted; selfBooked recorded; the day
+	//    claim is live.
+	aKey := mustSelfBook("sdlapptA001", provP, "2026-07-01T09:00:00Z", "2026-07-01T09:30:00Z")
+	assertSelfBooked(aKey)
+	assertClaimLive(dayP, "after A")
+	claimRev := clRevision(t, ctx, conn, dayP)
+
+	// 2. Self-book B with P on day D at 14:00 — no cell overlap with A — →
+	//    SelfBookingLimit.
+	mustRefuseSelfBook("sdlapptB001", provP, "2026-07-01T14:00:00Z", "2026-07-01T14:30:00Z")
+
+	// 3. Self-book C with a DIFFERENT provider Q on day D → accepted (the claim
+	//    is per provider).
+	cKey := mustSelfBook("sdlapptC001", provQ, "2026-07-01T10:00:00Z", "2026-07-01T10:30:00Z")
+	assertClaimLive(dayQ, "after C")
+
+	// 4. Self-book with P on day D+1 → accepted (the claim is per day).
+	nextKey := mustSelfBook("sdlapptN001", provP, "2026-07-02T09:00:00Z", "2026-07-02T09:30:00Z")
+	assertClaimLive(dayP2, "after D+1")
+
+	// 5. The DESK books the same patient with P on day D at 16:00 → accepted:
+	//    the desk is unrestricted; its .schedule records no selfBooked and A's
+	//    day claim is untouched (same revision).
+	deskKey := deskBook("sdlapptK001", provP, "2026-07-01T16:00:00Z", "2026-07-01T16:30:00Z")
+	if present, _ := selfBooked(deskKey); present {
+		t.Fatalf("desk booking %s must record no selfBooked", deskKey)
+	}
+	if got := clRevision(t, ctx, conn, dayP); got != claimRev {
+		t.Fatalf("desk booking touched the day claim %s: revision %d → %d", dayP, claimRev, got)
+	}
+
+	// 6. Staff cancel A → the day claim is tombstoned; self-book B on day D
+	//    again → accepted (the OCC-revive branch), the claim live again.
+	{
+		reads, optionalReads := clStatusReads(aKey, true, provP, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "sdlcancelA01", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+aKey+`","status":"cancelled","provider":"`+provP+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
+	clAssertTombstoned(t, ctx, conn, dayP, "day claim after cancelling A")
+	bKey := mustSelfBook("sdlapptB002", provP, "2026-07-01T14:00:00Z", "2026-07-01T14:30:00Z")
+	assertSelfBooked(bKey)
+	assertClaimLive(dayP, "after re-booking B")
+
+	// 7. Reschedule B to day D+2 (the desk moves it) → accepted; the old day's
+	//    claim is tombstoned, the new day's is live, selfBooked is carried; and
+	//    day D is free again for a self booking with P.
+	clSubmitOpt(t, ctx, conn, cp, cons, "sdlresB0001", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+bKey+`","provider":"`+provP+`","patient":"`+patientKey+`","startsAt":"2026-07-03T14:00:00Z","endsAt":"2026-07-03T14:30:00Z"}`,
+		clRescheduleReads(bKey, provP, patientKey), clRescheduleOptionalReads(bKey), processor.OutcomeAccepted)
+	clAssertTombstoned(t, ctx, conn, dayP, "day claim after moving B off day D")
+	assertClaimLive(dayP3, "after moving B to D+2")
+	assertSelfBooked(bKey)
+	mustSelfBook("sdlapptE001", provP, "2026-07-01T11:00:00Z", "2026-07-01T11:30:00Z")
+	assertClaimLive(dayP, "after re-claiming day D")
+
+	// 8. Reschedule the D+1 visit onto D+2 — already held by B — →
+	//    SelfBookingLimit (the claim follows the visit, for any mover); the
+	//    patient's own move meets the same refusal. A same-day move of that
+	//    visit → accepted, its day claim untouched.
+	{
+		outcome, reason := clStaffSubmitReason(t, ctx, conn, cp, cons, "sdlresN0001", "RescheduleAppointment", "appointment",
+			`{"appointmentKey":"`+nextKey+`","provider":"`+provP+`","patient":"`+patientKey+`","startsAt":"2026-07-03T09:00:00Z","endsAt":"2026-07-03T09:30:00Z"}`,
+			clRescheduleReads(nextKey, provP, patientKey), clRescheduleOptionalReads(nextKey))
+		if outcome != processor.OutcomeRejected || !strings.Contains(reason, "SelfBookingLimit") {
+			t.Fatalf("staff move onto a held day = %v (%s), want Rejected SelfBookingLimit", outcome, reason)
+		}
+	}
+	{
+		_, outcome, reason := clSelfSubmit(t, ctx, conn, cp, cons, "sdlresN0002", "RescheduleAppointment",
+			`{"appointmentKey":"`+nextKey+`","provider":"`+provP+`","patient":"`+patientKey+`","startsAt":"2026-07-03T09:00:00Z","endsAt":"2026-07-03T09:30:00Z"}`,
+			clRescheduleReads(nextKey, provP, patientKey), append(clRescheduleOptionalReads(nextKey), identifiedByLnk))
+		if outcome != processor.OutcomeRejected || !strings.Contains(reason, "SelfBookingLimit") {
+			t.Fatalf("self move onto a held day = %v (%s), want Rejected SelfBookingLimit", outcome, reason)
+		}
+	}
+	assertClaimLive(dayP2, "after the refused moves")
+	assertClaimLive(dayP3, "after the refused moves")
+	nextRev := clRevision(t, ctx, conn, dayP2)
+	clSubmitOpt(t, ctx, conn, cp, cons, "sdlresN0003", "RescheduleAppointment", "appointment",
+		`{"appointmentKey":"`+nextKey+`","provider":"`+provP+`","patient":"`+patientKey+`","startsAt":"2026-07-02T13:00:00Z","endsAt":"2026-07-02T13:30:00Z"}`,
+		clRescheduleReads(nextKey, provP, patientKey), clRescheduleOptionalReads(nextKey), processor.OutcomeAccepted)
+	if got := clRevision(t, ctx, conn, dayP2); got != nextRev {
+		t.Fatalf("same-day move touched the day claim %s: revision %d → %d", dayP2, nextRev, got)
+	}
+	assertSelfBooked(nextKey)
+
+	// 9. The MarkPastDueNoShow sweep on the (moved) D+1 visit releases its day
+	//    claim; TombstoneAppointment on C releases Q's.
+	clSweepAt(t, ctx, conn, cp, cons, "sdlsweepN01", nextKey, "2026-07-02T13:30:00Z")
+	clAssertTombstoned(t, ctx, conn, dayP2, "day claim after the sweep")
+	cID := cKey[len("vtx.appointment."):]
+	clSubmit(t, ctx, conn, cp, cons, "sdltombC001", "TombstoneAppointment", "appointment",
+		`{"appointmentKey":"`+cKey+`","provider":"`+provQ+`","patient":"`+patientKey+`"}`,
+		[]string{
+			cKey, cKey + ".schedule",
+			"lnk.appointment." + cID + ".withProvider.provider." + provQ[len("vtx.provider."):],
+			"lnk.appointment." + cID + ".forPatient.patient." + patientID,
+		}, processor.OutcomeAccepted)
+	clAssertTombstoned(t, ctx, conn, dayQ, "day claim after tombstoning C")
+	mustSelfBook("sdlapptQ002", provQ, "2026-07-01T12:00:00Z", "2026-07-01T12:30:00Z")
+	assertClaimLive(dayQ, "after re-booking with Q")
+
+	// 10. Tombstoning an appointment that ALREADY reached a terminal status
+	//     releases nothing: self-book A2 on day D+5, staff cancel it (claim
+	//     released), self-book B2 on D+5 (the same claim key OCC-revived, now
+	//     B2's), then TombstoneAppointment(A2) → B2's claim stays live, and a
+	//     third self booking on D+5 is still refused SelfBookingLimit.
+	dayP6 := clSelfDayClaimKey(patientKey, "2026-07-06T00:00:00Z", provP)
+	a2Key := mustSelfBook("sdlapptA2001", provP, "2026-07-06T09:00:00Z", "2026-07-06T09:30:00Z")
+	{
+		reads, optionalReads := clStatusReads(a2Key, true, provP, patientKey)
+		clSubmitOpt(t, ctx, conn, cp, cons, "sdlcancelA02", "SetAppointmentStatus", "appointment",
+			`{"appointmentKey":"`+a2Key+`","status":"cancelled","provider":"`+provP+`","patient":"`+patientKey+`"}`,
+			reads, optionalReads, processor.OutcomeAccepted)
+	}
+	clAssertTombstoned(t, ctx, conn, dayP6, "day claim after cancelling A2")
+	mustSelfBook("sdlapptB2001", provP, "2026-07-06T14:00:00Z", "2026-07-06T14:30:00Z")
+	assertClaimLive(dayP6, "after B2 revived the claim")
+	b2Rev := clRevision(t, ctx, conn, dayP6)
+	a2ID := a2Key[len("vtx.appointment."):]
+	clSubmit(t, ctx, conn, cp, cons, "sdltombA2001", "TombstoneAppointment", "appointment",
+		`{"appointmentKey":"`+a2Key+`","provider":"`+provP+`","patient":"`+patientKey+`"}`,
+		[]string{
+			a2Key, a2Key + ".schedule",
+			"lnk.appointment." + a2ID + ".withProvider.provider." + provP[len("vtx.provider."):],
+			"lnk.appointment." + a2ID + ".forPatient.patient." + patientID,
+		}, processor.OutcomeAccepted)
+	clAssertTombstoned(t, ctx, conn, a2Key, "A2 root after tombstone")
+	assertClaimLive(dayP6, "B2's claim after tombstoning the cancelled A2")
+	if got := clRevision(t, ctx, conn, dayP6); got != b2Rev {
+		t.Fatalf("tombstoning the cancelled A2 touched B2's day claim %s: revision %d → %d", dayP6, b2Rev, got)
+	}
+	clAssertSlotClaimLive(t, ctx, conn, patientKey, "2026-07-06T14:00:00Z")
+	mustRefuseSelfBook("sdlapptC2001", provP, "2026-07-06T11:00:00Z", "2026-07-06T11:30:00Z")
+}
+
 // TestClinic_SetAppointmentStatus proves the unconditioned-upsert idiom: a
 // SetAppointmentStatus overwrites the .status aspect in place (scheduled→confirmed).
 func TestClinic_SetAppointmentStatus(t *testing.T) {

@@ -24,9 +24,9 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the twenty DDLs: five vertexType owners (patient,
-// provider, appointment, clinicSite, clinicSiteAssignment) and fifteen
-// aspectType step-6 gates (ten attach to patient/provider/appointment
+// TestPackage_DDLs pins the twenty-two DDLs: five vertexType owners (patient,
+// provider, appointment, clinicSite, clinicSiteAssignment) and seventeen
+// aspectType step-6 gates (twelve attach to patient/provider/appointment
 // vertices; appointmentSiteAssignment is the SetAppointmentSite concurrency
 // guard aspect; identityPatientClaim and identityProviderClaim attach onto an
 // identity-domain vertex, the clinic-reminders idiom; clinicSiteProfile
@@ -38,8 +38,8 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // see TestPackage_EncounterAspectIsSensitiveAndCustodied — the one deliberate
 // exception this loop excludes and tests separately.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 21 {
-		t.Fatalf("expected 21 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 22 {
+		t.Fatalf("expected 22 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -88,6 +88,7 @@ func TestPackage_DDLs(t *testing.T) {
 		"providerTimeOff":           {"SetProviderTimeOff"},
 		"providerSlotClaim":         {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
 		"patientSlotClaim":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
+		"patientSelfDayClaim":       {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
 		"appointmentDocumentation":  {"RecordEncounter"},
 		"appointmentSiteAssignment": {"SetAppointmentSite"},
 		"identityPatientClaim":      {"CreatePatient", "BindPatientIdentity", "UnbindPatientIdentity"},

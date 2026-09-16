@@ -647,10 +647,14 @@ async function submitCatalogOp(envelope) {
 // out-of-availability-window booking (OutsideHours), a date-specific time-off
 // overlap (ProviderUnavailable), a past-dated booking (ScheduleInPast), a
 // misaligned 15-minute-grid time (SlotGridViolation), an over-long appointment
-// (AppointmentTooLong), and a move of an already-final appointment (TerminalStatus)
-// are the domain rejections CreateAppointment / RescheduleAppointment raise.
-// Anything else passes through.
+// (AppointmentTooLong), a move of an already-final appointment (TerminalStatus),
+// and a patient's second self-booked open visit with the same provider on the
+// same day (SelfBookingLimit) are the domain rejections CreateAppointment /
+// RescheduleAppointment raise. Anything else passes through.
 function friendlyBookingRejection(msg) {
+  if (msg.indexOf("SelfBookingLimit") !== -1) {
+    return "This patient already holds a self-booked open visit with this provider that day. Cancel or complete it first, or pick another day.";
+  }
   if (msg.indexOf("TerminalStatus") !== -1) {
     return "This appointment is already cancelled, completed or marked no-show and can no longer be moved. Refresh to see its current status.";
   }
@@ -3096,6 +3100,7 @@ async function submitBook(ev) {
   // refusal-courtesy: CreateAppointment/AppointmentTooLong: cap — #duration is a fixed select (15/30/45/60 min), always well under the 24h/96-cell cap.
   // refusal-courtesy: CreateAppointment/ProviderNotAtSite: drop — populateProviderSelect(opts.site) narrows #provider to state.providerSites members of the chosen #book-site.
   // refusal-courtesy: CreateAppointment/OutsideHours, ProviderUnavailable, SlotConflict, PatientDoubleBook: drop — computeOpenSlots (refreshSlots' picker) skips any start outside the provider's .hours windows, any start overlapping a .timeOff range, and any start overlapping a live appointment on the provider's or the patient's own book.
+  // refusal-courtesy: CreateAppointment/SelfBookingLimit: none — clinicAppointmentsRead projects no selfBooked column, so the picker cannot tell a self-booked open visit from a desk-booked one; the refusal is the answer (friendlyBookingRejection).
   ev.preventDefault();
   if (!state.patient) {
     toast("Select a patient first.", "err");
@@ -5894,6 +5899,7 @@ async function submitReschedule(ev) {
   // refusal-courtesy: RescheduleAppointment/LateReschedule: hide — renderApptCard shows the self-service Reschedule button only when selfVisitClock(a.startsAt)==='open' (hidden once 'late', inside the 24h window, same as once 'started'); staff cards' clock is always "open", matching the script's self-only gate.
   // refusal-courtesy: RescheduleAppointment/WrongPatient, WrongProvider: unreachable — payload.provider/payload.patient are read straight off the SAME appointment row being rescheduled (a.providerKey/a.patientKey), never user-selected, so require_matching_provider/patient's check against that appointment's own links always matches.
   // refusal-courtesy: RescheduleAppointment/OutsideHours, ProviderUnavailable, SlotConflict, PatientDoubleBook, InvalidState: none — the reschedule modal has no slot picker (unlike submitBook's computeOpenSlots); #rs-startsAt is free-text bounded only by the min/grid-snap caps above.
+  // refusal-courtesy: RescheduleAppointment/SelfBookingLimit: none — clinicAppointmentsRead projects no selfBooked column, so the reschedule modal cannot warn that the target day already holds a self-booked open visit with this provider; the refusal is the answer (friendlyBookingRejection).
   ev.preventDefault();
   const a = state.rescheduling;
   if (!a) {
