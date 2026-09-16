@@ -38,7 +38,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:        "front-desk",
-	Version:     "0.4.0",
+	Version:     "0.4.1",
 	Description: "Café/Wellness/Clinic mixed-use composition Inc 1 + Inc 4 + Inc 5 — front-desk unified resident context: wellness-domain's resident-rate bookings, every leaseapp's unit rent/term, and clinic-domain's resident-confined visits (existence + time only), all re-projected keyed by leaseAppKey, joined client-side with cafe-domain's open tabs. frontDeskBookingHistory re-projects the same bookings at any status for period-based usage consumers.",
 	Depends:     []string{"wellness-domain", "clinic-domain"},
 	Lenses:      Lenses(),

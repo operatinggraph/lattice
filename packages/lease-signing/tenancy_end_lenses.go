@@ -37,7 +37,7 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 				OutputKeyPattern: TenancyEndTarget + ".{actorSuffix}",
 				BodyColumns: []string{
 					"violating", "missing_tenancyEnded", "missing_relist", "entityKey", "unitKey", "freshUntil",
-					"leaseEnd", "endedAt", "unitStatus",
+					"leaseEnd", "termEnd", "moveOutAt", "endedAt", "unitStatus",
 				},
 				EmptyBehavior: "delete",
 				KeyColumn:     "entityId",
@@ -56,8 +56,9 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 //     lease — the same two facts leaseExpirySpec requires, re-derived here
 //     since each §10.2 lens is a self-contained projection), it carries a
 //     .tenancy with a leaseEnd, that .tenancy carries NO endedAt yet, a timer
-//     this target armed has RECORDED a fire at or after leaseEnd, and NO OPEN
-//     renewal covers this term. → directOp EndTenancy{leaseAppKey}.
+//     this target armed has RECORDED a fire at or after termEnd, and either
+//     NO OPEN renewal covers this term or a notice has been given. →
+//     directOp EndTenancy{leaseAppKey}.
 //   - missing_relist — the term is recorded as ended and the unit is still
 //     marked leased with nobody else living in it: endedAt is set, the
 //     appliesToUnit unit is live (unitKey <> null), its .listing.status is
@@ -66,18 +67,30 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 //   - violating is the explicit OR of the two (Contract #10 §10.2 — Weaver
 //     dispatches only violating rows).
 //
+// termEnd is the term's EFFECTIVE end, carried in both languages (this cypher
+// and EndTenancy's script derive it identically from the same two recorded
+// values): a notice (.notice.moveOutAt, written once by GiveNotice) whose
+// move-out precedes leaseEnd ends the term there; otherwise, and on every
+// lease with no notice, termEnd is leaseEnd. A notice at or after leaseEnd
+// is refused by GiveNotice (MoveOutAfterEnd), so the CASE's else arm is the
+// only shape such a row could take; the comparison stays in the cypher so a
+// stored value the op never admitted still reads as the term's own end.
+//
 // freshUntil is null-once-LAPSED, not null-when-past, exactly as leaseExpiry's
-// is: it carries leaseEnd until the marker under this target's own byTarget key
+// is: it carries termEnd until the marker under this target's own byTarget key
 // reaches it, or until the term is recorded as ended (an ended term has nothing
 // left to wait for, and a still-armed @at on it would fire into a row that
-// dispatches nothing). A leaseEnd already in the past projects VERBATIM, Weaver
+// dispatches nothing). A termEnd already in the past projects VERBATIM, Weaver
 // publishes the overdue @at and NATS releases it at once — the only path that
 // records the lapse. The marker read rides the aggregating WITH as a scalar,
-// the same way leaseEnd does, so the RETURN compares two carried values and
+// the same way termEnd does, so the RETURN compares two carried values and
 // the cypher references no clock parameter at all (Andrew, 2026-09-01: time
 // facts are recorded on the entity, never $now in a lens). What re-arms the
 // timer is the same comparison: SignRenewal extends leaseEnd past the recorded
-// fire, lapsedAt >= leaseEnd goes false, and freshUntil projects the new end.
+// fire, lapsedAt >= termEnd goes false, and freshUntil projects the new end;
+// a notice given on a live term moves termEnd EARLIER, and a recorded lapse
+// already at or past the move-out opens the end at once — the same "an
+// overdue @at fires now" path a late-activated target takes.
 //
 // Why an OPEN renewal holds the tenancy (openRenewalCount): a renewal with
 // status 'open' whose cycleEnd equals THIS tenancy's leaseEnd means the parties
@@ -91,13 +104,22 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 // cycleEnd, so it drops out of the count by construction. The renewal fan is
 // walked INBOUND across renews (renewal→leaseapp), the leaseExpiry idiom.
 //
+// A NOTICE overrides that hold (the `OR (moveOutAt <> null)` disjunct): a
+// tenant who gives notice while a cycle is open has answered the renewal
+// question by leaving, and the cycle can no longer extend the term —
+// SignRenewal refuses NoticeGiven off the same .notice aspect
+// (renewal_scripts.go), which is the op-side predicate this conjunct's
+// exclusion is grounded in. The term ends on the move-out; renewalComplete's
+// (tenancyEndedAt = null) gate then closes the open cycle on the recorded
+// endedAt.
+//
 // This open-renewal conjunct is DISPATCH-GATED ONLY: EndTenancy does not walk
-// renewals — it reads the leaseapp + its .tenancy and refuses only NotYetEnded
-// / NoTenancy (the SignRenewal-bgcheck-freshness posture, renewal_scripts.go:
-// the lens decides when to dispatch, the op re-proves what it can from its own
-// declared reads). An operator ending a term by hand while a renewal is open
-// is admitted; SignRenewal then refuses TenancyEnded rather than dropping the
-// endedAt its whole-aspect rewrite would otherwise lose.
+// renewals — it reads the leaseapp + its .tenancy (+ its .notice) and refuses
+// only NotYetEnded / NoTenancy (the SignRenewal-bgcheck-freshness posture,
+// renewal_scripts.go: the lens decides when to dispatch, the op re-proves what
+// it can from its own declared reads). An operator ending a term by hand while
+// a renewal is open is admitted; SignRenewal then refuses TenancyEnded rather
+// than dropping the endedAt its whole-aspect rewrite would otherwise lose.
 //
 // Why otherLiveTenancyCount is load-bearing: the relist gap reads a UNIT fact
 // (status = 'leased') off a LEASEAPP anchor, and the unit outlives the
@@ -133,9 +155,10 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 // '= null' / '<> null' are the full engine's null tests (ruleengine/full
 // values.go equalsAny: null = null is true, any value = null is false; `<>`
 // is its negation). compareAny answers FALSE when either side of an ordering
-// operator is nil, so an unmarked leaseapp reads (null >= leaseEnd) = false
+// operator is nil, so an unmarked leaseapp reads (null >= termEnd) = false
 // and stays armed; a leaseapp with no .tenancy reads leaseEnd = null, opens
-// nothing, and projects a null freshUntil. Both aggregates are count(DISTINCT
+// nothing, and projects a null freshUntil (a null moveOutAt against a null
+// leaseEnd takes the CASE's else arm, so termEnd is null too). Both aggregates are count(DISTINCT
 // CASE ...) over their own fan's keys, so the renewal × other-application
 // cross product never inflates either.
 //
@@ -152,6 +175,8 @@ OPTIONAL MATCH (u)<-[:appliesToUnit]-(other:leaseapp)
 WITH
   app.key                          AS entityKey,
   app.tenancy.data.leaseEnd        AS leaseEnd,
+  app.notice.data.moveOutAt        AS moveOutAt,
+  CASE WHEN (app.notice.data.moveOutAt <> null) AND (app.notice.data.moveOutAt < app.tenancy.data.leaseEnd) THEN app.notice.data.moveOutAt ELSE app.tenancy.data.leaseEnd END AS termEnd,
   app.tenancy.data.endedAt         AS endedAt,
   app.decision.data.value          AS landlordDecision,
   app.signature.data.signedAt      AS signedAt,
@@ -165,10 +190,12 @@ RETURN
   entityKey,
   unitKey,
   leaseEnd,
+  termEnd,
+  moveOutAt,
   endedAt,
   unitStatus,
-  CASE WHEN (endedAt <> null) OR (lapsedAt >= leaseEnd) THEN null ELSE leaseEnd END AS freshUntil,
-  ((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= leaseEnd) AND (openRenewalCount = 0)) AS missing_tenancyEnded,
+  CASE WHEN (endedAt <> null) OR (lapsedAt >= termEnd) THEN null ELSE termEnd END AS freshUntil,
+  ((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))) AS missing_tenancyEnded,
   ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0)) AS missing_relist,
-  (((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= leaseEnd) AND (openRenewalCount = 0)) OR ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0))) AS violating
+  (((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))) OR ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0))) AS violating
 `, TenancyEndTarget)

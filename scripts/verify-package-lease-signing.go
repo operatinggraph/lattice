@@ -6,15 +6,17 @@
 // Connects to a running Lattice NATS instance and checks that the lease-signing
 // package has been correctly installed. Asserts:
 //
-//	15 DDLs: leaseapp (vertexType — CreateLeaseApplication/SignLease/
+//	16 DDLs: leaseapp (vertexType — CreateLeaseApplication/SignLease/
 //	  WithdrawLeaseApplication/DecideLeaseApplication/SetApplicantProfile/
-//	  BackfillLeaseTerms/ReassignLeaseUnit/EndTenancy/RecordApplicationLoss);
+//	  BackfillLeaseTerms/ReassignLeaseUnit/EndTenancy/GiveNotice/
+//	  RecordApplicationLoss);
 //	  applicantProfile / underwritingParties / applicationSignals (aspectType —
 //	  the three-way split SetApplicantProfile writes, up to one batch);
 //	  decidedProfileSnapshot (aspectType — the fair-housing preservation record
 //	  DecideLeaseApplication CREATE-ONLY-stamps on the FIRST decision of either
 //	  value); tenantName (aspectType — the executed lease's party-name
-//	  snapshot SignLease CREATE-ONLY-stamps at signing); the externalTask
+//	  snapshot SignLease CREATE-ONLY-stamps at signing); tenancyNotice
+//	  (aspectType — the move-out GiveNotice CREATE-ONLY-records); the externalTask
 //	  wrapper triad
 //	  leaseServiceInstance/leaseServiceReply/leaseServiceDispatch (vertexType) +
 //	  leaseServiceOutcome/leaseServiceDispatchMarker (aspectType); the docGen
@@ -127,12 +129,13 @@ func main() {
 	fmt.Printf("verify-package-lease-signing: scanning %d Core KV keys...\n", len(allKeys))
 
 	ddlChecks := []ddlCheck{
-		{canonical: "leaseapp", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy", "RecordApplicationLoss"}},
+		{canonical: "leaseapp", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy", "GiveNotice", "RecordApplicationLoss"}},
 		{canonical: "applicantProfile", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "underwritingParties", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "applicationSignals", class: "meta.ddl.aspectType", ops: []string{"SetApplicantProfile"}},
 		{canonical: "decidedProfileSnapshot", class: "meta.ddl.aspectType", ops: []string{"DecideLeaseApplication"}},
 		{canonical: "tenantName", class: "meta.ddl.aspectType", ops: []string{"SignLease"}},
+		{canonical: "tenancyNotice", class: "meta.ddl.aspectType", ops: []string{"GiveNotice"}},
 		{canonical: "leaseServiceInstance", class: "meta.ddl.vertexType", ops: []string{"CreateLeaseServiceInstance", "TombstoneSupersededLeaseServiceInstance"}},
 		{canonical: "leaseServiceReply", class: "meta.ddl.vertexType", ops: []string{"RecordLeaseServiceOutcome"}},
 		{canonical: "leaseServiceDispatch", class: "meta.ddl.vertexType", ops: []string{"RecordServiceDispatch"}},

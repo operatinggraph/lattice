@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.39.0
+version: 0.40.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -54,6 +54,13 @@ description: |
   relists the ended tenancy's unit via SetListingStatus unless another
   approved tenancy now holds it; an ended tenancy is terminal in
   leaseApplicationComplete and leaseExpiry, and SignRenewal refuses it. A
+  tenant gives notice and the lease ends early: GiveNotice (tenant self,
+  landlord manages, or operator) writes the create-only .notice aspect
+  {moveOutAt, givenAt, givenBy}; the term's effective end becomes the earlier
+  of the move-out and leaseEnd in the tenancyEnd lens (which then overrides
+  the open-renewal hold) and in EndTenancy (endedAt = that end), SignRenewal
+  refuses NoticeGiven, leaseExpiry opens no cycle, and the three read models
+  project the notice. A
   losing rival's loss is a recorded fact, not a live derivation:
   leaseApplicationComplete's missing_lossRecorded gap dispatches
   RecordApplicationLoss (operator-granted) to write .decision = lost on an
@@ -78,6 +85,8 @@ declares:
     - canonicalName: decidedProfileSnapshot
       class: meta.ddl.aspectType
     - canonicalName: tenantName
+      class: meta.ddl.aspectType
+    - canonicalName: tenancyNotice
       class: meta.ddl.aspectType
     - canonicalName: leaseServiceInstance
       class: meta.ddl.vertexType
@@ -218,6 +227,12 @@ declares:
     - operationType: EndTenancy
       scope: any
       grantsTo: [operator]
+    - operationType: GiveNotice
+      scope: any
+      grantsTo: [operator]
+    - operationType: GiveNotice
+      scope: self
+      grantsTo: [consumer]
     - operationType: RecordApplicationLoss
       scope: any
       grantsTo: [operator]
@@ -253,6 +268,7 @@ declares:
     - operationType: WithdrawLeaseApplication
     - operationType: ReassignLeaseUnit
     - operationType: EndTenancy
+    - operationType: GiveNotice
     - operationType: RecordApplicationLoss
     - operationType: SetApplicantProfile
     - operationType: SetRenewalTerms

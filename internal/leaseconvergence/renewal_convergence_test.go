@@ -374,7 +374,7 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 	require.Eventuallyf(t, func() bool {
 		reply := h.submitOp("SignRenewal", "renewal", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 			"renewalKey": renewalKeyA, "leaseApp": appKeyA, "applicant": applicantA,
-		}, &processor.ContextHint{Reads: []string{renewalKeyA}})
+		}, &processor.ContextHint{Reads: []string{renewalKeyA}, OptionalReads: []string{appKeyA + ".notice"}})
 		return reply.Status == processor.ReplyStatusAccepted
 	}, 60*time.Second, 500*time.Millisecond, "SignRenewal(A) must eventually succeed once the refreshed bgcheck is fresh")
 
@@ -448,7 +448,7 @@ func TestRenewalConvergence_TwoTenantsDivergeThenDeclinePath(t *testing.T) {
 
 	signReplyB := h.submitOp("SignRenewal", "renewal", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"renewalKey": renewalKeyB, "leaseApp": appKeyB, "applicant": applicantB,
-	}, &processor.ContextHint{Reads: []string{renewalKeyB}})
+	}, &processor.ContextHint{Reads: []string{renewalKeyB}, OptionalReads: []string{appKeyB + ".notice"}})
 	require.Equalf(t, processor.ReplyStatusAccepted, signReplyB.Status, "SignRenewal(B): %+v", signReplyB.Error)
 
 	rowB := h.awaitRenewalComplete(renewalIDB, 10*time.Second)

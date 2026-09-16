@@ -441,6 +441,19 @@ def execute(state, op):
         ended_at = tenancy.data.get("endedAt")
         if ended_at != None:
             fail("TenancyEnded: lease " + app_key + " ended on " + str(ended_at)[:10] + " (UTC); an ended term cannot be renewed")
+        # A lease under notice cannot be renewed either: GiveNotice has
+        # recorded the tenant's answer to the renewal question (they are
+        # leaving on moveOutAt), and the tenancyEnd lens ends the term there
+        # even while this cycle is open — the whole-aspect rewrite below would
+        # extend a term the notice is about to end. The refusal names the
+        # move-out by its UTC calendar date. The aspect is a declared
+        # OptionalRead at every dispatcher; a lease that never gave notice is
+        # the common case.
+        # read-posture: (d) declared optionalReads at SignRenewal dispatch —
+        # absent means no notice was given.
+        notice = kv.Read(app_key + ".notice")
+        if notice != None and not notice.isDeleted:
+            fail("NoticeGiven: lease " + app_key + " gave notice for " + str(notice.data.get("moveOutAt"))[:10] + " (UTC); a lease under notice cannot be renewed")
         previous_lease_end = tenancy.data.get("leaseEnd")
         new_lease_end = time.rfc3339_add_months(previous_lease_end, int(term_months))
         new_renewal_opens_at = time.rfc3339_add(new_lease_end, "-__RENEWAL_WINDOW__")

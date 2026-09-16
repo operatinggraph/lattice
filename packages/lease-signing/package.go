@@ -87,6 +87,16 @@
 //     approved tenancy now holds it. See
 //     _bmad-output/implementation-artifacts/loftspace-lease-term-and-tenancy-end-design.md.
 //
+//   - GiveNotice (leaseapp DDL; operator any + consumer self — the tenant via
+//     the applicationFor link, the landlord via the manages link): a tenant
+//     gives notice and the lease ends early. The create-only .notice aspect
+//     {moveOutAt, givenAt, givenBy} is the recorded fact; the term's
+//     effective end (termEnd = the earlier of moveOutAt and leaseEnd) is
+//     carried in the tenancyEnd lens, which then overrides the open-renewal
+//     hold, and in EndTenancy (endedAt = termEnd); SignRenewal refuses
+//     NoticeGiven, leaseExpiry opens no cycle, and the three read models
+//     project the notice. See docs/reviews/loftspace-tenancy-notice-2026-09-15.md.
+//
 //   - RecordApplicationLoss (leaseapp DDL, operator-granted), dispatched by
 //     leaseApplicationComplete's missing_lossRecorded gap: a losing rival's
 //     loss recorded on the application as .decision = lost, the third
@@ -104,7 +114,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.39.0",
+	Version: "0.40.0",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -146,6 +156,11 @@ var Package = pkgmgr.Definition{
 		"dispatches EndTenancy (operator-granted) to record .tenancy.endedAt once the recorded lapse reaches it with no " +
 		"open renewal, and relists the ended tenancy's unit via SetListingStatus unless another approved tenancy now holds " +
 		"it; an ended tenancy is terminal in leaseApplicationComplete and leaseExpiry, and SignRenewal refuses it. A " +
+		"tenant gives notice and the lease ends early: GiveNotice (tenant self, landlord manages, or operator) writes the " +
+		"create-only .notice aspect {moveOutAt, givenAt, givenBy}; the term's effective end becomes the earlier of the " +
+		"move-out and leaseEnd in the tenancyEnd lens (which then overrides the open-renewal hold) and in EndTenancy " +
+		"(endedAt = that end), SignRenewal refuses NoticeGiven, leaseExpiry opens no cycle, and the three read models " +
+		"project the notice. A " +
 		"losing rival's loss is a recorded fact, not a live derivation: leaseApplicationComplete's missing_lossRecorded gap " +
 		"dispatches RecordApplicationLoss (operator-granted) to write .decision = lost on an undecided application whose " +
 		"unit leased to someone else, and every liveness consumer reads the recorded value, so the winner's later tenancy " +

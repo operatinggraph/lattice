@@ -75,6 +75,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     walk, the clause's own outbound governs links (degree 1 by
 //     construction), which it re-keys when spelled with the legacy
 //     `governs.lease.` target segment.
+//   - missing_termShortened → directOp(ShortenClauseTerm) (this package) — a
+//     termed monthly clause running past a recorded notice's moveOutAt.
+//     Params route that clause (row.overrunClauseKey, the lens's max() over
+//     the same governs fan — non-null whenever the gap is open) and the
+//     lease; Reads routes the clause, its .terms (the op shortens it), the
+//     lease and its .notice (the moveOutAt the op reads, required — the gap
+//     only opens when it is present); OptionalReads the clause's .status,
+//     whose recorded due date decides whether the shortened term is already
+//     fully billed; Enumerations declares the op's one bounded walk, the
+//     clause's own outbound governs links, which it reads to verify the
+//     clause governs the lease the dispatch named.
 //
 // Cross-checked by TestSemanticContracts_LeaseRentSettlementColumnsMatchLens.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
@@ -161,6 +172,18 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					OptionalReads: []string{"row.untermedClauseKey.status"},
 					Enumerations: []pkgmgr.EnumerationSpec{
 						{Hub: "row.untermedClauseKey", Relation: "governs", Direction: "out"},
+					},
+				},
+				"missing_termShortened": {
+					Action:        "directOp",
+					Operation:     "ShortenClauseTerm",
+					Class:         "clause",
+					Params:        map[string]string{"clauseKey": "row.overrunClauseKey", "leaseAppKey": "row.entityKey"},
+					Reads:         []string{"row.overrunClauseKey", "row.overrunClauseKey.terms", "row.entityKey", "row.entityKey.notice"},
+					OptionalReads: []string{"row.overrunClauseKey.status"},
+					Target:        "row.overrunClauseKey",
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "row.overrunClauseKey", Relation: "governs", Direction: "out"},
 					},
 				},
 			},

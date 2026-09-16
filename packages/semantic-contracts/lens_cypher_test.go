@@ -997,3 +997,183 @@ func TestLeaseRentSettlement_UntermedClause_OtherClausesNotCandidates(t *testing
 	require.Equal(t, false, v["missing_clause"])
 	require.Equal(t, false, v["violating"])
 }
+
+const noticeMoveOutAt = "2026-01-15T00:00:00Z"
+
+// TestLeaseRentSettlement_NoticeOverrunsTermedClause_MissingTermShortened —
+// the central missing_termShortened vector: a recorded notice's moveOutAt
+// falls inside a termed, unconditioned monthly clause's term, so the clause
+// runs past it. overrunClauseKey names that clause, moveOutAt projects
+// through, and missing_clause stays shut (the clause's own validFrom still
+// equals termStart, so termClauseCount holds it closed even though the term
+// has not been shortened yet).
+func TestLeaseRentSettlement_NoticeOverrunsTermedClause_MissingTermShortened(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "noticelease", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.mkRentClause(t, "noticelease_orig", "noticelease", origStart, origEnd)
+	f.aspect(t, "noticelease", "notice", "tenancyNotice", map[string]any{"moveOutAt": noticeMoveOutAt})
+
+	v := f.projectLeaseAt(t, "noticelease")[0].Values
+	require.Equal(t, true, v["missing_termShortened"], "the clause's validUntil runs past the recorded moveOutAt")
+	require.Equal(t, "vtx.clause."+f.ids["noticelease_orig"], v["overrunClauseKey"])
+	require.Equal(t, noticeMoveOutAt, v["moveOutAt"])
+	require.Equal(t, false, v["missing_clause"], "the clause still carries validFrom = termStart — shortening it never re-opens missing_clause")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestLeaseRentSettlement_ShortenedClause_MissingTermShortenedClears — the
+// same lease once the clause's validUntil has been capped at the recorded
+// moveOutAt (ShortenClauseTerm's own write): the gap closes.
+func TestLeaseRentSettlement_ShortenedClause_MissingTermShortenedClears(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "shortenedlease", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.mkRentClause(t, "shortenedlease_orig", "shortenedlease", origStart, origEnd)
+	f.aspect(t, "shortenedlease", "notice", "tenancyNotice", map[string]any{"moveOutAt": noticeMoveOutAt})
+
+	before := f.projectLeaseAt(t, "shortenedlease")[0].Values
+	require.Equal(t, true, before["missing_termShortened"], "fixture sanity: overrunning before the shortening write")
+
+	f.aspect(t, "shortenedlease_orig", "terms", "clauseTerms", map[string]any{
+		"kind": "computational", "conditioned": false, "amountCents": 250000.0,
+		"period": "monthly", "validFrom": origStart, "validUntil": noticeMoveOutAt,
+	})
+
+	after := f.projectLeaseAt(t, "shortenedlease")[0].Values
+	require.Equal(t, false, after["missing_termShortened"], "validUntil now equals moveOutAt — nothing left to shorten")
+	require.Equal(t, false, after["missing_clause"], "validFrom is unchanged — still the term's own clause")
+	require.Equal(t, false, after["violating"])
+}
+
+// TestLeaseRentSettlement_NoNotice_NoMissingTermShortened — the same
+// overrunning termed clause, but the lease carries no .notice: nothing to
+// shorten to, so the gap never opens.
+func TestLeaseRentSettlement_NoNotice_NoMissingTermShortened(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "nonoticelease", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.mkRentClause(t, "nonoticelease_orig", "nonoticelease", origStart, origEnd)
+
+	v := f.projectLeaseAt(t, "nonoticelease")[0].Values
+	require.Equal(t, false, v["missing_termShortened"], "no recorded notice — nothing to shorten to")
+	require.Nil(t, v["overrunClauseKey"])
+	require.Nil(t, v["moveOutAt"])
+	require.Equal(t, false, v["violating"])
+}
+
+// TestLeaseRentSettlement_OneTimeAndConditionedClauses_NeverOverrun — a
+// one-time fee (never termed — a term is monthly-only) and a conditioned
+// monthly termed clause both running past the recorded moveOutAt are neither
+// one a missing_termShortened candidate: the gate's period=monthly AND
+// conditioned<>true conjuncts are the same ones missing_term and missing_clause
+// already require.
+func TestLeaseRentSettlement_OneTimeAndConditionedClauses_NeverOverrun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "nonrentnotice", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.aspect(t, "nonrentnotice", "notice", "tenancyNotice", map[string]any{"moveOutAt": noticeMoveOutAt})
+
+	f.vtx(t, "nonrentnotice_fee", "clause")
+	f.aspect(t, "nonrentnotice_fee", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": false, "amountCents": 4500.0, "period": "oneTime"})
+	f.edge(t, "governs", "nonrentnotice_fee", "nonrentnotice")
+
+	f.vtx(t, "nonrentnotice_pet", "clause")
+	f.aspect(t, "nonrentnotice_pet", "terms", "clauseTerms", map[string]any{"kind": "computational", "conditioned": true, "amountCents": 5000.0,
+		"period": "monthly", "validFrom": origStart, "validUntil": origEnd})
+	f.edge(t, "governs", "nonrentnotice_pet", "nonrentnotice")
+
+	v := f.projectLeaseAt(t, "nonrentnotice")[0].Values
+	require.Equal(t, false, v["missing_termShortened"], "neither a one-time fee nor a conditioned fee is a rent clause")
+	require.Nil(t, v["overrunClauseKey"])
+	require.Equal(t, true, v["missing_clause"], "no unconditioned monthly rent clause exists at all — a different, already-covered gap")
+}
+
+// TestLeaseRentSettlement_CollapsedClause_MissingTermShortenedClosed pins the
+// collapsed-term case: a clause whose term has already collapsed to
+// validFrom (validUntil == validFrom) still satisfies the plain `validUntil >
+// moveOutAt` conjunct whenever the recorded move-out predates validFrom, so
+// the `validUntil > validFrom` conjunct is the one that excludes it — without
+// it, the row would keep selecting a clause with nothing left to shorten on
+// every pass.
+func TestLeaseRentSettlement_CollapsedClause_MissingTermShortenedClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "collapsedlease", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.mkRentClause(t, "collapsedlease_orig", "collapsedlease", origStart, origStart)
+	f.aspect(t, "collapsedlease", "notice", "tenancyNotice", map[string]any{"moveOutAt": "2025-06-01T00:00:00Z"})
+
+	v := f.projectLeaseAt(t, "collapsedlease")[0].Values
+	require.Equal(t, false, v["missing_termShortened"],
+		"validUntil == validFrom is a collapsed term — nothing left to shorten, even though validUntil is still after moveOutAt")
+	require.Nil(t, v["overrunClauseKey"])
+}
+
+// TestLeaseRentSettlement_CompletedClause_MissingTermShortenedClosed — a
+// clause DebitAccount (or an earlier ShortenClauseTerm pass) already marked
+// completed must never be re-selected, even though its validUntil still runs
+// past the recorded moveOutAt: the `status.state <> 'completed'` conjunct is
+// what excludes it, independent of the collapsed-term conjunct above.
+func TestLeaseRentSettlement_CompletedClause_MissingTermShortenedClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "completedlease", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": origEnd})
+	f.mkRentClause(t, "completedlease_orig", "completedlease", origStart, origEnd)
+	f.aspect(t, "completedlease_orig", "status", "clauseStatus", map[string]any{"state": "completed", "completedAt": "2025-12-01T00:00:00Z"})
+	f.aspect(t, "completedlease", "notice", "tenancyNotice", map[string]any{"moveOutAt": noticeMoveOutAt})
+
+	v := f.projectLeaseAt(t, "completedlease")[0].Values
+	require.Equal(t, false, v["missing_termShortened"], "a completed clause is never re-selected, even though its validUntil still runs past moveOutAt")
+	require.Nil(t, v["overrunClauseKey"])
+}
+
+// TestLeaseRentSettlement_TwoOverrunningClauses_OnePerPass pins the
+// multi-candidate case: two termed, unconditioned monthly clauses on the
+// same lease (the original term's plus a renewal's) both run past the
+// recorded moveOutAt. max() picks exactly one on the first pass; once that
+// one is marked completed (simulating the dispatch that closed it, without
+// needing to know its own validFrom), the OTHER becomes the sole remaining
+// candidate on the very next pass — a candidate that has already been
+// closed out never keeps winning max() and starving its sibling.
+func TestLeaseRentSettlement_TwoOverrunningClauses_OnePerPass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newBcFixture(t)
+	f.mkRentLease(t, "twooverrun", 2500, map[string]any{"leaseStart": origStart, "leaseEnd": renewEnd, "termStart": origEnd, "rentAmount": 2600.0})
+	f.mkRentClause(t, "twooverrun_orig", "twooverrun", origStart, origEnd)
+	f.mkRentClause(t, "twooverrun_renew", "twooverrun", origEnd, renewEnd)
+	f.aspect(t, "twooverrun", "notice", "tenancyNotice", map[string]any{"moveOutAt": noticeMoveOutAt})
+
+	origKey := "vtx.clause." + f.ids["twooverrun_orig"]
+	renewKey := "vtx.clause." + f.ids["twooverrun_renew"]
+
+	first := f.projectLeaseAt(t, "twooverrun")[0].Values
+	require.Equal(t, true, first["missing_termShortened"])
+	firstPick, _ := first["overrunClauseKey"].(string)
+	require.Contains(t, []string{origKey, renewKey}, firstPick, "max() must pick one of the two overrunning clauses")
+
+	pickedName, otherKey := "twooverrun_orig", renewKey
+	if firstPick == renewKey {
+		pickedName, otherKey = "twooverrun_renew", origKey
+	}
+
+	f.aspect(t, pickedName, "status", "clauseStatus", map[string]any{"state": "completed", "completedAt": "2026-02-01T00:00:00Z"})
+
+	second := f.projectLeaseAt(t, "twooverrun")[0].Values
+	require.Equal(t, true, second["missing_termShortened"], "the OTHER overrunning clause is still there")
+	require.Equal(t, otherKey, second["overrunClauseKey"],
+		"the previously-passed-over clause is now the sole candidate — proves one-per-pass, not a starvation livelock on the first pick")
+}

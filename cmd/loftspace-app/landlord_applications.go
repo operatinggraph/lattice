@@ -88,6 +88,12 @@ type protectedLandlordRow struct {
 	TenancyTermStart  *string  `json:"tenancyTermStart"`
 	TenancyRentAmount *float64 `json:"tenancyRentAmount"`
 	TenancyEndedAt    *string  `json:"tenancyEndedAt"`
+	// The recorded notice (GiveNotice) — mirrors protectedApplicationRow field
+	// for field (applications.go): null until the tenant or landlord records a
+	// move-out date, not terminal (the lease stays live until TenancyEndedAt).
+	NoticeMoveOutAt *string `json:"noticeMoveOutAt"`
+	NoticeGivenAt   *string `json:"noticeGivenAt"`
+	NoticeGivenBy   *string `json:"noticeGivenBy"`
 	// The anchored executed-lease artifact's pointers — the SAME columns the
 	// applicant model carries (cmd/loftspace-app's GET /api/lease-document falls
 	// back to this landlord-scoped row when the applicant-scoped read finds
@@ -138,6 +144,7 @@ SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        terms_lease_term_months, terms_requested_rent,
        tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
        tenancy_rent_amount, tenancy_ended_at,
+       notice_move_out_at, notice_given_at, notice_given_by,
        doc_store_name, doc_filename, doc_content_type,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
@@ -184,6 +191,7 @@ func queryLandlordApplications(ctx context.Context, pool pgxBeginner, actorID st
 			&row.TermsRequestedRent,
 			&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
 			&row.TenancyRentAmount, &row.TenancyEndedAt,
+			&row.NoticeMoveOutAt, &row.NoticeGivenAt, &row.NoticeGivenBy,
 			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 			&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,
@@ -232,6 +240,7 @@ SELECT entity_key, applicant, applicant_name, applicant_email, applicant_phone,
        terms_lease_term_months, terms_requested_rent,
        tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
        tenancy_rent_amount, tenancy_ended_at,
+       notice_move_out_at, notice_given_at, notice_given_by,
        doc_store_name, doc_filename, doc_content_type,
        COALESCE(profile_submitted, false), income_to_rent_met, employment_verified,
        reference_count, has_co_applicant, has_guarantor,
@@ -269,6 +278,7 @@ func queryLandlordApplicationByKey(ctx context.Context, pool pgxBeginner, actorI
 		&row.TermsRequestedRent,
 		&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
 		&row.TenancyRentAmount, &row.TenancyEndedAt,
+		&row.NoticeMoveOutAt, &row.NoticeGivenAt, &row.NoticeGivenBy,
 		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified,
 		&row.ReferenceCount, &row.HasCoApplicant, &row.HasGuarantor,

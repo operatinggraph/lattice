@@ -34,15 +34,19 @@ type leaseApplicationProjection struct {
 // staff-only Front Desk render — the "who" dimension the POS/Front Desk
 // lease picker (leases.go) has no notion of, since cafeLeaseAccounts is keyed
 // by lease, not identity, and only carries a row once a tab has ever
-// settled. LeaseEnd carries no `omitempty`: the resident's own self-service
-// Open Tab (cmd/cafe-app/web/app.js's residentOpenTabAllowed) gates on it,
-// and an omitted key would read identically to a lease with no projected
-// term.
+// settled. LeaseEnd and EndedAt carry no `omitempty`: the resident's own
+// self-service Open Tab (cmd/cafe-app/web/app.js's residentOpenTabAllowed,
+// via tenancyEnded) gates on them, and an omitted key would read identically
+// to a lease with no projected term. EndedAt is the recorded FACT the
+// tenancy ended (an early move-out via GiveNotice, or the term simply
+// running out); LeaseEnd stays the term's nominal end for a lease with no
+// EndedAt recorded yet.
 type residentRow struct {
 	LeaseAppKey string `json:"leaseAppKey"`
 	BookerKey   string `json:"bookerKey"`
 	Approved    bool   `json:"approved"`
 	LeaseEnd    string `json:"leaseEnd"`
+	EndedAt     string `json:"endedAt"`
 }
 
 // computeResidents decodes every leaseApplicationComplete row, sorted by
@@ -75,20 +79,28 @@ func computeResidents(keys []string, get kvGetter) []residentRow {
 	return rows
 }
 
+// tenancyEnd carries one lease's projected term end (leaseEnd) and its
+// recorded early-or-actual end (endedAt) — the two dates leaseTenancyEnds
+// resolves per lease, either of which may be empty.
+type tenancyEnd struct {
+	LeaseEnd string
+	EndedAt  string
+}
+
 // leaseTenancyEnds resolves every leaseAppKey's own tenancy end off the
 // cafe-domain cafeLeaseWorkplaces lens (leaseWorkplaceRows, readauth.go) — a
 // row with no projected term (or one this pass never read at all) is simply
-// absent from the map, which callers read as "" (no term), never as an
-// error condition of its own.
-func (s *server) leaseTenancyEnds(ctx context.Context) (map[string]string, error) {
+// absent from the map, which callers read as the zero tenancyEnd (no term),
+// never as an error condition of its own.
+func (s *server) leaseTenancyEnds(ctx context.Context) (map[string]tenancyEnd, error) {
 	rows, err := s.leaseWorkplaceRows(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ends := make(map[string]string, len(rows))
+	ends := make(map[string]tenancyEnd, len(rows))
 	for _, p := range rows {
-		if p.LeaseEnd != "" {
-			ends[p.LeaseAppKey] = p.LeaseEnd
+		if p.LeaseEnd != "" || p.EndedAt != "" {
+			ends[p.LeaseAppKey] = tenancyEnd{LeaseEnd: p.LeaseEnd, EndedAt: p.EndedAt}
 		}
 	}
 	return ends, nil
@@ -103,11 +115,14 @@ func (s *server) leaseTenancyEnds(ctx context.Context) (map[string]string, error
 // rows whose applicant is them, so both hats ask visibleLeases the same
 // question and this roster needs no second rule of its own.
 //
-// Each row also carries leaseEnd, joined from cafe-domain's
+// Each row also carries leaseEnd and endedAt, joined from cafe-domain's
 // cafeLeaseWorkplaces lens by leaseAppKey (leaseTenancyEnds) — the
-// resident-readable half of the TenancyEnded fact OpenTab refuses on. The
-// resident's own self-service Open Tab reads THIS endpoint; the staff-only
-// /api/frontdesk-lease-details carries the same fact for the POS picker.
+// resident-readable half of the TenancyEnded fact OpenTab refuses on:
+// endedAt is the recorded FACT the tenancy ended (an early move-out via
+// GiveNotice, or the term simply running out), leaseEnd the term's nominal
+// end for a lease with no endedAt recorded yet. The resident's own
+// self-service Open Tab reads THIS endpoint; the staff-only
+// /api/frontdesk-lease-details carries the same facts for the POS picker.
 func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 	conn, ok := s.requireConn(w)
 	if !ok {
@@ -143,7 +158,9 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 		if !visible.admits(row.LeaseAppKey) {
 			continue
 		}
-		row.LeaseEnd = leaseEnds[row.LeaseAppKey]
+		end := leaseEnds[row.LeaseAppKey]
+		row.LeaseEnd = end.LeaseEnd
+		row.EndedAt = end.EndedAt
 		filtered = append(filtered, row)
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"residents": filtered})

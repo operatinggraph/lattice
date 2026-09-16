@@ -169,6 +169,27 @@ def as_rfc3339_instant(s):
         return s + "T00:00:00Z"
     return s
 
+def required_date_instant(p, name):
+    # A required DATE-ONLY fact: a bare "YYYY-MM-DD" or an RFC3339 instant,
+    # returned as midnight UTC of the value's UTC calendar day in
+    # time.rfc3339_utc's canonical form, so every comparison against a stored
+    # .tenancy stamp is a plain string compare and the stored value renders
+    # as the same date on every card. An instant with an offset is read as
+    # ITS UTC calendar day ("2027-04-01T00:00:00-07:00" is 2027-04-01T07:00Z,
+    # recorded as 2027-04-01T00:00:00Z); the clock part is dropped, never
+    # kept — a move-out is a day, and a stray seven hours would otherwise be
+    # a whole billing period on the rent clause. The shape is checked here so
+    # the refusal names the FIELD ("2026-9-15" would otherwise die inside the
+    # parser under a message naming only the value); a well-shaped date the
+    # calendar rejects (a February 30th) is still the parser's own
+    # InvalidArgument.
+    v = required_string(p, name)
+    s = as_rfc3339_instant(v)
+    digits = s[0:4] + s[5:7] + s[8:10]
+    if len(s) < 20 or s[4] != "-" or s[7] != "-" or s[10] != "T" or not digits.isdigit():
+        fail("InvalidArgument: " + name + ": required YYYY-MM-DD or an RFC3339 instant; got " + v)
+    return time.rfc3339_utc(s)[:10] + "T00:00:00Z"
+
 def optional_bool(p, name):
     # An optional boolean flag (hasCoApplicant / hasGuarantor). Absent / null /
     # non-bool degrades to False — a flag the applicant did not set is "no".
@@ -1510,17 +1531,19 @@ def execute(state, op):
     if ot == "EndTenancy":
         # Weaver's service-actor directOp (the OpenRenewal / SetListingStatus
         # precedent), dispatched by the tenancyEnd target once a signed,
-        # approved tenancy's leaseEnd has lapsed with no open renewal — and
-        # runnable by an operator by hand. It records that the term ended,
-        # ON ITS OWN END DATE: endedAt = leaseEnd, never the instant this op
-        # ran (a recorded value is read as the fact it records — the cards
-        # and the TenancyEnded refusal name the end date). The write-path
-        # honesty check is its own: it does not trust the dispatcher's clock,
-        # so a submission ahead of leaseEnd is refused NotYetEnded whatever
-        # the lens said. It does NOT walk renewals — the open-renewal hold is
-        # the lens's dispatch gate (tenancy_end_lenses.go); an operator ending
-        # a term under an open cycle is admitted, and SignRenewal then
-        # refuses TenancyEnded rather than dropping the endedAt.
+        # approved tenancy's term has lapsed — and runnable by an operator by
+        # hand. It records that the term ended, ON ITS OWN END DATE: endedAt
+        # is the term's effective end (termEnd — the recorded move-out when a
+        # GiveNotice precedes leaseEnd, else leaseEnd), never the instant
+        # this op ran (a recorded value is read as the fact it records — the
+        # cards and the TenancyEnded refusal name the end date). The
+        # write-path honesty check is its own: it does not trust the
+        # dispatcher's clock, so a submission ahead of termEnd is refused
+        # NotYetEnded whatever the lens said. It does NOT walk renewals — the
+        # open-renewal hold is the lens's dispatch gate (tenancy_end_lenses.go);
+        # an operator ending a term under an open cycle is admitted, and
+        # SignRenewal then refuses TenancyEnded rather than dropping the
+        # endedAt.
         app_key = required_string(p, "leaseAppKey")
         parts_of(app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, app_key):
@@ -1549,15 +1572,35 @@ def execute(state, op):
         if tenancy.data.get("endedAt") != None:
             return {"mutations": [], "events": [], "response": {}}
 
+        # The term's effective end. A recorded notice (.notice, written once
+        # by GiveNotice) whose moveOutAt precedes leaseEnd ends the term
+        # there — the same termEnd the tenancyEnd lens arms its timer on. The
+        # aspect is a declared OptionalRead (the descriptor's OptionalReads
+        # and the target's row.entityKey.notice), read from state exactly as
+        # .tenancy is: a submitter that never declared it gets the documented
+        # fallback — the term ends at leaseEnd, and a submission before that
+        # is refused NotYetEnded — rather than a lazy GET that would end the
+        # term on a fact the envelope never named.
+        # read-posture: (d) declared optionalReads at EndTenancy dispatch — a
+        # lease with no notice is the common case.
+        notice_key = app_key + ".notice"
+        notice = state[notice_key] if notice_key in state else None
+        end = lease_end
+        if notice != None and not notice.isDeleted:
+            move_out_at = notice.data.get("moveOutAt")
+            if move_out_at != None and type(move_out_at) == type("") and move_out_at < lease_end:
+                end = move_out_at
+
         # Both stamps are canonical-UTC RFC3339 (leaseEnd is rfc3339_utc /
-        # rfc3339_add_months output, fixed-width and zero-padded), so the
-        # string comparison orders chronologically. The refusal names the
-        # end by its UTC calendar date — the same YYYY-MM-DD slice every
-        # .tenancy stamp renders by (a midnight-UTC instant reads as the day
-        # before west of Greenwich, so no local-zone date ever appears).
+        # rfc3339_add_months output, moveOutAt is rfc3339_utc output —
+        # fixed-width and zero-padded), so the string comparison orders
+        # chronologically. The refusal names the end by its UTC calendar date
+        # — the same YYYY-MM-DD slice every .tenancy stamp renders by (a
+        # midnight-UTC instant reads as the day before west of Greenwich, so
+        # no local-zone date ever appears).
         submitted_at = time.rfc3339_utc(op.submittedAt)
-        if submitted_at < lease_end:
-            fail("NotYetEnded: lease " + app_key + " runs until " + lease_end[:10] + " (UTC)")
+        if submitted_at < end:
+            fail("NotYetEnded: lease " + app_key + " runs until " + end[:10] + " (UTC)")
 
         # Every existing field preserved (leaseStart / renewalOpensAt, and a
         # renewed term's termStart / rentAmount), endedAt added — pinned to
@@ -1567,10 +1610,153 @@ def execute(state, op):
         ended = {}
         for k in tenancy.data:
             ended[k] = tenancy.data[k]
-        ended["endedAt"] = lease_end
+        ended["endedAt"] = end
         mutations = [make_aspect_update_occ(app_key, "tenancy", "tenancy", ended, tenancy.revision)]
         events = [{"class": "leaseapp.tenancyEnded",
-                   "data": {"leaseAppKey": app_key, "leaseEnd": lease_end}}]
+                   "data": {"leaseAppKey": app_key, "leaseEnd": lease_end, "endedAt": end}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": app_key}}
+
+    if ot == "GiveNotice":
+        # A tenant (or their landlord, or an operator) records that the
+        # tenancy ends EARLY, on a move-out date inside the term. The notice
+        # is a recorded fact on the leaseapp — .notice = {moveOutAt, givenAt,
+        # givenBy}, its own aspect rather than a .tenancy field, since
+        # .tenancy already has two whole-aspect writers (DecideLeaseApplication,
+        # SignRenewal) and a third would put the notice under SignRenewal's
+        # rewrite. It is written ONCE (create-only; a change of date is a
+        # different op): from here the term's effective end is termEnd =
+        # min(moveOutAt, leaseEnd) — the tenancyEnd lens arms its timer on
+        # it and EndTenancy records endedAt = termEnd; SignRenewal refuses
+        # NoticeGiven; leaseExpiry opens no renewal cycle.
+        #
+        # Under an OPEN renewal cycle the notice is ADMITTED and walks no
+        # renewals: the tenant declines by leaving. The lens-side override
+        # (tenancy_end_lenses.go: missing_tenancyEnded opens on a recorded
+        # notice even while openRenewalCount > 0) ends the term on the
+        # move-out, SignRenewal's NoticeGiven refusal keeps the open cycle
+        # from extending it, and renewalComplete's (tenancyEndedAt = null)
+        # gate closes the cycle once endedAt lands.
+        app_key = required_string(p, "leaseAppKey")
+        _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
+        move_out_at = required_date_instant(p, "moveOutDate")
+
+        # Who is giving notice — the probe that admits the caller names the
+        # recorded givenBy, and the probes answer AHEAD of the liveness check
+        # so a caller who is neither tenant nor landlord cannot use a denial
+        # to learn that an application exists.
+        #
+        # The op carries two grants: operator at scope=any and consumer at
+        # scope=self. On the platform-VALIDATED self path (step 3 proved
+        # authContext.target == actor on a scope=self grant — the exact
+        # predicate require_manages binds on, so the two probes cannot
+        # disagree about which path they are on) the caller is the TENANT
+        # when the deterministic applicationFor link keyed on the acting
+        # identity is live, else the LANDLORD when require_manages proves a
+        # manages link to the application's own unit — it fails AuthDenied
+        # itself on that path when the link is absent. A scope=any holder
+        # (the operator, the trusted-tool app) is admitted on the standing
+        # grant without either link and is recorded as such, whatever
+        # authContext its client happened to send.
+        given_by = "operator"
+        # authcontext-target: (ownership) the target is used only as
+        # op.actor's own key on a path the platform already proved equal to
+        # the actor; the authority it buys is then proven by the
+        # applicationFor link read here or the manages link require_manages
+        # reads, so a forged one only fails closed.
+        if op.authTargetValidated and op.authContextTarget == op.actor:
+            _, self_id = parts_of(op.actor, "actor", "identity")
+            # read-posture: (d) declared optionalReads at GiveNotice dispatch
+            # on the consumer path — absent means the caller is not this
+            # application's tenant and the landlord probe answers next.
+            tenant_lnk = kv.Read("lnk.leaseapp." + app_id + ".applicationFor.identity." + self_id)
+            if tenant_lnk != None and not tenant_lnk.isDeleted:
+                given_by = "tenant"
+            else:
+                # workplace-exempt: (ownership-bound) this IS the ownership
+                # proof -- it requires the acting identity to manage the unit
+                # the application's own appliesToUnit link names, so the
+                # validated scope=self path never reaches the write
+                # unconfined; no staff grant reaches this op at all.
+                require_manages(leaseapp_unit(app_key), "cannot give notice on application " + app_key)
+                given_by = "landlord"
+
+        if not vertex_alive(state, app_key):
+            fail("UnknownLeaseApplication: " + app_key)
+
+        # The term the notice shortens: .tenancy and .signature are REQUIRED
+        # declared reads (the descriptor's Dispatch.Reads), read from state
+        # exactly as EndTenancy reads .tenancy — a notice on an application
+        # that is not an approved, signed lease is refused, never served by
+        # an on-demand GET.
+        tenancy_key = app_key + ".tenancy"
+        tenancy = state[tenancy_key] if tenancy_key in state else None
+        if tenancy == None or tenancy.isDeleted:
+            fail("NoTenancy: application " + app_key + " has no .tenancy aspect; there is no term to give notice on")
+        lease_start = tenancy.data.get("leaseStart")
+        lease_end = tenancy.data.get("leaseEnd")
+        if lease_end == None or type(lease_end) != type("") or lease_start == None or type(lease_start) != type(""):
+            fail("NoTenancy: application " + app_key + "'s .tenancy aspect is missing leaseStart or leaseEnd")
+        sig_key = app_key + ".signature"
+        sig = state[sig_key] if sig_key in state else None
+        if sig == None or sig.isDeleted or sig.data.get("signedAt") == None:
+            fail("LeaseNotSigned: application " + app_key + " has not been signed; an unsigned lease has no term to give notice on")
+        ended_at = tenancy.data.get("endedAt")
+        if ended_at != None:
+            fail("TenancyEnded: lease " + app_key + " ended on " + str(ended_at)[:10] + " (UTC); an ended term cannot be given notice")
+
+        # Once only. The aspect is a declared OptionalRead, so a declared
+        # absence conditions the create below CreateOnly and a second notice
+        # racing this one conflicts; a submitter that declared it and finds
+        # it live is refused here by name.
+        # read-posture: (d) declared optionalReads at GiveNotice dispatch —
+        # absent is the common first-notice case.
+        notice_key = app_key + ".notice"
+        prior = state[notice_key] if notice_key in state else None
+        if prior != None and not prior.isDeleted:
+            fail("NoticeAlreadyGiven: lease " + app_key + " already gave notice for " + str(prior.data.get("moveOutAt"))[:10] + " (UTC); a recorded notice is not changed here")
+
+        # The date rules, every stamp canonical-UTC RFC3339 (rfc3339_utc /
+        # rfc3339_add_months output), compared as strings. "Today" is the
+        # UTC calendar day of the op's own submittedAt — the platform's
+        # timestamp, never a client clock — so a same-day move-out is
+        # admitted (the tenant who already left records today) and every
+        # refusal names its date by the same YYYY-MM-DD slice the cards
+        # render. The move-out must fall strictly inside the term: on or
+        # before leaseStart there is no tenancy to leave, on or after
+        # leaseEnd the term ends on its own date and there is nothing to
+        # record.
+        submitted_at = time.rfc3339_utc(op.submittedAt)
+        today_start = submitted_at[:10] + "T00:00:00Z"
+        if move_out_at < today_start:
+            fail("MoveOutBeforeToday: move-out " + move_out_at[:10] + " (UTC) is before today " + today_start[:10] + " (UTC); a notice records a move-out from today on")
+        if move_out_at <= lease_start:
+            fail("MoveOutBeforeStart: move-out " + move_out_at[:10] + " (UTC) is not after the term's start " + lease_start[:10] + " (UTC)")
+        if move_out_at >= lease_end:
+            fail("MoveOutAfterEnd: move-out " + move_out_at[:10] + " (UTC) is not before the term's end " + lease_end[:10] + " (UTC); the term ends on its own date")
+
+        # The .tenancy rewrite below is a SERIALIZATION POINT, not a data
+        # write: it carries the aspect's own data back unchanged, pinned to
+        # the revision this op hydrated. GiveNotice and SignRenewal read each
+        # other's aspect (.notice / .tenancy) but each writes only its own,
+        # and the commit path conditions only the keys a batch mutates — so
+        # without a shared key a SignRenewal hydrated before this notice
+        # commits would still land a signed, extended term on a lease under
+        # notice. Pinning .tenancy makes the two conflict instead: a
+        # SignRenewal that committed between this op's hydration and its
+        # commit RevisionConflicts this notice (the client re-reads the new
+        # leaseEnd and asks again), and a notice that committed first
+        # conflicts the signing (which then re-runs and refuses NoticeGiven).
+        unchanged = {}
+        for k in tenancy.data:
+            unchanged[k] = tenancy.data[k]
+        mutations = [
+            make_aspect(app_key, "notice", "tenancyNotice",
+                        {"moveOutAt": move_out_at, "givenAt": submitted_at, "givenBy": given_by}),
+            make_aspect_update_occ(app_key, "tenancy", "tenancy", unchanged, tenancy.revision),
+        ]
+        events = [{"class": "leaseapp.noticeGiven",
+                   "data": {"leaseAppKey": app_key, "moveOutAt": move_out_at, "givenBy": given_by}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": app_key}}
 

@@ -43,7 +43,15 @@ type renewalRow struct {
 	// landlord_applications.go). SignRenewal refuses TenancyEnded once this is
 	// set (renewal_scripts.go); renderRenewalCard gates the Sign action on it,
 	// never omitted so that gate has something to read.
-	TenancyEndedAt      *string  `json:"tenancyEndedAt"`
+	TenancyEndedAt *string `json:"tenancyEndedAt"`
+	// The recorded notice (GiveNotice) on the renewed leaseapp — null until the
+	// tenant or landlord records a move-out date. SignRenewal refuses
+	// NoticeGiven once this is set (renewal_scripts.go); renderRenewalCard
+	// hides Sign on a cycle whose leaseapp carries one, mirroring the
+	// TenancyEndedAt gate above.
+	NoticeMoveOutAt     *string  `json:"noticeMoveOutAt"`
+	NoticeGivenAt       *string  `json:"noticeGivenAt"`
+	NoticeGivenBy       *string  `json:"noticeGivenBy"`
 	RentAmount          *float64 `json:"rentAmount"`
 	TermMonths          *float64 `json:"termMonths"`
 	TermsSetAt          *string  `json:"termsSetAt"`
@@ -61,7 +69,9 @@ type renewalRow struct {
 // open cycle needing action surfaces before a completed/cancelled one.
 const selectRenewalsSQL = `
 SELECT entity_key, lease_app, tenant, tenant_name, landlord, status, cycle_end,
-       unit_address, lease_end, tenancy_ended_at, rent_amount, term_months, terms_set_at,
+       unit_address, lease_end, tenancy_ended_at,
+       notice_move_out_at, notice_given_at, notice_given_by,
+       rent_amount, term_months, terms_set_at,
        has_guarantor, guarantor_verified_at, guarantor_method,
        signed_at, cancel_reason
 FROM read_renewals
@@ -96,7 +106,9 @@ func queryRenewals(ctx context.Context, pool pgxBeginner, actorID string) ([]ren
 		var row renewalRow
 		if err := rows.Scan(
 			&row.EntityKey, &row.LeaseApp, &row.Tenant, &row.TenantName, &row.Landlord, &row.Status, &row.CycleEnd,
-			&row.UnitAddress, &row.LeaseEnd, &row.TenancyEndedAt, &row.RentAmount, &row.TermMonths, &row.TermsSetAt,
+			&row.UnitAddress, &row.LeaseEnd, &row.TenancyEndedAt,
+			&row.NoticeMoveOutAt, &row.NoticeGivenAt, &row.NoticeGivenBy,
+			&row.RentAmount, &row.TermMonths, &row.TermsSetAt,
 			&row.HasGuarantor, &row.GuarantorVerifiedAt, &row.GuarantorMethod,
 			&row.SignedAt, &row.CancelReason,
 		); err != nil {

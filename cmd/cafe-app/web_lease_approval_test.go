@@ -117,3 +117,32 @@ const notYetEnded = { leaseAppKey: "vtx.leaseapp.a", approved: true, leaseEnd: "
 		}
 	}
 }
+
+// TestResidentOpenTabAllowed_EndedAtVectors proves the row's recorded
+// endedAt (a resident's own GiveNotice, or the term simply running out)
+// withholds the Open Tab button the moment it is set, unconditionally —
+// even months before leaseEnd, the exact gap a moved-out resident's leaseEnd
+// alone would otherwise leave open. The positive vector runs first: no
+// endedAt recorded and a future leaseEnd still allows the tab.
+func TestResidentOpenTabAllowed_EndedAtVectors(t *testing.T) {
+	vm := residentOpenTabAllowedVM(t)
+	if _, err := vm.RunString(`
+const now = new Date("2026-09-15T00:00:00Z");
+const notYetNoticed = { leaseAppKey: "vtx.leaseapp.a", approved: true, leaseEnd: "2027-08-01T00:00:00Z" };
+const noticed = { leaseAppKey: "vtx.leaseapp.a", approved: true, leaseEnd: "2027-08-01T00:00:00Z", endedAt: "2026-09-15T00:00:00Z" };
+`); err != nil {
+		t.Fatalf("fixture eval: %v", err)
+	}
+	for expr, want := range map[string]bool{
+		"residentOpenTabAllowed(notYetNoticed, now)": true,
+		"residentOpenTabAllowed(noticed, now)":       false,
+	} {
+		v, err := vm.RunString(expr)
+		if err != nil {
+			t.Fatalf("%s: %v", expr, err)
+		}
+		if got := v.ToBoolean(); got != want {
+			t.Errorf("%s = %v, want %v", expr, got, want)
+		}
+	}
+}

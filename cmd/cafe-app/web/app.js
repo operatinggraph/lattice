@@ -772,8 +772,11 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, 
       opt.disabled = true;
       // The calendar date of the UTC stamp, the same slice the refusal
       // toasts — a local rendering of a midnight-UTC term end names the
-      // day before in every zone west of Greenwich.
-      opt.textContent = who + unit + " (lease ended " + detail.leaseEnd.slice(0, 10) + ")";
+      // day before in every zone west of Greenwich. Names the recorded
+      // endedAt (an early move-out, or the term run out) when set; else
+      // falls back to the projected leaseEnd.
+      const endDate = detail.endedAt || detail.leaseEnd;
+      opt.textContent = who + unit + " (lease ended " + endDate.slice(0, 10) + ")";
     } else {
       opt.textContent = who + unit + (l.accountKey ? "" : " (no café account yet)");
     }
@@ -783,12 +786,20 @@ function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, 
   if (prev && leases.some((l) => l.leaseAppKey === prev)) select.value = prev;
 }
 
-// tenancyEnded reports whether a lease-details row carries a leaseEnd that
-// `now` has reached — the same inclusive boundary OpenTab's TenancyEnded
-// guard applies (packages/cafe-domain/ddls.go). A row with no leaseEnd, or
-// one that does not parse, is not evidence the term ended.
+// tenancyEnded reports whether a lease-details row's tenancy has ended —
+// the same fact OpenTab's TenancyEnded guard refuses on
+// (packages/cafe-domain/ddls.go). A recorded endedAt (an early move-out via
+// GiveNotice, or the term simply running out) is the FACT the tenancy
+// ended, checked first and unconditionally — it is only ever written once
+// already reached, so its mere presence is evidence enough, no `now`
+// comparison needed. Absent that, falls back to leaseEnd having been
+// reached by `now`, the same inclusive boundary the op applies for a lease
+// EndTenancy has not caught up with yet. A row with neither, or one that
+// does not parse, is not evidence the term ended.
 function tenancyEnded(detail, now) {
-  if (!detail || !detail.leaseEnd) return false;
+  if (!detail) return false;
+  if (detail.endedAt) return true;
+  if (!detail.leaseEnd) return false;
   const end = new Date(detail.leaseEnd).getTime();
   if (isNaN(end)) return false;
   return now.getTime() >= end;
@@ -1762,10 +1773,9 @@ let residentOwnLeaseRow = null;
 // roster hasn't resolved) and the caller's current time. Blocks only on
 // POSITIVE evidence — row.approved === false (LeaseNotApproved, the posture
 // fillLeaseSelect's own `approved === false` check takes) or the row's own
-// leaseEnd column having been reached (TenancyEnded, the same inclusive
-// boundary tenancyEnded applies above) — so a roster a resident's session
-// cannot yet join, or a lease with no projected term, never wrongly
-// withholds their own tab.
+// endedAt/leaseEnd having ended the tenancy (TenancyEnded, tenancyEnded
+// applied above) — so a roster a resident's session cannot yet join, or a
+// lease with no projected term, never wrongly withholds their own tab.
 function residentOpenTabAllowed(row, now) {
   return !row || (row.approved !== false && !tenancyEnded(row, now));
 }
@@ -1807,7 +1817,7 @@ async function loadResident() {
 // refusal-courtesy: OpenTab/InvalidState: none — the arrears aspect's wrong class is a data-integrity fault (require_no_credit_hold, packages/cafe-domain/ddls.go), not state /api/ledger exposes
 // refusal-courtesy: OpenTab/LeaseNotApproved: hide — loadResident resolves residentOwnLeaseRow from /api/residents before the first render, and this function renders the "awaiting landlord approval" panel, no button, when its approved field is false
 // refusal-courtesy: OpenTab/OpenTabAlreadyExists: hide — the Open Tab button only renders on the `!open` branch (tabs.tabs.find(t => t.status === "open") absent)
-// refusal-courtesy: OpenTab/TenancyEnded: hide — residentOpenTabAllowed hides Open Tab once residentOwnLeaseRow's leaseEnd column (cafeLeaseWorkplaces, packages/cafe-domain/lenses.go, joined onto /api/residents by cmd/cafe-app/residents.go) is past, and this function renders the "your lease ended" panel, no button, in its place
+// refusal-courtesy: OpenTab/TenancyEnded: hide — residentOpenTabAllowed hides Open Tab once residentOwnLeaseRow's endedAt is recorded or its leaseEnd column (cafeLeaseWorkplaces, packages/cafe-domain/lenses.go, joined onto /api/residents by cmd/cafe-app/residents.go) is past, and this function renders the "your lease ended" panel, no button, in its place
 // refusal-courtesy: Charge/ItemUnavailable: disable — menuOptions renders a sold-out item (available === false) inside a disabled "Sold out today" optgroup on the self-order-form select
 // refusal-courtesy: Charge/TabNotOpen: hide — self-order-form only renders inside the `if (open)` branch
 // refusal-courtesy: Settle/TabNotOpen: hide — resident-settle-btn only renders inside the `if (open)` branch
@@ -1905,14 +1915,16 @@ async function renderResident() {
     // refusal-courtesy: OpenTab/TenancyEnded: hide — this panel replaces the
     // Open Tab button once residentOpenTabAllowed(residentOwnLeaseRow, now)
     // is false for a reason other than approval (checked above), i.e. the
-    // lease's own leaseEnd column has been reached. The calendar date of the
-    // UTC stamp, the same slice fillLeaseSelect's own disabled-option copy
-    // uses — a local rendering of a midnight-UTC term end names the day
-    // before in every zone west of Greenwich.
+    // lease's own endedAt is recorded or its leaseEnd column has been
+    // reached. Names endedAt (an early move-out, or the term run out) when
+    // recorded, else leaseEnd. The calendar date of the UTC stamp, the same
+    // slice fillLeaseSelect's own disabled-option copy uses — a local
+    // rendering of a midnight-UTC term end names the day before in every
+    // zone west of Greenwich.
     parts.push(
       '<div class="panel">' +
       "<h2>No open tab</h2>" +
-      '<p class="lead">Your lease ended ' + escapeHtml(residentOwnLeaseRow.leaseEnd.slice(0, 10)) + " — a house tab cannot open once your tenancy has ended.</p>" +
+      '<p class="lead">Your lease ended ' + escapeHtml((residentOwnLeaseRow.endedAt || residentOwnLeaseRow.leaseEnd).slice(0, 10)) + " — a house tab cannot open once your tenancy has ended.</p>" +
       "</div>"
     );
   } else if (selfMode) {

@@ -391,7 +391,7 @@ func TestSignRenewal_EndedTenancy_Refused(t *testing.T) {
 				applicationForLinkKey(appKey, applicantKey),
 				appKey + ".tenancy",
 			},
-			OptionalReads: []string{renewalKey + ".terms", appKey + ".applicationSignals", renewalKey + ".guarantorVerification"},
+			OptionalReads: []string{renewalKey + ".terms", appKey + ".applicationSignals", renewalKey + ".guarantorVerification", appKey + ".notice"},
 		},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)

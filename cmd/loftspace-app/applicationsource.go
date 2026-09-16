@@ -76,6 +76,14 @@ type applicationRow struct {
 	// landlord by-unit view's Relist gate (unitTenancyEnded, app.js) reads it
 	// alongside LandlordApproved. Empty until the .tenancy exists and has ended.
 	TenancyEndedAt string `json:"tenancyEndedAt"`
+	// The recorded notice (GiveNotice). leaseApplicationComplete projects no
+	// notice columns, so every applicationRow decoded straight off this lens
+	// carries these empty — handleUnitApplications backfills them from the
+	// RLS-scoped landlordLeaseApplicationsRead rows it already loads
+	// (unit_applications.go's backfillNotices).
+	NoticeMoveOutAt string `json:"noticeMoveOutAt"`
+	NoticeGivenAt   string `json:"noticeGivenAt"`
+	NoticeGivenBy   string `json:"noticeGivenBy"`
 	// Applicant qualification profile — the DERIVED signals the landlord decides
 	// on (SetApplicantProfile; the raw financials are never projected). All
 	// pointers so an application with no .profile yet stays absent rather than

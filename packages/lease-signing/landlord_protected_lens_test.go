@@ -615,3 +615,30 @@ func TestLandlordLeaseApplicationsRead_RecordedLoss_HoldsAcrossTheRelist(t *test
 	require.Equal(t, "lost", byApp[f.ids["lostRival"]]["landlord_decision"])
 	require.Equal(t, false, byApp[f.ids["fresh"]]["lost_to_rival"], "the control: an undecided application on the relisted unit is awaiting the landlord")
 }
+
+// TestLandlordLeaseApplicationsRead_ProjectsTheNotice — the landlord read
+// model carries the SAME three notice columns the applicant read model does,
+// off the same app.notice aspect, so the landlord's application card shows
+// the "moving out <date>" chip and who gave it.
+func TestLandlordLeaseApplicationsRead_ProjectsTheNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedManagedApplication(t, "app", "alice", "unit1", "larry")
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-08-01T00:00:00Z", "leaseEnd": "2027-08-01T00:00:00Z"})
+
+	rows := f.projectLandlordRead(t)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["notice_move_out_at"], "no notice → null on a still-present row")
+
+	f.aspect(t, "app", "notice", "tenancyNotice", map[string]any{
+		"moveOutAt": "2027-03-31T00:00:00Z", "givenAt": "2027-02-14T09:30:00Z", "givenBy": "landlord"})
+	rows = f.projectLandlordRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "2027-03-31T00:00:00Z", v["notice_move_out_at"])
+	require.Equal(t, "2027-02-14T09:30:00Z", v["notice_given_at"])
+	require.Equal(t, "landlord", v["notice_given_by"])
+}

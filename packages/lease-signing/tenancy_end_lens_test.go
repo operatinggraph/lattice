@@ -399,8 +399,152 @@ func TestTenancyEnd_ReadsItsOwnTargetsMarkerEntry(t *testing.T) {
 	require.Equal(t, TenancyEndTarget+".{actorSuffix}", outputPrefix, "the row prefix IS the target id (the §10.2↔§10.8 binding)")
 	require.Contains(t, tenancyEndSpec, "app.freshnessExpiry.data.byTarget."+target+" AS lapsedAt",
 		"tenancyEnd must read the marker under its own target id — the timer that fires writes that entry and no other")
-	require.Contains(t, tenancyEndSpec, "CASE WHEN (endedAt <> null) OR (lapsedAt >= leaseEnd) THEN null ELSE leaseEnd END AS freshUntil",
-		"freshUntil is leaseEnd until the recorded lapse reaches it or the end is recorded — the fragment the timer and the reader share")
-	require.True(t, strings.Contains(tenancyEndSpec, "(lapsedAt >= leaseEnd) AND (openRenewalCount = 0)"),
-		"the end gap requires the recorded lapse AND no open renewal")
+	require.Contains(t, tenancyEndSpec, "CASE WHEN (endedAt <> null) OR (lapsedAt >= termEnd) THEN null ELSE termEnd END AS freshUntil",
+		"freshUntil is termEnd until the recorded lapse reaches it or the end is recorded — the fragment the timer and the reader share")
+	require.True(t, strings.Contains(tenancyEndSpec, "(lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))"),
+		"the end gap requires the recorded lapse AND (no open renewal OR a recorded notice)")
+	require.Contains(t, tenancyEndSpec, "CASE WHEN (app.notice.data.moveOutAt <> null) AND (app.notice.data.moveOutAt < app.tenancy.data.leaseEnd) THEN app.notice.data.moveOutAt ELSE app.tenancy.data.leaseEnd END AS termEnd",
+		"termEnd is the earlier of the recorded move-out and leaseEnd — the same derivation EndTenancy's script carries")
+}
+
+// --- a recorded notice moves the term's end (design
+// docs/reviews/loftspace-tenancy-notice-2026-09-15.md §2) -------------------
+
+// teMoveOut is the move-out every notice vector below records — inside the
+// term seedLeasedTenancy stamps ([…, 2027-01-01)).
+const teMoveOut = "2026-11-15T00:00:00Z"
+
+// giveNotice writes the .notice the way GiveNotice commits it.
+func giveNotice(t *testing.T, f *lensFixture, appName, moveOutAt string) {
+	t.Helper()
+	f.aspect(t, appName, "notice", "tenancyNotice", map[string]any{
+		"moveOutAt": moveOutAt, "givenAt": "2026-10-01T09:00:00Z", "givenBy": "tenant"})
+}
+
+// TestTenancyEnd_NoticeArmsTheMoveOut: a notice before leaseEnd is the
+// term's effective end — freshUntil (the scalar Weaver schedules from) is
+// the move-out, termEnd projects it, moveOutAt projects the recorded value,
+// and leaseEnd is still the term's own end. Nothing opens until a lapse is
+// recorded.
+func TestTenancyEnd_NoticeArmsTheMoveOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	giveNotice(t, f, "app", teMoveOut)
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, teMoveOut, v["freshUntil"], "the timer arms on the move-out, not leaseEnd")
+	require.Equal(t, teMoveOut, v["termEnd"])
+	require.Equal(t, teMoveOut, v["moveOutAt"])
+	require.Equal(t, teLeaseEnd, v["leaseEnd"], "leaseEnd stays the term's own end")
+	require.Equal(t, false, v["missing_tenancyEnded"])
+	require.Equal(t, false, v["violating"])
+}
+
+// TestTenancyEnd_LapseAtMoveOutOpensTheEnd: a recorded lapse at the move-out
+// — well before leaseEnd — opens missing_tenancyEnded and disarms the timer.
+// A leaseEnd-keyed reading would still be armed here, which is what makes the
+// vector discriminating.
+func TestTenancyEnd_LapseAtMoveOutOpensTheEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	giveNotice(t, f, "app", teMoveOut)
+	recordLeaseappLapse(t, f, "app", map[string]string{TenancyEndTarget: teMoveOut})
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, true, v["missing_tenancyEnded"], "marker == moveOutAt is a lapse: the term ended on the move-out")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"])
+}
+
+// TestTenancyEnd_NoticeOverridesTheOpenRenewalHold: an OPEN renewal for this
+// cycle no longer holds a term under notice — the tenant answered the renewal
+// question by leaving, and SignRenewal refuses NoticeGiven (renewal_scripts.go)
+// so the cycle cannot extend the term. The end opens on the recorded lapse at
+// the move-out.
+func TestTenancyEnd_NoticeOverridesTheOpenRenewalHold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	giveNotice(t, f, "app", teMoveOut)
+	recordLeaseappLapse(t, f, "app", map[string]string{TenancyEndTarget: teMoveOut})
+	f.vtx(t, "rn", "renewal")
+	f.setRootData(t, "rn", map[string]any{"status": "open", "cycleEnd": teLeaseEnd})
+	f.edge(t, "renews", "rn", "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, true, v["missing_tenancyEnded"], "a notice overrides the open-renewal hold")
+	require.Equal(t, true, v["violating"])
+}
+
+// termEndFixtures is the ONE fixture table both languages of termEnd are
+// pinned over — this lens's CASE and EndTenancy's script derivation
+// (give_notice_ops_test.go's termEndOpFixtures carries the same rows against
+// the same 2027-01-01 leaseEnd, in the external test package). The "before"
+// and "after" rows pin the direction of the comparison and the "none" row
+// its null arm; the "at" row pins that the boundary is INERT — at equality
+// both arms name the same instant, so a `<` written as `<=` in either
+// language changes nothing observable, and no vector could tell them apart.
+// A stored move-out at or past leaseEnd (a shape GiveNotice refuses,
+// MoveOutAfterEnd) must leave the end at leaseEnd in both places.
+var termEndFixtures = []struct {
+	name, moveOutAt, wantTermEnd string
+}{
+	{"before", "2026-11-15T00:00:00Z", "2026-11-15T00:00:00Z"},
+	{"at", teLeaseEnd, teLeaseEnd},
+	{"after", "2027-03-01T00:00:00Z", teLeaseEnd},
+	{"none", "", teLeaseEnd},
+}
+
+// TestTenancyEnd_TermEndFixtureTable drives termEndFixtures through the lens:
+// termEnd and the timer (freshUntil) follow the table, and the recorded
+// moveOutAt projects verbatim whatever the comparison decides.
+func TestTenancyEnd_TermEndFixtureTable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, fx := range termEndFixtures {
+		f := newLensFixture(t)
+		seedLeasedTenancy(t, f, "app", "leased")
+		if fx.moveOutAt != "" {
+			giveNotice(t, f, "app", fx.moveOutAt)
+		}
+
+		v := f.projectTenancyEnd(t, "app")
+		require.Equal(t, fx.wantTermEnd, v["termEnd"], "%s: termEnd", fx.name)
+		require.Equal(t, fx.wantTermEnd, v["freshUntil"], "%s: the timer arms on termEnd", fx.name)
+		if fx.moveOutAt == "" {
+			require.Nil(t, v["moveOutAt"], "%s: no notice projects null", fx.name)
+		} else {
+			require.Equal(t, fx.moveOutAt, v["moveOutAt"], "%s: the recorded move-out projects verbatim", fx.name)
+		}
+		require.Equal(t, false, v["missing_tenancyEnded"], "%s: nothing opens until a lapse is recorded", fx.name)
+	}
+}
+
+// TestTenancyEnd_NoNoticeProjectsUnchangedRows pins the no-notice shape: termEnd
+// = leaseEnd, moveOutAt null, and the open-renewal hold still holds — the rows
+// every lease without a notice projects, unchanged by the notice columns.
+func TestTenancyEnd_NoNoticeProjectsUnchangedRows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	recordLeaseappLapse(t, f, "app", map[string]string{TenancyEndTarget: teLeaseEnd})
+	f.vtx(t, "rn", "renewal")
+	f.setRootData(t, "rn", map[string]any{"status": "open", "cycleEnd": teLeaseEnd})
+	f.edge(t, "renews", "rn", "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, teLeaseEnd, v["termEnd"])
+	require.Nil(t, v["moveOutAt"])
+	require.Equal(t, false, v["missing_tenancyEnded"], "with no notice the open renewal still holds the term")
 }

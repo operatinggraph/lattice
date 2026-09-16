@@ -74,10 +74,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // against a lease the landlord hasn't signed off on (a self-order against an
 // unapproved lease posted a live $4.50 charge before this guard existed).
 // The same lease's `.tenancy` aspect rides alongside it (OptionalReads — a
-// lease approved before tenancies were minted carries none): once
-// submittedAt reaches its leaseEnd the op rejects TenancyEnded, so a
-// moved-out resident's lease stops taking house tabs the moment its rent
-// clause stops billing.
+// lease approved before tenancies were minted carries none): once its
+// recorded endedAt is set (EndTenancy, whether from an early move-out or the
+// term simply running out) — or, absent that, once submittedAt reaches its
+// leaseEnd — the op rejects TenancyEnded, so a moved-out resident's lease
+// stops taking house tabs the moment its rent clause stops billing.
 //
 // VoidCharge declares no ownership probe: it has no self grant at all (a POS
 // correction is a staff decision even when reversing a resident's own mis-tap),

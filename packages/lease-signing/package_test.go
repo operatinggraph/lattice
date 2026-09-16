@@ -56,6 +56,7 @@ func TestPackage_SelfServiceDescriptorsNameTheSelfPath(t *testing.T) {
 		"SetRenewalTerms":          "renewal",
 		"VerifyGuarantor":          "renewal",
 		"CancelRenewal":            "renewal",
+		"GiveNotice":               "leaseapp",
 	}
 	byOp := map[string]pkgmgr.OpMetaSpec{}
 	for _, m := range Package.OpMetas {
@@ -219,16 +220,16 @@ func TestPackage_CreateLeaseDocInstanceFloorsTenantNameAbsence(t *testing.T) {
 //     losing Protected would move identity-bearing rows onto an open surface, so
 //     the flag is pinned per lens, not just the lens name.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 15; got != want {
+	if got, want := len(Package.DDLs), 16; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 11; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 27; got != want {
+	if got, want := len(Package.Permissions), 29; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 17; got != want {
+	if got, want := len(Package.OpMetas), 18; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -257,6 +258,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"applicationSignals", "meta.ddl.aspectType"},
 		{"decidedProfileSnapshot", "meta.ddl.aspectType"},
 		{"tenantName", "meta.ddl.aspectType"},
+		{"tenancyNotice", "meta.ddl.aspectType"},
 		{"leaseServiceInstance", "meta.ddl.vertexType"},
 		{"leaseServiceReply", "meta.ddl.vertexType"},
 		{"leaseServiceDispatch", "meta.ddl.vertexType"},
@@ -323,6 +325,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"SignRenewal", "any"},
 		{"CancelRenewal", "any"}, {"CancelRenewal", "self"},
 		{"EndTenancy", "any"},
+		{"GiveNotice", "any"}, {"GiveNotice", "self"},
 		{"RecordApplicationLoss", "any"},
 	}
 	for i, want := range wantPerms {

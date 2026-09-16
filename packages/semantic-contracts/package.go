@@ -25,6 +25,10 @@
 //     record) gating the charge on that vertex staying alive. Always writes
 //     the governs link (clause→leaseapp). BackfillClauseTerm stamps the term
 //     onto a monthly clause minted without one, from its lease's .tenancy.
+//     ShortenClauseTerm (the LoftSpace "a tenant gives notice" design) caps
+//     an already-termed clause's validUntil at a lease's recorded early
+//     move-out, completing the clause once its recorded due date reaches
+//     the shortened term.
 //
 //   - The `clauseSatisfaction` actorAggregate convergence lens (§10.2),
 //     anchored on the clause: `missing_charge` is true while the clause
@@ -67,7 +71,10 @@
 //     the inbound governs walk resolves a clause from the link's source-type
 //     segment, which is right on every key shape, while a legacy
 //     `governs.lease.` key can never be walked outbound from the clause; the
-//     op re-keys such a link as it terms the clause.
+//     op re-keys such a link as it terms the clause. Its fifth gap,
+//     missing_termShortened → directOp(ShortenClauseTerm), caps a termed
+//     clause running past a recorded notice's moveOutAt at max(moveOutAt,
+//     validFrom) — one clause per pass, the same shape.
 //
 // loftspace-ledger's DebitAccount op accepts an optional clauseRef: when
 // present it writes the lnk.transaction.authorizedBy.clause audit link and
@@ -93,20 +100,22 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "semantic-contracts",
-	Version: "0.5.1",
+	Version: "0.6.0",
 	Description: "LoftSpace 'Executable Paper' reference package (fixed/one-time, conditioned, judgment, " +
 		"recurring monthly — termed to a calendar-month period grid or untermed — and prorated computational " +
-		"clauses, plus self-amendment): the clause vertex type (CreateClause/SupersedeClause/BackfillClauseTerm, " +
+		"clauses, plus self-amendment and early shortening): the clause vertex type " +
+		"(CreateClause/SupersedeClause/BackfillClauseTerm/ShortenClauseTerm, " +
 		".prose/.terms/.status/.clauseInspection aspects, governs + chargesTo/requiresInspectionBy/conditionedOn/" +
 		"amends links) + the clauseSatisfaction actorAggregate convergence lens (§10.2, " +
 		"missing_charge/missing_inspection, freshUntil-armed recurring freshness on the term's period grid) + the " +
 		"§10.8 playbook dispatching directOp(DebitAccount)/assignTask(InspectPremises) on the gaps + the " +
 		"leaseRentSettlement actorAggregate lens/playbook bootstrapping an approved signed lease's agreed rent, " +
-		"ledger account, then a recurring monthly rent clause for its current term, and terming any monthly " +
-		"clause it has minted without one (missing_terms → directOp(BackfillLeaseTerms), missing_account → " +
-		"directOp(LoftspaceCreateAccount), missing_clause → directOp(CreateClause) with the term, missing_term → " +
-		"directOp(BackfillClauseTerm), dollars→cents conversion in the lens). Depends lease-signing + " +
-		"loftspace-ledger.",
+		"ledger account, then a recurring monthly rent clause for its current term, terming any monthly clause it " +
+		"has minted without one, and shortening a termed clause to a recorded early move-out (missing_terms → " +
+		"directOp(BackfillLeaseTerms), missing_account → directOp(LoftspaceCreateAccount), missing_clause → " +
+		"directOp(CreateClause) with the term, missing_term → directOp(BackfillClauseTerm), " +
+		"missing_termShortened → directOp(ShortenClauseTerm), dollars→cents conversion in the lens). Depends " +
+		"lease-signing + loftspace-ledger.",
 	Depends:       []string{"lease-signing", "loftspace-ledger"},
 	DDLs:          DDLs(),
 	Lenses:        Lenses(),

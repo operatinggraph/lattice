@@ -44,6 +44,15 @@ type applicantSummary struct {
 	// landlord unit card's Relist gate (unitTenancyEnded, app.js) reads it
 	// alongside LandlordApproved to tell an ended tenancy apart from a live one.
 	TenancyEndedAt string `json:"tenancyEndedAt"`
+	// The recorded notice (GiveNotice). leaseApplicationComplete projects no
+	// notice columns (applicationsource.go), so handleUnitApplications
+	// backfills these from the RLS-scoped landlordLeaseApplicationsRead rows
+	// it already loads (backfillNotices). Not terminal: status keeps
+	// whatever arm it already reads (leased/approved/qualified/…) and this
+	// only adds the chip.
+	NoticeMoveOutAt string `json:"noticeMoveOutAt"`
+	NoticeGivenAt   string `json:"noticeGivenAt"`
+	NoticeGivenBy   string `json:"noticeGivenBy"`
 	// The applicant's qualification profile — the DERIVED signals the landlord
 	// reads to decide (never the raw financials). Pointers stay null until the
 	// applicant submits a profile, so the FE renders "no profile yet" rather than
@@ -180,6 +189,9 @@ func groupByUnit(apps []applicationRow, identities []identityView, listings []li
 			LandlordDeclined:         a.LandlordDeclined,
 			DeclineReason:            a.DeclineReason,
 			TenancyEndedAt:           a.TenancyEndedAt,
+			NoticeMoveOutAt:          a.NoticeMoveOutAt,
+			NoticeGivenAt:            a.NoticeGivenAt,
+			NoticeGivenBy:            a.NoticeGivenBy,
 			ProfileSubmitted:         a.ProfileSubmitted,
 			IncomeToRentMet:          a.IncomeToRentMet,
 			EmploymentVerified:       a.EmploymentVerified,
@@ -309,10 +321,43 @@ func (s *server) handleUnitApplications(w http.ResponseWriter, r *http.Request) 
 	}
 
 	apps := computeApplications(appKeys, appGet, "")
+	backfillNotices(apps, managed)
 	listings := decodeListingProjections(listKeys, listGet)
 	rows := groupByUnit(apps, identities, listings)
 	scoped := filterUnitsToManaged(rows, managedUnits)
 	s.writeJSON(w, http.StatusOK, map[string]any{"units": scoped, "count": len(scoped)})
+}
+
+// backfillNotices fills each apps row's notice fields from the RLS-scoped
+// landlordLeaseApplicationsRead rows already loaded above (managed) — the
+// leaseApplicationComplete convergence lens this console otherwise reads
+// projects no .notice columns (applicationsource.go). Both sources key on
+// the leaseapp's own entityKey, so this is a plain join, not a second
+// authorization boundary: managed is already RLS-scoped to units this actor
+// manages, and apps is filtered to that same scope by filterUnitsToManaged
+// right after this runs. Mutates apps in place.
+func backfillNotices(apps []applicationRow, managed []protectedLandlordRow) {
+	notices := make(map[string]protectedLandlordRow, len(managed))
+	for _, m := range managed {
+		if m.NoticeMoveOutAt != nil {
+			notices[m.EntityKey] = m
+		}
+	}
+	for i := range apps {
+		m, ok := notices[apps[i].EntityKey]
+		if !ok {
+			continue
+		}
+		if m.NoticeMoveOutAt != nil {
+			apps[i].NoticeMoveOutAt = *m.NoticeMoveOutAt
+		}
+		if m.NoticeGivenAt != nil {
+			apps[i].NoticeGivenAt = *m.NoticeGivenAt
+		}
+		if m.NoticeGivenBy != nil {
+			apps[i].NoticeGivenBy = *m.NoticeGivenBy
+		}
+	}
 }
 
 // filterUnitsToManaged keeps only the rows whose UnitKey is in managed — the

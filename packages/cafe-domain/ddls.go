@@ -44,8 +44,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 		Description: "Café house-tab session DDL. Vertex shape: vtx.tab.<NanoID>, class=tab, root data = {} " +
 			"(minimal, D5 — the running total lives on the .status aspect). OpenTab{leaseAppKey} validates the lease " +
 			"is alive, rejects LeaseNotApproved unless the lease's own lease-signing .decision aspect reads " +
-			"approved, rejects TenancyEnded once submittedAt reaches the lease's .tenancy leaseEnd (rent stops there too, so the " +
-			"house tab closes to a moved-out resident at the same instant; a lease with no .tenancy has no term to have ended), rejects CreditHold once the lease's " +
+			"approved, rejects TenancyEnded once the tenancy has ended — its recorded .tenancy endedAt if a resident gave " +
+			"notice or the term simply ran out, else its leaseEnd once submittedAt reaches it (rent stops at the same " +
+			"recorded end too, so the house tab closes to a moved-out resident at the same instant; a lease with no " +
+			".tenancy has no term to have ended), rejects CreditHold once the lease's " +
 			"café account carries an arrears episode a reminder has gone out for (cafe-ledger's .arrears.sentAt, reached by a live heldFor " +
 			"walk from the lease — never a caller-declared read — and dropped by cafe-ledger only when the balance returns to zero; overdue-but-unreminded " +
 			"is not a hold; enforced on the staff and resident-self legs alike), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
@@ -149,7 +151,7 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"{value: open, totalCents: 0, itemsMemo: \"\", lines: [], openedAt, leaseAppKey} + the chargedTo and openFor links " +
 					"(both tab→leaseapp) + claims " +
 					"the lease's cafeOpenTabGuard. Returns primaryKey (the tab key). Rejects UnknownLeaseApplication " +
-					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, TenancyEnded if its .tenancy leaseEnd has passed, CreditHold if the lease's café account has been reminded of a balance it still owes (.arrears.sentAt set), or OpenTabAlreadyExists if the lease already has an open tab.",
+					"if the lease is absent, LeaseNotApproved if the landlord hasn't approved it, TenancyEnded if its .tenancy has ended — endedAt recorded, or else leaseEnd reached — CreditHold if the lease's café account has been reminded of a balance it still owes (.arrears.sentAt set), or OpenTabAlreadyExists if the lease already has an open tab.",
 			},
 			{
 				Name:    "Charge — ring up an off-menu item on an open tab (operator)",
@@ -1154,15 +1156,21 @@ def execute(state, op):
         # read-posture: (d) declared in contextHint.optionalReads by the
         # caller — absent on a lease approved before lease-signing minted
         # tenancies, and on a decided-but-never-approved lease; either way
-        # there is no term to have ended. An approved lease carries the term
-        # DecideLeaseApplication computed (SignRenewal extends leaseEnd on a
-        # renewal), and the rent clause already stops billing at leaseEnd
-        # (semantic-contracts' BackfillClauseTerm), so a house tab — a charge
+        # there is no term to have ended. A recorded endedAt (EndTenancy) is
+        # the fact of the tenancy's end, not leaseEnd — a resident who gives
+        # notice moves out before leaseEnd, potentially by months, and the
+        # rent clause is capped down to that same recorded end
+        # (semantic-contracts' ShortenClauseTerm), so a house tab — a charge
         # against that same lease's ledger — closes to the resident at the
-        # same instant. Both stamps are RFC3339 UTC, so the comparison is the
-        # same string ordering the clinic's late-cancel window relies on.
+        # same instant. When no endedAt is recorded yet, fall back to
+        # leaseEnd itself (a term that lapsed before EndTenancy ran). Both
+        # stamps are RFC3339 UTC, so the comparison is the same string
+        # ordering the clinic's late-cancel window relies on.
         tenancy = kv.Read(lease_key + ".tenancy")
         if tenancy != None and not tenancy.isDeleted:
+            ended_at = tenancy.data.get("endedAt")
+            if type(ended_at) == "string":
+                fail("TenancyEnded: this lease's tenancy ended on " + ended_at[:10] + "; a house tab can no longer be opened against it")
             lease_end = tenancy.data.get("leaseEnd")
             if type(lease_end) == "string" and time.rfc3339_utc(op.submittedAt) >= time.rfc3339_utc(lease_end):
                 fail("TenancyEnded: this lease's tenancy ended on " + lease_end[:10] + "; a house tab can no longer be opened against it")

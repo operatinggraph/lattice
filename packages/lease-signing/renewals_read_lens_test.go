@@ -398,3 +398,30 @@ func TestRenewalsRead_ManagesTombstoneStopsProjectingTheRow(t *testing.T) {
 	require.Equal(t, f.ids["rn2"], rows[0].Values["renewal_id"],
 		"and it is the OTHER renewal that survives, not a collapsed row of the two")
 }
+
+// TestRenewalsRead_ProjectsTheNotice — notice_move_out_at / notice_given_at /
+// notice_given_by read the renewed leaseapp's .notice (GiveNotice); SignRenewal
+// refuses NoticeGiven off the same aspect, so the card hides Sign on a cycle
+// whose lease is under notice and says why. A lease without one projects the
+// three as null on a still-present row.
+func TestRenewalsRead_ProjectsTheNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedOpenRenewal(t, "rn", "app", "tina", "unit1", "larry")
+
+	rows := f.projectRenewalsRead(t)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["notice_move_out_at"], "no notice → null, not a dropped row")
+	require.Nil(t, rows[0].Values["notice_given_at"])
+	require.Nil(t, rows[0].Values["notice_given_by"])
+
+	f.aspect(t, "app", "notice", "tenancyNotice", map[string]any{
+		"moveOutAt": "2026-12-15T00:00:00Z", "givenAt": "2026-10-01T09:00:00Z", "givenBy": "tenant"})
+	rows = f.projectRenewalsRead(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, "2026-12-15T00:00:00Z", rows[0].Values["notice_move_out_at"])
+	require.Equal(t, "2026-10-01T09:00:00Z", rows[0].Values["notice_given_at"])
+	require.Equal(t, "tenant", rows[0].Values["notice_given_by"])
+}

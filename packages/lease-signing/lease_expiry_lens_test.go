@@ -338,3 +338,28 @@ func TestLeaseExpiry_ReadsItsOwnTargetsMarkerEntry(t *testing.T) {
 	require.Contains(t, leaseExpirySpec, "byTarget."+targetID,
 		"leaseExpiry must read the marker under its own target id — the timer that fires writes that entry and no other")
 }
+
+// TestLeaseExpiry_NoticeOpensNoCycle: a tenancy under notice (.notice.moveOutAt
+// recorded by GiveNotice) opens no renewal cycle and arms no horizon, even
+// with the lapse recorded at renewalOpensAt — the tenant has answered the
+// renewal question by leaving (SignRenewal refuses NoticeGiven off the same
+// aspect), and the tenancyEnd target ends the term on the move-out.
+func TestLeaseExpiry_NoticeOpensNoCycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedSignedTenancy(t, f, "app", "2026-11-02T00:00:00Z")
+	f.aspect(t, "app", "notice", "tenancyNotice", map[string]any{
+		"moveOutAt": "2026-12-15T00:00:00Z", "givenAt": "2026-10-01T09:00:00Z", "givenBy": "tenant"})
+
+	armed := f.projectLeaseExpiry(t, "app")
+	require.Nil(t, armed["freshUntil"], "no renewal horizon is armed on a lease under notice")
+	require.Equal(t, false, armed["missing_renewalCycle"])
+
+	recordLeaseappLapse(t, f, "app", map[string]string{LeaseExpiryTarget: "2026-11-02T00:00:00Z"})
+	lapsed := f.projectLeaseExpiry(t, "app")
+	require.Equal(t, false, lapsed["missing_renewalCycle"], "a recorded lapse opens nothing on a lease under notice")
+	require.Equal(t, false, lapsed["violating"])
+	require.Nil(t, lapsed["freshUntil"])
+}
