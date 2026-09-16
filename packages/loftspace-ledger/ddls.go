@@ -36,7 +36,9 @@ func accountDDL() pkgmgr.DDLSpec {
 			"leaseAppKey be a live leaseapp (no orphan accounts). " +
 			"EvaluateLoftspaceArrears{accountKey} is the second operation on this DDL, dispatched by " +
 			"Weaver's loftspaceArrearsReminders playbook rather than by a person: it replays the account's own " +
-			"postedTo history under a bounded budget, ages it with the same plain FIFO the tenant's statement runs " +
+			"postedTo history, one page per dispatch — a history longer than one page records its running aggregate " +
+			"and cursor on .arrears.replay and Weaver dispatches the next page through the lens's phase gaps, so " +
+			"the head is computed exactly whatever the history's length — ages it with the same plain FIFO the tenant's statement runs " +
 			"(every credit offsets the oldest still-open charge first; an unapplied credit carries forward as " +
 			"surplus — no entry in this ledger names a charge it reverses, so there is no netting pre-pass), and " +
 			"records on the account's .arrears aspect (loftspaceAccountArrears DDL) dueAt — the oldest open " +
@@ -59,11 +61,13 @@ func accountDDL() pkgmgr.DDLSpec {
 			"after the evaluation has seen that episode's opener posted), so the evaluation drops " +
 			"remindedFor/sentAt as the finished episode's and the new one is reminded for on its own merits; a " +
 			"head that a partial payment moved past the opener is still the same episode and keeps its send " +
-			"record. An account whose history outruns the " +
-			"replay budget is not refused: the evaluation DEGRADES, recording historyTooLong (carrying " +
-			"dueAt/remindAt/remindedFor/sentAt as they stood, clearing stale) and sending nothing, which holds " +
+			"record. An account whose history runs past the replay budget (page size × page cap) " +
+			"is not refused: the evaluation DEGRADES, recording historyTooLong together with the budget it " +
+			"exhausted as historyBudget (carrying dueAt/remindAt/remindedFor/sentAt as they stood, clearing stale " +
+			"and the in-progress checkpoint) and sending nothing, which holds " +
 			"the row quiet and visible rather than re-dispatching a doomed evaluation on every window; the next " +
-			"posted entry clears the flag and buys one more attempt. The lease and the tenant the notification " +
+			"posted entry clears the flag and its budget and buys one more attempt, and a later, larger budget " +
+			"reaches the accounts a smaller one parked. The lease and the tenant the notification " +
 			"addresses are resolved LIVE off the account's own heldFor out-link and the live lease's own " +
 			"applicationFor out-link, never from the payload; an account whose lease was withdrawn or whose " +
 			"tenant has gone dead is still evaluated (the arrears fact is about the account), and the " +
@@ -85,15 +89,18 @@ func accountDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "EvaluateLoftspaceArrears — age a lease account and remind once the grace has run out",
 				Payload: map[string]any{"accountKey": "vtx.account.<NanoID>"},
-				ExpectedOutcome: "Validates the account is alive, replays its postedTo history under the evaluation budget and ages it " +
-					"plain FIFO. Writes vtx.account.<NanoID>.arrears = {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?} — " +
+				ExpectedOutcome: "Validates the account is alive, replays its postedTo history ONE PAGE PER DISPATCH " +
+					"(a history longer than one page leaves a checkpoint on .arrears.replay and Weaver dispatches the next " +
+					"page) and ages it plain FIFO once the enumeration is exhausted. Writes vtx.account.<NanoID>.arrears = " +
+					"{evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?} — " +
 					"{evaluatedAt} alone when nothing is owed. dueAt is the oldest open charge's own recorded due date (its " +
 					"postedAt when it recorded none); remindAt is dueAt + 5 days. When remindAt has passed it stamps " +
 					"remindedFor = dueAt, and where no reminder has yet gone out in this episode (sentAt absent) ALSO stamps " +
 					"sentAt and emits external.notification keyed <accountKey>:<dueAt>:<headTransactionKey>, with leaseAppKey / identityKey in its " +
 					"params only where the account's own heldFor link resolves to a live lease and that lease's applicationFor " +
 					"link to a live identity. A re-run recomputes the head, finds sentAt already recorded, and sends nothing. " +
-					"A history past the replay budget records historyTooLong instead, carrying what was already recorded and " +
+					"A history past the replay budget (page size × page cap) records historyTooLong and historyBudget instead, " +
+					"carrying what was already recorded and " +
 					"sending nothing. Rejects AuthDenied for any actor but Weaver's dispatch actor and UnknownAccount for an " +
 					"absent or tombstoned account.",
 			},
@@ -177,33 +184,56 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 //     already gone out for THIS episode, so a head that a partial payment
 //     moved to another overdue charge is recorded (remindedFor) without
 //     sending again.
+//   - An evaluation part-way through a history longer than one page of its
+//     postedTo replay writes a CHECKPOINT, replay = {phase, cursor, pages,
+//     entries}: the pages consumed, the cursor to resume from, and every
+//     debit and credit read so far (each keyed by its bare transaction ID,
+//     never its full vtx key, and carrying its own recorded postedAt — no
+//     netting, no total to collapse into, since this ledger has no reverses
+//     relation) — the exact rows the FIFO head is computed from once the
+//     enumeration is exhausted, and a phase that flips
+//     on every page (the lens projects one continuation gap per phase, so
+//     Weaver chains the pages). Every other field is carried verbatim — evaluatedAt still names
+//     the last COMPLETED evaluation — and nothing is sent. The finalize page
+//     writes the aspect without it; every posted entry drops it (a charge
+//     that would otherwise write nothing carries the state and marks it stale
+//     when a checkpoint is present) and marks stale, so the next evaluation
+//     restarts at page 1.
 //   - The one evaluation that does NOT recompute is the degraded one: an
 //     account whose postedTo history outran the replay budget records
-//     historyTooLong, carrying dueAt/remindAt/remindedFor/sentAt untouched and
-//     dropping stale, and sends nothing. The flag suppresses both the
-//     convergence gap and the timer, so the row goes quiet rather than
-//     re-dispatching a doomed evaluation on every window; it is dropped by
-//     the next posted entry's carry, which buys exactly one more attempt.
+//     historyTooLong together with historyBudget, the entry count it
+//     exhausted, carrying dueAt/remindAt/remindedFor/sentAt untouched and
+//     dropping stale and the checkpoint, and sends nothing. The pair
+//     suppresses both the convergence gap and the timer while the recorded
+//     budget is at least the current one, so the row goes quiet rather than
+//     re-dispatching a doomed evaluation on every window; both are dropped by
+//     the next posted entry's carry, which buys exactly one more attempt. A
+//     flag recorded under a smaller budget than the current one re-opens the
+//     gap for one evaluation under the current budget, so a raised budget
+//     reaches the accounts the old one parked, once.
 //   - EVERY DebitAccount / LoftspaceRecordCharge / CreditAccount /
 //     ReturnDeposit against an account that carries the aspect marks it
 //     stale (carrying every other
-//     field, the send record included): with no balance to reason from, an
+//     field, the send record included, and dropping any in-progress replay
+//     checkpoint — a posted entry changes the set the checkpoint's cursor
+//     pages over): with no balance to reason from, an
 //     entry can tell neither an episode opening from one continuing nor a
 //     clearing payment from a partial one, so it asks for the recomputation
 //     and never guesses. Against an account with no aspect it writes nothing
 //     — such an account is already opening the never-evaluated gap.
 //
-// Non-sensitive: dates and two booleans on a vtx.account (not an identity),
-// no money and no PII. Declaration-only: written by the five ops above, never
-// dispatched as an operation in its own right. Never tombstoned (an account
-// is never tombstoned).
+// Non-sensitive: dates, two booleans, a page count and per-transaction cent
+// aggregates on a vtx.account (not an identity), no money and no PII.
+// Declaration-only: written by the five ops above, never dispatched as an
+// operation in its own right. Never tombstoned (an account is never
+// tombstoned).
 func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "loftspaceAccountArrears",
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"DebitAccount", "LoftspaceRecordCharge", "CreditAccount", "ReturnDeposit", arrearsOp},
 		Description: "Per-account arrears-episode aspect. Stored as vtx.account.<NanoID>.arrears " +
-			"(class loftspaceAccountArrears) = {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?, stale?, historyTooLong?}. " +
+			"(class loftspaceAccountArrears) = {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?, stale?, historyTooLong?, historyBudget?, replay?}. " +
 			"Non-sensitive. dueAt is the FIFO-oldest still-open charge's OWN recorded due date (the .entry.dueAt a " +
 			"clause-authorized rent charge carries from its anniversary grid), or its postedAt when it recorded none " +
 			"(a landlord one-off is due on receipt) — a RECORDED time fact read as the fact it records, never a term " +
@@ -214,19 +244,28 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"committed (the SEND INTENT — the adapter's delivery outcome is .arrearsNotification), and its ABSENCE is " +
 			"the send condition, which is what makes the notification once-per-EPISODE rather than once-per-head or " +
 			"once-per-convergence-window. historyTooLong means the account's history outran the evaluation's replay " +
-			"budget, so no head could be computed: it suppresses both the gap and the timer (the row stays visible " +
-			"but quiet for an operator) and is dropped by the next posted entry, which buys one further attempt. " +
+			"budget, so no head could be computed under it; historyBudget records the budget (in entries) it " +
+			"exhausted. The flag suppresses the timer, and the gap while that budget is at least the current one (the " +
+			"row stays visible but quiet for an operator); a flag recorded under a smaller budget re-opens the gap for " +
+			"one evaluation under the current one. Both are dropped by the next posted entry, which buys one further " +
+			"attempt. replay is the checkpoint of an evaluation part-way through a history longer than one page: " +
+			"{phase, cursor, pages, entries} — the pages consumed, the cursor to resume from, every debit and credit " +
+			"read so far keyed by its bare transaction ID and its own recorded postedAt, and a phase that flips on every page so the lens's " +
+			"two continuation gaps chain the " +
+			"dispatches. Present only between the first page and the last; the finalize page writes the aspect " +
+			"without it and every posted entry drops it (a charge that would otherwise write nothing carries the " +
+			"state and marks it stale when a checkpoint is present). " +
 			"stale means what is recorded may no longer describe the account — EVERY posted entry sets it, because " +
 			"this ledger stores no balance for an entry to reason from — and is a request for a fresh " +
 			"EvaluateLoftspaceArrears, which rewrites the aspect and so never carries it forward. Written by " +
-			"DebitAccount / LoftspaceRecordCharge / CreditAccount / ReturnDeposit (mark stale; mint nothing where absent) and " +
+			"DebitAccount / LoftspaceRecordCharge / CreditAccount / ReturnDeposit (mark stale; drop any checkpoint; mint nothing where absent) and " +
 			"EvaluateLoftspaceArrears (recomputes the head; ends the episode at {evaluatedAt} alone when nothing is " +
 			"owed, and drops a send record that predates the charge that opened the episode it finds — the boundary between an episode paid " +
 			"off and the next one opened before any evaluation ran). Read by the loftspaceArrearsReminders " +
 			"convergence lens and projected for the landlord ledger, the tenant statement and the portfolio list by " +
 			"leaseAccounts. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
-		InputSchema:  `{"type":"object","properties":{"evaluatedAt":{"type":"string"},"dueAt":{"type":"string"},"remindAt":{"type":"string"},"remindedFor":{"type":"string"},"sentAt":{"type":"string"},"stale":{"type":"boolean"},"historyTooLong":{"type":"boolean"}}}`,
+		InputSchema:  `{"type":"object","properties":{"evaluatedAt":{"type":"string"},"dueAt":{"type":"string"},"remindAt":{"type":"string"},"remindedFor":{"type":"string"},"sentAt":{"type":"string"},"stale":{"type":"boolean"},"historyTooLong":{"type":"boolean"},"historyBudget":{"type":"integer"},"replay":{"type":"object","properties":{"phase":{"type":"string","enum":["` + ArrearsPhaseA + `","` + ArrearsPhaseB + `"]},"cursor":{"type":"string"},"pages":{"type":"integer"},"entries":{"type":"object"}}}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"evaluatedAt":    "RFC3339 instant (canonical UTC) the arrears state was last written by an evaluation. Its ABSENCE is what opens the convergence gap for an account nothing has ever evaluated.",
@@ -235,7 +274,9 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"remindedFor":    "The dueAt the last evaluation acknowledged as past its grace. Equal to dueAt closes the convergence gap; different (or absent) leaves it open for a recorded lapse to re-open.",
 			"sentAt":         "RFC3339 instant (canonical UTC) the reminder's outbox event was committed for this arrears episode — the send intent the landlord ledger and the tenant's statement show. Its ABSENCE is what lets the next passed reminder instant send; it is carried across every write of a live episode and dropped only by the evaluation that finds the episode over: no open charge, or an episode whose opening charge posted after this instant (the balance returned to zero and a new charge opened a fresh episode before an evaluation ran); a head that a partial payment moved past the opener stays in the same episode and keeps it.",
 			"stale":          "True when what is recorded may no longer describe the account — every posted entry sets it, since the ledger stores no balance to reason from. Opens the convergence gap; cleared by the evaluation that recomputes the head.",
-			"historyTooLong": "True when the account's postedTo history outran the evaluation's bounded replay budget, so no FIFO head could be computed. Suppresses BOTH the convergence gap and the freshness timer — the row stays in the read model for an operator to see, without re-dispatching an evaluation that cannot succeed. Dropped by the next posted entry (which also marks the state stale), buying exactly one more attempt.",
+			"historyTooLong": "True when the account's postedTo history outran the evaluation's bounded replay budget, so no FIFO head could be computed. Suppresses the freshness timer, and — with a historyBudget at least the current budget — the convergence gap: the row stays in the read model for an operator to see, without re-dispatching an evaluation that cannot succeed. Dropped by the next posted entry (which also marks the state stale), buying exactly one more attempt.",
+			"historyBudget":  "The replay budget, in postedTo entries, the degraded evaluation exhausted (the package's page size × page cap at the time). A recorded budget smaller than the current one — or none — re-opens the convergence gap for exactly one evaluation under the current budget, so a raised budget reaches the accounts the old one parked. Written only beside historyTooLong and dropped with it.",
+			"replay":         "The checkpoint of an evaluation part-way through a history longer than one page of its postedTo replay: {phase: '" + ArrearsPhaseA + "'|'" + ArrearsPhaseB + "', cursor, pages, entries: {txId: {postedAt, type, amountCents, dueAt}}}. phase flips on every page and is the lens's continuation trigger (one gap per phase); cursor resumes the enumeration; pages counts those consumed; entries carries every debit and credit read so far, keyed by its bare transaction ID (never its full vtx key — the checkpoint carries an identity to re-derive from, not a relationship to stand in for one) and its own recorded postedAt — the exact rows the FIFO head is computed from once the enumeration is exhausted, no netting, no total (this ledger has no reverses relation, and the episode-start computation needs each entry's own real timing, not a collapsed sum); dueAt is carried because arrears_head reads it off every debit row to name the head's own recorded due date. Present only between the first page and the last — the finalize page and the degrade write the aspect without it, and every posted entry drops it, because a posted entry changes the set under the cursor. A checkpoint the evaluation cannot resume (a malformed field) is treated as absent: the evaluation restarts at page 1.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
