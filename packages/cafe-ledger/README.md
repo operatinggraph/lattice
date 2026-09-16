@@ -16,7 +16,7 @@ the account). Install: `lattice-pkg install packages/cafe-ledger` (after both).
 
 This package shipped the ledger primitive alone. `cafe-domain` (the `OpenTab`/`Charge`/`Settle` tab
 lifecycle) is Increment 2's domain half, posting into this ledger through a Weaver playbook via
-`DebitAccount`'s `tabRef` (below) — never a direct cross-package write. Both halves have shipped,
+`DebitAccount`'s and `CreditCafeAccount`'s `tabRef` (below) — never a direct cross-package write. Both halves have shipped,
 including the café FE (`cmd/cafe-app`). The one-bill composition lens unioning `ledgerHistory` +
 `cafeLedgerHistory` by `leaseAppKey` is Increment 3. See
 [`cafe-ledger-design.md`](../../_bmad-output/implementation-artifacts/cafe-ledger-design.md).
@@ -27,8 +27,8 @@ including the café FE (`cmd/cafe-app`). The one-bill composition lens unioning 
 |---|---|
 | **Vertex types** (2) | `cafeaccount` (root `{}`, D5, `.balance` aspect) · `cafetransaction` (root `{}`, D5, `.entry` aspect) |
 | **Aspect types** (4) | `cafeLedgerAccountGuard` — `vtx.leaseapp.<id>.cafeLedgerAccount`, the per-lease create-only uniqueness guard · `cafeAccountBalance` — `vtx.cafeaccount.<id>.balance`, the maintained running total · `cafeAccountArrears` — `vtx.cafeaccount.<id>.arrears`, the arrears-episode state · `cafeAccountArrearsNotification` — `vtx.cafeaccount.<id>.arrearsNotification`, the reminder's audit-only outcome |
-| **Links** (4) | `heldFor` (cafeaccount → leaseapp) · `postedTo` (cafetransaction → cafeaccount) · `settles` (cafetransaction → tab, the charge that settled a `cafe-domain` tab) · `reverses` (cafetransaction → cafetransaction, a refund to the charge it gives back) |
-| **Operations** (7) | `CreateAccount` · `DebitAccount` (optional `tabRef` — `cafe-domain`'s Settle consumer) · `CreditCafeAccount` (optional `reason` — `payment` or the staff-only `waiver`) · `RefundCafeCharge` · `PayoutCafeCredit` · `EvaluateCafeArrears` (Weaver-dispatched) · `RecordCafeArrearsReminderNotification` (bridge replyOp) |
+| **Links** (4) | `heldFor` (cafeaccount → leaseapp) · `postedTo` (cafetransaction → cafeaccount) · `settles` (cafetransaction → tab: the charge that settled a `cafe-domain` tab, and the counter payment for the cash the desk took as it was settled) · `reverses` (cafetransaction → cafetransaction, a refund to the charge it gives back) |
+| **Operations** (7) | `CreateAccount` · `DebitAccount` (optional `tabRef` — `cafe-domain`'s settlement consumer) · `CreditCafeAccount` (optional `reason` — `payment` or the staff-only `waiver`; optional staff-only `tabRef` — the settlement playbook's counter-payment consumer) · `RefundCafeCharge` · `PayoutCafeCredit` · `EvaluateCafeArrears` (Weaver-dispatched) · `RecordCafeArrearsReminderNotification` (bridge replyOp) |
 | **Projection lenses** (2) | `cafeLedgerHistory` (one row per transaction) → `cafe-ledger-history` · `cafeLeaseAccounts` (lease → account key lookup, plus the account's arrears due date / reminder timestamp) → `cafe-lease-accounts` (both `nats-kv`, `full` engine) |
 | **Weaver targets** (1) | `cafeArrearsReminders` — its own convergence lens → `weaver-targets`; one gap, `missing_evaluation` → `directOp(EvaluateCafeArrears)` |
 
@@ -53,7 +53,7 @@ vtx.leaseapp.<id>.cafeLedgerAccount      class=cafeLedgerAccountGuard  {accountK
 
 lnk.cafeaccount.<id>.heldFor.leaseapp.<id>          (cafeaccount → leaseapp; cafeaccount is the later-arriving vertex)
 lnk.cafetransaction.<id>.postedTo.cafeaccount.<id>  (cafetransaction → cafeaccount; cafetransaction is the later-arriving vertex)
-lnk.cafetransaction.<id>.settles.tab.<id>           (cafetransaction → tab; DebitAccount's optional tabRef audit link)
+lnk.cafetransaction.<id>.settles.tab.<id>           (cafetransaction → tab; DebitAccount's / CreditCafeAccount's optional tabRef audit link)
 lnk.cafetransaction.<id>.reverses.cafetransaction.<id>  (refund → the charge it gives back; the refund is the later-arriving vertex)
 ```
 
@@ -190,13 +190,39 @@ only way the FE resolves a lease's café account key, since it is no longer deri
 `leaseAppKey` (the independent NanoID above) — a lease with no café account yet still gets a row
 (`accountKey` null).
 
-## `tabRef` — the `cafe-domain` settlement back-link
+## `tabRef` — the `cafe-domain` settlement back-links
 
-`DebitAccount` accepts an optional `tabRef` (`vtx.tab.<NanoID>`, validated alive when supplied): when
-present it writes `lnk.cafetransaction.<id>.settles.tab.<id>` (mirroring `loftspace-ledger`'s
-`clauseRef`/`authorizedBy` precedent) — the audit link `cafe-domain`'s `cafeTabSettlement` lens reads
-to detect a settled tab's charge has posted. A plain human-submitted `DebitAccount` omitting `tabRef`
-is byte-for-byte unaffected.
+`DebitAccount` and `CreditCafeAccount` accept an optional `tabRef` (`vtx.tab.<NanoID>`, validated
+alive when supplied; refused `InvalidArgument` on `RefundCafeCharge` and `PayoutCafeCredit`). When
+present the entry writes `lnk.cafetransaction.<id>.settles.tab.<id>` (mirroring `loftspace-ledger`'s
+`clauseRef`/`authorizedBy` precedent), one relation for both entry types — *transaction settles tab*
+reads for a payment as well as a charge — and `cafe-domain`'s `cafeTabSettlement` lens discriminates
+by `.entry.type`:
+
+- a **charge** (debit) is what `missing_charge` counts to detect a settled tab's charge has posted;
+- a **payment** (credit) is what `missing_payment` counts to detect the cash the desk took at settle
+  (`Settle{paidCents}`, recorded on the tab as `paidAtSettleCents`) has posted. The playbook opens that
+  gap only once a settling debit exists, so the payment always lands inside the balance the charge
+  opened and the payment cap (below) never refuses it for cash the resident has already handed over.
+
+`tabRef` on a credit is staff-only: a resident's self-scoped `CreditCafeAccount` carrying one is refused
+`AuthDenied` — a settles link on their own payment would read to the lens as the desk's counter payment
+already posted, closing the gap before the cash the desk recorded ever reached the ledger.
+
+A tab-tied credit is **bounded by the tab's recorded fact, not by the balance cap**
+(`require_counter_payment`, `scripts.go`): `reason` must be `payment` (a write-off pays for no tab —
+`InvalidArgument`); the tab's `.status` — a declared read, `row.tabKey.status` on the playbook dispatch and
+derived by this DDL's own `derive_reads` for any submitter — must be `settled` (`TabNotSettled`) and record
+`paidAtSettleCents` (`NoCounterPayment`) equal to `amountCents` (`CounterPaymentMismatch`); the tab's
+`leaseAppKey` must be the account's own `heldFor` lease, recovered from the account's topology exactly as
+the resident-self proof does (`AuthDenied`); and no credit may already `settles` the tab
+(`CounterPaymentAlreadyPosted` — the replay dedup, read off the tab's inbound `settles` entries). With those
+proven the credit is exempt from `NoBalanceToPay` / `PaymentExceedsBalance`: the cash is real and was
+bounded at `Settle` to the tab's total, a resident's own self-payment landing between the charge and the
+counter payment can no longer make it refusable, and an account legitimately goes further into credit —
+`cashCents` rises by the same amount, so the cash floor still bounds any later `PayoutCafeCredit`. Every
+credit without `tabRef` keeps the cap unchanged. A plain human-submitted entry omitting `tabRef` is
+byte-for-byte unaffected.
 
 ## `reversesRef` — refunding a posted charge
 

@@ -1678,6 +1678,15 @@ func TestSettleStaleTab_ClosesTabAndBackfillsChargedTo(t *testing.T) {
 	if got, _ := statusData["totalCents"].(float64); got != 900 {
 		t.Fatalf("status.totalCents = %v, want 900 (frozen)", got)
 	}
+	// Settle is the only writer of the counter-payment fields: an auto-settle
+	// takes no cash, so it records none — and absent is read as "no counter
+	// payment", never as unpaid.
+	if _, has := statusData["paidAtSettleCents"]; has {
+		t.Fatalf("SettleStaleTab must write no paidAtSettleCents, found %v", statusData["paidAtSettleCents"])
+	}
+	if _, has := statusData["paidAtSettleBy"]; has {
+		t.Fatalf("SettleStaleTab must write no paidAtSettleBy, found %v", statusData["paidAtSettleBy"])
+	}
 
 	tabID := tabKey[len("vtx.tab."):]
 	leaseID := leaseKey[len("vtx.leaseapp."):]
@@ -2121,6 +2130,195 @@ func TestSettle_ConsumerSelfScope_RejectedForOthersTab(t *testing.T) {
 	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
 	if outcome != processor.OutcomeRejected {
 		t.Fatalf("self-service Settle of another's tab outcome = %v, want Rejected (AuthDenied)", outcome)
+	}
+}
+
+// staffSettleEnv is the Settle envelope a staff caller submits, the payload
+// spelled out so a vector can carry paidCents in any shape (a number, a
+// fraction, a negative): the tab + its .status declared, the holdsRole
+// enumeration the confinement walk needs, the chargedTo enumeration the
+// backfill's live confirmation reads.
+func staffSettleEnv(label, tabKey, actorKey, payload, submittedAt string) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "Settle",
+		Actor:         actorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "tab",
+		Payload:       json.RawMessage(payload),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
+			},
+		},
+	}
+}
+
+// settleRejectedBecause drives env and asserts it was rejected FOR THE STATED
+// REASON — an outcome-only assertion on a paidCents refusal passes just as
+// well against a guard that denied the actor or the tab. It also asserts the
+// tab is still open: a refused Settle commits nothing.
+func settleRejectedBecause(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, env *processor.OperationEnvelope, tabKey, wantMessage string) {
+	t.Helper()
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("%s: outcome = %q, want rejected", env.RequestID, outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, wantMessage) {
+		t.Fatalf("%s: rejected with %+v, want a refusal containing %q", env.RequestID, reply.Error, wantMessage)
+	}
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["value"].(string); got != "open" {
+		t.Fatalf("%s: a refused Settle must leave the tab open, status.value = %q", env.RequestID, got)
+	}
+}
+
+// TestSettle_PaidCentsRecordsCounterPayment: a staff Settle{paidCents} closes
+// the tab exactly as a bare Settle does AND records the cash the desk took —
+// paidAtSettleCents and paidAtSettleBy (the staffer) on .status, and
+// paidAtSettleCents on the tab.settled event. Nothing is posted to the
+// ledger here (P2): the settlement playbook posts the credit after the
+// charge (lenses.go missing_payment).
+func TestSettle_PaidCentsRecordsCounterPayment(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "settlepaid")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNPDLEASEHJKM")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabpaid0000001", leaseKey)
+	staffCharge(t, ctx, conn, cp, cons, "cdchargepaid00000001", tabKey, 1200, "2026-07-07T12:05:00Z")
+
+	env := staffSettleEnv("cdsettlepaid00000001", tabKey, domainActorKey,
+		`{"tabKey":"`+tabKey+`","paidCents":1200}`, "2026-07-07T13:00:00Z")
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, _ := statusData["totalCents"].(float64); got != 1200 {
+		t.Fatalf("status.totalCents = %v, want 1200 (frozen, untouched by the payment)", got)
+	}
+	if got, _ := statusData["paidAtSettleCents"].(float64); got != 1200 {
+		t.Fatalf("status.paidAtSettleCents = %v, want 1200", statusData["paidAtSettleCents"])
+	}
+	if got, _ := statusData["paidAtSettleBy"].(string); got != domainActorKey {
+		t.Fatalf("status.paidAtSettleBy = %q, want the settling staffer %q", got, domainActorKey)
+	}
+
+	outbox, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(env.RequestID))
+	if err != nil {
+		t.Fatalf("read outbox aspect: %v", err)
+	}
+	ob, err := processor.ParseOutboxAspect(outbox.Value)
+	if err != nil {
+		t.Fatalf("parse outbox aspect: %v", err)
+	}
+	if len(ob.Data.Events) != 1 || ob.Data.Events[0].EventType != "tab.settled" {
+		t.Fatalf("Settle emitted %+v, want exactly one tab.settled", ob.Data.Events)
+	}
+	evData := ob.Data.Events[0].Payload
+	if got, _ := evData["paidAtSettleCents"].(float64); got != 1200 {
+		t.Fatalf("tab.settled.paidAtSettleCents = %v, want 1200", evData["paidAtSettleCents"])
+	}
+}
+
+// TestSettle_PaidCentsRefusals pins every refusal on the field, each against
+// a tab that stays open afterwards, and then the exact-total payment that is
+// accepted (a check that refused every number would pass a rejection-only
+// test): PaidMismatchesTab above AND below the total — the desk pays the
+// whole tab, and a stale card's old total is refused rather than recorded as
+// a partial — InvalidArgument on zero, a negative, a fraction and a string.
+func TestSettle_PaidCentsRefusals(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "settlepaidbad")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNPDBDLEASEHJ")
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdopentabpaidbad0001", leaseKey)
+	staffCharge(t, ctx, conn, cp, cons, "cdchargepaidbad00001", tabKey, 1425, "2026-07-07T12:05:00Z")
+
+	for _, tc := range []struct{ label, paid, want string }{
+		{"cdsettlepaidover0001", "1426", "PaidMismatchesTab: the counter payment of $14.26 does not match the tab total of $14.25"},
+		{"cdsettlepaidundr0001", "1000", "PaidMismatchesTab: the counter payment of $10.00 does not match the tab total of $14.25"},
+		{"cdsettlepaidzero0001", "0", "InvalidArgument: paidCents: required positive whole cents, got 0"},
+		{"cdsettlepaidneg00001", "-1", "InvalidArgument: paidCents: required positive whole cents, got -1"},
+		{"cdsettlepaidfrac0001", "12.5", "InvalidArgument: paidCents: required whole cents, got 12.5"},
+		{"cdsettlepaidstr00001", `"1425"`, "InvalidArgument: paidCents: required whole cents, got 1425"},
+	} {
+		env := staffSettleEnv(tc.label, tabKey, domainActorKey,
+			`{"tabKey":"`+tabKey+`","paidCents":`+tc.paid+`}`, "2026-07-07T13:00:00Z")
+		settleRejectedBecause(t, ctx, conn, cp, cons, env, tabKey, tc.want)
+	}
+
+	// The exact total is accepted — the equality is `!=`, and the positive
+	// sibling is what makes the refusals above the field's and not the op's.
+	env := staffSettleEnv("cdsettlepaidexact001", tabKey, domainActorKey,
+		`{"tabKey":"`+tabKey+`","paidCents":1425}`, "2026-07-07T13:01:00Z")
+	testutil.PublishOp(t, conn, env)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if got, _ := statusData["paidAtSettleCents"].(float64); got != 1425 {
+		t.Fatalf("status.paidAtSettleCents = %v, want 1425", statusData["paidAtSettleCents"])
+	}
+}
+
+// TestSettle_ConsumerSelfScope_PaidCentsDenied: a resident settling their
+// own tab hands over no cash, so paidCents on the self leg is AuthDenied —
+// the waiver-is-staff-only shape. The resident OWNS this tab: the bare
+// Settle is what TestSettle_ConsumerSelfScope_Allowed accepts, and the
+// refusal here lands AFTER the ownership proof, so it is the field and
+// nothing else. The tab stays open, and the same resident's bare Settle then
+// closes it — the positive sibling in the same fixture.
+func TestSettle_ConsumerSelfScope_PaidCentsDenied(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "settleselfpaid")
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, "BBCAFEDMNSTLPDLEASEH", domainConsumerID)
+	tabKey := openTab(t, ctx, conn, cp, cons, "cdselfsetpaid0000001", leaseKey)
+	staffCharge(t, ctx, conn, cp, cons, "cdselfsetpaidchg0001", tabKey, 900, "2026-07-07T12:05:00Z")
+	applicationForLnk := "lnk.leaseapp.BBCAFEDMNSTLPDLEASEH.applicationFor.identity." + domainConsumerID
+
+	selfEnv := func(label, payload string) *processor.OperationEnvelope {
+		return &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "Settle",
+			Actor:         domainConsumerKey,
+			SubmittedAt:   "2026-07-07T13:00:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(payload),
+			ContextHint: &processor.ContextHint{
+				Reads:         []string{tabKey, tabKey + ".status"},
+				OptionalReads: []string{applicationForLnk},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
+				},
+			},
+			AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+		}
+	}
+
+	settleRejectedBecause(t, ctx, conn, cp, cons,
+		selfEnv("cdselfsetpaid0000002", `{"tabKey":"`+tabKey+`","paidCents":900}`), tabKey,
+		"AuthDenied: only staff may record a counter payment at settle")
+
+	testutil.PublishOp(t, conn, selfEnv("cdselfsetpaid0000003", `{"tabKey":"`+tabKey+`"}`))
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("the same resident's bare self Settle outcome = %v, want Accepted — the refusal above is the field alone", outcome)
+	}
+	statusDoc := readDoc(t, ctx, conn, tabKey+".status")
+	statusData, _ := statusDoc["data"].(map[string]any)
+	if _, has := statusData["paidAtSettleCents"]; has {
+		t.Fatalf("a resident's self Settle must record no paidAtSettleCents, found %v", statusData["paidAtSettleCents"])
 	}
 }
 

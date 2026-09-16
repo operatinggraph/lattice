@@ -38,18 +38,25 @@
 //     anchored on tab: `missing_account` is true while a settled,
 //     positive-total tab's lease has no café-ledger account yet;
 //     `missing_charge` is true once the account exists but no
-//     cafetransaction `settles` this tab.
+//     cafetransaction `settles` this tab; `missing_payment` is true once
+//     the charge is posted, the tab records paidAtSettleCents (a staff
+//     Settle{paidCents} — cash taken at the counter) and no CREDIT
+//     cafetransaction `settles` it yet.
 //
 //   - The §10.8 playbook (meta.weaverTarget cafeTabSettlement) —
 //     missing_account → directOp(CreateAccount) (cafe-ledger, opens the
 //     account on first use); missing_charge → directOp(DebitAccount)
-//     (cafe-ledger, posts the settled total with a tabRef back-link).
+//     (cafe-ledger, posts the settled total with a tabRef back-link);
+//     missing_payment → directOp(CreditCafeAccount) (cafe-ledger, posts the
+//     counter payment with a tabRef back-link, after the charge so the
+//     ledger's balance cap admits it).
 //
-// cafe-ledger's DebitAccount accepts an optional tabRef: when present it
-// writes the lnk.cafetransaction.settles.tab audit link the
-// cafeTabSettlement lens's missing_charge gate reads — the
+// cafe-ledger's DebitAccount and CreditCafeAccount accept an optional
+// tabRef: when present the entry writes the lnk.cafetransaction.settles.tab
+// audit link — the cafeTabSettlement lens's missing_charge gate counts the
+// settling debits, its missing_payment gate the settling credits — the
 // semantic-contracts clauseRef precedent, additive and byte-for-byte
-// unaffected for a plain human-submitted DebitAccount.
+// unaffected for a plain human-submitted entry.
 //
 //   - The `cafeStaleTabSettlement` actorAggregate convergence lens, the
 //     clinic-reminders/pastDueAppointments idiom applied to café's own tab
@@ -96,12 +103,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.16.0",
+	Version: "0.17.0",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/MarkLineServed/Settle/" +
 		"SettleStaleTab/BackfillTabStaleAt, OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement " +
-		"actorAggregate convergence lens (missing_account/missing_charge) + the §10.8 playbook dispatching " +
-		"directOp(CreateAccount)/directOp(DebitAccount) (cafe-ledger) to post a settled tab onto the resident's " +
-		"house-tab account + the cafeStaleTabSettlement actorAggregate convergence lens (missing_settle, " +
+		"actorAggregate convergence lens (missing_account/missing_charge/missing_payment) + the §10.8 playbook dispatching " +
+		"directOp(CreateAccount)/directOp(DebitAccount)/directOp(CreditCafeAccount) (cafe-ledger) to post a settled tab onto " +
+		"the resident's house-tab account, and after the charge the cash a staff Settle{paidCents} recorded as taken at " +
+		"the counter + the cafeStaleTabSettlement actorAggregate convergence lens (missing_settle, " +
 		"auto-closes an OPEN tab once its own staleAt deadline passes unattended, orchestration-internal " +
 		"directOp(SettleStaleTab); missing_staleat, backfills staleAt on a tab opened before that field shipped, " +
 		"orchestration-internal directOp(BackfillTabStaleAt)) + " +

@@ -105,10 +105,12 @@ func Lenses() []pkgmgr.LensSpec {
 //     — reason says the line is a refund, the hop says of what — and the entry
 //     itself is an ordinary credit, deliberately, so every balance consumer
 //     sums it unchanged.
-//   - settles, present only on a charge posted by the cafeTabSettlement
-//     playbook, names the tab it settled. It is what tells a reader which
-//     debits are refundable café charges at all: a hand-posted debit with no
-//     tab behind it has no counter transaction to correct.
+//   - settles, present only on an entry posted by the cafeTabSettlement
+//     playbook, names the tab it settled — the charge, and the counter
+//     payment recorded at settle (a credit carrying the same hop). It is what
+//     tells a reader which debits are refundable café charges at all: a
+//     hand-posted debit with no tab behind it has no counter transaction to
+//     correct — and which credit paid for which tab's lines.
 const ledgerHistorySpec = `MATCH (t:cafetransaction)
 MATCH (t)-[:postedTo]->(a:cafeaccount)
 MATCH (a)-[:heldFor]->(l:leaseapp)

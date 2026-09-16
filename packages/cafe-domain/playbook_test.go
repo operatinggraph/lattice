@@ -21,7 +21,7 @@ func TestCafeDomain_PlaybookColumnsMatchLens(t *testing.T) {
 	}
 
 	targets := WeaverTargets()
-	wantGapCount := map[string]int{TabSettlementTarget: 2, StaleTabSettlementTarget: 2}
+	wantGapCount := map[string]int{TabSettlementTarget: 3, StaleTabSettlementTarget: 2}
 	if len(targets) != len(wantGapCount) {
 		t.Fatalf("expected exactly %d weaverTargets, got %d", len(wantGapCount), len(targets))
 	}

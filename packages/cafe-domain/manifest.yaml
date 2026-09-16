@@ -1,13 +1,15 @@
 name: cafe-domain
-version: 0.16.0
+version: 0.17.0
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   VoidCharge/MarkLineServed/Settle/SettleStaleTab/BackfillTabStaleAt, OCC-conditioned
   running total) + the
   tabStatus aspect type + the cafeTabSettlement actorAggregate convergence
-  lens (missing_account/missing_charge) + the §10.8 playbook dispatching
-  directOp(CreateAccount)/directOp(DebitAccount) (cafe-ledger) to post a
-  settled tab onto the resident's house-tab account + the
+  lens (missing_account/missing_charge/missing_payment) + the §10.8 playbook
+  dispatching directOp(CreateAccount)/directOp(DebitAccount)/
+  directOp(CreditCafeAccount) (cafe-ledger) to post a settled tab onto the
+  resident's house-tab account, and after the charge the cash a staff
+  Settle{paidCents} recorded as taken at the counter + the
   cafeStaleTabSettlement actorAggregate convergence lens (missing_settle,
   auto-closes an OPEN tab once its own staleAt deadline passes unattended,
   orchestration-internal directOp(SettleStaleTab); missing_staleat,

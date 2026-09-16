@@ -221,6 +221,19 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 					"{tabKey, leaseAppKey, totalCents}. Returns primaryKey. Rejects TabNotOpen if already settled.",
 			},
 			{
+				Name:    "Settle — close a tab and record the cash the desk took (staff only)",
+				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>", "paidCents": 1850},
+				ExpectedOutcome: "The plain Settle exactly, plus .status.paidAtSettleCents = 1850 and paidAtSettleBy = " +
+					"op.actor (the staffer who took the cash), and tab.settled carries paidAtSettleCents. Nothing is " +
+					"posted to the ledger here: the cafeTabSettlement playbook posts the charge (missing_charge) and " +
+					"then, once that charge's settles link exists, the payment as CreditCafeAccount{tabRef} " +
+					"(missing_payment), so the payment always lands inside the balance the charge opened. Rejects " +
+					"AuthDenied on a resident's self-scoped submit (a resident hands over no cash), PaidMismatchesTab " +
+					"unless paidCents equals totalCents (the desk pays the whole tab; a stale card's old total is " +
+					"refused, never recorded as a partial), InvalidArgument unless paidCents is a positive whole " +
+					"number, TabNotOpen if already settled.",
+			},
+			{
 				Name:    "SettleStaleTab — auto-settle a tab nobody closed (orchestration-internal)",
 				Payload: map[string]any{"tabKey": "vtx.tab.<NanoID>"},
 				ExpectedOutcome: "Validates the tab is alive, closes it exactly like Settle (settled, settledAt stamped, " +
@@ -250,7 +263,7 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"OpenTab", "Charge", "VoidCharge", "MarkLineServed", "Settle", "SettleStaleTab", "BackfillTabStaleAt"},
 		Description: "Tab status aspect (café). Stored as vtx.tab.<NanoID>.status (class tabStatus) = " +
-			"{value: open|settled, totalCents, itemsMemo, lines, openedAt, staleAt, leaseAppKey, settledAt?}. Non-sensitive. Written by OpenTab " +
+			"{value: open|settled, totalCents, itemsMemo, lines, openedAt, staleAt, leaseAppKey, settledAt?, paidAtSettleCents?, paidAtSettleBy?}. Non-sensitive. Written by OpenTab " +
 			"(mints, value=open, totalCents=0, itemsMemo=\"\", lines=[], staleAt=openedAt+24h), Charge (OCC-conditioned accumulate onto totalCents, " +
 			"appends the charged item's name to itemsMemo and a matching {id, description, amountCents, voided: false, orderedBy: op.actor, orderedAt: op.submittedAt} entry to lines " +
 			"(a staff ring-up's entry also carries servedAt = orderedAt and servedBy = op.actor — handed over at the counter; a self-order's does not), " +
@@ -261,7 +274,8 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"on one named, live, not-yet-served lines entry; nothing else changes), Settle/SettleStaleTab " +
 			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/lines carried over frozen, itemsMemo frozen as the " +
 			"comma-joined non-voided line descriptions, staleAt dropped — " +
-			"no longer meaningful once settled), and BackfillTabStaleAt (OCC-conditioned backfill of a missing staleAt on a tab opened " +
+			"no longer meaningful once settled; a staff Settle{paidCents} also records paidAtSettleCents + paidAtSettleBy, " +
+			"the cash the desk took at the counter, which SettleStaleTab never writes), and BackfillTabStaleAt (OCC-conditioned backfill of a missing staleAt on a tab opened " +
 			"before that field shipped, computed the same way OpenTab computes it; a no-op once staleAt is already present) — " +
 			"all owned by the tab vertexType DDL's script. " +
 			"Declaration-only: no op handler of its own.",
@@ -269,17 +283,20 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"value":{"type":"string","enum":["open","settled"]},"totalCents":{"type":"number"},"itemsMemo":{"type":"string"},` +
 			`"lines":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"},"amountCents":{"type":"number"},"voided":{"type":"boolean"},"orderedBy":{"type":"string"},"orderedAt":{"type":"string"},"servedAt":{"type":"string"},"servedBy":{"type":"string"}}}},` +
-			`"openedAt":{"type":"string"},"staleAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"}}}`,
+			`"openedAt":{"type":"string"},"staleAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"},` +
+			`"paidAtSettleCents":{"type":"number"},"paidAtSettleBy":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"value":       "open | settled.",
-			"totalCents":  "The tab's running total in integer cents, accumulated by Charge.",
-			"itemsMemo":   "A comma-joined line of what was charged, derived from lines: the description of every non-voided line, in charge order (a lineId void drops its line out). A tab with no lines keeps whatever memo it already carries. Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
-			"lines":       "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, orderedBy, orderedAt, servedAt?, servedBy?}, one entry per Charge, in charge order. orderedAt is the Charge's op.submittedAt (RFC3339). servedAt/servedBy record that the line was handed over: stamped at ring-up on a staff Charge (the counter hands it over), by MarkLineServed on a self-order; a line with orderedAt and no servedAt is still to make, a line with neither predates this field and its state is unknown. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
-			"openedAt":    "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
-			"staleAt":     "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open, or BackfillTabStaleAt if it is absent entirely (a tab opened before this field shipped). Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
-			"leaseAppKey": "The resident lease this tab belongs to (denormalized from OpenTab's payload).",
-			"settledAt":   "When the tab was settled (RFC3339, = Settle's op.submittedAt). Absent while open.",
+			"value":             "open | settled.",
+			"totalCents":        "The tab's running total in integer cents, accumulated by Charge.",
+			"itemsMemo":         "A comma-joined line of what was charged, derived from lines: the description of every non-voided line, in charge order (a lineId void drops its line out). A tab with no lines keeps whatever memo it already carries. Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
+			"lines":             "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, orderedBy, orderedAt, servedAt?, servedBy?}, one entry per Charge, in charge order. orderedAt is the Charge's op.submittedAt (RFC3339). servedAt/servedBy record that the line was handed over: stamped at ring-up on a staff Charge (the counter hands it over), by MarkLineServed on a self-order; a line with orderedAt and no servedAt is still to make, a line with neither predates this field and its state is unknown. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
+			"openedAt":          "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
+			"staleAt":           "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open, or BackfillTabStaleAt if it is absent entirely (a tab opened before this field shipped). Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
+			"leaseAppKey":       "The resident lease this tab belongs to (denormalized from OpenTab's payload).",
+			"settledAt":         "When the tab was settled (RFC3339, = Settle's op.submittedAt). Absent while open.",
+			"paidAtSettleCents": "Cash the desk took at the counter as the tab was settled, in integer cents (= a staff Settle's paidCents, which must equal totalCents). Written by Settle only when paidCents was supplied; never by SettleStaleTab or a resident's self-scoped Settle. Absent means no counter payment was recorded at settle — never \"unpaid\" (the resident may pay later against the ledger). The cafeTabSettlement lens's missing_payment gap reads it to post the payment (CreditCafeAccount{tabRef}) once the settling charge exists.",
+			"paidAtSettleBy":    "The staffer who took the cash (= op.actor of the Settle that carried paidCents). Present exactly when paidAtSettleCents is.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -565,6 +582,44 @@ def optional_string(p, name):
     if len(v) == 0:
         return None
     return v
+
+def optional_cents(p, name):
+    # Money is whole cents, and an amount that is present must be a positive
+    # whole number (cafe-ledger's require_cents, made absence-tolerant): a
+    # fractional or non-positive value is refused rather than rounded or
+    # dropped, because the value is recorded as cash the desk took. Absent
+    # (or null) returns None.
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None:
+        return None
+    if type(v) != type(0) and type(v) != type(0.0):
+        fail("InvalidArgument: " + name + ": required whole cents, got " + str(v))
+    if v != int(v):
+        fail("InvalidArgument: " + name + ": required whole cents, got " + str(v))
+    if int(v) <= 0:
+        fail("InvalidArgument: " + name + ": required positive whole cents, got " + str(v))
+    return int(v)
+
+def dollars(cents):
+    # Cents rendered the way the counter shows money (cafe-ledger's dollars).
+    # The refusal that spends this is toasted VERBATIM at a staffer, and
+    # "1425" reads as a different number than the $14.25 tab it is talking
+    # about. The sign is carried explicitly so a negative never renders as
+    # "$-14.25".
+    negative = cents < 0
+    whole = cents
+    if negative:
+        whole = -cents
+    minor = whole % 100
+    minor_text = str(minor)
+    if minor < 10:
+        minor_text = "0" + minor_text
+    sign = ""
+    if negative:
+        sign = "-"
+    return sign + "$" + str(whole // 100) + "." + minor_text
 
 def bare_nanoid_or_mint(p, name):
     if not hasattr(p, name):
@@ -1551,12 +1606,43 @@ def execute(state, op):
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only settle their own tab")
 
+        # paidCents: cash the desk took at the counter as the tab closed. Staff
+        # legs only — a resident settling their own tab from their phone hands
+        # over no cash, so the self leg refuses the field (the waiver-is-staff-
+        # only shape), after the ownership proof above so a bare self Settle
+        # is unaffected. Must EQUAL the tab's total: the desk's one act pays
+        # the whole tab (a partial counter payment is not a shape this op
+        # records — the resident's own Record payment is the partial path),
+        # and a desk card that went stale between render and click — a line
+        # rung up or voided in between — submits the old total and is refused
+        # rather than silently recording a partial. Never posted here (P2:
+        # cafe-domain writes no cafe-ledger vertex) — the cafeTabSettlement
+        # playbook posts it as a CreditCafeAccount{tabRef} once the settling
+        # charge exists (lenses.go missing_payment, targets.go), and the ledger
+        # bounds that credit by this recorded value. Recorded ONLY when
+        # supplied: an absent paidAtSettleCents means no counter payment,
+        # never "unpaid".
+        paid_cents = optional_cents(p, "paidCents")
+        if paid_cents != None:
+            # authcontext-target: (selector) selects the refusal branch and
+            # only that -- presence never grants anything here; a resident's
+            # self-scoped submit is the one leg that carries a target, and it
+            # is refused the field outright.
+            if op.authContextTarget != "":
+                fail("AuthDenied: only staff may record a counter payment at settle")
+            if paid_cents != total_cents:
+                fail("PaidMismatchesTab: the counter payment of " + dollars(paid_cents) +
+                     " does not match the tab total of " + dollars(total_cents))
+
         existing_lines = existing.data.get("lines", [])
         frozen_memo = items_memo_from_lines(existing_lines, existing.data.get("itemsMemo", ""))
         status_data = {"value": "settled", "totalCents": total_cents, "itemsMemo": frozen_memo,
                         "lines": existing_lines,
                         "openedAt": existing.data.get("openedAt"),
                         "leaseAppKey": lease_key, "settledAt": settled_at}
+        if paid_cents != None:
+            status_data["paidAtSettleCents"] = paid_cents
+            status_data["paidAtSettleBy"] = op.actor
         # Two releases, both unconditioned, mirroring clinic-domain's slot-cell
         # release (a stale-tombstone race can only free them early; OpenTab's
         # own OCC-revive is what actually serializes a genuine race on the next
@@ -1605,7 +1691,10 @@ def execute(state, op):
                 has_charged_to = True
         if not has_charged_to:
             mutations.append(make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}))
-        events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents}}]
+        settled_event = {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents}
+        if paid_cents != None:
+            settled_event["paidAtSettleCents"] = paid_cents
+        events = [{"class": "tab.settled", "data": settled_event}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": tab_key}}
 

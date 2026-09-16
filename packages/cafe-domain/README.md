@@ -23,11 +23,11 @@ confinement described below (facet-staff-worlds-design.md §3.5, §9).
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (2) | `tab` (root `{}`, D5, `.status` aspect) · `menuitem` (root `{}`, D5, `.price` aspect) |
-| **Aspect types** (3) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, itemsMemo, openedAt, leaseAppKey, settledAt?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents, available}` |
+| **Aspect types** (3) | `tabStatus` — `vtx.tab.<id>.status`, `{value, totalCents, itemsMemo, lines, openedAt, staleAt, leaseAppKey, settledAt?, paidAtSettleCents?, paidAtSettleBy?}` · `cafeOpenTabGuard` — `vtx.leaseapp.<id>.cafeOpenTab`, `{tabKey}` (per-lease open-tab dedup guard) · `menuItemPrice` — `vtx.menuitem.<id>.price`, `{name, priceCents, available}` |
 | **Links** (3) | `chargedTo` (tab → leaseapp, permanent) · `openFor` (tab → leaseapp, released by `Settle`) · `servedAt` (menuitem → location, permanent — what makes an item reachable) |
 | **Operations** (9) | `OpenTab` · `Charge` · `VoidCharge` · `Settle` · `CreateMenuItem` · `RetireMenuItem` · `SetMenuItemAvailability` · `SetMenuItemLocation` · `UpdateMenuItem` |
-| **Lenses** (3) | `cafeTabSettlement` (convergence, one row per tab, `missing_account`/`missing_charge`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) · `menuCatalog` (plain projection, one row per live menuitem) → `cafe-menu-catalog` (`nats-kv`) · `cafeLeaseWorkplaces` (one row per lease, `coveringLocations` + `leaseEnd`) → `cafe-lease-workplaces` (`nats-kv`) — the read-side half of workplace confinement, plus the resident-readable tenancy-end column |
-| **Weaver playbook** (1) | `cafeTabSettlement` — `missing_account` → `directOp(CreateAccount)` · `missing_charge` → `directOp(DebitAccount)` (both cafe-ledger) |
+| **Lenses** (3) | `cafeTabSettlement` (convergence, one row per tab, `missing_account`/`missing_charge`/`missing_payment`) → `weaver-targets` (`nats-kv`, `full` engine, actorAggregate) · `menuCatalog` (plain projection, one row per live menuitem) → `cafe-menu-catalog` (`nats-kv`) · `cafeLeaseWorkplaces` (one row per lease, `coveringLocations` + `leaseEnd`) → `cafe-lease-workplaces` (`nats-kv`) — the read-side half of workplace confinement, plus the resident-readable tenancy-end column |
+| **Weaver playbook** (1) | `cafeTabSettlement` — `missing_account` → `directOp(CreateAccount)` · `missing_charge` → `directOp(DebitAccount)` · `missing_payment` → `directOp(CreditCafeAccount)` (all cafe-ledger) |
 
 Grants (`permissions.go`): `OpenTab`/`Charge`/`Settle` grant `operator`+`frontOfHouse` at `scope: any` AND
 `consumer` at `scope: self` (a resident may open/self-order/settle their OWN tab, verified via the lease's
@@ -50,7 +50,7 @@ vtx.menuitem.<id>.price      class=menuItemPrice   {name, priceCents}
 lnk.tab.<id>.chargedTo.leaseapp.<id>          (tab → leaseapp; permanent — where the money lands; cafeTabSettlement anchors here)
 lnk.tab.<id>.openFor.leaseapp.<id>            (tab → leaseapp; transient — that the tab is open; Settle tombstones it)
 lnk.menuitem.<id>.servedAt.<locType>.<id>     (menuitem → location; permanent — what makes the item reachable to a resident who lives there)
-lnk.cafetransaction.<id>.settles.tab.<id>     (cafetransaction → tab; written by cafe-ledger's DebitAccount tabRef)
+lnk.cafetransaction.<id>.settles.tab.<id>     (cafetransaction → tab; written by cafe-ledger's DebitAccount / CreditCafeAccount tabRef)
 ```
 
 ## OCC-conditioned running total, not append-only line items
@@ -67,6 +67,18 @@ void amount from the named `.status.lines` entry itself, never a caller-supplied
 marks that entry `voided: true` in place. `Settle` freezes `totalCents`, flips `value` to `settled`,
 and stamps `settledAt` — also OCC-conditioned. All three reject a tab that is not currently `open`
 (`TabNotOpen`).
+
+`Settle{tabKey, paidCents?}` — the desk settles and takes the cash in one act. `paidCents` is
+optional, staff-only integer cents: the cash the desk took at the counter as the tab closed. When
+present it is recorded on `.status` as `paidAtSettleCents` + `paidAtSettleBy` (`op.actor`, the staffer
+who took it) and on the `tab.settled` event; absent, neither field is written — absent reads as *no
+counter payment*, never as unpaid (`SettleStaleTab` never writes them either). Refused `AuthDenied` on
+a resident's self-scoped `Settle` (a resident hands over no cash — the `waiver`-is-staff-only shape),
+`PaidMismatchesTab` unless it equals `totalCents` (the desk pays the whole tab; a card that went stale
+between render and click submits the old total and is refused, never recorded as a partial — the
+resident's own Record payment is the partial path), `InvalidArgument` unless a positive whole number.
+Nothing is posted to the ledger by the op itself (P2): the settlement playbook below posts the payment
+after the charge, and `cafe-ledger` bounds that credit by the recorded value.
 
 Alongside `totalCents`, every `Charge` also appends a matching entry to `.status.lines`; `.status.itemsMemo`
 is re-derived from the live (non-voided) lines on every `Charge`/`VoidCharge` — a comma-joined summary (a
@@ -142,10 +154,20 @@ DDLs permit `CreateAccount`/`DebitAccount` for those classes. Instead, `Settle` 
 - **`missing_account`** — true while the resident's lease has no café-ledger account yet
   (`l.cafeLedgerAccount.data.accountKey` null). Weaver dispatches `CreateAccount{leaseAppKey}`
   (`cafe-ledger`) — "opening one via `CreateAccount` on first use."
-- **`missing_charge`** — true once the account exists but no `cafetransaction` `settles` this tab yet.
-  Weaver dispatches `DebitAccount{accountKey, amountCents, memo, tabRef}` (`cafe-ledger`) — the `tabRef`
-  extension writes the `settles` audit link back to the tab, which is exactly what the lens's
+- **`missing_charge`** — true once the account exists but no debit `cafetransaction` `settles` this tab
+  yet. Weaver dispatches `DebitAccount{accountKey, amountCents, memo, tabRef}` (`cafe-ledger`) — the
+  `tabRef` extension writes the `settles` audit link back to the tab, which is exactly what the lens's
   `OPTIONAL MATCH (t)<-[:settles]-(tx:cafetransaction)` reads to converge the gap.
+- **`missing_payment`** — true once the charge is posted (a debit `settles` the tab), the tab records
+  `paidAtSettleCents > 0`, and no credit `cafetransaction` `settles` it yet. Weaver dispatches
+  `CreditCafeAccount{accountKey, amountCents: paidAtSettleCents, memo: "Paid at the counter", reason:
+  "payment", tabRef}` (`cafe-ledger`), and the credit writes the same `settles` audit link. One hop
+  serves both gaps — the counts discriminate by `.entry.type` (`count(CASE WHEN … THEN tx.key ELSE
+  null END)`), which keeps the lens inside the relation-narrowed consumer-filter budget a second
+  relation name would have broken. The *charge is posted* conjunct is what orders the two postings: `cafe-ledger`'s payment cap reads the account's
+  live `.balance`, so a credit dispatched before the debit would be refused `PaymentExceedsBalance` for
+  cash the resident already handed over; opened only once the debit exists, the payment always lands
+  inside the balance that debit opened. `missing_charge` and `missing_payment` are never both live.
 
 Mirrors `semantic-contracts/targets.go`'s `missing_charge → directOp(DebitAccount)` shape verbatim —
 every payload field the dispatched op requires goes directly in `Params` (the `objects-base`

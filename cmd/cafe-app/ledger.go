@@ -29,8 +29,11 @@ type ledgerEntryProjection struct {
 // renders. ReversesKey is set only on a refund and names the charge it gives
 // back — the statement reads it to say a line is a correction rather than a
 // payment the resident made, since the entry itself is an ordinary credit.
-// TabKey is set only on a charge the tab-settlement playbook posted, and is
-// what tells the front desk which debits can be refunded at all. Reason
+// TabKey is set on a charge OR a counter payment the tab-settlement playbook
+// posted (a debit from missing_charge, a credit from missing_payment) — it
+// names the tab either one settled, and on the debit side is what tells the
+// front desk which charges can be refunded at all; a hand-posted entry (no
+// playbook behind it) never carries one. Reason
 // classifies the entry beyond debit/credit: a credit carries "waiver" (a
 // staff write-off) or "refund" (RefundCafeCharge), a debit carries "payout"
 // (cash handed back out of a credit), and an ordinary payment or charge

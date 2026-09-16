@@ -186,6 +186,49 @@ func TestWorkplace_StaffConfinedToWorkplace(t *testing.T) {
 	}
 }
 
+// TestWorkplace_SettleWithCounterPaymentStaffConfinedToWorkplace: the
+// counter-payment leg of Settle is a STAFF act (a frontOfHouse standing
+// grant, never the operator, so actor_holds_operator does not short-circuit
+// the walk) and is confined like every other tab write — a staffer records
+// cash taken at settle only for a tab at a building they worksAt. Positive
+// sibling first: at their OWN building the fields land, stamped with the
+// staffer as paidAtSettleBy; at ANOTHER building the same call is refused
+// and the tab stays open.
+func TestWorkplace_SettleWithCounterPaymentStaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcsettlepaid")
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+
+	tabA := openTab(t, ctx, conn, cp, cons, "wcstlpaidtaba0000001", leaseA)
+	staffCharge(t, ctx, conn, cp, cons, "wcstlpaidchga0000001", tabA, 900, "2026-07-20T12:05:00Z")
+	tabB := openTab(t, ctx, conn, cp, cons, "wcstlpaidtabb0000001", leaseB)
+	staffCharge(t, ctx, conn, cp, cons, "wcstlpaidchgb0000001", tabB, 900, "2026-07-20T12:05:00Z")
+
+	testutil.PublishOp(t, conn, staffSettleEnv("wcstlpaidsettlea0001", tabA, wcStaffKey,
+		`{"tabKey":"`+tabA+`","paidCents":900}`, "2026-07-20T13:00:00Z"))
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("staff Settle{paidCents} at its OWN workplace = %v, want Accepted "+
+			"(the positive sibling — if this fails the negative proves nothing)", got)
+	}
+	statusA, _ := readDoc(t, ctx, conn, tabA+".status")["data"].(map[string]any)
+	if got, _ := statusA["paidAtSettleCents"].(float64); got != 900 {
+		t.Fatalf("tabA status.paidAtSettleCents = %v, want 900", statusA["paidAtSettleCents"])
+	}
+	if got, _ := statusA["paidAtSettleBy"].(string); got != wcStaffKey {
+		t.Fatalf("tabA status.paidAtSettleBy = %q, want the frontOfHouse staffer %q", got, wcStaffKey)
+	}
+
+	settleRejectedBecause(t, ctx, conn, cp, cons,
+		staffSettleEnv("wcstlpaidsettleb0001", tabB, wcStaffKey,
+			`{"tabKey":"`+tabB+`","paidCents":900}`, "2026-07-20T13:00:00Z"),
+		tabB, "AuthDenied")
+	statusB, _ := readDoc(t, ctx, conn, tabB+".status")["data"].(map[string]any)
+	if _, has := statusB["paidAtSettleCents"]; has {
+		t.Fatalf("tabB carries paidAtSettleCents %v — a denied Settle must write nothing", statusB["paidAtSettleCents"])
+	}
+}
+
 // wcSubmitVoidCharge submits VoidCharge as an arbitrary actor. forgedTarget,
 // when non-empty, becomes authContext.target with no task — the shape any
 // scope=any holder can put on the wire, since the Gateway forwards target

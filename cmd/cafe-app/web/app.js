@@ -185,6 +185,23 @@ function chargedToOptionalRead(tabKey, leaseAppKey) {
   return "lnk.tab." + idOf(tabKey) + ".chargedTo.leaseapp." + idOf(leaseAppKey);
 }
 
+// settlePayEnvelope builds the exact opOrThrow envelope both desk "Settle &
+// pay" buttons (the POS card and the Front Desk card) submit — one shared
+// declaration so the two sites can never drift: paidCents is always the
+// card's own totalCents, never a typed amount, which is the courtesy that
+// keeps PaidMismatchesTab a stale-card refusal rather than something a
+// visitor could construct.
+// refusal-courtesy: Settle/TabNotOpen: hide — settlePayEnvelope is only called from the settle-pay-btn/settle-pay-<tabKey> click handlers, themselves only wired inside renderOpenTabCard/frontDeskCard, both only rendered on the `open` branch
+// refusal-courtesy: Settle/PaidMismatchesTab: cap — paidCents is always the totalCents argument, the card's own total, so a mismatch only arises from a stale card (a self-order or void since render) and the refusal toast is the courtesy
+function settlePayEnvelope(tabKey, leaseAppKey, totalCents) {
+  return {
+    operationType: "Settle", class: "tab",
+    reads: [tabKey, tabKey + ".status"],
+    optionalReads: [chargedToOptionalRead(tabKey, leaseAppKey)],
+    payload: { tabKey: tabKey, paidCents: totalCents },
+  };
+}
+
 // ---- op catalog + shared op-form renderer (staff-descriptor-rendering-design.md §15) ----
 //
 // loadOpCatalog fetches the op-catalog descriptors (GET /api/op-catalog,
@@ -368,6 +385,16 @@ function money(cents) {
   return "$" + n.toFixed(2);
 }
 
+// counterPaymentLine renders a settled tab's paidAtSettleCents (cash the
+// desk took at the counter when it settled the tab — absent on every other
+// settle) as the phrase every surface showing that tab tags it with, or ""
+// when there is nothing to say: absent, or (defensively) zero.
+function counterPaymentLine(tab) {
+  const cents = tab && tab.paidAtSettleCents;
+  if (!cents) return "";
+  return "paid " + money(cents) + " at the counter";
+}
+
 // customerMemo strips a raw entity key from a ledger memo before it reaches
 // a customer surface — a memo is free text an operator typed, so nothing
 // stops one from embedding a bare NanoID (2026-08-29: a remediation memo did
@@ -514,8 +541,10 @@ function menuOptions(items) {
 // what it was for — {lines, memo} for chargeLinesBlock, or null when there
 // is nothing to join (no tabKey, or the tab hasn't resolved yet: a
 // projection still catching up, or a tab whose row was pruned). The join is
-// by KEY alone, never by row type — a row this shape never carries today
-// (a credit posted from a settled tab) would still join.
+// by KEY alone, never by row type: the counter payment the settlement
+// playbook posts (a credit carrying the same settles hop, so cafeLedgerHistory
+// projects its tabKey too) joins its tab's lines the same way, and the
+// statement shows what the cash paid for.
 function receiptLines(row, tabByKey) {
   if (!row || !row.tabKey) return null;
   const tab = tabByKey[row.tabKey];
@@ -930,6 +959,7 @@ async function loadPos() {
 // refusal-courtesy: Charge/ItemUnavailable: disable — menuOptions renders a sold-out item (available === false) inside a disabled "Sold out today" optgroup
 // refusal-courtesy: Charge/TabNotOpen: hide — the catalog/off-menu charge forms only render inside renderOpenTabCard, itself only rendered on the `open` branch
 // refusal-courtesy: Settle/TabNotOpen: hide — settle-btn only renders inside renderOpenTabCard, itself only rendered on the `open` branch
+// refusal-courtesy: Settle/PaidMismatchesTab: see settlePayEnvelope
 // refusal-courtesy: VoidCharge/TabNotOpen: hide — the void buttons (chargeLinesBlock's data-void-line) only render inside renderOpenTabCard, itself only rendered on the `open` branch
 async function renderPos() {
   const body = document.getElementById("pos-body");
@@ -1096,6 +1126,30 @@ async function renderPos() {
       btn.disabled = false;
     }
   });
+  const settlePayBtn = document.getElementById("settle-pay-btn");
+  if (settlePayBtn) {
+    settlePayBtn.addEventListener("click", async () => {
+      settlePayBtn.disabled = true;
+      try {
+        await opOrThrow(settlePayEnvelope(open.tabKey, leaseAppKey, open.totalCents), "settle the tab");
+        toast("Tab settled — " + money(open.totalCents) + " taken at the counter; posting to the café ledger shortly.", true);
+        setTimeout(renderPos, 700);
+      } catch (e) {
+        toast(e.message, false);
+        settlePayBtn.disabled = false;
+        // A PaidMismatchesTab or TabNotOpen refusal means the card is stale
+        // (a self-order or void changed the total, or someone else settled
+        // the tab since this render) — the toast already says why, so the
+        // only courtesy left is showing the current card rather than leaving
+        // the stale one on screen. opOrThrow throws a bare Error for a
+        // rejection and a transport failure alike, so the refusal is read
+        // off its message.
+        if (e.message && (e.message.indexOf("PaidMismatchesTab") !== -1 || e.message.indexOf("TabNotOpen") !== -1)) {
+          setTimeout(renderPos, 700);
+        }
+      }
+    });
+  }
 }
 
 function renderOpenTabForm() {
@@ -1149,7 +1203,11 @@ function renderOpenTabCard(tab, items) {
     '<input id="charge-desc" type="text" placeholder="Description (optional)" />' +
     '<button id="charge-submit" type="submit">Add Charge</button>' +
     "</form>" +
-    '<div class="panel-actions"><button id="settle-btn" class="danger">Settle Tab</button></div>' +
+    '<div class="panel-actions"><button id="settle-btn" class="danger">Settle Tab</button>' +
+    (tab.totalCents > 0
+      ? '<button id="settle-pay-btn" class="danger">Settle &amp; pay ' + money(tab.totalCents) + "</button>"
+      : "") +
+    "</div>" +
     "</div>"
   );
 }
@@ -1184,7 +1242,7 @@ function summarizeToday(tabs, now) {
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
   const byItem = new Map();
-  const out = { tabs: 0, grossCents: 0, items: [], voidCount: 0, voidCents: 0, unitemizedCents: 0 };
+  const out = { tabs: 0, grossCents: 0, items: [], voidCount: 0, voidCents: 0, unitemizedCents: 0, counterPaidCents: 0 };
   let itemizedCents = 0;
   for (const t of tabs || []) {
     if (t.status !== "settled" || !t.settledAt) continue;
@@ -1196,6 +1254,10 @@ function summarizeToday(tabs, now) {
     if (!(t.totalCents || 0) && !(t.lines || []).length) continue;
     out.tabs += 1;
     out.grossCents += t.totalCents || 0;
+    // A tab carrying no paidAtSettleCents (no counter payment at settle, or
+    // a tab settled before this field existed) contributes nothing to the
+    // sum — absent is not zero cash counted, it's nothing recorded.
+    out.counterPaidCents += t.paidAtSettleCents || 0;
     for (const l of t.lines || []) {
       const cents = l.amountCents || 0;
       if (l.voided) {
@@ -1248,6 +1310,16 @@ function renderFrontDeskToday(summary) {
   voids.textContent = summary.voidCount
     ? summary.voidCount + " line" + (summary.voidCount === 1 ? "" : "s") + " voided · " + money(summary.voidCents) + " not charged"
     : "No voids.";
+  const counterPaid = document.getElementById("frontdesk-today-counterpaid");
+  if (counterPaid) {
+    if (summary.counterPaidCents) {
+      counterPaid.hidden = false;
+      counterPaid.textContent = "of which " + money(summary.counterPaidCents) + " taken at the counter";
+    } else {
+      counterPaid.hidden = true;
+      counterPaid.textContent = "";
+    }
+  }
 }
 
 // ordersQueue is the desk's orders queue: every line, across every open tab,
@@ -1369,6 +1441,7 @@ function renderFrontDeskOrders(tabs) {
 }
 
 // refusal-courtesy: Settle/TabNotOpen: hide — loadFrontDesk filters to tabs whose status === "open" (tabs = (r.tabs || []).filter(...)) before drawing a settle-<tabKey> button per one
+// refusal-courtesy: Settle/PaidMismatchesTab: see settlePayEnvelope
 async function loadFrontDesk() {
   const grid = document.getElementById("frontdesk-grid");
   const summary = document.getElementById("frontdesk-summary");
@@ -1438,27 +1511,49 @@ async function loadFrontDesk() {
     .map((t) => frontDeskCard(t, bookingsByLease[t.leaseAppKey], leaseDetailsByLease[t.leaseAppKey], visitsByLease[t.leaseAppKey], residentsByLease[t.leaseAppKey], balancesByLease[t.leaseAppKey]))
     .join("");
   tabs.forEach((t) => {
-    const btn = document.getElementById("settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, ""));
-    if (!btn) return;
-    btn.addEventListener("click", async () => {
-      btn.disabled = true;
-      try {
-        await opOrThrow(
-          {
-            operationType: "Settle", class: "tab",
-            reads: [t.tabKey, t.tabKey + ".status"],
-            optionalReads: [chargedToOptionalRead(t.tabKey, t.leaseAppKey)],
-            payload: { tabKey: t.tabKey },
-          },
-          "settle the tab"
-        );
-        toast("Tab settled.", true);
-        setTimeout(loadFrontDesk, 700);
-      } catch (e) {
-        toast(e.message, false);
-        btn.disabled = false;
-      }
-    });
+    const sanitized = t.tabKey.replace(/[^a-zA-Z0-9]/g, "");
+    const btn = document.getElementById("settle-" + sanitized);
+    if (btn) {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await opOrThrow(
+            {
+              operationType: "Settle", class: "tab",
+              reads: [t.tabKey, t.tabKey + ".status"],
+              optionalReads: [chargedToOptionalRead(t.tabKey, t.leaseAppKey)],
+              payload: { tabKey: t.tabKey },
+            },
+            "settle the tab"
+          );
+          toast("Tab settled.", true);
+          setTimeout(loadFrontDesk, 700);
+        } catch (e) {
+          toast(e.message, false);
+          btn.disabled = false;
+        }
+      });
+    }
+    const payBtn = document.getElementById("settle-pay-" + sanitized);
+    if (payBtn) {
+      payBtn.addEventListener("click", async () => {
+        payBtn.disabled = true;
+        try {
+          await opOrThrow(settlePayEnvelope(t.tabKey, t.leaseAppKey, t.totalCents), "settle the tab");
+          toast("Tab settled — " + money(t.totalCents) + " taken at the counter; posting to the café ledger shortly.", true);
+          setTimeout(loadFrontDesk, 700);
+        } catch (e) {
+          toast(e.message, false);
+          payBtn.disabled = false;
+          // See the POS settle-pay-btn's own catch (renderPos): a
+          // PaidMismatchesTab or TabNotOpen refusal means the card is stale,
+          // and the courtesy is refreshing it rather than leaving it up.
+          if (e.message && (e.message.indexOf("PaidMismatchesTab") !== -1 || e.message.indexOf("TabNotOpen") !== -1)) {
+            setTimeout(loadFrontDesk, 700);
+          }
+        }
+      });
+    }
   });
 }
 
@@ -1515,11 +1610,14 @@ function frontDeskArrearsLine(row) {
 // handleFrontDeskArrears uses server-side: isOverdue desc, then daysOverdue
 // desc, then balanceCents desc — a credit lease's balanceCents is negative,
 // so this single sort already places every debtor ahead of every credit
-// lease with no separate pass. A debtor row gets a Write off button
-// (confirm → CreditCafeAccount reason: waiver, capped at the balance shown);
-// a credit row renders "in credit $X" with a Pay out button (confirm →
-// PayoutCafeCredit, capped at the credit shown) — wireArrearsActions binds
-// both, once, via one delegated click handler on the list itself.
+// lease with no separate pass. A debtor row gets a Take payment button
+// (confirm → CreditCafeAccount reason: payment, capped at the balance shown
+// — cash collected at the desk) beside a Write off button (confirm →
+// CreditCafeAccount reason: waiver, capped at the balance shown — the debt
+// forgiven instead); a credit row renders "in credit $X" with a Pay out
+// button (confirm → PayoutCafeCredit, capped at the credit shown) —
+// wireArrearsActions binds all three, once, via one delegated click handler
+// on the list itself.
 function renderFrontDeskArrears(balances, residentsByLease) {
   const list = document.getElementById("frontdesk-arrears");
   const empty = document.getElementById("frontdesk-arrears-empty");
@@ -1550,7 +1648,10 @@ function renderFrontDeskArrears(balances, residentsByLease) {
     } else {
       li.innerHTML =
         escapeHtml(who) + " — " + money(row.balanceCents) + " · " + frontDeskArrearsLine(row) +
-        ' <span class="ledger-entry-actions"><button type="button" class="writeoff-debt-btn" data-account="' +
+        ' <span class="ledger-entry-actions"><button type="button" class="take-payment-btn" data-account="' +
+        escapeHtml(row.accountKey || "") + '" data-amount="' + (+row.balanceCents) +
+        '" data-who="' + escapeHtml(who) + '">Take payment</button>' +
+        '<button type="button" class="writeoff-debt-btn" data-account="' +
         escapeHtml(row.accountKey || "") + '" data-amount="' + (+row.balanceCents) +
         '" data-who="' + escapeHtml(who) + '">Write off</button></span>';
     }
@@ -1559,23 +1660,81 @@ function renderFrontDeskArrears(balances, residentsByLease) {
 }
 
 // wireArrearsActions binds ONE delegated click handler to the arrears list
-// (#frontdesk-arrears), covering both the Write off and Pay out buttons
-// renderFrontDeskArrears draws into it — bound once ever (list.dataset.wired
-// guards re-registration across every renderFrontDeskArrears call, since the
-// list element itself persists across renders while its rows are replaced).
-// Delegating onto the persistent list, rather than a listener per button,
-// means a re-render never has to re-wire, and every row's data-account/
-// data-amount/data-who attributes carry everything the handler needs — no
-// closure over the render's own data.
+// (#frontdesk-arrears), covering the Take payment, Write off, and Pay out
+// buttons renderFrontDeskArrears draws into it — bound once ever
+// (list.dataset.wired guards re-registration across every
+// renderFrontDeskArrears call, since the list element itself persists across
+// renders while its rows are replaced). Delegating onto the persistent list,
+// rather than a listener per button, means a re-render never has to
+// re-wire, and every row's data-account/data-amount/data-who attributes
+// carry everything the handler needs — no closure over the render's own
+// data.
 function wireArrearsActions(list) {
   if (list.dataset.wired) return;
   list.dataset.wired = "1";
   list.addEventListener("click", (ev) => {
+    const takePaymentBtn = ev.target.closest(".take-payment-btn");
+    if (takePaymentBtn) { handleTakePayment(takePaymentBtn); return; }
     const writeoffBtn = ev.target.closest(".writeoff-debt-btn");
     if (writeoffBtn) { handleWriteOffDebt(writeoffBtn); return; }
     const payoutBtn = ev.target.closest(".payout-credit-btn");
     if (payoutBtn) { handlePayoutCredit(payoutBtn); return; }
   });
+}
+
+// handleTakePayment records cash collected at the desk against a debtor's
+// balance — a staff-only CreditCafeAccount submitted with reason: "payment",
+// capped at the balance shown (mirrors handleWriteOffDebt exactly, reason
+// aside: same confirm-then-dispatch shape, same landed-ambiguity throw path
+// narration, lint-ceremony-throw-path.go).
+// refusal-courtesy: CreditCafeAccount/InvalidState: none — the account's .balance aspect being a foreign class is a data-integrity fault (post_entry, packages/cafe-ledger/scripts.go), not state any read model exposes
+// refusal-courtesy: CreditCafeAccount/NoCreditToPayOut, PayoutExceedsCash, PayoutExceedsCredit: unreachable — CreditCafeAccount calls post_entry(entry_type="credit", ...) (packages/cafe-ledger/scripts.go); is_payout requires entry_type == "debit", so the payout branch never runs
+// refusal-courtesy: CreditCafeAccount/RefundExceedsCharge, RefundExceedsPaid: unreachable — CreditCafeAccount calls post_entry(..., allow_reverses_ref=False, ...) (packages/cafe-ledger/scripts.go); the reversesRef branch (reversed_charge / the cash-floor check) only runs when allow_reverses_ref is True
+// refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — renderFrontDeskArrears only lists non-zero-balance leases (frontdesk-balances) and only draws the take-payment-btn on the debtor branch (row.balanceCents >= 0); a zero-balance lease never appears in the arrears list at all
+// refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: cap — amountCents is prefilled to exactly row.balanceCents (the balance shown) into a detached, never-rendered descriptor mount (renderOpForm(row, context, document.createElement("div")))
+// refusal-courtesy: CreditCafeAccount/WriteOffExceedsBalance: unreachable — this function always submits reason: "payment" (post_entry, packages/cafe-ledger/scripts.go); the reason=="waiver" branch that raises WriteOffExceedsBalance never runs from here
+// refusal-courtesy: CreditCafeAccount/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — this function's context.prefill never sets tabRef (the Weaver-only field only cafeTabSettlement's missing_payment dispatch sets); require_counter_payment (packages/cafe-ledger/scripts.go) only runs when payload.tabRef is present
+async function handleTakePayment(btn) {
+  const accountKey = btn.getAttribute("data-account");
+  const amountCents = parseInt(btn.getAttribute("data-amount"), 10);
+  const who = btn.getAttribute("data-who");
+  if (!accountKey || !amountCents) { toast("This lease has no café account to take a payment against.", false); return; }
+  if (!confirm("Take a payment of " + money(amountCents) + " from " + who + "? This records cash collected at the desk.")) return;
+  btn.disabled = true;
+  try {
+    await loadOpCatalogQuiet();
+    const { renderOpForm } = await loadDescriptorform();
+    const row = opCatalogCache && opCatalogCache.CreditCafeAccount;
+    if (!row) throw new Error("this action is unavailable");
+    // me is set because CreditCafeAccount's descriptor declares an
+    // `{actor} holdsRole out` enumeration (the workplace-confinement walk
+    // the script runs) — not for buildAuthContext, which ignores context.me
+    // entirely once selfVoice is false.
+    const context = {
+      target: accountKey,
+      me: identityKey(),
+      selfVoice: false,
+      prefill: { amountCents: amountCents, reason: "payment", memo: "Paid at the desk" },
+    };
+    const handle = renderOpForm(row, context, document.createElement("div"));
+    if (!handle) throw new Error("this action is unavailable");
+    const { envelope, reveal } = await handle.submit();
+    const reply = await submitCatalogOp(envelope, "take the payment");
+    revealCeremonySecret(reveal, reply);
+    toast("Took " + money(amountCents) + " from " + who + ".", true);
+    setTimeout(loadFrontDesk, 700);
+  } catch (e) {
+    // See handleWriteOffDebt's own catch: e.rejected (submitCatalogOp) marks
+    // a CONFIRMED non-commit — the payment cap, AuthDenied — whose message
+    // already says exactly why, toasted bare. Anything else is a
+    // transport/unknown throw with an ambiguous landing.
+    if (e.rejected) {
+      toast(e.message, false);
+    } else {
+      toast("Could not confirm the payment reached the server — it may have landed; check the ledger before trying again. " + e.message, false);
+    }
+    btn.disabled = false;
+  }
 }
 
 // handleWriteOffDebt forgives a debtor's balance — a staff-only
@@ -1591,6 +1750,7 @@ function wireArrearsActions(list) {
 // refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — renderFrontDeskArrears only lists non-zero-balance leases (frontdesk-balances) and only draws the writeoff-debt-btn on the debtor branch (row.balanceCents >= 0); a zero-balance lease never appears in the arrears list at all
 // refusal-courtesy: CreditCafeAccount/WriteOffExceedsBalance: cap — amountCents is prefilled to exactly row.balanceCents (the balance shown) into a detached, never-rendered descriptor mount (renderOpForm(row, context, document.createElement("div")))
 // refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: unreachable — this function always submits reason: "waiver" (post_entry, packages/cafe-ledger/scripts.go); the reason=="waiver" branch raises WriteOffExceedsBalance first, so the plain PaymentExceedsBalance fail below it is never reached from here
+// refusal-courtesy: CreditCafeAccount/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — this function's context.prefill never sets tabRef (the Weaver-only field only cafeTabSettlement's missing_payment dispatch sets); require_counter_payment (packages/cafe-ledger/scripts.go) only runs when payload.tabRef is present
 async function handleWriteOffDebt(btn) {
   const accountKey = btn.getAttribute("data-account");
   const amountCents = parseInt(btn.getAttribute("data-amount"), 10);
@@ -1645,6 +1805,7 @@ async function handleWriteOffDebt(btn) {
 // refusal-courtesy: PayoutCafeCredit/PayoutExceedsCredit, PayoutExceedsCash: cap — amountCents is prefilled to exactly -row.balanceCents (the credit shown) into a detached, never-rendered descriptor mount (renderOpForm(row, context, document.createElement("div"))), so the submitted amount never exceeds the credit; and the script holds credit <= cashCents (a credit is only ever posted from cash paid in), so an amount within the credit is within the cash too
 // refusal-courtesy: PayoutCafeCredit/RefundExceedsCharge, RefundExceedsPaid: unreachable — PayoutCafeCredit calls post_entry(..., allow_reverses_ref=False, ...) (packages/cafe-ledger/scripts.go); the reversesRef branch only runs when allow_reverses_ref is True
 // refusal-courtesy: PayoutCafeCredit/NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: unreachable — PayoutCafeCredit calls post_entry(state, op, "debit", ...) (packages/cafe-ledger/scripts.go); is_payment requires entry_type == "credit", so the whole is_payment block these codes live in never runs for a debit
+// refusal-courtesy: PayoutCafeCredit/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — PayoutCafeCredit calls post_entry(..., allow_tab_ref=False, ...) and refuses any payload.tabRef before reaching post_entry at all (packages/cafe-ledger/scripts.go); require_counter_payment never runs
 async function handlePayoutCredit(btn) {
   const accountKey = btn.getAttribute("data-account");
   const amountCents = parseInt(btn.getAttribute("data-amount"), 10);
@@ -1690,7 +1851,9 @@ async function handlePayoutCredit(btn) {
 }
 
 function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
-  const id = "settle-" + t.tabKey.replace(/[^a-zA-Z0-9]/g, ""); // markup-safe: stripped to [a-zA-Z0-9], nothing else survives
+  const sanitized = t.tabKey.replace(/[^a-zA-Z0-9]/g, ""); // markup-safe: stripped to [a-zA-Z0-9], nothing else survives
+  const id = "settle-" + sanitized;
+  const payId = "settle-pay-" + sanitized;
   const balanceBadge = frontDeskBalanceBadge(balance);
   const classBadge = booking
     ? '<div class="meta">🧘 Booked: ' + escapeHtml(booking.sessionName || "class") + " · " + escapeHtml(localDateTime(booking.startsAt)) + "</div>"
@@ -1720,7 +1883,11 @@ function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
     classBadge +
     leaseLine +
     visitBadge +
-    '<div class="card-actions"><button id="' + id + '" class="danger">Settle</button></div>' +
+    '<div class="card-actions"><button id="' + id + '" class="danger">Settle</button>' +
+    (t.totalCents > 0
+      ? '<button id="' + payId + '" class="danger">Settle &amp; pay ' + money(t.totalCents) + "</button>"
+      : "") +
+    "</div>" +
     "</div>"
   );
 }
@@ -1988,10 +2155,12 @@ async function loadResident() {
 // refusal-courtesy: Charge/ItemUnavailable: disable — menuOptions renders a sold-out item (available === false) inside a disabled "Sold out today" optgroup on the self-order-form select
 // refusal-courtesy: Charge/TabNotOpen: hide — self-order-form only renders inside the `if (open)` branch
 // refusal-courtesy: Settle/TabNotOpen: hide — resident-settle-btn only renders inside the `if (open)` branch
+// refusal-courtesy: Settle/PaidMismatchesTab: unreachable — resident-settle-btn submits no paidCents, and the script only raises the code when the field is present
 // refusal-courtesy: CreditCafeAccount/InvalidState, NoCreditToPayOut, PayoutExceedsCash, PayoutExceedsCredit, RefundExceedsCharge, RefundExceedsPaid: see handleWriteOffDebt
 // refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — both #record-payment-form (desk) and #self-pay-form (resident) render only when ledger.accountKey exists and (ledger.balanceCents||0) > 0
 // refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: cap — both forms' amount input is prefilled to ledger.balanceCents/100 and its `max` is set to the same value
 // refusal-courtesy: CreditCafeAccount/WriteOffExceedsBalance: unreachable — neither #record-payment-form's nor #self-pay-form's submit handler ever sets prefill.reason, so it defaults server-side to "payment" (post_entry, packages/cafe-ledger/scripts.go); the reason=="waiver" branch that raises WriteOffExceedsBalance never runs from either form here
+// refusal-courtesy: CreditCafeAccount/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — neither #record-payment-form's nor #self-pay-form's submit handler ever sets prefill.tabRef (the Weaver-only field only cafeTabSettlement's missing_payment dispatch sets); require_counter_payment (packages/cafe-ledger/scripts.go) only runs when payload.tabRef is present
 async function renderResident() {
   const body = document.getElementById("resident-body");
   const selfMode = !isFrontDesk();
@@ -2104,9 +2273,11 @@ async function renderResident() {
     );
   }
   if (pendingSettled) {
+    const paidLine = counterPaymentLine(pendingSettled);
     parts.push(
       '<div class="panel"><h2>Pending posting</h2><p class="amount">' + money(pendingSettled.totalCents) +
-      '</p><p class="meta">Settled ' + escapeHtml(localDateTime(pendingSettled.settledAt)) + " — posting to the ledger shortly</p>" +
+      '</p><p class="meta">Settled ' + escapeHtml(localDateTime(pendingSettled.settledAt)) + " — posting to the ledger shortly" +
+      (paidLine ? " · " + escapeHtml(paidLine) : "") + "</p>" +
       chargeLinesBlock(pendingSettled.lines, pendingSettled.itemsMemo, null, false) + "</div>"
     );
   }
@@ -2153,17 +2324,21 @@ async function renderResident() {
             const reversed = r.reversesKey ? rowByKey[r.reversesKey] : null;
             const refunded = refundedByCharge[r.transactionKey] || 0;
             const remaining = (r.amountCents || 0) - refunded;
-            // Only a charge the tab-settlement playbook posted carries a
-            // tabKey, and only such a charge is a café purchase there is
-            // anything to give back for — a hand-posted debit has no counter
-            // transaction behind it. Staff-only: RefundCafeCharge is granted
-            // to operator/frontOfHouse and to no consumer at any scope. A
-            // charge already given back in full is not offered again: the
-            // remaining amount is what the script will accept, so an
-            // exhausted charge has no refund left to start. A PayoutCafeCredit
-            // debit carries no tabKey either (it settles a credit in cash, not
-            // a café purchase), so this predicate already excludes it — a
-            // payout is not itself refundable.
+            // A tabKey is no longer proof of refundability by itself: the
+            // tab-settlement playbook posts it on BOTH sides of a settle
+            // that took cash — the debit (missing_charge) AND the counter
+            // payment credit (missing_payment) — so the type === "debit"
+            // guard below is load-bearing, not redundant with !!r.tabKey. A
+            // hand-posted debit carries no tabKey (no counter transaction
+            // behind it) and so is excluded the same way. Staff-only:
+            // RefundCafeCharge is granted to operator/frontOfHouse and to no
+            // consumer at any scope. A charge already given back in full is
+            // not offered again: the remaining amount is what the script
+            // will accept, so an exhausted charge has no refund left to
+            // start. A PayoutCafeCredit debit carries no tabKey either (it
+            // settles a credit in cash, not a café purchase), so this
+            // predicate already excludes it — a payout is not itself
+            // refundable.
             const refundable = !selfMode && r.type === "debit" && !!r.tabKey && remaining > 0;
             const receipt = receiptLines(r, tabByKey);
             return (
@@ -2464,6 +2639,7 @@ async function renderResident() {
 // refusal-courtesy: RefundCafeCharge/RefundExceedsCharge: cap — renderResident only draws the refund-charge-btn when remaining (a charge's amountCents minus refundedByCharge, both read off this same ledger list) is > 0, and this function prefills amountCents to that remaining value and sets the field's max to it, so a larger typed amount never leaves the form
 // refusal-courtesy: RefundCafeCharge/RefundExceedsPaid: none — cashCents (the account's cash-floor) is never projected to cmd/cafe-app's read models (ledger.go), so no field here can bound a refund against it
 // refusal-courtesy: RefundCafeCharge/NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: unreachable — RefundCafeCharge calls post_entry(..., allow_reverses_ref=True, ...) (packages/cafe-ledger/scripts.go); is_payment requires not allow_reverses_ref, so the whole is_payment block these codes live in never runs
+// refusal-courtesy: RefundCafeCharge/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — RefundCafeCharge calls post_entry(..., allow_tab_ref=False, ...) and refuses any payload.tabRef before reaching post_entry at all (packages/cafe-ledger/scripts.go); require_counter_payment never runs
 async function wireRefundCharge(accountKey, onDone) {
   const host = document.getElementById("refund-form-host");
   if (!host) return;
