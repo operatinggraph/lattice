@@ -131,7 +131,9 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   project no date-only column. Mechanized as the mandated pin shape, not a gate (no producer-side type marks a
   column date-only, so the set is not derivable): `cmd/loftspace-app/lease_term_ui_test.go` evaluates the shipped
   helpers under a pinned `time.Local = America/Los_Angeles` with a positive vector proving the zone reaches goja's
-  Date; an app that gains a date-only column adds its helper to that shape.
+  Date; an app that gains a date-only column adds its helper to that shape. Third sighting (clinic `amendedAt`,
+  2026-09-16, caught cold): a real instant rendered by its UTC slice on the card and locale in the modal, beside a
+  locale `documentedAt` on the same line — the inverse error; an instant renders locale everywhere.
 - **A new terminal state on a row is a census of every status switch and render gate in the app, not of the banner
   that named it** — `ended` reached the applicant banner and the terms panel, and missed `applicationStatus` (the
   by-unit console read an ended tenant as "Approved — leasing" and dealt it a ledger panel), the decide gate

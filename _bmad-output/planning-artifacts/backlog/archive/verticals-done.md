@@ -2,6 +2,9 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-14 · `7a2809b8` · A follow-up is addressed only by a later visit with its own provider — `followUpReminders` folds `addressedAt` over the patient's visits and gates on it; `hasLaterVisit` carries the same conjuncts, goja-pinned; live.
+- 2026-09-14 · `7a2809b8` · A clinical note needs a held visit — `RecordEncounter` reads `.schedule` + `.status` at every dispatcher and refuses `VisitNotHeld` (cancelled / noShow) and `NotYetStarted`; the phantom 09-15 instance refused live.
+- 2026-09-14 · `7a2809b8` · Recorded arrival is never swept to no-show — `pastDueAppointments`' gap and `MarkPastDueNoShow` leave `checkedIn` alone (the lapse still records); the worklist's "Arrived, never closed" is the desk's observer.
 - 2026-09-14 · `52212ced` · A thrown irreversible submit says the write may have landed — six hand-built catches stage `sent`/`confirmed`; the two-zones class censused 0/39 live, LoftSpace date pins run under a pinned LA zone.
 - 2026-09-14 · `71912135` · A lost application is a recorded fact — `RecordApplicationLoss` writes `.decision = lost` off `missing_lossRecorded`; every liveness gate, `SignLease` and every landlord surface read it; 52/52 live rivals recorded.
 - 2026-09-14 · `4fe3ecef` · A losing applicant is told the unit went to someone else — both application read lenses project `lost_to_rival`; banner + landlord row read it; expired and lost-application tasks read-only; all 52 live rivals read it.

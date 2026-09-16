@@ -97,14 +97,21 @@ op scripts, lenses and the app, each on a shipped pattern named below).
    followUpRequested, followUpDate?}` — the follow-up signals are the payload's, as today (the form re-sends them;
    `followUpReminders` keeps reading the same two keys). **An amendment that changes nothing** — same three texts,
    same `followUpRequested`, same normalized `followUpDate` — writes nothing and emits nothing (`{"mutations": []}`,
-   `MarkPastDueNoShow`'s idiom): "amended" is a claim that something changed. **Past `MAX_ENCOUNTER_AMENDMENTS = 50`**
-   superseded versions the op refuses `AmendmentLimit` (a bounded aspect; 50 × 12 KB stays under the NATS payload).
+   `MarkPastDueNoShow`'s idiom): "amended" is a claim that something changed. **A follow-up-only change is not a text
+   amendment** (amended 2026-09-16, review): it rewrites `.documentation`'s follow-up fields, preserves `amendedAt`, and
+   leaves `.encounter` out of the batch — `superseded` grows and `amendedAt` moves only when one of the three texts
+   differs. **Each text is bounded at 4,000 bytes** (`InvalidArgument`, the descriptor's `maxLength`, the form's
+   `maxlength` — the DDL declared the bound and nothing enforced it); **past `MAX_ENCOUNTER_AMENDMENTS = 40`**
+   superseded versions the op refuses `AmendmentLimit` (41 × ≤12,000 B plaintext ≈ 492 KB, ≈ 660 KB enveloped, under
+   NATS's 1 MiB `max_payload`).
    Both aspects still land in one batch; `.documentation`'s bare update is OCC-conditioned on the hydrated revision
    because it is declared, so two concurrent amendments cannot both build on the same prior. `documentedAt` is now
    "when the visit was FIRST documented"; `amendedAt` "when the current text was recorded" — the DDL text says so.
 2. **Projection: `amendedAt` only.** `clinicAppointments` (NATS KV), `clinicAppointmentsRead` and
-   `providerAppointmentsRead` (Postgres, `amended_at text`) gain the column beside `documentedAt`; `/api/my-appointments`,
-   `/api/my-schedule` and the unprotected decode thread `amendedAt`. `clinicEncountersRead` is **untouched**: a
+   `providerAppointmentsRead` (Postgres, `amended_at text`) gain the column beside `documentedAt`; `/api/my-appointments` and
+   `/api/my-schedule` thread `amendedAt`; the unprotected `/api/appointments` availability decode does NOT — it is
+   PHI-minimized to `{appointmentKey, startsAt, endsAt, status}` by design (D1.5) and no consumer reads more (amended
+   2026-09-16, build). `clinicEncountersRead` is **untouched**: a
    secure column over `superseded` would Terminal on every pre-fire row (the decryptor's missing-field rule), and the
    provider reads the current text; the history is retained in the record, not rendered — a later fire that wants
    to render it adds a column with a backfill, which is its own design. A count column is not added either
@@ -118,8 +125,9 @@ op scripts, lenses and the app, each on a shipped pattern named below).
 4. **`RescheduleAppointment` returns a `confirmed` / `checkedIn` visit to `scheduled`.** After the terminal refusal,
    when `cur_val in ("confirmed", "checkedIn")` the batch adds `make_aspect_upsert(appt_key, "status",
    "appointmentStatus", {"value": "scheduled"})` — a bare update on a declared key (OCC on the hydrated revision), the
-   note dropped (it belongs to the transition that recorded it; neither of these carries a fee). `scheduled` and
-   absent stay untouched. The `clinic.appointmentRescheduled` event gains `statusReset: true` on that arm. The
+   note dropped (it belongs to the transition that recorded it; neither of these carries a fee). A live `scheduled` is re-stamped
+   unchanged (no `statusReset`) so a self confirm hydrated on the OLD schedule conflicts under OCC instead of landing
+   `confirmed` on the moved visit (amended 2026-09-16, review); absent and tombstoned stay untouched. The `clinic.appointmentRescheduled` event gains `statusReset: true` on that arm. The
    patient-self path is the same: a confirmed visit the patient moves needs confirming again for its new date, which is
    what the re-armed reminder asks. `pastDueAppointments` then re-opens on the next projection (its comment's own
    promise), so a moved visit that is missed is swept and billed like any other.
@@ -132,8 +140,9 @@ op scripts, lenses and the app, each on a shipped pattern named below).
    binding and the current-status read: `cur_val == "checkedIn"` → `AuthDenied` (the desk has already checked the
    patient in; a self write must not undo it — the same "write into someone else's building" posture the staff
    guard names); `self_visit_clock(...) == "started"` → `VisitStarted` (a visit cannot be confirmed after it began;
-   `late` is fine — confirming inside 24 h is exactly what the reminder invites). A re-confirm is idempotent
-   (`confirmed → confirmed`). The self-confirm reads `.schedule` for the clock — declared `(a)` by the self dispatcher
+   `late` is fine — confirming inside 24 h is exactly what the reminder invites). A re-confirm (`confirmed → confirmed`) is the
+   EMPTY batch — nothing re-stamped, no event — and a self confirm never carries `note` (the payload's is ignored): a
+   patient's write must not clear or replace the desk's note (amended 2026-09-16, review). The self-confirm reads `.schedule` for the clock — declared `(a)` by the self dispatcher
    as the descriptor already does. No fee, no cells move. Staff paths unchanged. The grant note and both descriptor
    descriptions read "cancel or confirm".
 7. **"Confirm" on the patient card.** The self card gains a primary "Confirm" button when `a.status === "scheduled"`
@@ -142,8 +151,9 @@ op scripts, lenses and the app, each on a shipped pattern named below).
    `.schedule`, both endpoint links and the `identifiedBy` probe — the descriptor's own declaration, per hat — so the
    self cancel stops leaning on the lazy seam too. The toast says "Appointment confirmed." (`STATUS_PAST` already
    carries it); a `confirmed` self card shows no Confirm, and its Cancel / Reschedule stay as they are.
-8. **Version + text.** clinic-domain `0.36.2 → 0.37.0` (`Version` + manifest); the `.encounter` and `.documentation`
-   DDL descriptions, field descriptions and examples say the new shape; `RecordEncounter`'s `ExpectedOutcome` says
+8. **Version + text.** clinic-domain `0.36.2 → 0.37.0` (`Version` + manifest); the `.status` DDL's `PermittedCommands`
+   gains `RescheduleAppointment` (and the verify script's `ddlCheck` with it — a third writer is a DDL fact, missed by
+   the brief); the `.encounter` and `.documentation` DDL descriptions, field descriptions and examples say the new shape; `RecordEncounter`'s `ExpectedOutcome` says
    record-or-amend; the `RescheduleAppointment` description says a confirmed / checked-in visit returns to scheduled;
    `SetAppointmentStatus`'s says a patient may cancel or confirm.
 
@@ -223,7 +233,32 @@ op scripts, lenses and the app, each on a shipped pattern named below).
    to the lens column at the producer) · #5 (`.status`: three writers already, each on its own verb — the reset arm
    fires only on a value no other writer is racing to set) · #6 (the self-cancel path's undeclared `identifiedBy`
    read is debt this fire stops mirroring on the self path).
-6. **Adjacent finds:** none beyond the self-path declaration debt above (absorbed).
+6. **Adjacent finds:** the self-path declaration debt above (absorbed); `MarkPastDueNoShow` carries no clock
+   conjunct of its own, so a sweep dispatch racing a reschedule of a past-end visit committed `noShow` onto the new
+   future date (review, 2026-09-16 — absorbed as this fire's own unit: a dispatch whose `submittedAt` precedes the
+   appointment's `endsAt` is the empty batch).
 7. **Non-goals:** rendering the superseded history (verdict 2); a provider-facing "restore prior version";
    refusing Reschedule on a checked-in visit; a self `checkedIn`; a desk "confirm on the patient's behalf" (staff
    already set any status); the reminder's own text; the other Clinic rows.
+
+### Build note (2026-09-16)
+
+Shipped `99615546` (merge of `08888209`; CI `35082306746` green); brief `cf7cf954`. Two cold reviewers (capability
+plane · edge-case/acceptance): no BLOCKING; the five SHOULD-FIX and two absorbed finds are the dated amendments in the
+verdict above (the self re-confirm as the empty batch with `note` ignored; a follow-up-only change is not an amendment;
+the 4,000-byte text bound and the cap at 40; the `scheduled` re-stamp; `MarkPastDueNoShow`'s clock; the `pastDueAppointments`
+playbook declaring `.schedule` required + `.status` optional, clinic-reminders 0.12.2, so the sweep's write is conditioned
+live — the op's `(a)` annotations had named a declaration only the test harness made; `amendedAt` rendered locale at
+both sites). Classification: design-gap ×3 (re-confirm write, follow-up-only, unenforced bound), implementation-bug ×2
+(zone split, sweep clock — pre-existing, absorbed), brief-gap ×2 (`.status`'s third writer is a `PermittedCommands` +
+`ddlCheck` fact; the playbook declaration), convention ×2 (a false `unreachable`, stale "cancelled only" text) — each
+a sighting on an existing `_packages.md` / `vertical-apps.md` dossier entry, none a second gate-shaped sighting.
+Claims, not pins: an undeclared submitter still amends (the harness's read-drift guard admits no unbaselined live read;
+`connKVReader` and step 4 share `decryptSensitiveDoc`). Live on the shared stack (clinic-domain 0.37.0 + clinic-reminders
+0.12.2 diff-applied; `clinicAppointmentsRead` / `providerAppointmentsRead` latched in the install→provision gap and were
+resumed as the Loupe operator; `bin/clinic-app` cycled): a documented 2026-08-26 visit amended as the operator reads
+`documentedAt 2026-08-26T23:07:05Z · amendedAt 2026-09-16T09:59:55Z` on all three lenses; a visit checked in with a note
+and moved to 2026-10-06 reads `{value: scheduled}` and re-projects; its patient confirmed it through the Gateway with a
+payload `note` — `.status = {value: confirmed}` alone — a re-confirm left revision 504907 untouched, and a self
+`checkedIn` was refused. The pre-split plaintext census the backfill script's header now states: 9 `.encounter` rows
+live, all enveloped.

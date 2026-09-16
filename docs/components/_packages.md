@@ -578,7 +578,11 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   non-null (café tab `missing_charge` carries `accountKey <> null`); anything else reached by a walk is resolved by
   the op from state, and one lens pin seeds the anchor with the walk missing. Check (Hub): a declared hub names the
   identity the SCRIPT walks from, and the staff-leg vector resolves it with the payload, not the actor —
-  `grep 'Hub: "{actor}"'` on every op whose script walks from a payload key.
+  `grep 'Hub: "{actor}"'` on every op whose script walks from a payload key. Sighting (clinic `pastDueAppointments`,
+  2026-09-16, caught cold): a script read annotated `(a) declared in contextHint.reads` whose ONLY dispatcher is a
+  playbook declaring `Reads: [row.entityKey]` ran on the live seam — the bare `.status` update landed unconditioned.
+  Check (Reads): for an op whose sole dispatcher is a playbook, every `(a)`/`(d)` annotation resolves to a
+  `Reads`/`OptionalReads` entry on that playbook, never to the test harness's hand declaration.
 - **A gap's budget and cadence are derived from its WHOLE loop, not one arm or one window** — a cap summed over
   one arm of a multi-relation sweep under-sizes it (erasure residue caps, 2026-08-24, 2× and 3×); a gap that
   re-opens on a recorded clock lapse mints a successor per window while the prior instance stays live (lease-signing
@@ -621,7 +625,12 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   list every op that can reach the walk and the states each leaves the anchor in — a probe on one exists on all or
   the exclusion is stated per pair; nothing runs before the walk that proves the caller may name the target.
   Second minter: `SupersedeClause` re-mints `.terms` from its payload, so a `purpose` the deposit gaps read was dropped
-  or changed on supersede (semantic-contracts, 2026-09-15, caught cold — now equal-or-omitted). Mechanize on the next sighting.
+  or changed on supersede (semantic-contracts, 2026-09-15, caught cold — now equal-or-omitted). Third minter: a self grant
+  widened to `confirmed` walked the fee and the clock but not the FIELDS the shared write path stamps — a patient's
+  re-confirm re-stamped `.status` and carried a payload `note` over the desk's (clinic, 2026-09-16, caught cold); the
+  same fire's Weaver-dispatched terminal op (`MarkPastDueNoShow`) had no clock of its own and swept `noShow` onto a
+  just-moved future date. A same-value re-set on a widened leg is the EMPTY batch; a widened leg lists every field the
+  write stamps. Mechanize on the next sighting.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
@@ -655,6 +664,8 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   UTC calendar day. Sightings (loftspace deposit, 2026-09-15, caught cold): `.status.state = completed` read as "charged"
   when a termed monthly clause also completes on its final period — the archetype is a conjunct; `depositHeldCents`
   (charged − returned, custody) read as "unpaid" on the balance line — the ledger attributes no payment to a clause.
+  Sighting (clinic `RecordEncounter`, 2026-09-16, caught cold): `amendedAt` = "when the current TEXT was recorded" was
+  stamped on a follow-up-only change — name the fact a stamp records and stamp it only when that fact changed.
 - **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from** — `mint_clause` wrote
   `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires; the inbound walk bound fine, a
   clause-anchored `(c)-[:governs]->(l:leaseapp)` never could (`adjacency/store.go` `OtherType: dstType`). Check: a
@@ -668,7 +679,10 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   that writer's validation and refuse the malformed shapes THERE (`InvalidTerms`), storing the normalized value; the
   reader keeps a named refusal for rows that predate the check. Second sighting: `rentAmount` / `depositAmount` /
   `requestedRent` became whole-cent-load-bearing when `mint_clause` gained `whole_cents` (2026-09-15, caught cold) —
-  the three sources now refuse more than two decimals.
+  the three sources now refuse more than two decimals. Third sighting (clinic `.encounter`, 2026-09-16, caught cold):
+  a DDL `InputSchema` `maxLength` is declarative — nothing enforces it — and a history cap's byte arithmetic leaned on
+  it; the script now refuses past 4,000 bytes. A bound a design counts on is enforced in the script, never read off
+  the schema.
 - **A mirror that drops one of the precedent's checks or branches drops the INVARIANT it enforced** — clinic-ledger's
   `reversesRef` kept café's liveness check and dropped its ownership check (a desk waiver could disarm another
   patient's `missing_reversal`; the descriptor field then reached the self leg, 2026-09-14); wellness's arrears
