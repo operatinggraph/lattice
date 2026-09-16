@@ -790,21 +790,26 @@ func TestArrears_LegacyAccountOnlyEverMarksStale(t *testing.T) {
 }
 
 // TestArrears_HistoryPastTheBudgetDegrades (k) is the exhaustion path, and the
-// claim is that it is a DEGRADE and not a stop. The replay budget
-// (ARREARS_PAGE_LIMIT × ARREARS_MAX_PAGES) is fixed by the Processor's script
-// wall, so an account can genuinely outrun it, and the op then cannot name a
-// head. A refusal there would be permanent and SILENT: the only thing that
-// re-drives this op is the convergence gap the account's own row opens, and a
-// rejected op never closes it, so Weaver would re-dispatch the same doomed
-// evaluation on every window — no reminder, no error anyone reads, forever.
+// claim is that it is a DEGRADE and not a stop. The replay is paged — one
+// kv.Links page of ARREARS_PAGE_LIMIT entries per dispatch, the running
+// aggregate checkpointed on the account between pages — and capped at
+// ARREARS_MAX_PAGES pages, so an account can genuinely outrun it, and the op
+// then cannot name a head. A refusal there would be permanent and SILENT: the
+// only thing that re-drives this op is the convergence gap the account's own
+// row opens, and a rejected op never closes it, so Weaver would re-dispatch the
+// same doomed evaluation on every window — no reminder, no error anyone reads,
+// forever.
 //
-// So the op records the exhaustion instead. It is ACCEPTED, it sends nothing, it
-// leaves everything already recorded untouched (a reminder already sent stays
-// recorded as sent; a due date already armed is not erased by an evaluation that
-// could not read the history), and it drops stale — which the lens pin
-// TestClinicArrears_HistoryTooLongGoesQuiet turns into silence. The second half
-// is the way back out: the next posted entry drops the flag and re-marks the
-// state stale, which re-opens the gap for exactly one more attempt.
+// So the op records the exhaustion instead, on the dispatch AFTER the last
+// in-budget page. It is ACCEPTED, it sends nothing, it leaves everything already
+// recorded untouched (a reminder already sent stays recorded as sent; a due
+// date already armed is not erased by an evaluation that could not read the
+// history), it records the budget it exhausted, and it drops stale and the
+// checkpoint — which the lens pin TestClinicArrears_HistoryTooLongGoesQuiet
+// turns into silence. Every page before it carried the episode record and sent
+// nothing too. The second half is the way back out: the next posted entry
+// drops the flag and its budget and re-marks the state stale, which re-opens
+// the gap for exactly one more attempt.
 func TestArrears_HistoryPastTheBudgetDegrades(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsbudget")
@@ -816,8 +821,8 @@ func TestArrears_HistoryPastTheBudgetDegrades(t *testing.T) {
 	// payment would be the re-arming entry there.
 	acctKey := seedLegacyAccount(t, ctx, conn, "CLARREARSBGTACCTHJKM", patientKey)
 
-	// One more posted entry than the budget, so the walk ends with a live
-	// cursor and the budget genuinely runs out.
+	// One more posted entry than the budget, so the last in-budget page ends
+	// with a live cursor and the budget genuinely runs out.
 	overBudget := clinicledger.ArrearsPageLimit*clinicledger.ArrearsMaxPages + 1
 	for i := 0; i < overBudget; i++ {
 		seedEntryAt(t, ctx, conn, acctKey, budgetTxID(i), "debit", 100, "2026-05-01T12:00:00Z", "")
@@ -831,31 +836,57 @@ func TestArrears_HistoryPastTheBudgetDegrades(t *testing.T) {
 		"evaluatedAt": "2026-08-17T09:00:00Z",
 		"stale":       true,
 	})
-
-	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "clarrbgteval00000001",
-		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
-
-	if notif := arrearsNotification(t, ctx, conn, reqID); notif != nil {
-		t.Fatalf("an evaluation that could not read the history must send nothing — it does not know the head: %+v", notif)
+	carried := map[string]string{
+		"dueAt":       "2026-08-16T09:00:00Z",
+		"remindedFor": "2026-08-16T09:00:00Z",
+		"sentAt":      "2026-08-17T09:00:00Z",
 	}
-	data := arrearsData(t, ctx, conn, acctKey)
-	if flag, _ := data["historyTooLong"].(bool); !flag {
-		t.Fatalf("the exhaustion must be RECORDED, not raised — a refusal is a permanent silent stop: %+v", data)
+
+	// Drive one dispatch per page until the degrade lands; every page before
+	// it is a checkpoint that carries the record and sends nothing.
+	dispatches := 0
+	var data map[string]any
+	for dispatches < clinicledger.ArrearsMaxPages+2 {
+		dispatches++
+		_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "clarrbgteval"+strconv.Itoa(10000000+dispatches),
+			bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+		if notif := arrearsNotification(t, ctx, conn, reqID); notif != nil {
+			t.Fatalf("dispatch %d: an evaluation that has not read the whole history must send nothing — it does not know the head: %+v", dispatches, notif)
+		}
+		data = arrearsData(t, ctx, conn, acctKey)
+		for field, want := range carried {
+			if got, _ := data[field].(string); got != want {
+				t.Fatalf("dispatch %d: %s = %q, want %q carried untouched — a page that read nothing whole must erase nothing", dispatches, field, got, want)
+			}
+		}
+		if flag, _ := data["historyTooLong"].(bool); flag {
+			break
+		}
+		replay, _ := data["replay"].(map[string]any)
+		if replay == nil {
+			t.Fatalf("dispatch %d: neither a checkpoint nor the degrade: %+v", dispatches, data)
+		}
+		if got, _ := replay["pages"].(float64); int(got) != dispatches {
+			t.Fatalf("dispatch %d: replay.pages = %v, want %d — one page per dispatch", dispatches, replay["pages"], dispatches)
+		}
+		if got, _ := data["evaluatedAt"].(string); got != "2026-08-17T09:00:00Z" {
+			t.Fatalf("dispatch %d: evaluatedAt = %q — a page is not an evaluation, so the last completed one's stamp stands", dispatches, got)
+		}
+	}
+	if dispatches != clinicledger.ArrearsMaxPages+1 {
+		t.Fatalf("the degrade landed on dispatch %d, want %d — every in-budget page is consumed first, then one more dispatch records the exhaustion", dispatches, clinicledger.ArrearsMaxPages+1)
+	}
+	if got, _ := data["historyBudget"].(float64); int(got) != clinicledger.ArrearsPageLimit*clinicledger.ArrearsMaxPages {
+		t.Fatalf("historyBudget = %v, want %d — the budget the flag was recorded under, so a later larger one can tell it apart", data["historyBudget"], clinicledger.ArrearsPageLimit*clinicledger.ArrearsMaxPages)
+	}
+	if _, ok := data["replay"]; ok {
+		t.Fatalf("the degrade ends the replay, so the checkpoint must not survive it — a surviving phase would hold a gap open under the flag: %+v", data)
 	}
 	if _, ok := data["stale"]; ok {
 		t.Fatalf("stale asks for a recomputation this op has just attempted; re-asking re-opens the gap the degrade closes: %+v", data)
 	}
 	if got, _ := data["evaluatedAt"].(string); got != "2026-08-22T09:00:00Z" {
-		t.Fatalf("evaluatedAt = %q, want the evaluation's own submittedAt", got)
-	}
-	for field, want := range map[string]string{
-		"dueAt":       "2026-08-16T09:00:00Z",
-		"remindedFor": "2026-08-16T09:00:00Z",
-		"sentAt":      "2026-08-17T09:00:00Z",
-	} {
-		if got, _ := data[field].(string); got != want {
-			t.Fatalf("%s = %q, want %q carried untouched — an evaluation that read nothing must erase nothing", field, got, want)
-		}
+		t.Fatalf("evaluatedAt = %q, want the degrading evaluation's own submittedAt", got)
 	}
 
 	// The way back out: one more posted entry, one more attempt.
@@ -864,11 +895,480 @@ func TestArrears_HistoryPastTheBudgetDegrades(t *testing.T) {
 	if _, ok := after["historyTooLong"]; ok {
 		t.Fatalf("a posted entry must drop the flag, or the row stays quiet for the life of the account: %+v", after)
 	}
+	if _, ok := after["historyBudget"]; ok {
+		t.Fatalf("and the budget recorded beside it — a budget with no flag records nothing: %+v", after)
+	}
 	if stale, _ := after["stale"].(bool); !stale {
 		t.Fatalf("and re-mark the state stale, which is what re-opens the gap for that one attempt: %+v", after)
 	}
 	if got, _ := after["sentAt"].(string); got != "2026-08-17T09:00:00Z" {
 		t.Fatalf("sentAt = %q — the send record is still carried across the re-arming entry", got)
+	}
+}
+
+// replayTxID encodes (prefix, i) as a valid 20-char NanoID whose first
+// character is `lead`, so a fixture can place an entry on a chosen page: the
+// postedTo enumeration pages the SORTED link keys, and the transaction id is
+// the first varying segment of lnk.clinictransaction.<id>.postedTo…, so ids
+// beginning 'A' precede every id beginning 'z'. i is encoded in the last three
+// characters over an alphabet that sorts in index order for i < 48.
+func replayTxID(lead byte, i int) string {
+	const safe = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+	n := len(safe)
+	return string(lead) + "CLREPLAYTXAHJKMN" + string([]byte{safe[i/(n*n)%n], safe[(i/n)%n], safe[i%n]})
+}
+
+// seedReplayAccount seeds a legacy account (no .balance — so a later posted
+// debit is a stale-marking write) and returns it.
+func seedReplayAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, label, acctID string) string {
+	t.Helper()
+	patientKey := createPatient(t, ctx, conn, cp, cons, label, "Riley Chen")
+	return seedLegacyAccount(t, ctx, conn, acctID, patientKey)
+}
+
+// arrearsReplay reads the checkpoint off the account's .arrears, or nil when
+// none is recorded.
+func arrearsReplay(t *testing.T, data map[string]any) map[string]any {
+	t.Helper()
+	replay, _ := data["replay"].(map[string]any)
+	return replay
+}
+
+// TestArrears_TwoPageHistoryCompletesInTwoDispatches is the resumable replay's
+// green bar: a history one entry longer than a page is evaluated EXACTLY across
+// two dispatches. The first consumes one page and records a checkpoint — phase
+// a, one page, a live cursor, the running aggregate — and nothing else: no
+// notification, no evaluatedAt (this account has never been evaluated, and a
+// page is not an evaluation). The second exhausts the enumeration, drops the
+// checkpoint, computes the FIFO head from the aggregate and, the head being
+// overdue, sends once. The head is the one a single-execution replay over the
+// same entries names: twenty-five charges a day apart and six payments of one
+// charge each, interleaved across the two pages, pay off the six oldest
+// charges wherever the payments sat in the walk, so the head is the seventh
+// charge.
+func TestArrears_TwoPageHistoryCompletesInTwoDispatches(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearstwopage")
+
+	acctKey := seedReplayAccount(t, ctx, conn, cp, cons, "clarrtwopat000000001", "CLARREARSTW2ACCTHJKM")
+
+	// 31 entries in id (= page) order: charges at i = 0..24, payments at the
+	// six slots 3, 9, 15, 21, 27, 30 — the last of them on the second page.
+	const pageLimit = clinicledger.ArrearsPageLimit
+	total := pageLimit + 1
+	paymentSlots := map[int]bool{3: true, 9: true, 15: true, 21: true, 27: true, 30: true}
+	day := 0
+	wantHead := ""
+	for i := 0; i < total; i++ {
+		if paymentSlots[i] {
+			seedEntryAt(t, ctx, conn, acctKey, replayTxID('B', i), "credit", 100, "2026-05-01T09:00:00Z", "")
+			continue
+		}
+		postedAt := time.Date(2026, 5, 1+day, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		if day == 6 {
+			wantHead = postedAt
+		}
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('B', i), "debit", 100, postedAt, "")
+		day++
+	}
+	if day != 25 || wantHead == "" {
+		t.Fatalf("fixture: %d charges seeded, want 25 with the seventh as the head", day)
+	}
+
+	// Dispatch 1: one page, a checkpoint, nothing else.
+	_, req1 := evaluateArrears(t, ctx, conn, cp, cons, "clarrtwoeval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	if notif := arrearsNotification(t, ctx, conn, req1); notif != nil {
+		t.Fatalf("a page is not an evaluation — nothing may be sent before the head is known: %+v", notif)
+	}
+	first := arrearsData(t, ctx, conn, acctKey)
+	replay := arrearsReplay(t, first)
+	if replay == nil {
+		t.Fatalf("a history longer than one page must leave a checkpoint: %+v", first)
+	}
+	if got, _ := replay["phase"].(string); got != clinicledger.ArrearsPhaseA {
+		t.Fatalf("replay.phase = %q, want %q — the first page opens missing_replay_a", got, clinicledger.ArrearsPhaseA)
+	}
+	if got, _ := replay["pages"].(float64); got != 1 {
+		t.Fatalf("replay.pages = %v, want 1", replay["pages"])
+	}
+	if got, _ := replay["cursor"].(string); got == "" {
+		t.Fatalf("replay.cursor must be the live cursor the next page resumes from: %+v", replay)
+	}
+	if _, ok := first["evaluatedAt"]; ok {
+		t.Fatalf("this account has never been evaluated and a page is not an evaluation, so no evaluatedAt may be stamped: %+v", first)
+	}
+	if _, ok := first["dueAt"]; ok {
+		t.Fatalf("no head is known mid-replay: %+v", first)
+	}
+	debits, _ := replay["debits"].(map[string]any)
+	if len(debits) != pageLimit-5 {
+		t.Fatalf("replay.debits carries %d charges after the first page, want %d (the page's 30 entries less its five payments)", len(debits), pageLimit-5)
+	}
+	if got, _ := replay["creditCents"].(float64); got != 500 {
+		t.Fatalf("replay.creditCents = %v after the first page, want 500 (five payments of 100)", replay["creditCents"])
+	}
+
+	// Dispatch 2: the enumeration is exhausted, the head is computed and sent for.
+	_, req2 := evaluateArrears(t, ctx, conn, cp, cons, "clarrtwoeval00000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-23T09:00:00Z", processor.OutcomeAccepted)
+	final := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, final) != nil {
+		t.Fatalf("the finalize page writes no checkpoint: %+v", final)
+	}
+	if got, _ := final["dueAt"].(string); got != dueFor(t, wantHead) {
+		t.Fatalf("dueAt = %q, want %q — six payments retire the six oldest charges whatever page they sat on, so the seventh charge is the head", got, dueFor(t, wantHead))
+	}
+	if got, _ := final["evaluatedAt"].(string); got != "2026-08-23T09:00:00Z" {
+		t.Fatalf("evaluatedAt = %q, want the finalizing dispatch's own submittedAt", got)
+	}
+	if got, _ := final["sentAt"].(string); got != "2026-08-23T09:00:00Z" {
+		t.Fatalf("sentAt = %q, want the finalizing dispatch's own submittedAt — the head is overdue and nothing has gone out", got)
+	}
+	notif := arrearsNotification(t, ctx, conn, req2)
+	if notif == nil {
+		t.Fatal("the finalize page must send for an overdue head exactly as a one-page evaluation does")
+	}
+	params, _ := notif["params"].(map[string]any)
+	if got, _ := params["balanceCents"].(float64); got != 1900 {
+		t.Fatalf("params.balanceCents = %v, want 1900 (25 × 100 − 6 × 100) — the aggregate's balance is the account's", got)
+	}
+
+	// A re-dispatch over the finished history: one page again, and it fits, so
+	// it finalizes in place and sends nothing more.
+	_, req3 := evaluateArrears(t, ctx, conn, cp, cons, "clarrtwoeval00000003",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-24T09:00:00Z", processor.OutcomeAccepted)
+	if arrearsNotification(t, ctx, conn, req3) != nil {
+		t.Fatal("the episode is already reminded for")
+	}
+	if got, _ := arrearsReplay(t, arrearsData(t, ctx, conn, acctKey))["phase"].(string); got != clinicledger.ArrearsPhaseA {
+		t.Fatalf("a fresh evaluation over a two-page history starts again at phase %q, got %q", clinicledger.ArrearsPhaseA, got)
+	}
+}
+
+// TestArrears_ReversalOnAnEarlierPageNetsItsCharge proves the aggregate's
+// netting is exact ACROSS pages — the reason the checkpoint keys its debits and
+// reversals by transaction id. The reversed charge sits on page 1 and the
+// credit that reverses it on page 2 (ids chosen to sort on opposite sides of
+// the page boundary), so no single execution sees both. The oldest charge A is
+// older than the reversed charge C: plain FIFO would spend the credit on A and
+// name the first small charge as the head; the netting retires C specifically
+// and leaves A — the charge the patient actually still owes — as the head, the
+// same rule the statement runs.
+func TestArrears_ReversalOnAnEarlierPageNetsItsCharge(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsxpage")
+
+	acctKey := seedReplayAccount(t, ctx, conn, cp, cons, "clarrxpgpat000000001", "CLARREARSXPGACCTHJKM")
+
+	// Page 1 (30 entries, ids A…, B…, C…): charge A, 28 small charges B, the
+	// charge C the reversal names. Page 2 (1 entry, id z…): the reversal.
+	chargeA := replayTxID('A', 0)
+	chargeC := replayTxID('C', 0)
+	seedEntryAt(t, ctx, conn, acctKey, chargeA, "debit", 1000, "2026-05-01T12:00:00Z", "")
+	for i := 0; i < clinicledger.ArrearsPageLimit-2; i++ {
+		postedAt := time.Date(2026, 6, 1+i, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('B', i), "debit", 100, postedAt, "")
+	}
+	seedEntryAt(t, ctx, conn, acctKey, chargeC, "debit", 1000, "2026-07-01T12:00:00Z", "")
+	seedEntryAt(t, ctx, conn, acctKey, replayTxID('z', 0), "credit", 1000, "2026-07-02T12:00:00Z", chargeC)
+
+	_, req1 := evaluateArrears(t, ctx, conn, cp, cons, "clarrxpgeval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	first := arrearsData(t, ctx, conn, acctKey)
+	replay := arrearsReplay(t, first)
+	if replay == nil {
+		t.Fatalf("fixture: 31 entries must leave a checkpoint after page 1: %+v", first)
+	}
+	if reversed, _ := replay["reversed"].(map[string]any); len(reversed) != 0 {
+		t.Fatalf("fixture: the reversal is on page 2, so page 1 records no reversal: %+v", reversed)
+	}
+	if debits, _ := replay["debits"].(map[string]any); debits[chargeC] == nil || debits[chargeA] == nil {
+		t.Fatalf("fixture: both A and C are on page 1: %v", debits)
+	}
+	if arrearsNotification(t, ctx, conn, req1) != nil {
+		t.Fatal("nothing is sent mid-replay")
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarrxpgeval00000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-23T09:00:00Z", processor.OutcomeAccepted)
+	final := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, final) != nil {
+		t.Fatalf("two pages, two dispatches: %+v", final)
+	}
+	if got, _ := final["dueAt"].(string); got != dueFor(t, "2026-05-01T12:00:00Z") {
+		t.Fatalf("dueAt = %q, want %q — the reversal on page 2 retires charge C on page 1, leaving A as the head; plain FIFO would have spent it on A", got, dueFor(t, "2026-05-01T12:00:00Z"))
+	}
+}
+
+// TestArrears_PostedEntryMidReplayRestartsIt pins the checkpoint's reset
+// boundary. A posted entry changes the set the cursor pages over, so a
+// checkpoint taken before it no longer describes a prefix of the history:
+// post_entry drops it on every branch and marks the state stale, the phase gap
+// closes, missing_evaluation re-opens, and the next evaluation starts again at
+// page 1 — never resumes a cursor over a set that has moved under it.
+func TestArrears_PostedEntryMidReplayRestartsIt(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsrestart")
+
+	acctKey := seedReplayAccount(t, ctx, conn, cp, cons, "clarrrstpat000000001", "CLARREARSRSTACCTHJKM")
+	for i := 0; i <= clinicledger.ArrearsPageLimit; i++ {
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('B', i), "debit", 100, "2026-05-01T12:00:00Z", "")
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarrrsteval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	if arrearsReplay(t, arrearsData(t, ctx, conn, acctKey)) == nil {
+		t.Fatal("fixture: the first dispatch must leave a checkpoint")
+	}
+
+	// A charge against the legacy account: the stale-marking branch.
+	debitAt(t, ctx, conn, cp, cons, "clarrrstdebit0000001", acctKey, "2026-08-25T09:00:00Z", 500)
+	after := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, after) != nil {
+		t.Fatalf("a posted entry must drop the checkpoint — the set under its cursor has changed: %+v", after)
+	}
+	if stale, _ := after["stale"].(bool); !stale {
+		t.Fatalf("and mark the state stale, which is what re-opens the evaluation gap: %+v", after)
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarrrsteval00000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-26T09:00:00Z", processor.OutcomeAccepted)
+	replay := arrearsReplay(t, arrearsData(t, ctx, conn, acctKey))
+	if replay == nil {
+		t.Fatal("32 entries are two pages, so the restarted evaluation checkpoints again")
+	}
+	if got, _ := replay["pages"].(float64); got != 1 {
+		t.Fatalf("replay.pages = %v, want 1 — the evaluation restarts at page 1, it does not resume a cursor over a moved set", replay["pages"])
+	}
+	if got, _ := replay["phase"].(string); got != clinicledger.ArrearsPhaseA {
+		t.Fatalf("replay.phase = %q, want %q on a fresh page 1", got, clinicledger.ArrearsPhaseA)
+	}
+}
+
+// TestArrears_ChargeOnAnOwingAccountMidReplayRestartsIt is the reset boundary
+// on the one post_entry shape that otherwise writes NOTHING: a charge against
+// an account with a balance cache that already owes (the charge queues behind
+// the open head, so no dueAt moves). With no replay in progress that shape
+// stays a no-write. With one, the new transaction changes the set the
+// checkpoint's cursor pages over — its key may sort at or below the cursor and
+// be skipped — so the finalize page would name a head and a balance over a
+// history missing an entry. post_entry therefore carries the state, drops the
+// checkpoint and marks it stale exactly when a checkpoint is present, and the
+// next evaluation restarts at page 1.
+func TestArrears_ChargeOnAnOwingAccountMidReplayRestartsIt(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsowingrestart")
+
+	// An account WITH a .balance: the opening charge posts through the op and
+	// leaves the balance owing; thirty more entries are seeded around it.
+	_, acctKey := openAccount(t, ctx, conn, cp, cons, "clarrowr", "Riley Chen")
+	debitAt(t, ctx, conn, cp, cons, "clarrowrdebit0000001", acctKey, "2026-05-01T09:00:00Z", 2500)
+	for i := 0; i < clinicledger.ArrearsPageLimit; i++ {
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('B', i), "debit", 100, "2026-05-02T12:00:00Z", "")
+	}
+	before := arrearsData(t, ctx, conn, acctKey)
+	if before == nil || before["dueAt"] == nil {
+		t.Fatalf("fixture: the opening charge must have opened an episode: %+v", before)
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarrowreval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-05-03T09:00:00Z", processor.OutcomeAccepted)
+	mid := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, mid) == nil {
+		t.Fatalf("fixture: 31 entries must leave a checkpoint after page 1: %+v", mid)
+	}
+
+	// The charge that, on a non-replaying owing account, writes nothing.
+	debitAt(t, ctx, conn, cp, cons, "clarrowrdebit0000002", acctKey, "2026-05-04T09:00:00Z", 500)
+	after := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, after) != nil {
+		t.Fatalf("a charge mid-replay must drop the checkpoint even where it would otherwise write nothing — the set under the cursor has changed: %+v", after)
+	}
+	if stale, _ := after["stale"].(bool); !stale {
+		t.Fatalf("and mark the state stale, which re-opens the evaluation gap: %+v", after)
+	}
+	if after["dueAt"] != before["dueAt"] {
+		t.Fatalf("the drop is a carry, not a rewrite: dueAt moved from %v to %v", before["dueAt"], after["dueAt"])
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarrowreval00000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-05-05T09:00:00Z", processor.OutcomeAccepted)
+	replay := arrearsReplay(t, arrearsData(t, ctx, conn, acctKey))
+	if replay == nil {
+		t.Fatal("32 entries are two pages, so the restarted evaluation checkpoints again")
+	}
+	if got, _ := replay["pages"].(float64); got != 1 {
+		t.Fatalf("replay.pages = %v, want 1 — the evaluation restarts at page 1", replay["pages"])
+	}
+
+	// The control: the same charge shape with NO replay in progress stays a
+	// no-write. Finish the replay first, then charge again.
+	evaluateArrears(t, ctx, conn, cp, cons, "clarrowreval00000003",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-05-06T09:00:00Z", processor.OutcomeAccepted)
+	settled := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, settled) != nil {
+		t.Fatalf("fixture: the second page finalizes: %+v", settled)
+	}
+	debitAt(t, ctx, conn, cp, cons, "clarrowrdebit0000003", acctKey, "2026-05-07T09:00:00Z", 500)
+	control := arrearsData(t, ctx, conn, acctKey)
+	if _, ok := control["stale"]; ok {
+		t.Fatalf("with no checkpoint to drop, a charge that queues behind the head writes nothing: %+v", control)
+	}
+	if control["evaluatedAt"] != settled["evaluatedAt"] {
+		t.Fatalf("with no checkpoint to drop, a charge that queues behind the head writes nothing; evaluatedAt moved from %v to %v", settled["evaluatedAt"], control["evaluatedAt"])
+	}
+}
+
+// TestArrears_MalformedCheckpointRestartsAtPageOne pins the op's side of the
+// hardening the lens pin TestClinicArrears_MalformedCheckpointReopensEvaluation
+// covers: a recorded checkpoint the op cannot resume — an unknown phase here —
+// is treated as absent, so the evaluation the re-opened gap dispatches starts
+// at page 1 over a fresh aggregate and records a well-formed checkpoint in its
+// place, rather than folding onto a corrupt one or refusing.
+func TestArrears_MalformedCheckpointRestartsAtPageOne(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsbadcheckpoint")
+
+	acctKey := seedReplayAccount(t, ctx, conn, cp, cons, "clarrbadpat000000001", "CLARREARSBADACCTHJKM")
+	for i := 0; i <= clinicledger.ArrearsPageLimit; i++ {
+		seedEntryAt(t, ctx, conn, acctKey, budgetTxID(i), "debit", 100, "2026-05-01T12:00:00Z", "")
+	}
+	seedAspect(t, ctx, conn, acctKey, "arrears", "clinicAccountArrears", map[string]any{
+		"evaluatedAt": "2026-05-17T09:00:00Z",
+		"stale":       true,
+		"replay": map[string]any{
+			"phase":       "x",
+			"cursor":      "lnk.clinictransaction." + budgetTxID(5) + ".postedTo.clinicaccount.CLARREARSBADACCTHJKM",
+			"pages":       7,
+			"debits":      map[string]any{budgetTxID(0): map[string]any{"postedAt": "2026-01-01T00:00:00Z", "amountCents": 999999}},
+			"reversed":    map[string]any{},
+			"creditCents": 0,
+		},
+	})
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarrbadeval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	replay := arrearsReplay(t, arrearsData(t, ctx, conn, acctKey))
+	if replay == nil {
+		t.Fatal("31 entries are two pages, so the restarted evaluation checkpoints")
+	}
+	if got, _ := replay["pages"].(float64); got != 1 {
+		t.Fatalf("replay.pages = %v, want 1 — an unresumable checkpoint is treated as absent, not continued from", replay["pages"])
+	}
+	if got, _ := replay["phase"].(string); got != clinicledger.ArrearsPhaseA {
+		t.Fatalf("replay.phase = %q, want %q on a fresh page 1", got, clinicledger.ArrearsPhaseA)
+	}
+	debits, _ := replay["debits"].(map[string]any)
+	if len(debits) != clinicledger.ArrearsPageLimit {
+		t.Fatalf("replay.debits carries %d charges, want %d — a fresh aggregate over page 1, not the corrupt one folded onto", len(debits), clinicledger.ArrearsPageLimit)
+	}
+	if d, _ := debits[budgetTxID(0)].(map[string]any); d == nil || d["amountCents"].(float64) != 100 {
+		t.Fatalf("the corrupt aggregate's entry must be replaced by the page's own reading: %v", debits[budgetTxID(0)])
+	}
+}
+
+// TestArrears_RedeliveredPageAdvancesNeverRepeats pins the replay-under-
+// redelivery rule: a dispatch that finds a checkpoint consumes the NEXT page,
+// so two dispatches after page 1 advance the checkpoint 1 → 2 (never 1 → 1),
+// and the phase alternates a → b — the flip that closes the gap that
+// dispatched the page and opens its sibling. Three pages of history so the
+// second dispatch is still mid-replay; the third finalizes.
+func TestArrears_RedeliveredPageAdvancesNeverRepeats(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsadvance")
+
+	acctKey := seedReplayAccount(t, ctx, conn, cp, cons, "clarradvpat000000001", "CLARREARSADVACCTHJKM")
+	for i := 0; i < 2*clinicledger.ArrearsPageLimit+1; i++ {
+		seedEntryAt(t, ctx, conn, acctKey, budgetTxID(i), "debit", 100, "2026-05-01T12:00:00Z", "")
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarradveval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	first := arrearsReplay(t, arrearsData(t, ctx, conn, acctKey))
+	if first == nil {
+		t.Fatal("fixture: page 1 must checkpoint")
+	}
+	if pages, _ := first["pages"].(float64); pages != 1 {
+		t.Fatalf("after one dispatch replay.pages = %v, want 1", first["pages"])
+	}
+	if phase, _ := first["phase"].(string); phase != clinicledger.ArrearsPhaseA {
+		t.Fatalf("after one dispatch replay.phase = %q, want %q", phase, clinicledger.ArrearsPhaseA)
+	}
+	firstCursor, _ := first["cursor"].(string)
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarradveval00000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	second := arrearsReplay(t, arrearsData(t, ctx, conn, acctKey))
+	if second == nil {
+		t.Fatal("61 entries are three pages, so the second dispatch is still mid-replay")
+	}
+	if pages, _ := second["pages"].(float64); pages != 2 {
+		t.Fatalf("after two dispatches replay.pages = %v, want 2 — a redelivered dispatch advances, it never repeats the page", second["pages"])
+	}
+	if phase, _ := second["phase"].(string); phase != clinicledger.ArrearsPhaseB {
+		t.Fatalf("after two dispatches replay.phase = %q, want %q — the flip is what closes missing_replay_a and opens missing_replay_b", phase, clinicledger.ArrearsPhaseB)
+	}
+	if cursor, _ := second["cursor"].(string); cursor == "" || cursor <= firstCursor {
+		t.Fatalf("the cursor must advance past page 1's (%q), got %q", firstCursor, cursor)
+	}
+	if debits, _ := second["debits"].(map[string]any); len(debits) != 2*clinicledger.ArrearsPageLimit {
+		t.Fatalf("replay.debits carries %d charges after two pages, want %d", len(debits), 2*clinicledger.ArrearsPageLimit)
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "clarradveval00000003",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	final := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, final) != nil {
+		t.Fatalf("the third page exhausts the enumeration and finalizes: %+v", final)
+	}
+	if got, _ := final["dueAt"].(string); got != dueFor(t, "2026-05-01T12:00:00Z") {
+		t.Fatalf("dueAt = %q, want %q over all 61 charges", got, dueFor(t, "2026-05-01T12:00:00Z"))
+	}
+}
+
+// TestArrears_MidReplayCarriesTheEpisodeRecord pins what a page WRITES: the
+// checkpoint, and every other recorded field verbatim. A page has evaluated
+// nothing, so the episode's due date, the head it was reminded for, the send
+// record and the stale mark all still describe the account exactly as the last
+// completed evaluation or posted entry left them — dropping the send record
+// here would send twice for one debt once the finalize page found the head
+// overdue — and evaluatedAt keeps naming that last completed evaluation.
+// Nothing is sent.
+func TestArrears_MidReplayCarriesTheEpisodeRecord(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearscarry")
+
+	acctKey := seedReplayAccount(t, ctx, conn, cp, cons, "clarrcrypat000000001", "CLARREARSCRYACCTHJKM")
+	for i := 0; i <= clinicledger.ArrearsPageLimit; i++ {
+		seedEntryAt(t, ctx, conn, acctKey, budgetTxID(i), "debit", 100, "2026-05-01T12:00:00Z", "")
+	}
+	seeded := map[string]any{
+		"dueAt":       "2026-05-16T12:00:00Z",
+		"remindedFor": "2026-05-16T12:00:00Z",
+		"sentAt":      "2026-05-17T09:00:00Z",
+		"evaluatedAt": "2026-05-17T09:00:00Z",
+		"stale":       true,
+	}
+	seedAspect(t, ctx, conn, acctKey, "arrears", "clinicAccountArrears", seeded)
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "clarrcryeval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	if notif := arrearsNotification(t, ctx, conn, reqID); notif != nil {
+		t.Fatalf("a page sends nothing: %+v", notif)
+	}
+	data := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, data) == nil {
+		t.Fatalf("a checkpoint is the one thing the page adds: %+v", data)
+	}
+	for field, want := range seeded {
+		if got := data[field]; got != want {
+			t.Fatalf("%s = %v, want %v carried verbatim — a page evaluates nothing and may rewrite nothing", field, got, want)
+		}
+	}
+	if len(data) != len(seeded)+1 {
+		t.Fatalf("the page writes the seeded fields plus replay and nothing else, got %+v", data)
 	}
 }
 

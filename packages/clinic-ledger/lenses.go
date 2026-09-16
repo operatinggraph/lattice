@@ -99,7 +99,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "clinicaccount",
 				OutputKeyPattern: ArrearsRemindersTarget + ".{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_evaluation", "entityKey", "freshUntil", "patientKey", "dueAt", "remindedFor", "reminderSentAt", "stale", "historyTooLong", "evaluatedAt"},
+				BodyColumns:      []string{"violating", "missing_evaluation", "missing_replay_a", "missing_replay_b", "entityKey", "freshUntil", "patientKey", "dueAt", "remindedFor", "reminderSentAt", "stale", "historyTooLong", "historyBudget", "evaluatedAt", "replaying", "replayPages"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -304,21 +304,57 @@ RETURN
 //   - An account nothing has ever evaluated projects evaluatedAt = null and is
 //     violating from its first projection — which is exactly how the accounts
 //     standing at install get their first evaluation, one op each, then quiet.
+//   - A history longer than one page of the op's postedTo enumeration is
+//     replayed ACROSS dispatches: each page records its running aggregate, the
+//     cursor to resume from and a phase that flips on every page on
+//     .arrears.replay (the checkpoint), and only the page that exhausts the
+//     enumeration computes the head and writes .arrears without it. While the
+//     checkpoint stands the row is mid-replay: missing_evaluation is false
+//     (its replay conjunct), freshUntil is null (no timer arms at a due date
+//     the replay has not confirmed), and exactly one of the two phase gaps is
+//     open — missing_replay_a on phase a, missing_replay_b on phase b — each
+//     a directOp(EvaluateClinicArrears) on the playbook. A checkpoint whose
+//     phase is neither value re-opens missing_evaluation instead (the
+//     conjunct admits it), so a malformed checkpoint restarts the evaluation
+//     rather than leaving the row with no gap at all. A page written
+//     under phase a CLOSES missing_replay_a and OPENS missing_replay_b, so the
+//     gap that dispatched a page is closed by that page's own write (its mark
+//     and dispatch count cleared) and the next page is dispatched by the other
+//     gap on the row's re-projection: a level-triggered gap that stayed OPEN
+//     across successful dispatches would instead hold its mark for the whole
+//     lease and accrue its dispatch count toward the retry budget. The finalize
+//     page writes no replay → every gap false. A posted entry mid-replay drops
+//     the checkpoint and sets stale (post_entry's carry), so the phase gap
+//     closes, missing_evaluation re-opens, and the next evaluation starts at
+//     page 1. replaying and replayPages are the operator's view of the same
+//     state.
 //   - An account whose transaction history outran the op's replay budget carries
-//     historyTooLong, and it suppresses BOTH the gap and the timer. That pairing
-//     is the point: the op cannot compute a head for such an account, so a gap
+//     historyTooLong with historyBudget, the entry count it exhausted. The flag
+//     suppresses the timer outright — a dueAt a degraded evaluation carried is
+//     not a date to arm on, exactly as stale is not — and suppresses the gap
+//     while the recorded budget is at least the current one. That pairing is
+//     the point: the op cannot compute a head for such an account, so a gap
 //     that stayed open would have Weaver re-dispatch the same doomed evaluation
-//     on every window with nothing sent and nothing said, and a timer armed at a
-//     dueAt no evaluation could confirm would fire against a head nobody knows.
-//     Quiet, but VISIBLE — the row stays in the weaver-targets bucket carrying
-//     the flag, which is the operator's signal. The next posted entry drops the
-//     flag (post_entry's carry) and sets stale, buying exactly one more attempt.
+//     on every window with nothing sent and nothing said, and a timer armed at
+//     a dueAt no evaluation could confirm would fire against a head nobody
+//     knows. Quiet, but VISIBLE — the row stays in the weaver-targets bucket
+//     carrying the flag, which is the operator's signal. The next posted entry
+//     drops the flag (post_entry's carry) and sets stale, buying exactly one
+//     more attempt. A flag recorded under a SMALLER budget than the current one
+//     — or under none (historyBudget absent) — does not suppress the gap:
+//     missing_evaluation's fourth arm opens it for exactly one evaluation under
+//     the current budget, which either finalizes or re-records the flag at the
+//     current budget, so a raised budget reaches the accounts the old one
+//     parked, once.
 //
-// missing_evaluation's third arm carries no `dueAt <> null` conjunct. It would be
-// dead: the arm's own byTarget >= dueAt comparison is already false on a null
+// missing_evaluation's lapse arm carries no `dueAt <> null` conjunct. It would
+// be dead: the arm's own byTarget >= dueAt comparison is already false on a null
 // dueAt (a null operand makes the range test false, never true), so nothing
 // reaches that arm without a recorded due date. freshUntil KEEPS its null test —
-// there the comparison it guards is negated, and NOT(false) is true.
+// there the comparison it guards is negated, and NOT(false) is true. The
+// historyBudget test leans on the same rule the other way: `historyBudget >= N`
+// is false when the field is absent, so NOT of it is true, and an account
+// flagged with no recorded budget reads as flagged under a smaller one.
 //
 // The lens reads NO clock. Both operands of every comparison are stored graph
 // data, so the row is a pure function of the subgraph and two projections at
@@ -328,17 +364,23 @@ RETURN
 // guarded create-only by the patient's .ledgerAccount aspect), so the OPTIONAL
 // walk cannot fan out — and it is OPTIONAL, so an account with no patient still
 // projects a row, with a null patientKey. patientKey, dueAt, remindedFor,
-// reminderSentAt, stale, historyTooLong and evaluatedAt are INFORMATIONAL
-// columns (operator observability in the weaver-targets read model; the
-// playbook never routes patientKey as a param — the op resolves the patient
-// itself); only entityKey + freshUntil + the two bools are load-bearing for
-// Weaver's dispatch and temporal lanes.
+// reminderSentAt, stale, historyTooLong, historyBudget, evaluatedAt, replaying
+// and replayPages are INFORMATIONAL columns (operator observability in the
+// weaver-targets read model; the playbook never routes patientKey as a param —
+// the op resolves the patient itself); only entityKey + freshUntil + the four
+// bools (violating and the three gaps) are load-bearing for Weaver's dispatch
+// and temporal lanes.
 //
-// Built with fmt.Sprintf so the target id comes from the constant the
-// WeaverTargetSpec uses, which puts this Spec out of lint-lens-anchors' static
-// reach; its advisory asks for a hand check for a narrowing range bound inside
-// a NEGATED pattern, and there is none — the cypher has no negated relationship
-// pattern at all, only scalar NOT comparisons.
+// Built with fmt.Sprintf: %[1]s is the target id, from the constant the
+// WeaverTargetSpec uses; %[2]d the current replay budget in entries
+// (ArrearsPageLimit × ArrearsMaxPages, scripts.go) that a recorded
+// historyBudget is measured against; %[3]s / %[4]s the two phase literals
+// (ArrearsPhaseA / ArrearsPhaseB) the op writes.
+//
+// The Sprintf puts this Spec out of lint-lens-anchors' static reach; its
+// advisory asks for a hand check for a narrowing range bound inside a NEGATED
+// pattern, and there is none — the cypher has no negated relationship pattern
+// at all, only scalar NOT comparisons.
 var arrearsRemindersSpec = fmt.Sprintf(`MATCH (a:clinicaccount {key: $actorKey})
 OPTIONAL MATCH (a)-[:heldFor]->(pt:patient)
 RETURN
@@ -350,21 +392,34 @@ RETURN
   a.arrears.data.sentAt AS reminderSentAt,
   a.arrears.data.stale AS stale,
   a.arrears.data.historyTooLong AS historyTooLong,
+  a.arrears.data.historyBudget AS historyBudget,
   a.arrears.data.evaluatedAt AS evaluatedAt,
-  CASE WHEN (a.arrears.data.dueAt <> null) AND (a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND NOT (a.arrears.data.stale = true) AND NOT (a.arrears.data.historyTooLong = true) AND NOT (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.dueAt) THEN a.arrears.data.dueAt ELSE null END AS freshUntil,
+  (a.arrears.data.replay <> null) AS replaying,
+  a.arrears.data.replay.pages AS replayPages,
+  CASE WHEN (a.arrears.data.dueAt <> null) AND (a.arrears.data.replay = null) AND (a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND NOT (a.arrears.data.stale = true) AND NOT (a.arrears.data.historyTooLong = true) AND NOT (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.dueAt) THEN a.arrears.data.dueAt ELSE null END AS freshUntil,
   (
-    NOT (a.arrears.data.historyTooLong = true)
+    NOT ((a.arrears.data.historyTooLong = true) AND (a.arrears.data.historyBudget >= %[2]d))
+    AND ((a.arrears.data.replay = null) OR (NOT (a.arrears.data.replay.phase = '%[3]s') AND NOT (a.arrears.data.replay.phase = '%[4]s')))
     AND (
       (a.arrears.data.evaluatedAt = null)
       OR (a.arrears.data.stale = true)
       OR ((a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.dueAt))
+      OR ((a.arrears.data.historyTooLong = true) AND NOT (a.arrears.data.historyBudget >= %[2]d))
     )
   ) AS missing_evaluation,
+  (a.arrears.data.replay.phase = '%[3]s') AS missing_replay_a,
+  (a.arrears.data.replay.phase = '%[4]s') AS missing_replay_b,
   (
-    NOT (a.arrears.data.historyTooLong = true)
-    AND (
-      (a.arrears.data.evaluatedAt = null)
-      OR (a.arrears.data.stale = true)
-      OR ((a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.dueAt))
+    (
+      NOT ((a.arrears.data.historyTooLong = true) AND (a.arrears.data.historyBudget >= %[2]d))
+      AND ((a.arrears.data.replay = null) OR (NOT (a.arrears.data.replay.phase = '%[3]s') AND NOT (a.arrears.data.replay.phase = '%[4]s')))
+      AND (
+        (a.arrears.data.evaluatedAt = null)
+        OR (a.arrears.data.stale = true)
+        OR ((a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.dueAt))
+        OR ((a.arrears.data.historyTooLong = true) AND NOT (a.arrears.data.historyBudget >= %[2]d))
+      )
     )
-  ) AS violating`, ArrearsRemindersTarget)
+    OR (a.arrears.data.replay.phase = '%[3]s')
+    OR (a.arrears.data.replay.phase = '%[4]s')
+  ) AS violating`, ArrearsRemindersTarget, ArrearsPageLimit*ArrearsMaxPages, ArrearsPhaseA, ArrearsPhaseB)
