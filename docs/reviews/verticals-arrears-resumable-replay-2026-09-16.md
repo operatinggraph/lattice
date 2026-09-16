@@ -84,10 +84,10 @@ head a day earlier than the statement's. §5 records the key-free form as the re
 | Carried | By each further page, which rewrites it whole (aggregate + advanced cursor + flipped phase) — the write is OCC-conditioned on the `.arrears` revision the page hydrated (the target's `OptionalReads`, the DDL's `derive_reads`), so two pages racing on one checkpoint serialize |
 | Reset | By `post_entry` on EVERY branch — a posted entry changes the enumerated set under the cursor, so the checkpoint is dropped and `stale` set (the partial-payment carry already does; the legacy, open and end branches gain the drop) — and by the finalize page, which writes `.arrears` without it |
 | Ordered | Pages consume the sorted key set the substrate pages (`substrate.pageFilteredKeys`: sort, de-dup, strict-greater cursor), so a set unchanged between pages is walked once, exactly |
-| Bounded | `ARREARS_MAX_PAGES` (20 → 600 entries): a history past it finalizes as `historyTooLong` — today's degrade, resized, quiet + visible, the next posted entry buying one more attempt |
+| Bounded | `ARREARS_MAX_PAGES` (20 → 600 entries): a history past it finalizes as `historyTooLong` — today's degrade, resized, quiet + visible, the next posted entry buying one more attempt — and RECORDS the budget it exhausted (`historyBudget: 600`). The lens suppresses only a flag recorded at or above the CURRENT budget; a flag recorded under a smaller one (or none — the flag predates the field) re-opens the gap for exactly one evaluation under the raised budget. A raised ceiling reaches the accounts the old one parked, once, by a recorded fact, not by a migration |
 | Replay / redelivery | A redelivered dispatch re-reads the checkpoint and consumes the NEXT page — progress, not repetition; a second concurrent dispatch loses the OCC race and re-executes on the advanced state |
 | Tombstone | Tombstoned links occupy page slots and are skipped, as today (`starlark_kv.go` G5) |
-| Upgrade | An account mid-replay at install carries no `replay` (the field is new); accounts flagged `historyTooLong` under the 30-entry budget are re-armed by their next posted entry, as before |
+| Upgrade | No account carries `replay` at install (the field is new). The nine standing clinic accounts' closed rows are unchanged by the `replay = null` conjunct; the one flagged `historyTooLong` under the 30-entry budget carries no `historyBudget`, so the recorded-budget arm above re-evaluates it once — that is the live proof |
 
 ## 3. Weaver chains the pages — two phase gaps, not one open gap
 
@@ -101,7 +101,8 @@ Instead each page CLOSES the gap that dispatched it and OPENS the other: the len
 — `missing_replay_a` = `(a.arrears.data.replay.phase = 'a')`, `missing_replay_b` = `(… = 'b')` — each a
 `directOp(Evaluate<Ledger>Arrears)` entry on the playbook with the same `Params` / `Reads` / `OptionalReads` /
 `Enumerations` as `missing_evaluation`; and `missing_evaluation` gains the conjunct `AND (a.arrears.data.replay =
-null)`, as does `freshUntil`. Page 1 (dispatched by `missing_evaluation`) writes `phase: a` → that gap closes
+null)`, as does `freshUntil`; its `historyTooLong` suppression becomes `NOT (historyTooLong AND historyBudget >= 600)` with a
+fourth arm `(historyTooLong AND NOT (historyBudget >= 600))` (§2's Bounded row). Page 1 (dispatched by `missing_evaluation`) writes `phase: a` → that gap closes
 (mark + count cleared), `missing_replay_a` opens → dispatched on the row's next evaluation → page 2 writes
 `phase: b` → … → the finalize page writes no `replay` → every gap false. Each gap episode is one dispatch, so
 the engine default retry budget stands (a REJECTED page — a wall breach — is reclaimed up to three times, then
