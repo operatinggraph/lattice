@@ -23,7 +23,7 @@ running stack).
 | **Links** (5) | `heldFor` (account → patient) · `postedTo` (transaction → account) · `settles` (transaction → appointment: the line IS the visit's fee) · `forVisit` (transaction → appointment: the line is FOR the visit) · `reverses` (credit → the charge it gives back) |
 | **Operations** (5) | `ClinicCreateAccount` · `ClinicDebitAccount` · `ClinicCreditAccount` · `EvaluateClinicArrears` (Weaver-dispatched) · `RecordClinicArrearsReminderNotification` (bridge replyOp) |
 | **Projection lenses** (2) | `clinicLedgerHistory` (one row per transaction, carrying the visit it names and the charge it reverses) → `clinic-ledger-history` · `clinicPatientAccounts` (patient → account key lookup, plus the account's arrears due date / reminder timestamp) → `clinic-patient-accounts` (both `nats-kv`, `full` engine) |
-| **Weaver targets** (2) | `clinicNoShowSettlement` — charges the fee an appointment's status carries once, opens the account first if needed, and reverses a charge whose appointment is later corrected to a fee-less status · `clinicArrearsReminders` — its own convergence lens → `weaver-targets`; one gap, `missing_evaluation` → `directOp(EvaluateClinicArrears)` |
+| **Weaver targets** (2) | `clinicNoShowSettlement` — charges the fee an appointment's status carries once, opens the account first if needed, and reverses a charge whose appointment is later corrected to a fee-less status · `clinicArrearsReminders` — its own convergence lens → `weaver-targets`; three gaps, `missing_evaluation` and the two replay-continuation gaps `missing_replay_a` / `missing_replay_b`, all → `directOp(EvaluateClinicArrears)` |
 
 The three desk operations are granted to `operator` and `frontOfHouse` at `scope: any` (`permissions.go`),
 unconfined — a patient carries no building to workplace-confine to. The front desk opens a patient's
@@ -36,7 +36,7 @@ them, nobody at a desk does.
 ```
 vtx.clinicaccount.<id>                 class=clinicaccount       root {} (D5)
 vtx.clinicaccount.<id>.balance         class=clinicAccountBalance  {balanceCents}  (O(1) cache; updated on every post)
-vtx.clinicaccount.<id>.arrears         class=clinicAccountArrears  {evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?, historyTooLong?}
+vtx.clinicaccount.<id>.arrears         class=clinicAccountArrears  {evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?, historyTooLong?, historyBudget?, replay?}
 vtx.clinicaccount.<id>.arrearsNotification  class=clinicAccountArrearsNotification  {status, remindedFor, sentAt}  (audit only)
 vtx.clinictransaction.<id>             class=clinictransaction   root {} (D5)
 vtx.clinictransaction.<id>.entry       class=entry               {type ∈ debit|credit, amountCents, memo?, postedAt,
@@ -185,9 +185,9 @@ credit (an over-waiver or a reversal of a paid charge took it below zero) writes
 prepays it outright, so there is no open debit to age. An account carrying no `.balance` (the legacy set)
 can only ever mark stale — it has no before/after balance to reason from.
 
-The lens arms Weaver's `@at` at the recorded `dueAt` and opens its one gap when the timer's lapse is recorded
-on the account, when the state is `stale`, or when the account has never been evaluated. All three dispatch
-the same remediation, `EvaluateClinicArrears`, which recomputes the head with **the same FIFO the patient's
+The lens arms Weaver's `@at` at the recorded `dueAt` and opens its evaluation gap when the timer's lapse is
+recorded on the account, when the state is `stale`, or when the account has never been evaluated. All three
+dispatch the same remediation, `EvaluateClinicArrears`, which recomputes the head with **the same FIFO the patient's
 own statement runs** (`cmd/clinic-app/ledger.go`, `deriveStatement` — a credit that names the charge it
 reverses retires that charge; every other credit offsets the oldest still-open charge first; an unapplied
 credit carries forward as surplus) and rewrites `.arrears`. A recomputed date that has passed is recorded as
@@ -195,11 +195,16 @@ credit carries forward as surplus) and rewrites `.arrears`. A recomputed date th
 (`sentAt` absent) the same commit stamps `sentAt` and fires `external.notification` to the bridge's
 `notification` adapter, keyed `<accountKey>:<dueAt>`, with the patient resolved live off the account's own
 `heldFor` link (never the payload; absent → still evaluated). `sentAt`, not `remindedFor`, is the send
-condition: one reminder per arrears **episode**, never one per head. A history past the replay budget
-(`ArrearsPageLimit × ArrearsMaxPages` = 30 entries — sized by round trips against the Processor's 250 ms
-script wall, see `scripts.go`) records `historyTooLong` and goes quiet (no gap, no timer, row still
-visible) until the next entry that rewrites the aspect (a credit, or an episode-opening charge) buys one
-more attempt. The op is restricted to Weaver's dispatch actor.
+condition: one reminder per arrears **episode**, never one per head. The replay is **resumable**: one page
+of `ArrearsPageLimit` (30) entries per dispatch — sized by round trips against the Processor's 250 ms
+script wall, see `scripts.go` — with the running aggregate and cursor recorded on `.arrears.replay` between
+pages and Weaver chaining the dispatches through the lens's two phase gaps (`missing_replay_a` /
+`missing_replay_b`), so a history of up to `ArrearsPageLimit × ArrearsMaxPages` = 600 entries is evaluated
+exactly across up to 20 dispatches. A history past that records `historyTooLong` with the budget it exhausted
+(`historyBudget`) and goes quiet (no gap, no timer, row still visible) until the next entry that rewrites the
+aspect (a credit, or an episode-opening charge) buys one more attempt — or until a raised budget re-arms it
+once. A posted entry mid-replay drops the checkpoint and the next evaluation restarts at page 1. The op is
+restricted to Weaver's dispatch actor.
 
 **Nothing is refused.** A clinic is not a café: `CreateAppointment`, check-in and `RecordEncounter` stay open
 to a debtor. The reminder changes what the desk and the patient *see* — `clinicPatientAccounts` carries
