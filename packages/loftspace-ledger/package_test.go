@@ -32,33 +32,33 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // this test rather than reaching an install, where the same change is a silent
 // capability or read-model shift.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 3; got != want {
+	if got, want := len(Package.DDLs), 6; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 7; got != want {
+	if got, want := len(Package.Permissions), 9; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 2; got != want {
+	if got, want := len(Package.Lenses), 3; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 0; got != want {
+	if got, want := len(Package.WeaverTargets), 1; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 3; got != want {
+	if got, want := len(Package.OpMetas), 5; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
-	wantDDLs := []string{"account", "ledgerAccountGuard", "transaction"}
+	wantDDLs := []string{"account", "ledgerAccountGuard", "loftspaceAccountArrears", "transaction", "loftspaceArrearsNotificationOp", "loftspaceAccountArrearsNotification"}
 	for i, d := range Package.DDLs {
 		if i < len(wantDDLs) && d.CanonicalName != wantDDLs[i] {
 			t.Errorf("DDLs[%d]: got %q, want %q", i, d.CanonicalName, wantDDLs[i])
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"LoftspaceCreateAccount", "any"}, {"LoftspaceCreateAccount", "self"}, {"DebitAccount", "any"}, {"CreditAccount", "any"}, {"CreditAccount", "self"}, {"LoftspaceRecordCharge", "any"}, {"LoftspaceRecordCharge", "self"}}
+	wantPerms := []struct{ op, scope string }{{"LoftspaceCreateAccount", "any"}, {"LoftspaceCreateAccount", "self"}, {"DebitAccount", "any"}, {"CreditAccount", "any"}, {"CreditAccount", "self"}, {"LoftspaceRecordCharge", "any"}, {"LoftspaceRecordCharge", "self"}, {"EvaluateLoftspaceArrears", "any"}, {"RecordLoftspaceArrearsReminderNotification", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break
@@ -69,7 +69,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantLenses := []string{"ledgerHistory", "leaseAccounts"}
+	wantLenses := []string{"ledgerHistory", "leaseAccounts", "loftspaceArrearsReminders"}
 	for i, d := range Package.Lenses {
 		if i < len(wantLenses) && d.CanonicalName != wantLenses[i] {
 			t.Errorf("Lenses[%d]: got %q, want %q", i, d.CanonicalName, wantLenses[i])

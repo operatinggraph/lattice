@@ -1,5 +1,5 @@
 name: loftspace-ledger
-version: 0.7.4
+version: 0.7.5
 description: |
   Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount,
   independently-minted id, one per lease via a .ledgerAccount guard aspect on
@@ -12,18 +12,35 @@ description: |
   own heldFor topology -- a resident paying down their own balance (credit
   only, capped) or a landlord recording a charge or payment on a lease of a
   unit they manage) + the ledgerHistory read-model lens (one row per
-  transaction) +
-  the leaseAccounts lens (lease -> account key lookup). Depends lease-signing.
+  transaction) + the leaseAccounts lens (lease -> account key lookup, plus the
+  account's arrears due date and reminder timestamps).
+  Also ships the rent-arrears reminder: the account's .arrears episode aspect
+  (minted by evaluation; every posted entry marks it stale, since no balance
+  is stored) + the loftspaceArrearsReminders weaver-target convergence lens,
+  whose playbook dispatches EvaluateLoftspaceArrears -- that op ages the
+  account with the same plain FIFO the tenant's statement runs, records the
+  head's own recorded due date (its postedAt when it recorded none) and the
+  reminder instant five days after it, and fires ONE external.notification
+  per arrears episode to the bridge's "notification" adapter, keyed on
+  (accountKey, dueAt, headKey). RecordLoftspaceArrearsReminderNotification records the
+  outcome. Depends lease-signing + orchestration-base.
 depends:
   - lease-signing
+  - orchestration-base
 declares:
   ddls:
     - canonicalName: account
       class: meta.ddl.vertexType
     - canonicalName: ledgerAccountGuard
       class: meta.ddl.aspectType
+    - canonicalName: loftspaceAccountArrears
+      class: meta.ddl.aspectType
     - canonicalName: transaction
       class: meta.ddl.vertexType
+    - canonicalName: loftspaceArrearsNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: loftspaceAccountArrearsNotification
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: ledgerHistory
       adapter: nats-kv
@@ -33,10 +50,16 @@ declares:
       adapter: nats-kv
       bucket: loftspace-lease-accounts
       engine: full
+    - canonicalName: loftspaceArrearsReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   opMetas:
     - operationType: LoftspaceCreateAccount
     - operationType: CreditAccount
     - operationType: LoftspaceRecordCharge
+    - operationType: EvaluateLoftspaceArrears
+    - operationType: RecordLoftspaceArrearsReminderNotification
   permissions:
     - operationType: LoftspaceCreateAccount
       scope: any
@@ -59,3 +82,12 @@ declares:
     - operationType: LoftspaceRecordCharge
       scope: self
       grantsTo: [consumer]
+    - operationType: EvaluateLoftspaceArrears
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordLoftspaceArrearsReminderNotification
+      scope: any
+      grantsTo: [operator]
+  weaverTargets:
+    - targetId: loftspaceArrearsReminders
+      lensRef: loftspaceArrearsReminders

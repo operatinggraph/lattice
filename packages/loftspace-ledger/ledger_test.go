@@ -54,7 +54,19 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateLeaseApplication", Scope: "any"},
 			{OperationType: "LoftspaceCreateAccount", Scope: "any"},
 			{OperationType: "DebitAccount", Scope: "any"},
+			{OperationType: "LoftspaceRecordCharge", Scope: "any"},
 			{OperationType: "CreditAccount", Scope: "any"},
+			// Deliberately the SAME grant Weaver holds for EvaluateLoftspaceArrears
+			// (arrearsWeaverCapDoc, arrears_test.go). That is what makes the
+			// forged-send vector attributable: the refusal can only come from the
+			// script's own actor guard, never from a missing or narrower grant.
+			{OperationType: "EvaluateLoftspaceArrears", Scope: "any"},
+			// The bridge's service actor is operator-equivalent, and this stands
+			// in for it: the replyOp is granted to operator/Scope:"any" by the
+			// package (notifications.go), so step 3 authorizes any operator that
+			// submits it. Everything that constrains WHAT such a submission can
+			// touch lives in the script's own validation of externalRef.
+			{OperationType: "RecordLoftspaceArrearsReminderNotification", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -82,6 +94,7 @@ func setupLedgerEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		t.Fatalf("install loftspace-ledger: %v", err)
 	}
 	testutil.SeedCapDoc(t, ctx, conn, ledgerCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, arrearsWeaverCapDoc())
 	// LoftspaceCreateAccount's workplace guard asks the GRAPH whether its
 	// caller is root, so the cap doc's Roles claim is not enough on its own —
 	// without the link this actor reads as an unprivileged caller with no

@@ -113,26 +113,41 @@ type portfolioPulseResult struct {
 }
 
 // landlordLeaseBalance is one arrears row: an occupied lease with a positive
-// (owed-to-landlord) running balance, worst-first.
+// (owed-to-landlord) running balance, most-overdue-first. DueDate/IsOverdue/
+// DaysOverdue/DaysUntilDue/ReminderSentAt are the same rent-age fields
+// /api/ledger and /api/one-bill carry (deriveRentArrears, ledger.go) — the
+// recorded leaseAccounts row wins when it has a stamp, else the ledger's own
+// FIFO head.
 type landlordLeaseBalance struct {
-	LeaseAppKey   string `json:"leaseAppKey"`
-	UnitAddress   string `json:"unitAddress"`
-	ApplicantName string `json:"applicantName"`
-	BalanceCents  int64  `json:"balanceCents"`
+	LeaseAppKey    string `json:"leaseAppKey"`
+	UnitAddress    string `json:"unitAddress"`
+	ApplicantName  string `json:"applicantName"`
+	BalanceCents   int64  `json:"balanceCents"`
+	DueDate        string `json:"dueDate"`
+	IsOverdue      bool   `json:"isOverdue"`
+	DaysOverdue    int    `json:"daysOverdue"`
+	DaysUntilDue   int    `json:"daysUntilDue"`
+	ReminderSentAt string `json:"reminderSentAt,omitempty"`
 }
 
 // computeLandlordLeaseBalances derives each occupied (signed) lease's running
 // balance from the same ledgerHistory rows handleLedger reads one lease at a
 // time (computeLedgerHistory, ledger.go), keeping only leases that owe the
-// landlord money (balance > 0 — a credit balance isn't arrears), sorted
-// worst-first so the FE needs no client-side sort.
-func computeLandlordLeaseBalances(rows []protectedLandlordRow, ledgerKeys []string, get kvGetter) []landlordLeaseBalance {
+// landlord money (balance > 0 — a credit balance isn't arrears). acctByLease
+// (indexLeaseAccountsByLease, ledger.go — read once, not per lease) supplies
+// each lease's recorded arrears stamp; a lease absent from it (a nil/short
+// map on a degraded read) falls back to the ledger's own derivation.
+//
+// Sorted most-overdue-first: overdue rows by daysOverdue desc then
+// balanceCents desc, then not-yet-due rows by daysUntilDue asc then
+// balanceCents desc — every overdue row outranks every not-yet-due one.
+func computeLandlordLeaseBalances(rows []protectedLandlordRow, ledgerKeys []string, get kvGetter, acctByLease map[string]leaseAccountProjection, now time.Time) []landlordLeaseBalance {
 	out := make([]landlordLeaseBalance, 0)
 	for _, r := range rows {
 		if r.SignedAt == nil || *r.SignedAt == "" {
 			continue
 		}
-		_, balance := computeLedgerHistory(ledgerKeys, get, r.EntityKey)
+		rentRows, balance := computeLedgerHistory(ledgerKeys, get, r.EntityKey)
 		if balance <= 0 {
 			continue
 		}
@@ -143,9 +158,31 @@ func computeLandlordLeaseBalances(rows []protectedLandlordRow, ledgerKeys []stri
 		if r.ApplicantName != nil {
 			row.ApplicantName = *r.ApplicantName
 		}
+		acct := acctByLease[r.EntityKey]
+		arrears := deriveRentArrears(rentRows, acct.ArrearsDueAt, acct.ArrearsReminderSentAt, now)
+		row.DueDate = arrears.DueDate
+		row.IsOverdue = arrears.IsOverdue
+		row.DaysOverdue = arrears.DaysOverdue
+		row.DaysUntilDue = arrears.DaysUntilDue
+		row.ReminderSentAt = arrears.ReminderSentAt
 		out = append(out, row)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].BalanceCents > out[j].BalanceCents })
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.IsOverdue != b.IsOverdue {
+			return a.IsOverdue
+		}
+		if a.IsOverdue {
+			if a.DaysOverdue != b.DaysOverdue {
+				return a.DaysOverdue > b.DaysOverdue
+			}
+			return a.BalanceCents > b.BalanceCents
+		}
+		if a.DaysUntilDue != b.DaysUntilDue {
+			return a.DaysUntilDue < b.DaysUntilDue
+		}
+		return a.BalanceCents > b.BalanceCents
+	})
 	return out
 }
 
@@ -398,9 +435,32 @@ func (s *server) handlePortfolioPulse(w http.ResponseWriter, r *http.Request) {
 		occupied := occupiedLeaseAppKeys(appRows)
 		conn := s.conn
 
-		// Lease balances (worst-first arrears) — independent of the
+		// Lease balances (most-overdue-first arrears) — independent of the
 		// booking/tab sources below: a landlord with no service-attach
 		// data at all still needs to see who owes rent.
+		//
+		// The recorded arrears stamp (leaseAccounts) is best-effort on top
+		// of that: a failed/incomplete read there degrades to
+		// deriveRentArrears' own FIFO fallback (a nil acctByLease) rather
+		// than losing the balances themselves — only the ledger-history
+		// read below is load-bearing for BalancesAvailable.
+		acctBucket := loftspaceledger.LeaseAccountsBucket
+		var acctByLease map[string]leaseAccountProjection
+		if acctKeys, aErr := conn.KVListKeys(ctx, acctBucket); aErr != nil {
+			s.logger.Warn("portfolio-pulse: lease accounts unavailable, falling back to derived-only rent age", "error", aErr)
+		} else if acctValues, rErr := readAllOrFail(acctKeys, func(key string) ([]byte, error) {
+			entry, err := conn.KVGet(ctx, acctBucket, key)
+			if err != nil {
+				return nil, err
+			}
+			return entry.Value, nil
+		}); rErr != nil {
+			s.logger.Warn("portfolio-pulse: lease accounts read incomplete, falling back to derived-only rent age", "error", rErr)
+		} else {
+			acctGet := func(key string) ([]byte, bool) { v, ok := acctValues[key]; return v, ok }
+			acctByLease = indexLeaseAccountsByLease(acctKeys, acctGet)
+		}
+
 		ledgerBucket := loftspaceledger.LedgerHistoryBucket
 		if ledgerKeys, lErr := conn.KVListKeys(ctx, ledgerBucket); lErr != nil {
 			s.logger.Warn("portfolio-pulse: ledger history unavailable, leaving lease balances unavailable", "error", lErr)
@@ -414,7 +474,7 @@ func (s *server) handlePortfolioPulse(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("portfolio-pulse: ledger history read incomplete, leaving lease balances unavailable", "error", rErr)
 		} else {
 			ledgerGet := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
-			result.LeaseBalances = computeLandlordLeaseBalances(appRows, ledgerKeys, ledgerGet)
+			result.LeaseBalances = computeLandlordLeaseBalances(appRows, ledgerKeys, ledgerGet, acctByLease, time.Now().UTC())
 			result.BalancesAvailable = true
 		}
 

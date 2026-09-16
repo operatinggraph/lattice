@@ -187,6 +187,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"leaseApplicationComplete":          "identity:applicationFor,manages,providedTo,scopedTo|leaseapp:applicationFor,appliesToUnit,providedTo,scopedTo,signedLease|meta:forOperation|object:signedLease|service:providedTo|task:forOperation,scopedTo|unit:appliesToUnit,manages",
 	"leaseExpiry":                       "identity:manages|leaseapp:appliesToUnit,renews|renewal:renews|unit:appliesToUnit,manages",
 	"leaseRentSettlement":               "clause:governs|leaseapp:governs",
+	"loftspaceArrearsReminders":         "none",
 	"myTasks":                           "identity:assignedTo,holdsRole|role:holdsRole,queuedFor|task:assignedTo,forOperation,queuedFor,scopedTo|any:forOperation,scopedTo",
 	"objectAttachments":                 scopeNil,
 	"objectLiveness":                    "none", // Derived-and-empty, not refused; see above.

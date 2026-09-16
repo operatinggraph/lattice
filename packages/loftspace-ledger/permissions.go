@@ -10,6 +10,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	DebitAccount           → operator
 //	LoftspaceRecordCharge  → operator, consumer (scope=self — landlord only, see below)
 //	CreditAccount          → operator, consumer (scope=self — resident or landlord, see below)
+//	EvaluateLoftspaceArrears                   → operator (Weaver's dispatch actor; the script refuses every other)
+//	RecordLoftspaceArrearsReminderNotification → operator (the bridge's service actor)
 //
 // DebitAccount is the ORCHESTRATED charge: the operator, and Weaver's
 // clauseSatisfaction playbook (packages/semantic-contracts, Contract #10
@@ -91,8 +93,18 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // possible: DebitAccount's name is Contract #10 §10.8's literal and Weaver's
 // clause-billing dispatch, so the person-facing charge gets its own
 // vertical-unique name and DebitAccount keeps the orchestrated one.
+//
+// EvaluateLoftspaceArrears and the arrears notification replyOp are the two
+// ops no human path reaches. Both grant `operator` at scope=any — the
+// operator-grant idiom every engine-submitted op uses — and neither is
+// callable from a console: WEAVER's dispatch actor submits the first (and the
+// script refuses every other actor outright, since the account it names ends
+// up in a message a tenant actually receives), the BRIDGE's service actor the
+// second. Granting them to `operator` is what authorizes those two engines,
+// and deliberately mints no consoleOperator or frontOfHouse counterpart —
+// there is no desk workflow that runs either one by hand.
 func Permissions() []pkgmgr.PermissionSpec {
-	return []pkgmgr.PermissionSpec{
+	return append([]pkgmgr.PermissionSpec{
 		{
 			OperationType: "LoftspaceCreateAccount",
 			Scope:         "any",
@@ -135,5 +147,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants a consumer the right to record a charge on the ledger account of a lease on a unit they MANAGE — a landlord's own receivable. scripts.go proves it off the account's own heldFor→appliesToUnit→manages topology; a resident (applicationFor) holding this grant is still refused.",
 			GrantsTo:      []string{"consumer"},
 		},
-	}
+		{
+			OperationType: arrearsOp,
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit EvaluateLoftspaceArrears (ages a lease account and sends the one arrears reminder per episode). Dispatched by WEAVER's loftspaceArrearsReminders playbook — the script refuses every actor but Weaver's dispatch actor, because the account named on the payload is forwarded into a message a tenant receives. Not a console operation: no consoleOperator grant is minted for it.",
+			GrantsTo:      []string{"operator"},
+		},
+	}, notificationPermissions()...)
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	loftspaceledger "github.com/operatinggraph/lattice/packages/loftspace-ledger"
 )
@@ -129,17 +130,23 @@ func readAllOrFail(keys []string, get rawGetter) (map[string][]byte, error) {
 // lens — one per lease, AccountKey empty until LoftspaceCreateAccount has opened one.
 // The account carries its OWN independently-minted NanoID (never derived
 // from the lease's — see packages/loftspace-ledger/scripts.go), so this lens
-// read is the only way to resolve it.
+// read is the only way to resolve it. The three Arrears columns come
+// straight off the account's own `.arrears` aspect (EvaluateLoftspaceArrears'
+// stamp) — empty for an account nothing has evaluated yet, or one with
+// nothing owed.
 type leaseAccountProjection struct {
-	LeaseAppKey string `json:"leaseAppKey"`
-	AccountKey  string `json:"accountKey"`
+	LeaseAppKey           string `json:"leaseAppKey"`
+	AccountKey            string `json:"accountKey"`
+	ArrearsDueAt          string `json:"arrearsDueAt"`
+	ArrearsRemindedFor    string `json:"arrearsRemindedFor"`
+	ArrearsReminderSentAt string `json:"arrearsReminderSentAt"`
 }
 
-// resolveLeaseAccount scans the leaseAccounts lens rows for the one matching
-// leaseAppKey, returning its account key ("" if the lease has none yet,
-// including when no row projected at all — a lease the Refractor hasn't
-// caught up to yet reads the same as one with no account).
-func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string {
+// findLeaseAccountRow scans the leaseAccounts lens rows for the one matching
+// leaseAppKey, returning its full projection (ok=false if the lease has no
+// row at all, including when the Refractor hasn't caught up to it yet —
+// that reads the same as a lease with no account opened).
+func findLeaseAccountRow(keys []string, get kvGetter, leaseAppKey string) (leaseAccountProjection, bool) {
 	for _, k := range keys {
 		raw, ok := get(k)
 		if !ok {
@@ -149,9 +156,173 @@ func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string
 		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey != leaseAppKey {
 			continue
 		}
-		return p.AccountKey
+		return p, true
 	}
-	return ""
+	return leaseAccountProjection{}, false
+}
+
+// indexLeaseAccountsByLease scans the leaseAccounts lens rows once and
+// returns them keyed by leaseAppKey — the portfolio handler needs every
+// occupied lease's row, and re-scanning the whole bucket once per lease
+// (findLeaseAccountRow's own per-lease cost) would redecode the same rows
+// N times over.
+func indexLeaseAccountsByLease(keys []string, get kvGetter) map[string]leaseAccountProjection {
+	out := make(map[string]leaseAccountProjection, len(keys))
+	for _, k := range keys {
+		raw, ok := get(k)
+		if !ok {
+			continue
+		}
+		var p leaseAccountProjection
+		if json.Unmarshal(raw, &p) != nil || p.LeaseAppKey == "" {
+			continue
+		}
+		out[p.LeaseAppKey] = p
+	}
+	return out
+}
+
+// resolveLeaseAccount scans the leaseAccounts lens rows for the one matching
+// leaseAppKey, returning its account key ("" if the lease has none yet,
+// including when no row projected at all — a lease the Refractor hasn't
+// caught up to yet reads the same as one with no account).
+func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string {
+	row, _ := findLeaseAccountRow(keys, get, leaseAppKey)
+	return row.AccountKey
+}
+
+// rentArrearsProjection is one lease's rent-balance age — dueDate empty when
+// nothing is owed, isOverdue/daysOverdue/daysUntilDue derived from whichever
+// dueDate applies, reminderSentAt threaded verbatim from the leaseAccounts
+// row. Shared by /api/ledger, /api/one-bill and /api/portfolio-pulse — the
+// three surfaces that render a lease's rent age.
+type rentArrearsProjection struct {
+	DueDate        string `json:"dueDate"`
+	IsOverdue      bool   `json:"isOverdue"`
+	DaysOverdue    int    `json:"daysOverdue"`
+	DaysUntilDue   int    `json:"daysUntilDue"`
+	ReminderSentAt string `json:"reminderSentAt"`
+}
+
+// deriveRentArrears computes a lease's rent-balance age from its own
+// ledgerHistory rows (rows must already be sorted chronologically —
+// postedAt, then transactionKey — the order computeLedgerHistory returns
+// them in). It FIFO-ages the ledger exactly as EvaluateLoftspaceArrears
+// does: debits open the queue, credits retire the oldest still-open debit
+// first, and any credit surplus carries forward to prepay whatever opens
+// next. Unlike the wellness/café ledgers this ledger writes no `reverses`
+// credit, so there is no netting pre-pass — the FIFO runs plain.
+//
+// The head of the open-debit queue is the oldest unpaid charge; its due
+// date is its own recorded dueAt (DebitAccount's stamp), or its postedAt
+// when it records none — a landlord one-off (LoftspaceRecordCharge) is due
+// on receipt, never re-gridded with an added term.
+//
+// A RECORDED due date (recordedDueAt — the leaseAccounts row's own
+// arrearsDueAt) wins over this derivation whenever a debit is still open;
+// a fully paid lease reports no due date regardless of a stamp an
+// evaluation has not yet caught up to clear. reminderSentAt threads through
+// as the account's own recorded SEND INTENT, unrelated to this call's own
+// balance recomputation — EXCEPT across an episode boundary: while walking
+// the FIFO, the EPISODE START is the postedAt of the debit that opens the
+// queue from empty (the charge that takes the account from square to
+// owing again). A recorded reminderSentAt that predates the CURRENT
+// episode's start belongs to a PRIOR episode the account has since paid
+// off and reopened — a payment to zero followed by a new charge, ahead of
+// the next EvaluateLoftspaceArrears evaluation minting a fresh `.arrears`
+// for the new one. Both reminderSentAt and recordedDueAt are dropped
+// together in that case (the recorded stamp predates the episode, so the
+// derived head's own due wins) — never partway, since both came off the
+// same stale evaluation. Equal to the episode start still counts as
+// belonging to it (dropped only when STRICTLY earlier).
+func deriveRentArrears(rows []ledgerEntryRow, recordedDueAt, reminderSentAt string, now time.Time) rentArrearsProjection {
+	type openDebit struct {
+		postedAt  string
+		dueAt     string
+		remaining int64
+	}
+	var open []openDebit
+	var surplus int64
+	var episodeStart string
+	for _, r := range rows {
+		switch r.Type {
+		case "debit":
+			amount := r.AmountCents
+			wasSquare := len(open) == 0
+			if surplus >= amount {
+				surplus -= amount
+				continue
+			}
+			amount -= surplus
+			surplus = 0
+			if wasSquare {
+				episodeStart = r.PostedAt
+			}
+			open = append(open, openDebit{postedAt: r.PostedAt, dueAt: r.DueAt, remaining: amount})
+		case "credit":
+			remaining := r.AmountCents
+			for remaining > 0 && len(open) > 0 {
+				if open[0].remaining > remaining {
+					open[0].remaining -= remaining
+					remaining = 0
+				} else {
+					remaining -= open[0].remaining
+					open = open[1:]
+				}
+			}
+			surplus += remaining
+		}
+	}
+
+	var dueDate string
+	if len(open) > 0 {
+		head := open[0]
+		derived := head.dueAt
+		if derived == "" {
+			derived = head.postedAt
+		}
+		dueDate = derived
+
+		if reminderSentAt != "" && reminderSentAt < episodeStart {
+			reminderSentAt = ""
+			recordedDueAt = ""
+		}
+		if recordedDueAt != "" {
+			dueDate = recordedDueAt
+		}
+	}
+
+	isOverdue, daysOverdue, daysUntilDue := computeRentOverdue(dueDate, now)
+	return rentArrearsProjection{
+		DueDate:        dueDate,
+		IsOverdue:      isOverdue,
+		DaysOverdue:    daysOverdue,
+		DaysUntilDue:   daysUntilDue,
+		ReminderSentAt: reminderSentAt,
+	}
+}
+
+// computeRentOverdue reports whether dueDate (RFC3339) has been reached by
+// now (isOverdue: dueDate <= now, so the exact instant a lease crosses into
+// arrears counts as overdue, matching EvaluateLoftspaceArrears' own
+// `remindAt <= evaluatedAt` boundary), and by how many whole UTC days in
+// whichever direction — floored, not rounded, so a due date the ledger has
+// been aging for exactly N days (not N+ε) reads as N, and a due date a
+// full day away reads daysUntilDue=1. A due date that fails to parse fails
+// closed (neither overdue nor upcoming), the same posture the FIFO
+// derivation takes on an unopened head.
+func computeRentOverdue(dueDate string, now time.Time) (isOverdue bool, daysOverdue int, daysUntilDue int) {
+	if dueDate == "" {
+		return false, 0, 0
+	}
+	due, err := time.Parse(time.RFC3339, dueDate)
+	if err != nil {
+		return false, 0, 0
+	}
+	if due.After(now) {
+		return false, 0, int(due.Sub(now).Hours() / 24)
+	}
+	return true, int(now.Sub(due).Hours() / 24), 0
 }
 
 // leaseVisibleToActor reports whether the authenticated actor may view
@@ -242,7 +413,8 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	acctGet := func(key string) ([]byte, bool) { v, ok := acctValues[key]; return v, ok }
-	accountKey := resolveLeaseAccount(acctKeys, acctGet, leaseAppKey)
+	acctRow, _ := findLeaseAccountRow(acctKeys, acctGet, leaseAppKey)
+	accountKey := acctRow.AccountKey
 
 	bucket := loftspaceledger.LedgerHistoryBucket
 	keys, err := conn.KVListKeys(ctx, bucket)
@@ -265,10 +437,16 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	}
 	get := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
 	rows, balance := computeLedgerHistory(keys, get, leaseAppKey)
+	arrears := deriveRentArrears(rows, acctRow.ArrearsDueAt, acctRow.ArrearsReminderSentAt, time.Now().UTC())
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"leaseAppKey":  leaseAppKey,
-		"accountKey":   accountKey,
-		"transactions": rows,
-		"balanceCents": balance,
+		"leaseAppKey":    leaseAppKey,
+		"accountKey":     accountKey,
+		"transactions":   rows,
+		"balanceCents":   balance,
+		"dueDate":        arrears.DueDate,
+		"isOverdue":      arrears.IsOverdue,
+		"daysOverdue":    arrears.DaysOverdue,
+		"daysUntilDue":   arrears.DaysUntilDue,
+		"reminderSentAt": arrears.ReminderSentAt,
 	})
 }

@@ -1,6 +1,10 @@
 package loftspaceledger
 
-import "github.com/operatinggraph/lattice/internal/pkgmgr"
+import (
+	"fmt"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
+)
 
 // LedgerHistoryBucket is the NATS-KV read model the ledgerHistory lens projects
 // into. It is the **P5 query surface** for "what charges/payments has this lease
@@ -19,13 +23,26 @@ const LedgerHistoryBucket = "loftspace-ledger-history"
 // "does this lease have a ledger account, and what is its key."
 const LeaseAccountsBucket = "loftspace-lease-accounts"
 
+// ArrearsRemindersTarget is the §10.8 TargetID == the loftspaceArrearsReminders
+// lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads, and
+// the key the freshnessExpiry marker records this target's own fired timer
+// under.
+const ArrearsRemindersTarget = "loftspaceArrearsReminders"
+
+// arrearsOp is the Weaver-dispatched arrears evaluation (accountDDLScript).
+const arrearsOp = "EvaluateLoftspaceArrears"
+
 // Lenses returns the package's Lens declarations: ledgerHistory (one row per
 // posted transaction, flattening the .entry aspect + the account/lease it
 // posted to into a query-optimized read-model row — the FE derives a running
 // balance client-side by summing amountCents, positive for debit, negative
 // for credit, over rows for a given leaseAppKey/accountKey; the ledger
-// itself never stores a mutable running total) and leaseAccounts (the lease
-// -> account key lookup, since the account key is no longer derivable).
+// itself never stores a mutable running total), leaseAccounts (the lease
+// -> account key lookup, since the account key is no longer derivable, plus
+// the account's three arrears columns), and loftspaceArrearsReminders (the
+// one-row-per-account arrears convergence lens whose playbook dispatches
+// EvaluateLoftspaceArrears — the wellness-ledger arrears mechanism applied
+// to this ledger).
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -44,8 +61,144 @@ func Lenses() []pkgmgr.LensSpec {
 			Engine:        "full",
 			Spec:          leaseAccountsSpec,
 		},
+		{
+			CanonicalName:  ArrearsRemindersTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           arrearsRemindersSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "account",
+				OutputKeyPattern: ArrearsRemindersTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_evaluation", "entityKey", "freshUntil", "dueAt", "remindAt", "remindedFor", "reminderSentAt", "stale", "historyTooLong", "evaluatedAt", "maxretries_evaluation"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+			},
+		},
 	}
 }
+
+// arrearsRemindersSpec is the one-row-per-account arrears convergence cypher —
+// wellness-ledger's wellnessArrearsRemindersSpec applied to a rent account,
+// with ONE difference: the timer arms at remindAt (the head's own recorded due
+// date plus the package's grace), not at dueAt. Rent is due on its date and the
+// statement counts "N days overdue" from dueAt; the reminder waits out the
+// grace. The identity the reminder addresses is the op's to resolve from
+// state, never a row column: a Params entry bound to an optional hop is a
+// dispatch refusal on every row where the hop misses. freshUntil arms Weaver's
+// @at temporal timer (internal/weaver/temporal.go) at a deadline, the fired
+// timer's MarkExpired records that lapse under THIS target's own byTarget key
+// on the account, and the recorded lapse — not a clock — is what opens the gap.
+//
+// The lifecycle of one arrears episode, on a ledger that stores no balance:
+//
+//   - An account nothing has ever evaluated projects evaluatedAt = null and is
+//     violating from its first projection — which is exactly how every such
+//     account, with charges or without, gets its first evaluation: one op
+//     each, then quiet.
+//   - EvaluateLoftspaceArrears replays the account's own history, and where a
+//     charge is open stamps .arrears.dueAt = that charge's own recorded due
+//     date (its postedAt when it recorded none) and .arrears.remindAt = dueAt
+//     plus the grace (RECORDED time facts, written by the op). While no timer
+//     has fired at that reminder instant the row projects freshUntil =
+//     remindAt → Weaver arms an @at there. missing_evaluation is false.
+//   - At remindAt the @at fires → MarkExpired's freshnessExpiry marker on this
+//     account records the fired instant under this target's key AND
+//     re-projects the row → the recorded lapse now reaches remindAt →
+//     missing_evaluation flips true and freshUntil goes null (a one-shot
+//     wake-up, not re-armed).
+//   - Weaver dispatches directOp(EvaluateLoftspaceArrears) — driven by the
+//     violating row, not by a timer. The op recomputes the FIFO head and
+//     stamps .arrears.remindedFor = the due date it reminded for, alongside
+//     the notification it fires → re-projection → remindedFor = dueAt →
+//     missing_evaluation false, freshUntil null. Converged, and no second
+//     reminder for this episode however many times the row is re-evaluated.
+//   - EVERY posted entry marks .arrears.stale (post_entry cannot see a
+//     balance, so it cannot tell a clearing payment from a partial one or a
+//     new charge from one queued behind the head), which opens the gap
+//     directly (no timer involved) so the evaluation recomputes. Its rewrite
+//     drops stale; a recomputed remindAt later than the recorded lapse re-arms
+//     freshUntil with no clearing write at all, and a history that nets to
+//     nothing owed rewrites .arrears to {evaluatedAt} alone: no remindAt, so
+//     no timer and no gap, and nothing of the finished episode survives to
+//     make the NEXT charge look already reminded. Where the next charge posted
+//     BEFORE that evaluation ran, the op finds an episode opener newer than
+//     the recorded send and drops the send record itself, so the row re-arms
+//     for the new episode with remindedFor absent.
+//   - The marker is permanent (orchestration-base merges, never clears), and
+//     a lapse recorded for an EARLIER episode can reach a new episode's
+//     remindAt only when that remindAt already lies in the past — a new head
+//     whose recorded due date plus the grace precedes an instant that has
+//     already fired, which a late-posted recurring rent can produce. The gap
+//     it then opens is a genuine one, not a spurious send: the op sends only
+//     on remindAt <= evaluatedAt, and every evaluation runs after the lapse
+//     it was opened by. The old marker can hurry a truly overdue episode's
+//     first evaluation; it cannot make one send early.
+//   - An account whose transaction history outran the op's replay budget
+//     carries historyTooLong, and it suppresses BOTH the gap and the timer.
+//     That pairing is the point: the op cannot compute a head for such an
+//     account, so a gap that stayed open would have Weaver re-dispatch the
+//     same doomed evaluation on every window with nothing sent and nothing
+//     said, and a timer armed at a remindAt no evaluation could confirm would
+//     fire against a head nobody knows. Quiet, but VISIBLE — the row stays in
+//     the weaver-targets bucket carrying the flag, which is the operator's
+//     signal. The next posted entry drops the flag (post_entry's carry) and
+//     sets stale, buying exactly one more attempt.
+//
+// missing_evaluation's third arm carries no `remindAt <> null` conjunct. It
+// would be dead: the arm's own byTarget >= remindAt comparison is already
+// false on a null remindAt (a null operand makes the range test false, never
+// true), so nothing reaches that arm without a recorded reminder instant.
+// freshUntil's null test is documentary rather than load-bearing: the CASE
+// yields remindAt itself, so a null remindAt projects null whether or not the
+// WHEN passes (the negated lapse compare, NOT(false), would otherwise let it
+// through). It stays so the arming rule reads as written — armed only while
+// a reminder instant is recorded — and no vector can red on its removal.
+//
+// The lens reads NO clock. Both operands of every comparison are stored graph
+// data, so the row is a pure function of the subgraph and two projections at
+// different wall-clock instants over the same graph agree.
+//
+// One row per anchor, no walk at all. dueAt, remindAt, remindedFor,
+// reminderSentAt, stale, historyTooLong and evaluatedAt are INFORMATIONAL
+// columns (operator observability); only entityKey + freshUntil + the two
+// bools are load-bearing for Weaver's dispatch and temporal lanes, and
+// maxretries_evaluation is the retry cap (retry_budget.go).
+//
+// Built with fmt.Sprintf so the target id comes from the constant the
+// WeaverTargetSpec uses. The cypher has no negated relationship pattern at
+// all, only scalar NOT comparisons, and carries no literal '%' of its own.
+var arrearsRemindersSpec = fmt.Sprintf(`MATCH (a:account {key: $actorKey})
+RETURN
+  a.key AS actorKey,
+  a.key AS entityKey,
+  a.arrears.data.dueAt AS dueAt,
+  a.arrears.data.remindAt AS remindAt,
+  a.arrears.data.remindedFor AS remindedFor,
+  a.arrears.data.sentAt AS reminderSentAt,
+  a.arrears.data.stale AS stale,
+  a.arrears.data.historyTooLong AS historyTooLong,
+  a.arrears.data.evaluatedAt AS evaluatedAt,
+  CASE WHEN (a.arrears.data.remindAt <> null) AND (a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND NOT (a.arrears.data.stale = true) AND NOT (a.arrears.data.historyTooLong = true) AND NOT (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.remindAt) THEN a.arrears.data.remindAt ELSE null END AS freshUntil,
+  (
+    NOT (a.arrears.data.historyTooLong = true)
+    AND (
+      (a.arrears.data.evaluatedAt = null)
+      OR (a.arrears.data.stale = true)
+      OR ((a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.remindAt))
+    )
+  ) AS missing_evaluation,
+  (
+    NOT (a.arrears.data.historyTooLong = true)
+    AND (
+      (a.arrears.data.evaluatedAt = null)
+      OR (a.arrears.data.stale = true)
+      OR ((a.arrears.data.remindedFor <> a.arrears.data.dueAt) AND (a.freshnessExpiry.data.byTarget.%[1]s >= a.arrears.data.remindAt))
+    )
+  ) AS violating,
+  %[2]d AS maxretries_evaluation`, ArrearsRemindersTarget, maxArrearsEvaluationRetries)
 
 // ledgerHistorySpec projects one row per transaction, walking postedTo to the
 // account and heldFor to the lease so the FE can filter/group by leaseAppKey
@@ -91,9 +244,20 @@ RETURN
 // account" query the FE needs before its first-ever charge or payment.
 // OPTIONAL MATCH: the heldFor hop legitimately has no match for a lease that
 // has never had a charge/payment.
+//
+// The three arrears columns come off the account's own .arrears aspect and are
+// INFORMATIONAL — this lens drives no convergence. They are here because the
+// landlord ledger, the tenant statement and the portfolio list all need to say
+// WHEN the rent fell due and WHEN a reminder went out, and this is already the
+// per-lease row all three read; the alternative was a second bucket keyed by
+// account for three scalars. They are null for a lease with no account, and
+// for an account nothing has yet aged.
 const leaseAccountsSpec = `MATCH (l:leaseapp)
 OPTIONAL MATCH (l)<-[:heldFor]-(a:account)
 RETURN
   l.key AS key,
   l.key AS leaseAppKey,
-  a.key AS accountKey`
+  a.key AS accountKey,
+  a.arrears.data.dueAt AS arrearsDueAt,
+  a.arrears.data.remindedFor AS arrearsRemindedFor,
+  a.arrears.data.sentAt AS arrearsReminderSentAt`

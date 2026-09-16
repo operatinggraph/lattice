@@ -276,6 +276,7 @@ def arrears_head(entries):
     open_debits = []
     surplus = 0
     balance_cents = 0
+    episode_start = None
     for r in rows:
         amount = r["amountCents"]
         if r["type"] == "debit":
@@ -288,6 +289,8 @@ def arrears_head(entries):
                 continue
             amount -= surplus
             surplus = 0
+            if len(open_debits) == 0:
+                episode_start = r["postedAt"]
             open_debits.append({"postedAt": r["postedAt"], "remaining": amount})
         elif r["type"] == "credit":
             balance_cents -= amount
@@ -310,26 +313,30 @@ def arrears_head(entries):
     # which is why deriveStatement's early "balance <= 0 has nothing to age"
     # return needs no counterpart here.
     #
-    # The head's own postedAt is ALSO the EPISODE START, and execute() reads
-    # it as that. An episode is the stretch from the charge that took the
-    # account from square (nothing open) to owing, until the queue is next
-    # empty; formally, the episode start is the postedAt of the first debit
-    # that was processed while the queue was empty and left it non-empty —
-    # a debit the surplus could not prepay outright. Under FIFO consumption
-    # that debit is exactly the head: every debit processed before it was
-    # retired (the queue was empty when it arrived), it has not been retired
-    # since (credits retire the front of the queue, and it IS the front until
-    # it is fully paid — at which point the queue is either empty again, a new
-    # episode, or the next debit is the front and the head by the same
-    # argument), and nothing older can be open. Netting does not disturb
-    # this: a reversed charge and its reversing credit are removed from the
-    # FIFO pair-wise before the walk, so "square" is judged net of reversals,
-    # which is the statement's own rule. So the head returned here names both
-    # the charge to age and the instant the current episode began, and no
-    # second walk over the history is needed to find the boundary.
+    # The walk ALSO tracks the EPISODE START, and execute() reads it as the
+    # boundary a recorded send is judged against. An episode is the stretch
+    # from the charge that took the account from square (nothing open) to
+    # owing, until the queue is next empty; formally, the episode start is
+    # the postedAt of the debit that was appended onto an EMPTY open queue —
+    # a debit the surplus could not prepay outright, since a prepaid (or
+    # fully reversed) debit never opens. The head is NOT necessarily that
+    # opener: a partial payment that exactly retires the opener moves the
+    # head to the next open charge while the member stays continuously in
+    # arrears, and that charge posted after the opener — so a boundary read
+    # off the head's own postedAt would mistake a moved head for a new
+    # episode and send a second reminder for a debt the member is visibly
+    # paying down. Every debit processed before the opener was retired (the
+    # queue was empty when it arrived), so the opener is the oldest charge of
+    # the current episode and its postedAt is the instant the episode began;
+    # a payment to zero empties the queue and the next debit that opens it
+    # starts the next episode, resetting the instant. Netting does not
+    # disturb this: a reversed charge and its reversing credit are removed
+    # from the FIFO pair-wise before the walk, so "square" is judged net of
+    # reversals, which is the statement's own rule. No second walk over the
+    # history is needed to find the boundary.
     if len(open_debits) == 0:
         return None, balance_cents
-    return open_debits[0]["postedAt"], balance_cents
+    return {"postedAt": open_debits[0]["postedAt"], "episodeStart": episode_start}, balance_cents
 
 def carry_arrears(doc):
     out = {}
@@ -519,7 +526,7 @@ def execute(state, op):
                                          "historyTooLong": True}}],
                     "response": {"primaryKey": acct_key}}
 
-        head_posted_at, balance_cents = arrears_head(entries)
+        head, balance_cents = arrears_head(entries)
 
         # evaluatedAt is written on EVERY outcome, including "owes nothing":
         # its absence is what opens the convergence gap for an account that
@@ -528,8 +535,8 @@ def execute(state, op):
         data = {"evaluatedAt": evaluated_at}
         events = []
 
-        if head_posted_at != None:
-            due_at = time.rfc3339_add(head_posted_at, ARREARS_GRACE_DURATION)
+        if head != None:
+            due_at = time.rfc3339_add(head["postedAt"], ARREARS_GRACE_DURATION)
             data["dueAt"] = due_at
             reminded_for = prior.get("remindedFor")
             sent_at = prior.get("sentAt")
@@ -537,21 +544,23 @@ def execute(state, op):
             # ends an episode at the entry that pays it off: a payment to
             # zero and a fresh charge can both post before any evaluation
             # runs, and the recorded send record then belongs to an episode
-            # that is already over. The head's postedAt is the instant the
-            # current episode began (arrears_head's own argument), and a
-            # reminder can only ever have gone out for a head at least the
-            # net term old — so a send stamped AT or BEFORE the current
-            # episode's first charge was necessarily a send for an earlier
-            # one, and is dropped here (remindedFor with it: the two are
-            # written together and mean nothing apart). Ties resolve the
-            # same way and for the same reason: a charge that posts in the
-            # very second a reminder goes out cannot be the head that
-            # reminder was for, since that head posted a whole term earlier;
-            # the compare is on the canonical whole-second UTC instants both
-            # values are written as. A send AFTER the episode start is this
-            # episode's own and is carried, whether the head has since moved
-            # (a partial payment) or not.
-            episode_start = head_posted_at
+            # that is already over. arrears_head's episodeStart is the
+            # postedAt of the charge that OPENED the current episode (not the
+            # head, which a partial payment may have moved past the opener
+            # while the member stayed in arrears), and a reminder can only
+            # ever have gone out for a head at least the net term old — so a
+            # send stamped AT or BEFORE the current episode's opener was
+            # necessarily a send for an earlier one, and is dropped here
+            # (remindedFor with it: the two are written together and mean
+            # nothing apart). Ties resolve the same way and for the same
+            # reason: a charge that posts in the very second a reminder goes
+            # out cannot be in the episode that reminder was for, since that
+            # episode's head posted a whole term earlier; the compare is on
+            # the canonical whole-second UTC instants both values are written
+            # as. A send AFTER the episode start is this episode's own and is
+            # carried, whether the head has since moved (a partial payment)
+            # or not.
+            episode_start = head["episodeStart"]
             if sent_at != None and sent_at <= episode_start:
                 sent_at = None
                 reminded_for = None
@@ -612,7 +621,7 @@ def execute(state, op):
                     data["remindedFor"] = reminded_for
                 if sent_at != None:
                     data["sentAt"] = sent_at
-        # head_posted_at == None: nothing is owed, so the episode is over and
+        # head == None: nothing is owed, so the episode is over and
         # {evaluatedAt} alone is written — dueAt, remindedFor, sentAt and stale
         # all go with it, which is what lets the NEXT charge open a clean
         # episode rather than inherit this one's send record. An episode ends

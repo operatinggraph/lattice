@@ -41,8 +41,25 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     (Standard §readTemplateDebt: an omitted clauseRef substitutes empty and
 //     leaves the literal ".terms" behind, a malformed key NATS rejects rather
 //     than reporting absent).
+//
+// The CreditAccount and LoftspaceRecordCharge dispatches ALSO declare the
+// account's own .arrears aspect in OptionalReads: post_entry (scripts.go)
+// marks it stale on every posted entry, and that write is a bare update
+// auto-conditioned on the step-4 hydrated revision only for a key the dispatch
+// hydrated (Contract #3 §3.2). Absence-tolerant, because no account carries
+// the aspect until an evaluation has run on it. The declaration DOCUMENTS that
+// read set; the transaction DDL's own derive_reads GUARANTEES it for a
+// submitter that omitted it.
+//
+// EvaluateLoftspaceArrears and the arrears notification replyOp carry a bare
+// OpMetaSpec — no Presentation, no Dispatch — for discoverability alone, parity
+// with wellness-ledger's own evaluate + replyOp metas. Neither has a form to
+// render: Weaver's actuator resolves the first from the §10.8 playbook and the
+// bridge resolves the second from the event body, so neither reads a
+// descriptor. The S1 gate does not ask them for one either — both are granted
+// to `operator` alone.
 func OpMetas() []pkgmgr.OpMetaSpec {
-	return []pkgmgr.OpMetaSpec{
+	return append([]pkgmgr.OpMetaSpec{
 		{
 			OperationType: "LoftspaceCreateAccount",
 			Presentation: &pkgmgr.OpPresentationSpec{
@@ -98,8 +115,12 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "accountKey",
 				TargetType:  "account",
 				Reads:       []string{"{payload.accountKey}"},
+				// The account's own arrears episode state post_entry marks stale
+				// (absence-tolerant: absent until the first evaluation).
+				OptionalReads: []string{"{payload.accountKey}.arrears"},
 			},
-			// refusal-courtesy(facet): AmountMismatch, InvalidState, TermExhausted: unreachable — CreditAccount's post_entry call hardcodes allow_clause_ref=False (scripts.go), so the clauseRef branch that raises these never runs for any CreditAccount dispatch.
+			// refusal-courtesy(facet): AmountMismatch, TermExhausted: unreachable — CreditAccount's post_entry call hardcodes allow_clause_ref=False (scripts.go), so the clauseRef branch that raises these never runs for any CreditAccount dispatch.
+			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column.
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: none — AuthContext "self" means every Facet submit of this op is self-scoped, so the self-credit balance-verification block (post_entry's authContextTarget branch, scripts.go) always runs, but amountCents carries no maximum tied to the account's own live balance (InputSchema above), and no edge-manifest entity lens projects that balance as a column Facet could bound against
 		},
 		{
@@ -127,9 +148,14 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "accountKey",
 				TargetType:  "account",
 				Reads:       []string{"{payload.accountKey}"},
+				// The account's own arrears episode state post_entry marks stale
+				// (absence-tolerant: absent until the first evaluation).
+				OptionalReads: []string{"{payload.accountKey}.arrears"},
 			},
-			// refusal-courtesy(facet): AmountMismatch, InvalidState, TermExhausted: unreachable — LoftspaceRecordCharge's post_entry call hardcodes allow_clause_ref=False (scripts.go), so the clauseRef branch that raises these never runs for any LoftspaceRecordCharge dispatch.
+			// refusal-courtesy(facet): AmountMismatch, TermExhausted: unreachable — LoftspaceRecordCharge's post_entry call hardcodes allow_clause_ref=False (scripts.go), so the clauseRef branch that raises these never runs for any LoftspaceRecordCharge dispatch.
+			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column.
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — a debit never enters the balance block: the resident branch refuses it AuthDenied first, the landlord branch has no cap.
 		},
-	}
+		{OperationType: arrearsOp},
+	}, notificationOpMetas()...)
 }

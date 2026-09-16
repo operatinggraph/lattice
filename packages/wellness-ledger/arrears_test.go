@@ -496,9 +496,18 @@ func TestArrears_NewEpisodeBeforeEvaluationDropsTheOldSend(t *testing.T) {
 // TestArrears_NewEpisodeInTheSendsOwnSecondDropsTheOldSend is the tie rule:
 // the payment to zero and the fresh charge post in the very second the
 // reminder went out. postedAt and sentAt are both whole-second canonical UTC,
-// so the new head's postedAt EQUALS the recorded sentAt — and it is still the
-// new episode's charge, because the head a send was for is a whole net term
-// older than the send. A strict compare would carry the old send onto it.
+// so the new episode's opener posts at an instant EQUAL to the recorded
+// sentAt — and it is still the new episode's charge, because the head a send
+// was for is a whole net term older than the send. A strict compare would
+// carry the old send onto it.
+//
+// Within one second the FIFO's order is the (postedAt, key) pair, so the two
+// entries are seeded with keys that put the payment FIRST: the queue empties
+// on the payment and the charge re-opens it, which is what makes the charge
+// an opener at all. With the charge sorting first it would join the queue
+// behind the still-open Aug 1 head and the payment would then retire that
+// head — one continuous episode by the ledger's own order, and the send
+// would rightly be carried.
 func TestArrears_NewEpisodeInTheSendsOwnSecondDropsTheOldSend(t *testing.T) {
 	ctx, conn := setupLedgerEnv(t)
 	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearstie")
@@ -512,8 +521,8 @@ func TestArrears_NewEpisodeInTheSendsOwnSecondDropsTheOldSend(t *testing.T) {
 		t.Fatal("fixture precondition: the Aug 1 charge must have been reminded for")
 	}
 
-	creditAt(t, ctx, conn, cp, cons, "wlarrtiepay000000001", acctKey, "2026-08-22T09:00:00Z", 1500, "")
-	debitAt(t, ctx, conn, cp, cons, "wlarrtiedebit0000002", acctKey, "2026-08-22T09:00:00Z", 500)
+	seedEntryAt(t, ctx, conn, acctKey, "WLARREARSTQECRDTAAAA", "credit", 1500, "2026-08-22T09:00:00Z")
+	seedEntryAt(t, ctx, conn, acctKey, "WLARREARSTQEDBTZZZZZ", "debit", 500, "2026-08-22T09:00:00Z")
 
 	evaluateArrears(t, ctx, conn, cp, cons, "wlarrtieeval00000002",
 		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:01Z", processor.OutcomeAccepted)
@@ -526,6 +535,62 @@ func TestArrears_NewEpisodeInTheSendsOwnSecondDropsTheOldSend(t *testing.T) {
 	}
 	if _, ok := data["remindedFor"]; ok {
 		t.Fatalf("remindedFor goes with sentAt: %+v", data)
+	}
+}
+
+// TestArrears_ExactRetirementMovesTheHeadWithinTheEpisode is the moved-head
+// boundary: A (Aug 1) is reminded for on Aug 22; B posts Sep 1; on Sep 3 the
+// member pays exactly A. The head moves to B, which posted AFTER the recorded
+// send — but the account was never square, so this is the same episode and
+// the send record must be carried. A boundary read off the head's own
+// postedAt would drop it here and send again once B's own term ran out, for
+// a debt the member is visibly paying down.
+func TestArrears_ExactRetirementMovesTheHeadWithinTheEpisode(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsmovedhead")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLARREARSMVHQDHJKMNP")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "wlarrmvhacct00000001", identityKey)
+	debitAt(t, ctx, conn, cp, cons, "wlarrmvhdebit0000001", acctKey, "2026-08-01T09:00:00Z", 1500)
+	_, sendReq := evaluateArrears(t, ctx, conn, cp, cons, "wlarrmvheval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	if arrearsNotification(t, ctx, conn, sendReq) == nil {
+		t.Fatal("fixture precondition: A is reminded for past its term")
+	}
+
+	debitAt(t, ctx, conn, cp, cons, "wlarrmvhdebit0000002", acctKey, "2026-09-01T09:00:00Z", 1500)
+	creditAt(t, ctx, conn, cp, cons, "wlarrmvhpay000000001", acctKey, "2026-09-03T09:00:00Z", 1500, "")
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "wlarrmvheval00000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-09-03T10:00:00Z", processor.OutcomeAccepted)
+	moved := arrearsData(t, ctx, conn, acctKey)
+	wantDue := dueFor(t, "2026-09-01T09:00:00Z")
+	if got, _ := moved["dueAt"].(string); got != wantDue {
+		t.Fatalf("dueAt = %q, want %q — the head moved to B", got, wantDue)
+	}
+	if got, _ := moved["sentAt"].(string); got != "2026-08-22T09:00:00Z" {
+		t.Fatalf("sentAt = %q — the head moved but the account was never square, so the episode's send is carried", got)
+	}
+	if got, _ := moved["remindedFor"].(string); got != dueFor(t, "2026-08-01T09:00:00Z") {
+		t.Fatalf("remindedFor = %q, want A's due date carried (B is not yet due)", got)
+	}
+	if notif := arrearsNotification(t, ctx, conn, reqID); notif != nil {
+		t.Fatalf("B is not yet due: %+v", notif)
+	}
+
+	// B's term runs out. remindedFor moves to B's due date, and NOTHING is
+	// sent — one reminder per episode, and this episode already had it.
+	_, reqID2 := evaluateArrears(t, ctx, conn, cp, cons, "wlarrmvheval00000003",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-09-20T09:00:00Z", processor.OutcomeAccepted)
+	if notif := arrearsNotification(t, ctx, conn, reqID2); notif != nil {
+		t.Fatalf("a second reminder for one continuous episode: %+v", notif)
+	}
+	after := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := after["remindedFor"].(string); got != wantDue {
+		t.Fatalf("remindedFor = %q, want B's due date — it is what closes the gap", got)
+	}
+	if got, _ := after["sentAt"].(string); got != "2026-08-22T09:00:00Z" {
+		t.Fatalf("sentAt = %q, want the episode's one send carried", got)
 	}
 }
 

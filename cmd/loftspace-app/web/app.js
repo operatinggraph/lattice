@@ -1531,6 +1531,77 @@ function customerMemo(memo) {
     .trim();
 }
 
+// rentBalanceLine renders a /api/ledger or /api/one-bill response's
+// balanceCents plus its dueDate/isOverdue/daysOverdue/daysUntilDue/
+// reminderSentAt fields (cmd/loftspace-app's handleLedger and
+// handleOneBillStatement) — cmd/wellness-app's own statementLine, applied to
+// a ledger whose head ages by its own RECORDED due date, never a term added
+// to the posting, and whose FIFO carries no refund netting. The owed/credit/
+// paid-in-full split is unconditional; the age clauses only ever follow an
+// owed balance.
+//
+// The one-bill (tenant) statement's balanceCents is rent + café combined,
+// but the age is the RENT account's alone (a café tab has no due date) — so
+// when rentBalanceCents is present and differs from the combined balance,
+// the due-date clause names the rent figure explicitly ("rent owed $R, due
+// <date>") instead of just "rent due <date>", so the age is never read as
+// describing the combined total. /api/ledger carries no rentBalanceCents (it
+// IS the rent ledger), so that clause never fires there.
+//
+// Every date renders through fmtUTCDate — the UTC CALENDAR-DATE slice, never
+// a locale Date parse, so the landlord ledger, the tenant statement and the
+// portfolio pulse all name the same instant regardless of the viewer's time
+// zone. Plain text: every call site assigns the result to .textContent,
+// never innerHTML.
+function rentBalanceLine(data) {
+  const cents = (data && data.balanceCents) || 0;
+  if (cents < 0) return "Credit balance: " + moneyAmount(-cents / 100);
+  if (cents === 0) return "Balance: $0.00 (paid in full)";
+
+  let line = "Balance owed: " + moneyAmount(cents / 100);
+  const rentCents = data && typeof data.rentBalanceCents === "number" ? data.rentBalanceCents : null;
+  const namesRentAlone = rentCents !== null && rentCents !== cents;
+
+  if (data && data.dueDate) {
+    line += namesRentAlone
+      ? " · rent owed " + moneyAmount(rentCents / 100) + ", due " + fmtUTCDate(data.dueDate)
+      : " · rent due " + fmtUTCDate(data.dueDate);
+  }
+  if (data && data.isOverdue) {
+    const days = Number(data.daysOverdue) || 0;
+    line += " · " + days + (days === 1 ? " day" : " days") + " overdue";
+  } else if (data && Number(data.daysUntilDue) > 0) {
+    const days = Number(data.daysUntilDue);
+    line += " · due in " + days + (days === 1 ? " day" : " days");
+  } else if (data && data.dueDate) {
+    line += " · due today";
+  }
+  if (data && data.reminderSentAt) {
+    line += " · a reminder was sent " + fmtUTCDate(data.reminderSentAt);
+  }
+  return line;
+}
+
+// rentAgeText renders one portfolio-pulse lease-balance row's rent age —
+// "N days overdue" / "due in N days" / "due today" / "" — from the same
+// dueDate/isOverdue/daysOverdue/daysUntilDue fields rentBalanceLine reads
+// (portfolio.go's landlordLeaseBalance, deriveRentArrears). Every row this
+// renders for already carries a positive balance
+// (computeLandlordLeaseBalances' own filter, server-side), so an empty
+// string here means no due date at all — a lease-accounts read that
+// degraded to derived-only AND whose ledger read also failed for this one
+// lease — never a zero-balance row, which never reaches this list.
+function rentAgeText(row) {
+  if (!row || !row.dueDate) return "";
+  if (row.isOverdue) {
+    const days = Number(row.daysOverdue) || 0;
+    return days + (days === 1 ? " day" : " days") + " overdue";
+  }
+  const until = Number(row.daysUntilDue) || 0;
+  if (until > 0) return "due in " + until + (until === 1 ? " day" : " days");
+  return "due today";
+}
+
 // renderCardPhoto builds the Browse card's cover image. With photos it shows the
 // first as a cover with an "n photos" count and opens the lightbox on click;
 // with none it shows a neutral placeholder so a listing nobody photographed still
@@ -3441,10 +3512,7 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
 
   const balance = document.createElement("div");
   balance.className = "ledger-balance";
-  const owed = data.balanceCents || 0;
-  if (owed > 0) balance.textContent = "Balance owed: " + moneyAmount(owed / 100);
-  else if (owed < 0) balance.textContent = "Credit balance: " + moneyAmount(-owed / 100);
-  else balance.textContent = "Balance: $0.00 (paid in full)";
+  balance.textContent = rentBalanceLine(data);
   body.append(balance);
 
   const txs = data.transactions || [];
@@ -3567,10 +3635,7 @@ async function refreshStatementBody(body, leaseAppKey) {
 
   const balance = document.createElement("div");
   balance.className = "ledger-balance";
-  const owed = data.balanceCents || 0;
-  if (owed > 0) balance.textContent = "Balance owed: " + moneyAmount(owed / 100);
-  else if (owed < 0) balance.textContent = "Credit balance: " + moneyAmount(-owed / 100);
-  else balance.textContent = "Balance: $0.00 (paid in full)";
+  balance.textContent = rentBalanceLine(data);
   body.append(balance);
 
   const entries = data.entries || [];
@@ -3623,8 +3688,10 @@ async function refreshStatementBody(body, leaseAppKey) {
 // heldFor→appliesToUnit→manages topology (nothing here is trusted
 // client-side, and the manages link is a server-side follow-up read off
 // that walk, so no optionalReads is declared).
-// refusal-courtesy: CreditAccount/AmountMismatch, InvalidState, TermExhausted: unreachable — CreditAccount's post_entry call hardcodes allow_clause_ref=False (loftspace-ledger/scripts.go), so the clauseRef branch never runs for any CreditAccount dispatch.
-// refusal-courtesy: LoftspaceRecordCharge/AmountMismatch, InvalidState, TermExhausted: unreachable — LoftspaceRecordCharge's post_entry call hardcodes allow_clause_ref=False (loftspace-ledger/scripts.go), so the clauseRef branch never runs for it; the clause branch belongs to DebitAccount, Weaver's clauseSatisfaction dispatch.
+// refusal-courtesy: CreditAccount/AmountMismatch, TermExhausted: unreachable — CreditAccount's post_entry call hardcodes allow_clause_ref=False (loftspace-ledger/scripts.go), so the clauseRef branch never runs for any CreditAccount dispatch.
+// refusal-courtesy: CreditAccount/InvalidState: none — the account's .arrears aspect carrying a class other than loftspaceAccountArrears is a data-integrity fault post_entry refuses (loftspace-ledger/scripts.go), never a state the leaseAccounts row projects; nothing here can pre-check it, and the toast shows the refusal.
+// refusal-courtesy: LoftspaceRecordCharge/AmountMismatch, TermExhausted: unreachable — LoftspaceRecordCharge's post_entry call hardcodes allow_clause_ref=False (loftspace-ledger/scripts.go), so the clauseRef branch never runs for it; the clause branch belongs to DebitAccount, Weaver's clauseSatisfaction dispatch.
+// refusal-courtesy: LoftspaceRecordCharge/InvalidState: none — the same wrong-class .arrears fault post_entry refuses for CreditAccount above; not a lens-projected column, so no form can pre-check it, and the toast shows the refusal.
 // refusal-courtesy: CreditAccount/NoBalanceToPay, PaymentExceedsBalance: none — reachable only when the acting landlord is ALSO the lease's applicant (the script's resident proof answers first and caps the credit at the balance); the landlord branch has no cap, and the toast names the balance the resident branch reports.
 // refusal-courtesy: LoftspaceRecordCharge/NoBalanceToPay, PaymentExceedsBalance: unreachable — a debit never enters the balance block: the resident branch refuses it AuthDenied before the block, the landlord branch has no cap.
 function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
@@ -4191,15 +4258,19 @@ async function loadPortfolioPulse() {
   }
 }
 
-// renderPortfolioArrears — the worst-first rent-owed column beside the pulse
-// card: one row per occupied lease with a positive balance, highest first
-// (server-sorted, portfolio.go's computeLandlordLeaseBalances). Hidden
-// entirely when the read was unavailable (balancesAvailable false) rather
-// than shown as a misleading "no one owes anything" — the same
-// zero-vs-unavailable distinction the pulse text already applies to
-// service-attach-rate. Built with createElement/textContent, never
-// innerHTML, since unit address and applicant name are landlord/tenant-
-// entered strings.
+// renderPortfolioArrears — the most-overdue-first rent-owed column beside
+// the pulse card: one row per occupied lease with a positive balance,
+// SERVER-sorted (portfolio.go's computeLandlordLeaseBalances — overdue rows
+// by days overdue then balance, not-yet-due rows by days until due then
+// balance, every overdue row ahead of every not-yet-due one), never
+// re-sorted here. Hidden entirely when the read was unavailable
+// (balancesAvailable false) rather than shown as a misleading "no one owes
+// anything" — the same zero-vs-unavailable distinction the pulse text
+// already applies to service-attach-rate. Each row's age span
+// (rentAgeText) names how late or how soon the RENT balance is, plus when
+// it was last reminded, so a bill posted today and one weeks overdue never
+// read alike. Built with createElement/textContent, never innerHTML, since unit
+// address and applicant name are landlord/tenant-entered strings.
 function renderPortfolioArrears(rows, available) {
   const el = $("#portfolio-arrears");
   if (!el) return;
@@ -4210,7 +4281,7 @@ function renderPortfolioArrears(rows, available) {
   }
   const title = document.createElement("div");
   title.className = "portfolio-arrears-title";
-  title.textContent = "💸 Rent owed (worst first)";
+  title.textContent = "💸 Rent owed (most overdue first)";
   el.appendChild(title);
   const list = document.createElement("ul");
   list.className = "portfolio-arrears-list";
@@ -4223,8 +4294,16 @@ function renderPortfolioArrears(rows, available) {
     const amount = document.createElement("span");
     amount.className = "portfolio-arrears-amount";
     amount.textContent = moneyAmount(row.balanceCents / 100);
+    const age = document.createElement("span");
+    age.className = "portfolio-arrears-age";
+    let ageText = rentAgeText(row);
+    if (row.reminderSentAt) {
+      ageText += (ageText ? " · " : "") + "reminder sent " + fmtUTCDate(row.reminderSentAt);
+    }
+    age.textContent = ageText;
     li.appendChild(who);
     li.appendChild(amount);
+    li.appendChild(age);
     list.appendChild(li);
   }
   el.appendChild(list);

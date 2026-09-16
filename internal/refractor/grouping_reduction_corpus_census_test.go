@@ -164,6 +164,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"tenancyEnd":                        {"key(endedAt entityKey landlordDecision lapsedAt leaseEnd signedAt unitKey unitStatus) p!landlordDecision", 0},
 	"leaseRentSettlement":               {"key(accountKey decision entityKey leaseEnd leaseStart requestedRent termRent termStart) p!decision", 0},
 	"ledgerHistory":                     {"p", 0},
+	"loftspaceArrearsReminders":         {"p", 0},
 	"menuCatalog":                       {"p", 0},
 	"myTasks":                           {"key(actorKey)", 0},
 	"objectAttachments":                 {"key(contentType digest encryption entityKey governingIdentity sensitive size storeName) p", 0},

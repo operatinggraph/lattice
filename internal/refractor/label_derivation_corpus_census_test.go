@@ -296,6 +296,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// predicate: only erasure-requested identities have a row at all.
 	"identityErasureResidue":        {broad, "identity", modeBroad},
 	"leaseApplicationComplete":      {narrow, "identity leaseapp meta object service task unit", modeLabel},
+	"loftspaceArrearsReminders":     {narrow, "account", modeRelation},
 	"menuCatalog":                   {broad, "menuitem", modeBroad},
 	"myTasks":                       {broad, "identity role task", modeBroad},
 	"objectAttachments":             {broad, "object", modeBroad},

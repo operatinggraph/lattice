@@ -50,8 +50,9 @@ func accountDDL() pkgmgr.DDLSpec {
 			"redelivered, or re-run over a moved head. A history that nets to nothing owed rewrites the aspect to " +
 			"{evaluatedAt} alone — this evaluation is the ONLY thing that ends an episode, since the ledger stores " +
 			"no balance for a posted entry to see reach zero — and where a payment to zero and a fresh charge both " +
-			"posted before it ran, the recorded send predates the new head (a reminder only ever goes out for a " +
-			"head a whole term old), so the evaluation drops remindedFor/sentAt as the finished episode's and the " +
+			"posted before it ran, the recorded send predates the charge that opened the new episode (a reminder " +
+			"only ever goes out for a head a whole term old), so the evaluation drops remindedFor/sentAt as the " +
+			"finished episode's and the " +
 			"new one is reminded for on its own merits. An account whose history outruns the replay budget " +
 			"is not refused: the evaluation DEGRADES, recording historyTooLong (carrying dueAt/remindedFor/sentAt " +
 			"as they stood, clearing stale) and sending nothing, which holds the row quiet and visible rather than " +
@@ -155,10 +156,12 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 //     episode's send record while a charge is open, {evaluatedAt} alone once
 //     the history nets to nothing owed. An episode ends ONLY in this op (this
 //     ledger stores no balance for a posted entry to see reach zero), in one
-//     of two ways: the history nets to nothing owed, or the head it finds
-//     posted at or after the recorded sentAt — a payment to zero and a fresh
-//     charge both posted before the evaluation ran, so the send belongs to
-//     the finished episode and is dropped with its remindedFor. stale is never
+//     of two ways: the history nets to nothing owed, or the charge that
+//     opened the episode it finds posted at or after the recorded sentAt — a
+//     payment to zero and a fresh charge both posted before the evaluation
+//     ran, so the send belongs to the finished episode and is dropped with
+//     its remindedFor (a head that a partial payment moved past the opener
+//     is still the same episode, and keeps it). stale is never
 //     carried across an evaluation, and neither is historyTooLong. It carries
 //     sentAt forward for as long as the episode runs: that field, not
 //     remindedFor, is what says a reminder has already gone out for THIS
@@ -203,7 +206,7 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"fresh EvaluateWellnessArrears, which rewrites the aspect and so never carries it forward. Written by " +
 			"WellnessDebitAccount / WellnessCreditAccount (mark stale; mint nothing where absent) and " +
 			"EvaluateWellnessArrears (recomputes the head; ends the episode at {evaluatedAt} alone when nothing is " +
-			"owed, and drops a send record that predates the head it finds — the boundary between an episode paid " +
+			"owed, and drops a send record that predates the charge that opened the episode it finds — the boundary between an episode paid " +
 			"off and the next one opened before any evaluation ran). Read by the wellnessArrearsReminders " +
 			"convergence lens and projected for the front desk and the " +
 			"member's statement by wellnessMemberAccounts. Declaration-only: no op handler.",
@@ -214,7 +217,7 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"evaluatedAt":    "RFC3339 instant (canonical UTC) the arrears state was last written by an evaluation. Its ABSENCE is what opens the convergence gap for an account nothing has ever evaluated.",
 			"dueAt":          "RFC3339 instant (canonical UTC) the FIFO-oldest still-open charge falls overdue: that charge's own postedAt plus the ledger's net term. Absent when the account owes nothing.",
 			"remindedFor":    "The dueAt the last evaluation acknowledged as passed. Equal to dueAt closes the convergence gap; different (or absent) leaves it open for a recorded lapse to re-open.",
-			"sentAt":         "RFC3339 instant (canonical UTC) the reminder's outbox event was committed for this arrears episode — the send intent the front-desk grid and the member's statement show, and the fact a booking hold reads. Its ABSENCE is what lets the next passed deadline send; it is carried across every write of a live episode and dropped only by the evaluation that finds the episode over: no open charge, or a head that posted at or after this instant (the balance returned to zero and a new charge opened a fresh episode before an evaluation ran).",
+			"sentAt":         "RFC3339 instant (canonical UTC) the reminder's outbox event was committed for this arrears episode — the send intent the front-desk grid and the member's statement show, and the fact a booking hold reads. Its ABSENCE is what lets the next passed deadline send; it is carried across every write of a live episode and dropped only by the evaluation that finds the episode over: no open charge, or an episode whose opening charge posted at or after this instant (the balance returned to zero and a new charge opened a fresh episode before an evaluation ran); a head that a partial payment moved past the opener stays in the same episode and keeps it.",
 			"stale":          "True when what is recorded may no longer describe the account — every posted entry sets it, since the ledger stores no balance to reason from. Opens the convergence gap; cleared by the evaluation that recomputes the head.",
 			"historyTooLong": "True when the account's postedTo history outran the evaluation's bounded replay budget, so no FIFO head could be computed. Suppresses BOTH the convergence gap and the freshness timer — the row stays in the read model for an operator to see, without re-dispatching an evaluation that cannot succeed. Dropped by the next posted entry (which also marks the state stale), buying exactly one more attempt.",
 		},
