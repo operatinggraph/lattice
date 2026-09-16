@@ -34,11 +34,24 @@ import (
 // approve derives a .tenancy whose leaseEnd already precedes $now, and the
 // tenancyEnd target's row projects an already-lapsed freshUntil the instant
 // it is activated (the leaseExpiry idiom: an overdue @at is published
-// verbatim and NATS releases it at once). The listing's own rentAmount is
-// deliberately set apart from requestedRent so a tenancy.rentAmount that
-// matches requestedRent proves R1's terms-first derivation rather than an
-// accidental fallback to the listing.
+// verbatim and NATS releases it at once).
 func (h *harness) seedTenancyEndApplication(label string, requestedRent float64) (appKey, appID, applicantKey, unitKey, moveInDate string) {
+	h.t.Helper()
+	// Truncated to whole seconds so it is byte-identical to time.rfc3339_utc's
+	// canonical re-emission (whole seconds, "Z" suffix) and can be compared to
+	// the recorded .tenancy.leaseStart directly.
+	moveInDate = time.Now().UTC().AddDate(-2, 0, 0).Truncate(time.Second).Format(time.RFC3339)
+	appKey, appID, applicantKey, unitKey = h.seedTenancyApplicationFrom(label, requestedRent, moveInDate)
+	return appKey, appID, applicantKey, unitKey, moveInDate
+}
+
+// seedTenancyApplicationFrom mints a landlord-owned unit and a lease
+// application whose declared .terms start at moveInDate with a 12-month
+// leaseTermMonths — the caller picks where the term sits relative to $now.
+// The listing's own rentAmount is deliberately set apart from requestedRent
+// so a tenancy.rentAmount that matches requestedRent proves R1's terms-first
+// derivation rather than an accidental fallback to the listing.
+func (h *harness) seedTenancyApplicationFrom(label string, requestedRent float64, moveInDate string) (appKey, appID, applicantKey, unitKey string) {
 	h.t.Helper()
 	claimSum := sha256.Sum256([]byte("tenancyend-applicant-claim-" + label + "-" + mustNanoID(h.t)))
 	idReply := h.submitOp("CreateUnclaimedIdentity", "identity", "default", bootstrap.BootstrapIdentityKey, map[string]any{
@@ -85,12 +98,6 @@ func (h *harness) seedTenancyEndApplication(label string, requestedRent float64)
 		Enumerations: testutil.DeclaredEnumerations("AssignUnitOwner", bootstrap.BootstrapIdentityKey, loftspacedomain.OpMetas())})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, ownerReply.Status, "AssignUnitOwner(%s): %+v", label, ownerReply.Error)
 
-	// moveInDate two years back + a 12-month term puts leaseEnd a year in the
-	// past — entirely over by the time this application is even decided.
-	// Truncated to whole seconds so it is byte-identical to time.rfc3339_utc's
-	// canonical re-emission (whole seconds, "Z" suffix) and can be compared to
-	// the recorded .tenancy.leaseStart directly.
-	moveInDate = time.Now().UTC().AddDate(-2, 0, 0).Truncate(time.Second).Format(time.RFC3339)
 	appReply := h.submitOp("CreateLeaseApplication", "leaseapp", "default", bootstrap.BootstrapIdentityKey, map[string]any{
 		"applicant": applicantKey, "unit": unitKey,
 		"moveInDate": moveInDate, "leaseTermMonths": 12, "requestedRent": requestedRent,
@@ -103,7 +110,7 @@ func (h *harness) seedTenancyEndApplication(label string, requestedRent float64)
 	require.Equalf(h.t, processor.ReplyStatusAccepted, appReply.Status, "CreateLeaseApplication(%s): %+v", label, appReply.Error)
 	appKey = appReply.PrimaryKey
 	appID = appKey[len("vtx.leaseapp."):]
-	return appKey, appID, applicantKey, unitKey, moveInDate
+	return appKey, appID, applicantKey, unitKey
 }
 
 // applyForUnit mints a SECOND applicant + application against an

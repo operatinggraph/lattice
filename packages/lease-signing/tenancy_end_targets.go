@@ -29,7 +29,10 @@ func TenancyEndTargets() []pkgmgr.WeaverTargetSpec {
 // read too via the row.<column>.<aspect> template form — .tenancy for
 // EndTenancy (a row with this gap open has proven the aspect exists; the op's
 // OCC pin rests on the hydrated revision that declaration produces), .listing
-// for SetListingStatus (its NoListing guard reads it).
+// for SetListingStatus (its NoListing guard reads it). EndTenancy's .notice is
+// a (d) OptionalRead: a lease with no notice is the common case, and the op
+// reads the recorded move-out from hydration to end the term there rather
+// than at leaseEnd (termEnd, the same value the lens armed the timer on).
 func tenancyEndTarget() pkgmgr.WeaverTargetSpec {
 	return pkgmgr.WeaverTargetSpec{
 		TargetID: TenancyEndTarget,
@@ -40,10 +43,11 @@ func tenancyEndTarget() pkgmgr.WeaverTargetSpec {
 		LensRef: TenancyEndTarget,
 		Gaps: map[string]pkgmgr.GapActionSpec{
 			"missing_tenancyEnded": {
-				Action:    "directOp",
-				Operation: "EndTenancy",
-				Params:    map[string]string{"leaseAppKey": "row.entityKey"},
-				Reads:     []string{"row.entityKey", "row.entityKey.tenancy"},
+				Action:        "directOp",
+				Operation:     "EndTenancy",
+				Params:        map[string]string{"leaseAppKey": "row.entityKey"},
+				Reads:         []string{"row.entityKey", "row.entityKey.tenancy"},
+				OptionalReads: []string{"row.entityKey.notice"},
 			},
 			"missing_relist": {
 				Action:    "directOp",

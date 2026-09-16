@@ -68,7 +68,7 @@ func RenewalLenses() []pkgmgr.LensSpec {
 				OutputKeyPattern: "renewalComplete.{actorSuffix}",
 				BodyColumns: []string{
 					"violating", "missing_renewalComplete", "entityKey", "leaseApp", "tenant", "landlord",
-					"open", "leaseappAlive", "hasGuarantor", "signalsSubmittedAt", "bgcheckValidUntil",
+					"open", "leaseappAlive", "tenancyEndedAt", "noticeMoveOutAt", "hasGuarantor", "signalsSubmittedAt", "bgcheckValidUntil",
 					"guarantorVerifiedAt", "termsSetAt", "signedAt",
 					"inflight_renewalComplete", "maxretries_renewalComplete",
 				},
@@ -117,6 +117,9 @@ func RenewalLenses() []pkgmgr.LensSpec {
 				{Name: "unit_address", Type: "text"},
 				{Name: "lease_end", Type: "text"},
 				{Name: "tenancy_ended_at", Type: "text"},
+				{Name: "notice_move_out_at", Type: "text"},
+				{Name: "notice_given_at", Type: "text"},
+				{Name: "notice_given_by", Type: "text"},
 				{Name: "rent_amount", Type: "double precision"},
 				{Name: "term_months", Type: "double precision"},
 				{Name: "terms_set_at", Type: "text"},
@@ -173,7 +176,12 @@ func RenewalLenses() []pkgmgr.LensSpec {
 // ever opened must not have one opened for it now, since the sweep would
 // otherwise mint a cycle on a former tenant's lease every time the row is
 // re-evaluated — and freshUntil goes null so the @at is never re-armed on a
-// term that is over.
+// term that is over. A tenancy UNDER NOTICE (.notice.moveOutAt recorded by
+// GiveNotice) is the same shape one step earlier: the tenant has answered the
+// renewal question by leaving, SignRenewal refuses NoticeGiven off that same
+// aspect, and the tenancyEnd target ends the term on the move-out — so the
+// (moveOutAt = null) conjunct opens no cycle and freshUntil goes null (there
+// is no renewal horizon left to arm).
 // Built with fmt.Sprintf so the target id comes from the constant the
 // WeaverTargetSpec uses, which puts this Spec out of lint-lens-anchors'
 // static reach; its advisory asks for a hand check for a narrowing range
@@ -189,6 +197,7 @@ WITH
   app.tenancy.data.leaseEnd        AS leaseEnd,
   app.tenancy.data.renewalOpensAt  AS renewalOpensAt,
   app.tenancy.data.endedAt         AS endedAt,
+  app.notice.data.moveOutAt        AS moveOutAt,
   app.decision.data.value          AS landlordDecision,
   app.signature.data.signedAt      AS signedAt,
   u.key                            AS unitKey,
@@ -198,9 +207,9 @@ WITH
 RETURN
   entityKey AS actorKey,
   entityKey,
-  CASE WHEN (endedAt <> null) OR (lapsedAt >= renewalOpensAt) THEN null ELSE renewalOpensAt END AS freshUntil,
-  ((renewalOpensAt <> null) AND (endedAt = null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS missing_renewalCycle,
-  ((renewalOpensAt <> null) AND (endedAt = null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS violating
+  CASE WHEN (endedAt <> null) OR (moveOutAt <> null) OR (lapsedAt >= renewalOpensAt) THEN null ELSE renewalOpensAt END AS freshUntil,
+  ((renewalOpensAt <> null) AND (endedAt = null) AND (moveOutAt = null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS missing_renewalCycle,
+  ((renewalOpensAt <> null) AND (endedAt = null) AND (moveOutAt = null) AND (landlordDecision = 'approved') AND (signedAt <> null) AND (unitKey <> null) AND (landlordCount > 0) AND (lapsedAt >= renewalOpensAt) AND (cycleRenewalCount = 0)) AS violating
 `, LeaseExpiryTarget)
 
 // renewalCompleteSpec anchors on EVERY renewal vertex, unfiltered by status
@@ -244,14 +253,24 @@ RETURN
 //     let the planner assign a signing task the op then refuses. A TIMESTAMP,
 //     not a boolean, because the planner's `present` treats a false bool as
 //     present (planner/state.go absent()).
-//   - open is the renewal's status gate AND the leaseapp's term being live:
-//     (status = 'open') AND (tenancyEndedAt = null). EndTenancy does not walk
-//     renewals — the tenancyEnd lens's open-renewal hold is a dispatch gate
-//     only — so an operator can end a term under an open cycle; without the
-//     conjunct that cycle stays violating forever with a signRenewal leg the
-//     op refuses TenancyEnded, and a bgcheck lapse re-dispatches a vendor
-//     check on a former tenant. An ended term's open renewal projects nothing
-//     open; CancelRenewal is the landlord's way to close the cycle itself.
+//   - open is the renewal's status gate AND the leaseapp's term being live
+//     AND not under notice: (status = 'open') AND (tenancyEndedAt = null) AND
+//     (noticeMoveOutAt = null). EndTenancy does not walk renewals — the
+//     tenancyEnd lens's open-renewal hold is a dispatch gate only — so an
+//     operator can end a term under an open cycle; without the conjunct that
+//     cycle stays violating forever with a signRenewal leg the op refuses
+//     TenancyEnded, and a bgcheck lapse re-dispatches a vendor check on a
+//     former tenant. A NOTICE (app.notice.data.moveOutAt, GiveNotice) is the
+//     same shape one step earlier: the tenant has answered the renewal
+//     question by leaving, SignRenewal refuses NoticeGiven off that aspect,
+//     and the tenancyEnd target ends the term on the move-out — so the
+//     planner must stop assigning SetRenewalTerms / VerifyGuarantor /
+//     SignRenewal tasks and re-triggering the bgcheck vendor leg toward a
+//     goal the op refuses; the staleUserTasks lens retires the SignRenewal
+//     task already in the inbox. An ended or noticed term's open renewal
+//     projects nothing open; CancelRenewal is the landlord's way to close
+//     the cycle itself. Both facts project as columns (tenancyEndedAt,
+//     noticeMoveOutAt) so a closed row says WHICH one closed it.
 //   - leaseApp is the renewed application's key — the submitProfile leg's
 //     assignTask target (SetApplicantProfile acts on the leaseapp, not the
 //     renewal; the row.clauseKey precedent in semantic-contracts). Never null
@@ -319,6 +338,7 @@ WITH
   app.key                                 AS leaseAppKey,
   (app.key <> null AND app.isDeleted <> True) AS leaseappAlive,
   app.tenancy.data.endedAt                AS tenancyEndedAt,
+  app.notice.data.moveOutAt               AS noticeMoveOutAt,
   id.key                                  AS tenant,
   min(DISTINCT landlord.key)              AS landlordMin,
   (app.applicationSignals.data.hasGuarantor = True) AS hasGuarantor,
@@ -336,7 +356,9 @@ RETURN
   tenant,
   landlordMin                             AS landlord,
   leaseappAlive,
-  ((status = 'open') AND (tenancyEndedAt = null)) AS open,
+  tenancyEndedAt,
+  noticeMoveOutAt,
+  ((status = 'open') AND (tenancyEndedAt = null) AND (noticeMoveOutAt = null)) AS open,
   hasGuarantor,
   signalsSubmittedAt,
   bgcheckValidUntil,
@@ -345,13 +367,13 @@ RETURN
   signedAt,
   ((bgInflight > 0) AND (bgcheckValidUntil = null)) AS inflight_renewalComplete,
   6                                       AS maxretries_renewalComplete,
-  ((status = 'open') AND (tenancyEndedAt = null) AND leaseappAlive AND NOT (
+  ((status = 'open') AND (tenancyEndedAt = null) AND (noticeMoveOutAt = null) AND leaseappAlive AND NOT (
      (bgcheckValidUntil <> null) AND
      ((hasGuarantor = False) OR (guarantorVerifiedAt <> null)) AND
      (termsSetAt <> null) AND
      (signedAt <> null)
    )) AS missing_renewalComplete,
-  ((status = 'open') AND (tenancyEndedAt = null) AND leaseappAlive AND NOT (
+  ((status = 'open') AND (tenancyEndedAt = null) AND (noticeMoveOutAt = null) AND leaseappAlive AND NOT (
      (bgcheckValidUntil <> null) AND
      ((hasGuarantor = False) OR (guarantorVerifiedAt <> null)) AND
      (termsSetAt <> null) AND
@@ -417,6 +439,10 @@ RETURN
 //     TenancyEnded off this exact field once EndTenancy has recorded it
 //     (renewal_scripts.go), so the card's own gate on offering Sign
 //     (renewalReady) reads the same fact.
+//   - notice_move_out_at / notice_given_at / notice_given_by read the
+//     leaseapp's .notice aspect (GiveNotice) the same way — SignRenewal
+//     refuses NoticeGiven off it, so the card hides Sign on a cycle whose
+//     lease is under notice and says why. Null on every lease without one.
 const renewalsReadSpec = `
 MATCH (rn:renewal)
 MATCH (rn)-[:renews]->(app:leaseapp)
@@ -436,6 +462,9 @@ WITH
   u.address.data.line1                     AS unitAddress,
   app.tenancy.data.leaseEnd                AS tenancyLeaseEnd,
   app.tenancy.data.endedAt                 AS tenancyEndedAt,
+  app.notice.data.moveOutAt                AS noticeMoveOutAt,
+  app.notice.data.givenAt                  AS noticeGivenAt,
+  app.notice.data.givenBy                  AS noticeGivenBy,
   app.applicationSignals.data.hasGuarantor AS hasGuarantor,
   rn.terms.data.rentAmount                 AS rentAmount,
   rn.terms.data.termMonths                 AS termMonths,
@@ -455,6 +484,9 @@ RETURN
   unitAddress                              AS unit_address,
   tenancyLeaseEnd                          AS lease_end,
   tenancyEndedAt                           AS tenancy_ended_at,
+  noticeMoveOutAt                          AS notice_move_out_at,
+  noticeGivenAt                            AS notice_given_at,
+  noticeGivenBy                            AS notice_given_by,
   rentAmount                               AS rent_amount,
   termMonths                               AS term_months,
   termsSetAt                               AS terms_set_at,

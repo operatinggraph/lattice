@@ -2029,8 +2029,23 @@ function renderApplicationCard(row, highlight) {
   // below it lets the tenant pay down what they owe themselves (self-scoped
   // CreditAccount, ownership-checked server-side — see renderTenantLedgerPanel).
   if (row.landlordApproved && row.unitStatus === "leased" && row.entityKey) {
-    card.append(renderStatementPanel(row.entityKey));
+    card.append(renderStatementPanel(row.entityKey, row.noticeMoveOutAt));
     card.append(renderTenantLedgerPanel(row.entityKey));
+  }
+
+  // Give notice — offered on a signed, approved, not-yet-ended lease with no
+  // notice recorded yet. Once recorded, states the fact instead (mirrors the
+  // renewal card's own "Notice given — moving out …" line).
+  if (row.landlordApproved && !row.missing_signature && !row.tenancyEndedAt) {
+    if (row.noticeMoveOutAt) {
+      const notice = document.createElement("p");
+      notice.className = "hint";
+      notice.textContent = `Notice given ${fmtDate(row.noticeGivenAt)} · moving out ${fmtUTCDate(row.noticeMoveOutAt)}.`;
+      card.append(notice);
+    } else {
+      const control = renderGiveNoticeControl(row, false, () => loadApplications());
+      if (control) card.append(control);
+    }
   }
 
   const actions = document.createElement("div");
@@ -2443,6 +2458,168 @@ async function withdrawApplication(row) {
   }
 }
 
+// ---- Give notice (early lease end) ----
+//
+// GiveNotice (lease-signing) admits two hats through the SAME consumer
+// scope=self grant: the tenant on their own lease (proven in-script by the
+// deterministic applicationFor link), or the managing landlord (proven by
+// the script's own manages walk — undeclarable client-side, the (e)
+// enumeration off appliesToUnit). Both submit under authContext.target =
+// the acting identity; there is no third path.
+
+// noticeDateBounds derives the Give-notice date input's [min, max] from
+// row's recorded tenancy stamps and nowIso — the exact bounds GiveNotice's
+// own script refusals enforce, so the control can never offer a date the op
+// would refuse: MoveOutBeforeToday (not before today's UTC calendar day),
+// MoveOutBeforeStart (the script refuses moveOutAt <= leaseStart, so the
+// floor is the day AFTER leaseStart), MoveOutAfterEnd (strictly before
+// leaseEnd, so the ceiling is the day before). All arithmetic is
+// calendar-day math in UTC (Date.UTC), never local midnight + 24h — the DST
+// trap the day-window dossier entry names, which UTC math is immune to.
+// Null when the lease carries no recorded end, or when no date in range
+// exists (a term ending today or already over) — the caller hides the
+// control in that case. Pure/DOM-free so it is goja-testable; nowIso is
+// passed in rather than read from Date.now() internally so the same code
+// proves deterministic under a pinned clock.
+function noticeDateBounds(row, nowIso) {
+  if (!row || !row.tenancyLeaseEnd) return null;
+  const dayMs = 86400000;
+  const utcDayMs = (iso) => {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  };
+  let minMs = utcDayMs(nowIso);
+  if (minMs === null) return null;
+  const startMs = row.tenancyLeaseStart ? utcDayMs(row.tenancyLeaseStart) : null;
+  if (startMs !== null && startMs + dayMs > minMs) minMs = startMs + dayMs;
+  const endMs = utcDayMs(row.tenancyLeaseEnd);
+  if (endMs === null) return null;
+  const maxMs = endMs - dayMs;
+  if (maxMs < minMs) return null;
+  const toDateStr = (ms) => new Date(ms).toISOString().slice(0, 10);
+  return { min: toDateStr(minMs), max: toDateStr(maxMs) };
+}
+
+// submitGiveNotice sends GiveNotice — an irreversible submit, so the throw
+// path stages sent/confirmed exactly as withdrawApplication's above: a
+// failure before the request lands says so plainly, a failure after says
+// the notice may have landed and to check the lease rather than retry
+// blind. The script reads the tenant's own applicationFor link
+// UNCONDITIONALLY on the validated self path — tenant or landlord alike —
+// before it ever falls back to require_manages (scripts.go: `tenant_lnk =
+// kv.Read(...)` runs first every time; the landlord branch is only the
+// else), and the descriptor declares it the same way for every self-path
+// caller (permissions.go OptionalReads), so this client sends it on both
+// hats too — never conditioned on which hat is submitting.
+// refusal-courtesy: GiveNotice/NoTenancy, LeaseNotSigned: hide — the control is offered only on a signed, approved lease (renderApplicationCard: row.landlordApproved && !row.missing_signature; renderRLSApplicantRow: a.landlordApproved && a.signedAt).
+// refusal-courtesy: GiveNotice/TenancyEnded: hide — offered only while !row.tenancyEndedAt / !a.tenancyEndedAt.
+// refusal-courtesy: GiveNotice/NoticeAlreadyGiven: hide — offered only while !row.noticeMoveOutAt / !a.noticeMoveOutAt.
+// refusal-courtesy: GiveNotice/MoveOutBeforeToday, MoveOutBeforeStart, MoveOutAfterEnd: cap — the date input's min/max come straight from noticeDateBounds(row, nowIso), the exact bounds the script itself enforces; the control renders nothing at all when no date in range exists.
+async function submitGiveNotice(row, moveOutDate) {
+  const appId = shortKey(row.entityKey);
+  const reads = [row.entityKey, row.entityKey + ".tenancy", row.entityKey + ".signature"];
+  const optionalReads = [
+    row.entityKey + ".notice",
+    "lnk.leaseapp." + appId + ".applicationFor.identity." + shortKey(state.applicant),
+  ];
+  let sent = false;
+  let confirmed = false;
+  try {
+    sent = true;
+    const reply = await submitOp(
+      {
+        operationType: "GiveNotice",
+        class: "leaseapp",
+        reads,
+        optionalReads,
+        payload: { leaseAppKey: row.entityKey, moveOutDate },
+      },
+      { authContext: { target: state.applicant } }
+    );
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not record notice — " + msg, "err");
+      return false;
+    }
+    confirmed = true;
+    toast("Notice recorded.", "ok");
+    return true;
+  } catch (e) {
+    if (!sent) {
+      toast("Could not give notice: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Notice recorded, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the notice reached the server — it may have landed; check the lease before trying again. " + e.message, "err");
+    }
+    return false;
+  }
+}
+
+// renderGiveNoticeControl builds the Give-notice / End-lease-early control
+// shared by the tenant's application card (renderApplicationCard) and the
+// landlord's application row (renderRLSApplicantRow): a toggle button that
+// reveals an inline date form. Never window.confirm() — an irreversible
+// submit gets its own consequence line and an explicit Confirm, matching the
+// staged sent/confirmed throw handling above. Returns null (renders
+// nothing) when noticeDateBounds finds no valid date — the caller has
+// already gated on landlordApproved/signed/!ended/!noticed before calling
+// this, so a null bounds here is only the edge case of a term ending today
+// or already over.
+function renderGiveNoticeControl(row, landlord, onDone) {
+  const bounds = noticeDateBounds(row, new Date().toISOString());
+  if (!bounds) return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "give-notice";
+
+  const toggle = document.createElement("button");
+  toggle.className = "ghost";
+  toggle.textContent = landlord ? "End lease early" : "Give notice";
+  wrap.append(toggle);
+
+  const form = document.createElement("form");
+  form.className = "give-notice-form";
+  form.hidden = true;
+  // bounds.min/max are noticeDateBounds' own return — YYYY-MM-DD slices of
+  // Date.UTC calendar-day arithmetic over the row's recorded stamps, never
+  // free text a person or another package could shape into markup.
+  const formHtml = `
+    <label>Move-out date
+      <input type="date" name="moveOutDate" min="${bounds.min}" max="${bounds.max}" required />
+    </label>
+    <p class="hint">Your lease ends on that date instead of its end date, and it cannot be renewed once notice is given. The rent period containing it is billed in full.</p>
+    <div class="give-notice-actions">
+      <button type="submit">Record move-out</button>
+      <button type="button" class="ghost cancel-notice">Cancel</button>
+    </div>
+  `;
+  form.innerHTML = formHtml; // markup-safe: formHtml's only interpolation is noticeDateBounds' computed YYYY-MM-DD dates (see above)
+  wrap.append(form);
+
+  toggle.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+  });
+  form.querySelector(".cancel-notice").addEventListener("click", () => {
+    form.hidden = true;
+  });
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const moveOutDate = form.moveOutDate.value;
+    if (!moveOutDate) return;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    try {
+      const ok = await submitGiveNotice(row, moveOutDate);
+      if (ok && onDone) onDone();
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+  return wrap;
+}
+
 // ---- Tasks (inbox) ----
 //
 // The applicant's OPEN tasks, read from the `my-tasks` lens projection (P5: a
@@ -2545,15 +2722,16 @@ function taskLostToRival(t, applications) {
 
 // refusal-courtesy: SetRenewalTerms/TermsLocked, InvalidTermMonths: see openComplete
 // refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NoGuarantorToVerify: see openComplete
-// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded: see openComplete
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded, NoticeGiven: see openComplete
 // renewalCardTaskOps names the renewal-chain ops (renewal_targets.go) whose
 // task the inbox completes through the generic openCatalogComplete path
 // (openComplete → openCatalogComplete) rather than this app's own form —
 // the set taskDisposition resolves against a loaded renewal row below.
 const renewalCardTaskOps = ["SetRenewalTerms", "VerifyGuarantor", "SignRenewal"];
 
+// refusal-courtesy: SetRenewalTerms/TermsLocked, InvalidTermMonths: see renderRenewalCard
 // refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NoGuarantorToVerify: see openComplete
-// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded: see openComplete
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded, NoticeGiven: see openComplete
 // renewalTaskStale answers whether row (the renewal cycle t.scopedTo names)
 // has moved past what t's op can still act on — the inbox's own version of
 // renderRenewalCard's own gating (renewalRow/renewalReady), which a task
@@ -2562,14 +2740,24 @@ const renewalCardTaskOps = ["SetRenewalTerms", "VerifyGuarantor", "SignRenewal"]
 // TenancyEnded (SignRenewal's own refusal, renewal_scripts.go) can arrive on
 // an otherwise-still-open, unsigned cycle at any point, so it is checked
 // first, ahead of the open/unsigned check — mirrors renderRenewalCard's own
-// precedence exactly. SetRenewalTerms shares the open/unsigned check
-// (TermsLocked fires on the identical condition); VerifyGuarantor checks
-// neither (its own script never reads the renewal's status or tenancyEndedAt),
-// so it is left alone here.
+// precedence exactly. A notice closes the renewal's OWN convergence gate
+// for every one of its three legs, not only SignRenewal's script refusal:
+// renewalCompleteSpec's `open` (and missing_renewalComplete off it) conjoins
+// `noticeMoveOutAt = null` (renewal_lenses.go) — the tenant answered the
+// renewal question by leaving, so the planner stops re-dispatching
+// SetRenewalTerms/VerifyGuarantor/SignRenewal once one lands, even though
+// only SignRenewal's own script hard-refuses NoticeGiven — so all three are
+// checked for it, ahead of the open/unsigned check too, the same render-gate
+// class as TenancyEnded. SetRenewalTerms otherwise shares the open/unsigned
+// check (TermsLocked fires on the identical condition); VerifyGuarantor
+// otherwise checks neither status nor tenancyEndedAt (its own script never
+// reads them), so only the notice arm applies to it here.
 function renewalTaskStale(operationName, row) {
   if (!row) return false;
   const unsigned = row.status === "open" && !row.signedAt;
   if (operationName === "SignRenewal" && unsigned && row.tenancyEndedAt) return "ended";
+  const noticeClosesLeg = operationName === "SignRenewal" || operationName === "SetRenewalTerms" || operationName === "VerifyGuarantor";
+  if (noticeClosesLeg && unsigned && row.noticeMoveOutAt) return "notice";
   if (operationName !== "VerifyGuarantor" && !unsigned) return "closed";
   return false;
 }
@@ -2609,7 +2797,15 @@ function taskDisposition(t, nowMs, canComplete, profileTask, applications, renew
         badge: "closed",
         label: "Lease ended",
         disabled: true,
-        title: "Lease ended " + fmtDate(row.tenancyEndedAt) + " — this renewal can no longer be completed.",
+        title: "Lease ended " + fmtUTCDate(row.tenancyEndedAt) + " — this renewal can no longer be completed.",
+      };
+    }
+    if (stale === "notice") {
+      return {
+        badge: "closed",
+        label: "Notice given",
+        disabled: true,
+        title: "Notice was given for " + fmtUTCDate(row.noticeMoveOutAt) + " — this renewal can no longer be completed.",
       };
     }
     if (stale === "closed") {
@@ -2789,10 +2985,10 @@ async function reportIssue(ev) {
 // refusal-courtesy: SetRenewalTerms/TermsLocked: hide — openCatalogComplete's renewalTaskStale check refuses (toast, no form mounted) before rendering when the renewal row is no longer open or already signed
 // refusal-courtesy: SetRenewalTerms/InvalidTermMonths: cap — this op's form renders through the shared internal/descriptorform module; schema type "integer" sets the control's step to "1" for termMonths (form.mjs:217)
 // refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch: unreachable — leaseApp/applicant are ContextParams filled from the renewal row (openCatalogComplete's row = renewalRow(task.scopedTo)), never rendered as fields to type
-// refusal-courtesy: VerifyGuarantor/ApplicationSignalsMissing, NoGuarantorToVerify: none — the inbox's Complete is gated only by task assignment + renewalTaskStale (open/unsigned/tenancy-ended); it never re-checks profileOnFile/hasGuarantor before opening the form, so a task assigned before the tenant's profile is submitted can still meet one of these here
-// refusal-courtesy: SignRenewal/RenewalNotOpen, TenancyEnded: hide — openCatalogComplete's renewalTaskStale check refuses (toast, no form mounted) before rendering when the renewal row is no longer open, already signed, or its tenancy has ended
+// refusal-courtesy: VerifyGuarantor/ApplicationSignalsMissing, NoGuarantorToVerify: none — the inbox's Complete is gated only by task assignment + renewalTaskStale (open/unsigned/tenancy-ended/notice-given); it never re-checks profileOnFile/hasGuarantor before opening the form, so a task assigned before the tenant's profile is submitted can still meet one of these here
+// refusal-courtesy: SignRenewal/RenewalNotOpen, TenancyEnded, NoticeGiven: hide — openCatalogComplete's renewalTaskStale check refuses (toast, no form mounted) before rendering when the renewal row is no longer open, already signed, its tenancy has ended, or notice has been given
 // refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch: unreachable — same ContextParams mechanism as VerifyGuarantor above
-// refusal-courtesy: SignRenewal/ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified: none — renewalTaskStale checks only open/unsigned/tenancy-ended, not the fuller renewalReady(row) renderRenewalCard checks before ever offering its own Sign button; a task assigned before terms/profile/guarantor are complete can still meet one of these here
+// refusal-courtesy: SignRenewal/ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified: none — renewalTaskStale checks only open/unsigned/tenancy-ended/notice-given, not the fuller renewalReady(row) renderRenewalCard checks before ever offering its own Sign button; a task assigned before terms/profile/guarantor are complete can still meet one of these here
 // refusal-courtesy: SignRenewal/NoTenancy: none — a wiring-fault-only case (OpenRenewal's own precondition already requires .tenancy to exist before a cycle can open); no render here checks it either, mirroring renderRenewalCard's own declaration
 // refusal-courtesy: SignLease/UnitNoLongerAvailable: disable — taskDisposition's taskLostToRival branch (badge "closed", "Unit no longer available") already disables Complete when the task's application row is lostToRival, before openComplete is ever reached
 // refusal-courtesy: SignLease/AlreadySigned: none — a live task implies missing_signature held at dispatch time; a completion race between two sign attempts (e.g. two devices) is not guarded client-side
@@ -2939,7 +3135,11 @@ async function openCatalogComplete(task, desc) {
     // that moved past this task's op after it was assigned.
     const stale = renewalTaskStale(task.operationName, row);
     if (stale === "ended") {
-      toast("Lease ended " + fmtDate(row.tenancyEndedAt) + " — this renewal can no longer be completed.", "err");
+      toast("Lease ended " + fmtUTCDate(row.tenancyEndedAt) + " — this renewal can no longer be completed.", "err");
+      return;
+    }
+    if (stale === "notice") {
+      toast("Notice was given for " + fmtUTCDate(row.noticeMoveOutAt) + " — this renewal can no longer be completed.", "err");
       return;
     }
     if (stale === "closed") {
@@ -2989,7 +3189,7 @@ function closeComplete() {
 // refusal-courtesy-dispatches: SetRenewalTerms, VerifyGuarantor, SignRenewal, SignLease
 // refusal-courtesy: SetRenewalTerms/TermsLocked, InvalidTermMonths: see openComplete
 // refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NoGuarantorToVerify: see openComplete
-// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded: see openComplete
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded, NoticeGiven: see openComplete
 // refusal-courtesy: SignLease/UnitNoLongerAvailable, AlreadySigned: see openComplete
 async function submitComplete(ev) {
   const task = state.currentTask;
@@ -3211,15 +3411,17 @@ function profileOnFile(row) {
 // is on file; the renewed application's tenancy not already ended — the op
 // fails closed TenancyEnded off the same app.tenancy.data.endedAt fact the
 // applications read lenses project, renewalsRead's own tenancy_ended_at
-// column, lease-signing renewal_lenses.go) — mirrors the planner's
-// signRenewal `pre`, the terminal-leg rule (design §4.3/§5). Readiness is
-// what makes the Sign button APPEAR; what makes it CLICKABLE is the grant,
-// which for a task-voice op is the tenant's own assigned task
-// (assignedTaskKey) — the Processor authorizes SignRenewal on {task, target},
-// never on the write guard alone, so a ready-but-unassigned cycle is shown as
-// waiting rather than as a button whose submit can only be denied.
+// column, lease-signing renewal_lenses.go; no notice given — the op fails
+// closed NoticeGiven off renewalsRead's own notice_move_out_at column) —
+// mirrors the planner's signRenewal `pre`, the terminal-leg rule (design
+// §4.3/§5). Readiness is what makes the Sign button APPEAR; what makes it
+// CLICKABLE is the grant, which for a task-voice op is the tenant's own
+// assigned task (assignedTaskKey) — the Processor authorizes SignRenewal on
+// {task, target}, never on the write guard alone, so a ready-but-unassigned
+// cycle is shown as waiting rather than as a button whose submit can only
+// be denied.
 function renewalReady(row) {
-  return profileOnFile(row) && !!row.termsSetAt && (row.hasGuarantor !== true || !!row.guarantorVerifiedAt) && !row.tenancyEndedAt;
+  return profileOnFile(row) && !!row.termsSetAt && (row.hasGuarantor !== true || !!row.guarantorVerifiedAt) && !row.tenancyEndedAt && !row.noticeMoveOutAt;
 }
 
 // assignedTaskKey answers the caller's own open task for operationName on
@@ -3237,6 +3439,21 @@ function renewalStatusLabel(row) {
   return "Open";
 }
 
+// renewalCardOffersLandlordActions reports whether the landlord's renewal
+// card should offer Set terms / Verify guarantor / Decline at all —
+// Winston's product call (tenancy-notice-2026-09-15 fix round): once the
+// renewed leaseapp carries tenancyEndedAt or noticeMoveOutAt,
+// renewalComplete's own `open` conjunct (renewal_lenses.go:
+// `(status = 'open') AND (tenancyEndedAt = null) AND (noticeMoveOutAt =
+// null)`) is false, so missing_renewalComplete never re-opens and the
+// planner stops driving this cycle — every leg's dispatch depends on that
+// same gap. A landlord card offering a button the planner will never assign
+// a task for again is a dead end, so it offers nothing but the fact. Pure
+// and DOM-free so it is goja-testable.
+function renewalCardOffersLandlordActions(row) {
+  return !(row && (row.tenancyEndedAt || row.noticeMoveOutAt));
+}
+
 // refusal-courtesy: CancelRenewal/TermsLocked: hide — declineBtn renders only when unsigned (row.status==="open" && !row.signedAt), matching the TermsLocked guard exactly.
 // refusal-courtesy: SetRenewalTerms/TermsLocked: hide — setTermsBtn renders only when unsigned, the same guard as CancelRenewal above.
 // refusal-courtesy: SetRenewalTerms/InvalidTermMonths: cap — this op's form renders through the shared internal/descriptorform module; schema type "integer" sets the control's step to "1" for termMonths (form.mjs:217).
@@ -3250,6 +3467,7 @@ function renewalStatusLabel(row) {
 // refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch: unreachable — same as VerifyGuarantor above: ContextParams fill both from the renewal row, never typed.
 // refusal-courtesy: SignRenewal/NoTenancy: none — a wiring-fault-only case (OpenRenewal's own precondition already requires .tenancy to exist before a cycle can open, per that op's own comment); no render checks it.
 // refusal-courtesy: SignRenewal/TenancyEnded: hide — renderRenewalCard hides Sign once tenancyEndedAt is set.
+// refusal-courtesy: SignRenewal/NoticeGiven: hide — renderRenewalCard hides Sign once noticeMoveOutAt is set (renewalReady requires !row.noticeMoveOutAt).
 function renderRenewalCard(row, landlord) {
   const card = document.createElement("div");
   card.className = "card task-card";
@@ -3288,6 +3506,17 @@ function renderRenewalCard(row, landlord) {
   const open = row.status === "open";
   const unsigned = open && !row.signedAt;
   if (landlord) {
+    if (!renewalCardOffersLandlordActions(row)) {
+      // Mirrors the tenant-side branches' own order below (ended before
+      // notice — the script's own check order, renewal_scripts.go).
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = row.tenancyEndedAt
+        ? "Lease ended " + fmtUTCDate(row.tenancyEndedAt) + " — this cycle is closed."
+        : "Notice given — moving out " + fmtUTCDate(row.noticeMoveOutAt) + "; this cycle is closed.";
+      card.append(title, sub, actions, hint);
+      return card;
+    }
     if (unsigned) {
       const setTermsBtn = document.createElement("button");
       setTermsBtn.textContent = row.termsSetAt ? "Update terms" : "Set terms";
@@ -3316,6 +3545,17 @@ function renderRenewalCard(row, landlord) {
     const hint = document.createElement("p");
     hint.className = "hint";
     hint.textContent = "Lease ended " + fmtUTCDate(row.tenancyEndedAt) + " — this renewal cannot be signed.";
+    card.append(title, sub, actions, hint);
+    return card;
+  } else if (unsigned && row.noticeMoveOutAt) {
+    // SignRenewal refuses NoticeGiven once GiveNotice has recorded a
+    // move-out (renewal_scripts.go) — checked right after TenancyEnded
+    // above (the script's own order) and, like it, ahead of the
+    // profile/readiness branches: a lease under notice has nothing left for
+    // either of those to offer.
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "Notice given — moving out " + fmtUTCDate(row.noticeMoveOutAt) + "; this renewal cannot be signed.";
     card.append(title, sub, actions, hint);
     return card;
   } else if (unsigned && !profileOnFile(row)) {
@@ -3379,7 +3619,7 @@ function renderRenewalCard(row, landlord) {
 // refusal-courtesy-dispatches: SetRenewalTerms, VerifyGuarantor, SignRenewal, CancelRenewal
 // refusal-courtesy: SetRenewalTerms/TermsLocked, InvalidTermMonths: see renderRenewalCard
 // refusal-courtesy: VerifyGuarantor/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NoGuarantorToVerify: see renderRenewalCard
-// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded: see renderRenewalCard
+// refusal-courtesy: SignRenewal/ApplicantMismatch, LeaseAppMismatch, ApplicationSignalsMissing, NotReadyToSign, GuarantorNotVerified, NoTenancy, RenewalNotOpen, TenancyEnded, NoticeGiven: see renderRenewalCard
 // refusal-courtesy: CancelRenewal/TermsLocked: see renderRenewalCard
 async function openRenewalAction(row, operationName) {
   try {
@@ -3570,8 +3810,11 @@ const ONE_BILL_SOURCE_BADGES = {
 };
 
 // renderStatementPanel builds a collapsible combined-statement section,
-// mirroring renderLedgerPanel's toggle/lazy-load shape.
-function renderStatementPanel(leaseAppKey) {
+// mirroring renderLedgerPanel's toggle/lazy-load shape. noticeMoveOutAt is
+// the application row's own field (already loaded by /api/applications, no
+// second server call) — when set, the statement header names the early end
+// so a tenant reading their statement sees why it stops short of leaseEnd.
+function renderStatementPanel(leaseAppKey, noticeMoveOutAt) {
   const wrap = document.createElement("div");
   wrap.className = "ledger-panel";
 
@@ -3586,7 +3829,7 @@ function renderStatementPanel(leaseAppKey) {
     body.hidden = !body.hidden;
     if (body.hidden || body.dataset.loaded) return;
     body.dataset.loaded = "1";
-    refreshStatementBody(body, leaseAppKey);
+    refreshStatementBody(body, leaseAppKey, noticeMoveOutAt);
   });
 
   wrap.append(toggle, body);
@@ -3622,7 +3865,7 @@ function fmtOneBillPeriodLabel(key) {
 // balance across all four ledgers, then the transaction list grouped by
 // month (newest first) with a per-month subtotal, each entry tagged by its
 // source ledger.
-async function refreshStatementBody(body, leaseAppKey) {
+async function refreshStatementBody(body, leaseAppKey, noticeMoveOutAt) {
   body.textContent = "Loading…";
   let data;
   try {
@@ -3632,6 +3875,13 @@ async function refreshStatementBody(body, leaseAppKey) {
     return;
   }
   body.innerHTML = "";
+
+  if (noticeMoveOutAt) {
+    const noticeLine = document.createElement("div");
+    noticeLine.className = "hint";
+    noticeLine.textContent = "Lease ends " + fmtUTCDate(noticeMoveOutAt) + " (notice given).";
+    body.append(noticeLine);
+  }
 
   const balance = document.createElement("div");
   balance.className = "ledger-balance";
@@ -4445,6 +4695,11 @@ function renderRLSApplicantRow(a, unit) {
   else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
   else if (a.lostToRival) info.append(dispChip("Unit went to another applicant", "declined"));
   else info.append(dispChip("Awaiting your decision", "review"));
+  // A notice is NOT terminal (the lease stays live until tenancyEndedAt), so
+  // it adds a chip rather than replacing the disposition chip above.
+  if (!a.tenancyEndedAt && a.noticeMoveOutAt) {
+    info.append(dispChip("Notice · moving out " + fmtUTCDate(a.noticeMoveOutAt), "review"));
+  }
   if (a.signedAt) {
     const signed = document.createElement("span");
     signed.className = "signed";
@@ -4472,6 +4727,15 @@ function renderRLSApplicantRow(a, unit) {
     const rent = typeof a.tenancyRentAmount === "number" ? ` · ${fmtMoney(a.tenancyRentAmount, a.unitCurrency)}/mo` : "";
     lease.textContent = `Lease ${fmtUTCDate(a.tenancyLeaseStart)} → ${end}${rent}`;
     row.append(lease);
+  }
+
+  // End lease early — the landlord's own path into the SAME GiveNotice op
+  // the tenant's card offers, admitted through the script's manages walk.
+  // Offered only on a live, signed, approved, not-yet-ended, not-yet-noticed
+  // lease — a notice is not terminal, so nothing else on this row changes.
+  if (a.landlordApproved && a.signedAt && !a.tenancyEndedAt && !a.noticeMoveOutAt) {
+    const control = renderGiveNoticeControl(a, true, () => loadLandlordRLS());
+    if (control) row.append(control);
   }
 
   row.append(renderQualification(a));
@@ -4668,6 +4932,9 @@ function renderSearchApplicationRow(a) {
   else if (a.landlordDeclined) info.append(dispChip("Declined", "declined"));
   else if (a.lostToRival) info.append(dispChip("Unit went to another applicant", "declined"));
   else info.append(dispChip("Awaiting decision", "review"));
+  if (!a.tenancyEndedAt && a.noticeMoveOutAt) {
+    info.append(dispChip("Notice · moving out " + fmtUTCDate(a.noticeMoveOutAt), "review"));
+  }
   if (a.signedAt) {
     const signed = document.createElement("span");
     signed.className = "signed";
@@ -4866,6 +5133,14 @@ function renderApplicantRow(a, unit, isTopMatch) {
     top.textContent = "★ Best match";
     top.title = "Highest-ranked applicant awaiting your decision";
     info.append(top);
+  }
+  // A notice is NOT terminal — status keeps whatever arm it already reads
+  // (leased/approved/qualified/…); this only adds the chip.
+  if (a.status !== "ended" && a.noticeMoveOutAt) {
+    const notice = document.createElement("span");
+    notice.className = "disp review";
+    notice.textContent = "Notice · moving out " + fmtUTCDate(a.noticeMoveOutAt);
+    info.append(notice);
   }
   row.append(info);
 

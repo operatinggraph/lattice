@@ -259,7 +259,15 @@ var appOpCeilings = map[string]int{
 	// the shared ceremony module lives outside this gate's cmd/*-app scan
 	// scope, same as form.mjs. appOpDebt's two entries for them are deleted
 	// in the same diff.
-	"cmd/loftspace-app": 18,
+	// 19: GiveNotice (loftspace-tenancy-notice-2026-09-15 §5) is the tenant's
+	// Give-notice / landlord's End-lease-early control (submitGiveNotice,
+	// app.js) — a bare date input whose min/max mirror the script's own
+	// MoveOutBeforeToday/MoveOutBeforeStart/MoveOutAfterEnd refusals
+	// (noticeDateBounds), which the generic InputSchema cannot state as a
+	// static minimum/maximum (the op-meta's own comment, permissions.go). The
+	// SAME hand-built-form-for-a-described-op shape withdrawApplication and
+	// decideApplication already established, not a new descriptor-catalog gap.
+	"cmd/loftspace-app": 19,
 	// 13: CreateUnclaimedIdentity backs the new-guest modal's submit
 	// (submitNewGuest, app.js), reusing loftspace-app's/clinic-app's own
 	// hand-built new-identity ceremony for the same op — a hardcoded literal

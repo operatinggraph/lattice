@@ -11,10 +11,16 @@ import (
 // renewalCardTaskOps / renewalTaskStale / taskDisposition / tasksSummaryFor
 // declarations out of the embedded app.js (the lease_term_ui_test.go
 // pattern: the REAL source runs here, not a copy). fmtDate is stubbed to the
-// identity — taskDisposition only reaches it in the expired/renewal-stale
-// branches' titles, and its locale formatting is not what these pins are
-// about.
+// identity — the only fmtDate call left in this slice is taskExpired's own
+// title text (a live instant, correctly local); UTC_MONTH_ABBR + fmtUTCDate
+// are the REAL shipped declarations, needed because taskDisposition's
+// ended/notice titles render tenancyEndedAt/noticeMoveOutAt — date-only
+// facts — through fmtUTCDate, never fmtDate (lease_term_ui_test.go's own
+// mandated pin shape; a bare identity stub here would hide a west-of-
+// Greenwich reader seeing the day before).
 var rivalTaskUIDecls = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)\nconst UTC_MONTH_ABBR = \[.*?\];\n`),
+	regexp.MustCompile(`(?s)\nfunction fmtUTCDate\(s\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction taskExpired\(t, nowMs\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction taskLostToRival\(t, applications\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nconst renewalCardTaskOps = \[.*?\];\n`),
@@ -249,6 +255,7 @@ func TestTaskDisposition_RenewalTaskStaleIsClosed(t *testing.T) {
 	}
 	renewals := []map[string]interface{}{
 		{"entityKey": "vtx.renewal.ended", "status": "open", "tenancyEndedAt": "2026-09-10T00:00:00Z"},
+		{"entityKey": "vtx.renewal.noticed", "status": "open", "noticeMoveOutAt": "2026-10-01T00:00:00Z"},
 		{"entityKey": "vtx.renewal.cancelled", "status": "cancelled"},
 		{"entityKey": "vtx.renewal.open", "status": "open"},
 	}
@@ -265,6 +272,30 @@ func TestTaskDisposition_RenewalTaskStaleIsClosed(t *testing.T) {
 		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SignRenewal", "scopedTo": "vtx.renewal.ended", "expiresAt": "2026-10-01T00:00:00Z"})
 		if badge != "closed" || label != "Lease ended" || !disabled {
 			t.Errorf("badge=%q label=%q disabled=%v, want closed/Lease ended/true", badge, label, disabled)
+		}
+	})
+	t.Run("SignRenewal on a noticed lease is not offered", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SignRenewal", "scopedTo": "vtx.renewal.noticed", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "closed" || label != "Notice given" || !disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want closed/Notice given/true", badge, label, disabled)
+		}
+	})
+	// A notice closes renewalCompleteSpec's OWN `open` conjunct (renewal_lenses.go:
+	// `(status = 'open') AND (tenancyEndedAt = null) AND (noticeMoveOutAt = null)`),
+	// which gates missing_renewalComplete for EVERY leg — not only SignRenewal's
+	// own script refusal — so the landlord's SetRenewalTerms/VerifyGuarantor tasks,
+	// dispatched before the notice landed, must close here too even though
+	// neither op's own script reads .notice.
+	t.Run("SetRenewalTerms on a noticed lease is not offered", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "SetRenewalTerms", "scopedTo": "vtx.renewal.noticed", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "closed" || label != "Notice given" || !disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want closed/Notice given/true", badge, label, disabled)
+		}
+	})
+	t.Run("VerifyGuarantor on a noticed lease is not offered", func(t *testing.T) {
+		badge, label, disabled := run(t, map[string]interface{}{"operationName": "VerifyGuarantor", "scopedTo": "vtx.renewal.noticed", "expiresAt": "2026-10-01T00:00:00Z"})
+		if badge != "closed" || label != "Notice given" || !disabled {
+			t.Errorf("badge=%q label=%q disabled=%v, want closed/Notice given/true", badge, label, disabled)
 		}
 	})
 	t.Run("SignRenewal on a cancelled renewal is not offered", func(t *testing.T) {

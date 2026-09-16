@@ -12,10 +12,12 @@ const BookingsBucket = "front-desk-bookings"
 
 // LeaseDetailsBucket is the NATS-KV read model the frontDeskLeaseDetails
 // lens projects into — one row per leaseapp, keyed by leaseAppKey, carrying
-// the applied-to unit's rent/currency/term/address. The Café front-desk view
-// reads THIS bucket to show lease details (term/rent) on every open-tab
-// card, not just those with a booked class (frontDeskBookings' anchor is the
-// booking, so it has no row for a leaseapp with no booking).
+// the applied-to unit's rent/currency/term/address plus the tenancy's
+// leaseEnd and recorded endedAt. The Café front-desk view reads THIS bucket
+// to show lease details (term/rent, and whether/when the tenancy has
+// actually ended) on every open-tab card, not just those with a booked class
+// (frontDeskBookings' anchor is the booking, so it has no row for a leaseapp
+// with no booking).
 const LeaseDetailsBucket = "front-desk-lease-details"
 
 // VisitsBucket is the NATS-KV read model the frontDeskVisits lens projects
@@ -117,10 +119,14 @@ RETURN
 // leaseApplicationCompleteSpec): unit is required at CreateLeaseApplication
 // so a live application always resolves one, but a tombstoned unit must not
 // drop the anchor — it degrades to null rent/term rather than no row.
-// leaseStart/leaseEnd come off the lease's own lease-signing .tenancy aspect
-// (null on a lease approved before terms were minted) — the term the café's
-// OpenTab refuses TenancyEnded past, so the desk's lease pickers can say a
-// tenancy has ended before a staffer tries.
+// leaseStart/leaseEnd/endedAt come off the lease's own lease-signing
+// .tenancy aspect (null on a lease approved before terms were minted).
+// leaseEnd is the term's nominal end; endedAt is the recorded FACT the
+// tenancy ended — set early on a resident's own notice, months before
+// leaseEnd, or later when the term simply runs out — and is the date the
+// café's OpenTab actually refuses TenancyEnded past once it is recorded, so
+// the desk's lease pickers can say a tenancy has ended (naming endedAt when
+// set, else leaseEnd) before a staffer tries.
 const leaseDetailsSpec = `MATCH (l:leaseapp)
 OPTIONAL MATCH (l)-[:appliesToUnit]->(u:unit)
 RETURN
@@ -132,7 +138,8 @@ RETURN
   u.listing.data.rentCurrency AS unitCurrency,
   u.listing.data.leaseTermMonths AS unitLeaseTermMonths,
   l.tenancy.data.leaseStart AS leaseStart,
-  l.tenancy.data.leaseEnd AS leaseEnd`
+  l.tenancy.data.leaseEnd AS leaseEnd,
+  l.tenancy.data.endedAt AS endedAt`
 
 // visitsSpec projects one row per LIVE, scheduled clinic appointment carrying
 // a residentVisit link (appointment→leaseapp) — clinic-domain's

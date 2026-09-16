@@ -1,11 +1,12 @@
 name: semantic-contracts
-version: 0.5.1
+version: 0.6.0
 description: |
   LoftSpace "Executable Paper" reference package (fixed/one-time,
   conditioned, judgment, recurring monthly — termed to a calendar-month
   period grid or untermed — and prorated computational clauses, plus
-  self-amendment): the clause vertex type (CreateClause/SupersedeClause/
-  BackfillClauseTerm, .prose/.terms/.status/.clauseInspection aspects,
+  self-amendment and early shortening): the clause vertex type
+  (CreateClause/SupersedeClause/BackfillClauseTerm/ShortenClauseTerm,
+  .prose/.terms/.status/.clauseInspection aspects,
   governs + chargesTo/requiresInspectionBy/conditionedOn/amends links) + the
   clauseSatisfaction actorAggregate convergence lens (§10.2, missing_charge/
   missing_inspection, freshUntil-armed recurring freshness on the term's
@@ -13,9 +14,11 @@ description: |
   assignTask(InspectPremises) on the gaps + the leaseRentSettlement
   actorAggregate lens/playbook bootstrapping an approved signed lease's
   ledger account then a recurring monthly rent clause for its current term,
-  and terming any monthly clause it has minted without one (missing_account
+  terming any monthly clause it has minted without one, and shortening a
+  termed clause to a recorded early move-out (missing_account
   → directOp(LoftspaceCreateAccount), missing_clause → directOp(CreateClause)
-  with the term, missing_term → directOp(BackfillClauseTerm), dollars→cents
+  with the term, missing_term → directOp(BackfillClauseTerm),
+  missing_termShortened → directOp(ShortenClauseTerm), dollars→cents
   conversion in the lens). Depends lease-signing + loftspace-ledger.
 depends:
   - lease-signing
@@ -54,6 +57,9 @@ declares:
     - operationType: BackfillClauseTerm
       scope: any
       grantsTo: [operator]
+    - operationType: ShortenClauseTerm
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: clauseSatisfaction
       lensRef: clauseSatisfaction
@@ -64,3 +70,4 @@ declares:
     - operationType: InspectPremises
     - operationType: SupersedeClause
     - operationType: BackfillClauseTerm
+    - operationType: ShortenClauseTerm

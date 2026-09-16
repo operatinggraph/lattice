@@ -224,6 +224,18 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "GiveNotice",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit GiveNotice by hand (the trusted-tool posture WithdrawLeaseApplication carries): a recorded notice ends the tenancy early on its move-out date. The script records givenBy = operator on this path.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "GiveNotice",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to give notice on a lease they hold — as the TENANT (the acting identity is the application's applicant, verified via the deterministic applicationFor link keyed on the actor) or as the LANDLORD (the acting identity manages the application's own unit, verified via the manages link — the script walks appliesToUnit and requires it, AuthDenied otherwise). Both probes bind the platform-validated self path; the one that admits the caller is the recorded givenBy.",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
 			OperationType: "RecordApplicationLoss",
 			Scope:         "any",
 			Note:          "Grants the operator (Weaver's service actor) the right to submit RecordApplicationLoss — the directOp leaseApplicationComplete's missing_lossRecorded gap dispatches once an undecided application's unit has leased to another applicant (the EndTenancy precedent); an operator may also run it by hand via the CLI under the primordial admin. Never a person-facing action: the loss is recorded on the application as .decision = lost, the op refuses UnitNotLeased against a unit that is not leased, and any recorded decision makes it a no-op.",
@@ -538,17 +550,21 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// posture: no scope=self path, so "standing" and no authContext
 			// target to bind. The descriptor exists so a by-hand operator
 			// submission (Loupe) and any descriptor-driven dispatcher declare
-			// the same two REQUIRED reads the target's playbook routes
-			// (tenancy_end_targets.go): the application and its .tenancy. Both
+			// the same reads the target's playbook routes
+			// (tenancy_end_targets.go): the application and its .tenancy as
+			// REQUIRED reads, and its .notice as an OPTIONAL one. The first two
 			// are fail-closed (a) reads on purpose — the gap only opens on a
 			// leaseapp that has a tenancy, and the script reads the aspect from
 			// hydration (never on demand), so an undeclared .tenancy is a
-			// NoTenancy refusal, not a lazy GET.
+			// NoTenancy refusal, not a lazy GET. The .notice is genuinely
+			// absence-tolerant (a lease with no notice is the common case) and
+			// read from hydration the same way: declared and present, the term
+			// ends on the recorded move-out; undeclared, it ends at leaseEnd.
 			OperationType: "EndTenancy",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "End a lease term",
 				ShortLabel:  "End tenancy",
-				Description: "Record that a lease term ended on its end date. Refused before the term's end; a no-op once recorded.",
+				Description: "Record that a lease term ended on its end date, or on its recorded move-out when notice was given. Refused before that date; a no-op once recorded.",
 				Icon:        "clipboard",
 				Tone:        "primary",
 				SubmitLabel: "Record term end",
@@ -558,7 +574,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`{"leaseAppKey":{"type":"string","x-entityRef":"leaseapp","description":"vtx.leaseapp.<NanoID> of the application whose lease term ended."}},` +
 				`"required":["leaseAppKey"]}`,
 			FieldDescriptions: map[string]string{
-				"leaseAppKey": "The application whose lease term ended. Its .tenancy.leaseEnd is the date recorded as endedAt; a term that has not reached it yet is refused.",
+				"leaseAppKey": "The application whose lease term ended. Its .tenancy.leaseEnd — or the earlier .notice.moveOutAt when notice was given — is the date recorded as endedAt; a term that has not reached it yet is refused.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "leaseapp",
@@ -569,7 +585,70 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.leaseAppKey}",
 					"{payload.leaseAppKey}.tenancy",
 				},
+				OptionalReads: []string{
+					"{payload.leaseAppKey}.notice",
+				},
 			},
+		},
+		{
+			// GiveNotice carries the WithdrawLeaseApplication grant pair —
+			// operator at scope=any and consumer at scope=self — and its
+			// descriptor names the SELF path (the dual-grant idiom above),
+			// which here admits TWO hats through one op: the tenant, proven by
+			// the deterministic applicationFor link keyed on the actor (the
+			// SetApplicantProfile probe), or else the landlord, proven by
+			// require_manages on the application's own unit (the
+			// DecideLeaseApplication probe). The tenant link is the only
+			// self-scoped read a client can form ahead of dispatch, so it is
+			// the declared OptionalRead; the landlord walk is the script's own
+			// (e) enumeration off appliesToUnit, undeclarable client-side.
+			// .tenancy and .signature are REQUIRED reads — a notice is only
+			// ever given on an approved, signed lease, and the script reads
+			// both from hydration; .notice is OPTIONAL (absent on every first
+			// notice — its declared absence is what conditions the create).
+			OperationType: "GiveNotice",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Give notice",
+				ShortLabel:  "Give notice",
+				Description: "Record the date you move out. Your lease ends on that date instead of its end date, and it cannot be renewed once notice is given.",
+				Icon:        "clipboard",
+				Tone:        "destructive",
+				SubmitLabel: "Record move-out",
+				Group:       "My lease",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","x-entityRef":"leaseapp","description":"vtx.leaseapp.<NanoID> of the lease you are giving notice on."},` +
+				`"moveOutDate":{"type":"string","format":"date","title":"Move-out date","description":"The date you move out (YYYY-MM-DD, read as midnight UTC). Today or later, after the lease started, before it ends."}},` +
+				`"required":["leaseAppKey","moveOutDate"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The lease you are giving notice on — filled from the lease in view, not typed. You must be its tenant, or a landlord of its unit.",
+				"moveOutDate": "The date you move out. Today or later, after the lease started and before its end date; a move-out on or after the end date needs no notice.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "leaseapp",
+				AuthContext: "self",
+				TargetField: "leaseAppKey",
+				TargetType:  "leaseapp",
+				Reads: []string{
+					"{payload.leaseAppKey}",
+					"{payload.leaseAppKey}.tenancy",
+					"{payload.leaseAppKey}.signature",
+				},
+				OptionalReads: []string{
+					"{payload.leaseAppKey}.notice",
+					"lnk.leaseapp.{payload.leaseAppKey:id}.applicationFor.identity.{actor:id}",
+				},
+				// The landlord probe's walk: when the tenant link is absent on
+				// the self path, require_manages resolves the unit from the
+				// application's own appliesToUnit link (leaseapp_unit) and
+				// reads the acting identity's manages link to it — the manages
+				// key is a follow-up off the walk, undeclarable up front.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
+				},
+			},
+			// refusal-courtesy(facet): NoTenancy, LeaseNotSigned, TenancyEnded, NoticeAlreadyGiven: none — no VisibleWhen or entity lens column projects a leaseapp's tenancy, signature, end or notice (edge-manifest's selfAnchors carries the leaseapp key alone), so Facet offers Give notice on every leaseapp row.
+			// refusal-courtesy(facet): MoveOutBeforeToday, MoveOutBeforeStart, MoveOutAfterEnd: none — the bounds are the op's own submittedAt and the lease's recorded leaseStart / leaseEnd, none of which the InputSchema can state as a static minimum/maximum for the generic date control.
 		},
 		{
 			// RecordApplicationLoss is dispatched by Weaver off
@@ -917,10 +996,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.renewalKey}.terms",
 					"{payload.leaseApp}.applicationSignals",
 					"{payload.renewalKey}.guarantorVerification",
+					// Absent on every lease that never gave notice; present, the
+					// script refuses NoticeGiven.
+					"{payload.leaseApp}.notice",
 				},
 			},
 			// refusal-courtesy(facet): ApplicantMismatch, LeaseAppMismatch: hide — as VerifyGuarantor above: the `{context.*}` contextParams are the staff app's row vocabulary, and Facet's opButton does not offer an op whose contextParam head it cannot resolve (unrecognisedContextTemplate).
-			// refusal-courtesy(facet): RenewalNotOpen, NotReadyToSign, ApplicationSignalsMissing, GuarantorNotVerified, NoTenancy, TenancyEnded: none — no VisibleWhen or entity lens column projects a renewal's status, terms, guarantor state, or its leaseapp's tenancy.
+			// refusal-courtesy(facet): RenewalNotOpen, NotReadyToSign, ApplicationSignalsMissing, GuarantorNotVerified, NoTenancy, TenancyEnded, NoticeGiven: none — no VisibleWhen or entity lens column projects a renewal's status, terms, guarantor state, or its leaseapp's tenancy or notice.
 		},
 		// SignLease is the applicant's own leg of the convergence: the
 		// assignTask target that closes missing_signature (targets.go). It is a

@@ -124,7 +124,10 @@ func (s *server) handleFrontDeskBookings(w http.ResponseWriter, r *http.Request)
 // (packages/front-desk/lenses.go) — decoded straight off the wire and
 // served as-is: the lease term/rent the front-desk grid joins onto a
 // resident's open-tab card, client-side, by leaseAppKey, the same
-// composition idiom bookingRow above already uses.
+// composition idiom bookingRow above already uses. EndedAt is the recorded
+// FACT the tenancy ended (set early on a resident's own notice, or later
+// when the term simply runs out); LeaseEnd stays the term's nominal end for
+// a lease with no EndedAt recorded yet.
 type leaseDetailRow struct {
 	LeaseAppKey     string  `json:"leaseAppKey"`
 	UnitAddress     string  `json:"unitAddress"`
@@ -133,6 +136,7 @@ type leaseDetailRow struct {
 	UnitLeaseTermMo float64 `json:"unitLeaseTermMonths"`
 	LeaseStart      string  `json:"leaseStart,omitempty"`
 	LeaseEnd        string  `json:"leaseEnd,omitempty"`
+	EndedAt         string  `json:"endedAt,omitempty"`
 }
 
 // computeFrontDeskLeaseDetails decodes every frontDeskLeaseDetails row in

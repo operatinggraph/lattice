@@ -57,6 +57,7 @@ func bcCapDoc() *processor.CapabilityDoc {
 			{OperationType: "InspectPremises", Scope: "any"},
 			{OperationType: "SupersedeClause", Scope: "any"},
 			{OperationType: "BackfillClauseTerm", Scope: "any"},
+			{OperationType: "ShortenClauseTerm", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

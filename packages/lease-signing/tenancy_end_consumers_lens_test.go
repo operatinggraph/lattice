@@ -196,3 +196,81 @@ func TestApplicantOnboarding_EndedTenancyStopsAsking(t *testing.T) {
 	require.Equal(t, false, rows[0].Values["missing_onboarding"], "an ended term's applicant is not asked for PII")
 	require.Equal(t, false, rows[0].Values["violating"])
 }
+
+// TestNoticeIsNotAnEnd_ApplicantGapsStayLive_RenewalCloses pins the design's
+// boundary between a notice and an end (docs/reviews/
+// loftspace-tenancy-notice-2026-09-15.md §4) on each side of it:
+// leaseApplicationComplete's listing flip and applicant gaps are keyed on
+// endedAt and read a lease UNDER NOTICE as a live tenancy (the tenant still
+// lives there until the move-out; only EndTenancy's recorded endedAt, which
+// the notice moves earlier, turns them terminal) — while renewalComplete
+// CLOSES on the notice: it is the tenant's answer to the renewal question, and
+// a planner that kept assigning its legs would be driving toward a signing
+// SignRenewal refuses NoticeGiven.
+func TestNoticeIsNotAnEnd_ApplicantGapsStayLive_RenewalCloses(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := endedApprovedLeaseFixture(t)
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-07-01T00:00:00Z", "leaseEnd": "2027-07-01T00:00:00Z", "renewalOpensAt": "2027-05-02T00:00:00Z"})
+	f.aspect(t, "app", "notice", "tenancyNotice", map[string]any{
+		"moveOutAt": "2027-03-31T00:00:00Z", "givenAt": "2027-02-14T09:30:00Z", "givenBy": "tenant"})
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["tenancyEndedAt"], "a notice records no end")
+	require.Equal(t, true, rows[0].Values["missing_listingLeased"], "a live tenancy under notice on an available unit still leases it")
+	require.Equal(t, true, rows[0].Values["violating"])
+
+	g := newLensFixture(t)
+	g.seedOpenRenewal(t, "rn", "app", "tenant", "unit1", "larry")
+	control := g.projectRenewalComplete(t, "rn")
+	require.Len(t, control, 1)
+	require.Equal(t, true, control[0].Values["open"], "the control: a live tenancy's open cycle is open")
+	require.Equal(t, true, control[0].Values["missing_renewalComplete"])
+
+	g.aspect(t, "app", "notice", "tenancyNotice", map[string]any{
+		"moveOutAt": "2026-12-15T00:00:00Z", "givenAt": "2026-10-01T09:00:00Z", "givenBy": "tenant"})
+	rn := g.projectRenewalComplete(t, "rn")
+	require.Len(t, rn, 1)
+	require.Equal(t, false, rn[0].Values["open"], "a cycle on a lease under notice is not open — the planner assigns nothing more toward a signing SignRenewal refuses")
+	require.Equal(t, "2026-12-15T00:00:00Z", rn[0].Values["noticeMoveOutAt"], "the row says which fact closed it")
+	require.Nil(t, rn[0].Values["tenancyEndedAt"])
+	require.Equal(t, false, rn[0].Values["missing_renewalComplete"])
+	require.Equal(t, false, rn[0].Values["violating"])
+}
+
+// TestStaleUserTasks_SignRenewal_LeaseUnderNoticeOrEnded_Violating: a
+// SignRenewal task minted before the lease gave notice (or before its term
+// was recorded ended) is an offer SignRenewal refuses — NoticeGiven /
+// TenancyEnded off the renewed leaseapp's own aspects — so staleUserTasks
+// retires it, reading the same two facts one hop across renews.
+func TestStaleUserTasks_SignRenewal_LeaseUnderNoticeOrEnded_Violating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for name, aspect := range map[string]func(f *lensFixture){
+		"notice": func(f *lensFixture) {
+			f.aspect(t, "app", "notice", "tenancyNotice", map[string]any{
+				"moveOutAt": "2026-12-15T00:00:00Z", "givenAt": "2026-10-01T09:00:00Z", "givenBy": "tenant"})
+		},
+		"ended": func(f *lensFixture) {
+			f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+				"leaseEnd": "2027-01-01T00:00:00Z", "renewalOpensAt": "2026-11-02T00:00:00Z", "endedAt": "2027-01-01T00:00:00Z"})
+		},
+	} {
+		f := newLensFixture(t)
+		f.seedOpenRenewal(t, "rn", "app", "tenant", "unit1", "larry")
+		f.aspect(t, "rn", "terms", "terms", map[string]any{"setAt": "2026-08-01T00:00:00Z", "rentAmount": 2200})
+		f.seedTask(t, "signtask", "signrenewal", "SignRenewal", "rn", "open")
+
+		live := f.projectStaleAt(t, "signtask", staleNow)[0].Values
+		require.Equal(t, false, live["missing_cancellation"], "%s: the control — terms set, unsigned, live lease: the task is the live remedy", name)
+
+		aspect(f)
+		v := f.projectStaleAt(t, "signtask", staleNow)[0].Values
+		require.Equal(t, true, v["missing_cancellation"], "%s: SignRenewal would refuse this task — it is obsolete", name)
+		require.Equal(t, true, v["violating"], name)
+	}
+}

@@ -116,6 +116,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "SignRenewal", Scope: "any"},
 			{OperationType: "CancelRenewal", Scope: "any"},
 			{OperationType: "EndTenancy", Scope: "any"},
+			{OperationType: "GiveNotice", Scope: "any"},
 			{OperationType: "RecordApplicationLoss", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},

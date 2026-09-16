@@ -632,3 +632,33 @@ func TestLeaseApplicationsRead_RecordedLoss_HoldsAcrossTheRelist(t *testing.T) {
 	require.Equal(t, false, fresh["lost_to_rival"], "the control: an undecided application on the relisted unit is in review")
 	require.Equal(t, true, fresh["missing_onboarding"])
 }
+
+// TestLeaseApplicationsRead_ProjectsTheNotice — the applicant read model
+// projects the lease's recorded notice (notice_move_out_at / notice_given_at /
+// notice_given_by, off app.notice.data), null on every lease without one; the
+// tenant card offers Give notice on a live signed tenancy with none and says
+// "moving out <date>" once one is recorded.
+func TestLeaseApplicationsRead_ProjectsTheNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedApplication(t, "app", "alice", "unit1")
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2026-09-15T00:00:00Z", "leaseEnd": "2027-09-15T00:00:00Z"})
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["notice_move_out_at"], "no notice → null on a still-present row")
+	require.Nil(t, rows[0].Values["notice_given_by"])
+
+	f.aspect(t, "app", "notice", "tenancyNotice", map[string]any{
+		"moveOutAt": "2027-03-31T00:00:00Z", "givenAt": "2027-02-14T09:30:00Z", "givenBy": "tenant"})
+	rows = f.projectRead(t)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "2027-03-31T00:00:00Z", v["notice_move_out_at"])
+	require.Equal(t, "2027-02-14T09:30:00Z", v["notice_given_at"])
+	require.Equal(t, "tenant", v["notice_given_by"])
+	require.Nil(t, v["tenancy_ended_at"], "a notice is not an end")
+}

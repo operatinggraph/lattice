@@ -133,7 +133,7 @@ func signRenewal(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *pr
 				applicationForLinkKey(leaseAppKey, applicantKey),
 				leaseAppKey + ".tenancy",
 			},
-			OptionalReads: []string{renewalKey + ".terms", leaseAppKey + ".applicationSignals", renewalKey + ".guarantorVerification"},
+			OptionalReads: []string{renewalKey + ".terms", leaseAppKey + ".applicationSignals", renewalKey + ".guarantorVerification", leaseAppKey + ".notice"},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -655,7 +655,7 @@ func TestSignRenewal_ApplicationSignalsMissing_Rejected(t *testing.T) {
 				applicationForLinkKey(appKey, applicantKey),
 				appKey + ".tenancy",
 			},
-			OptionalReads: []string{renewalKey + ".terms", appKey + ".applicationSignals", renewalKey + ".guarantorVerification"},
+			OptionalReads: []string{renewalKey + ".terms", appKey + ".applicationSignals", renewalKey + ".guarantorVerification", appKey + ".notice"},
 		},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)

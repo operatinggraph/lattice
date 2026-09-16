@@ -117,11 +117,12 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"staffReadGrants":                {"g0/o0!no-aggregating-item", 0, 0},
 	"staleAssignedTasks":             {"g0/o0!no-aggregating-item", 0, 0},
 	// Four sibling OPTIONAL MATCHes off the anchor (op, onbIdentity, sigApp,
-	// termsRenewal), none of them aggregating anything — the stage's branch
+	// termsRenewal) plus the renews hop hanging below termsRenewal
+	// (renewedApp), none of them aggregating anything — the stage's branch
 	// product IS the intended one-row-per-task output, so §4.2 refuses to fold
 	// it (no-aggregating-item), same shape as orphanedTaskGrants' own single
 	// forOperation branch.
-	"staleUserTasks":                    {"g4/o4!no-aggregating-item g0/o0!no-aggregating-item", 0, 4},
+	"staleUserTasks":                    {"g4/o5!no-aggregating-item g0/o0!no-aggregating-item", 0, 4},
 	"supersededBackgroundChecks":        {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
 	"tenancyEnd":                        {"g2/o3[other;rn] g0/o0!no-aggregating-item", 2, 2}, // [other] hangs below the base-row unit hop; differential in ruleengine/full branch_decomposition_equivalence_test.go
 	"unroutedTasks":                     {"g0/o0!no-aggregating-item", 0, 0},

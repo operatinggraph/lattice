@@ -80,6 +80,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		applicationSignalsAspectDDL(),
 		decidedProfileSnapshotAspectDDL(),
 		tenantNameAspectDDL(),
+		tenancyNoticeAspectDDL(),
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
 		leaseServiceDispatchDDL(),
@@ -102,7 +103,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "leaseapp",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy", "RecordApplicationLoss"},
+		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy", "GiveNotice", "RecordApplicationLoss"},
 		Description: "Lease-application DDL. Vertex shape: vtx.leaseapp.<NanoID>, class=leaseapp, root data = {} " +
 			"(minimal, D5 — the application status/gaps are LENS-computed, not stored). The application's applicant " +
 			"is a LINK (applicationFor → identity: the later-arriving leaseapp is the source, the pre-existing " +
@@ -202,20 +203,38 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"No-ops cleanly when the application already applies to newUnitKey. Emits " +
 			"leaseapp.unitReassigned{leaseAppKey, oldUnitKey, newUnitKey}. " +
 			"EndTenancy{leaseAppKey} is operator-granted (never person-facing) and records that a lease term ended — " +
-			"the directOp the tenancyEnd target dispatches once a signed, approved tenancy's leaseEnd has lapsed with " +
-			"no OPEN renewal for that cycle (an open renewal holds the term; a cancelled or never-opened one does not), " +
-			"and runnable by hand. It reads the application + its .tenancy (both REQUIRED declared reads — the gap only " +
-			"opens on a leaseapp with a tenancy; an undeclared or absent .tenancy is refused NoTenancy, never lazily " +
-			"read), refuses NotYetEnded when submittedAt is before leaseEnd (write-path honesty — the op does not trust " +
-			"the dispatcher's clock; the refusal names the end by its UTC calendar date), no-ops with zero mutations " +
-			"when endedAt is already set, and otherwise rewrites .tenancy with every existing field preserved plus " +
-			"endedAt = leaseEnd (the term ended on its own end date, never the fire instant), pinned to the hydrated " +
-			".tenancy revision so a SignRenewal extension that lands between hydration and commit conflicts instead of " +
-			"being overwritten. It does not walk renewals — the open-renewal hold is the lens's dispatch gate. " +
-			"Emits leaseapp.tenancyEnded{leaseAppKey, leaseEnd}. Once endedAt is set, SignRenewal refuses TenancyEnded, " +
+			"the directOp the tenancyEnd target dispatches once a signed, approved tenancy's term has lapsed with " +
+			"no OPEN renewal for that cycle or with a recorded notice (an open renewal holds the term; a cancelled or " +
+			"never-opened one does not; a notice overrides the hold), and runnable by hand. It reads the application + " +
+			"its .tenancy (both REQUIRED declared reads — the gap only opens on a leaseapp with a tenancy; an undeclared " +
+			"or absent .tenancy is refused NoTenancy, never lazily read) and its .notice (a declared OptionalRead: the " +
+			"term's effective end is the recorded move-out when a notice precedes leaseEnd, else leaseEnd — a submitter " +
+			"that never declared .notice gets the leaseEnd fallback, never a lazy read), refuses NotYetEnded when " +
+			"submittedAt is before that end (write-path honesty — the op does not trust the dispatcher's clock; the " +
+			"refusal names the end by its UTC calendar date), no-ops with zero mutations when endedAt is already set, " +
+			"and otherwise rewrites .tenancy with every existing field preserved plus endedAt = that end (the term " +
+			"ended on its own recorded date, never the fire instant), pinned to the hydrated .tenancy revision so a " +
+			"SignRenewal extension that lands between hydration and commit conflicts instead of being overwritten. It " +
+			"does not walk renewals — the open-renewal hold is the lens's dispatch gate. Emits " +
+			"leaseapp.tenancyEnded{leaseAppKey, leaseEnd, endedAt}. Once endedAt is set, SignRenewal refuses TenancyEnded, " +
 			"leaseApplicationComplete's applicant gaps and listing flip close (an ended tenancy is terminal, the decline's " +
 			"shape — a relisted unit is never re-leased to the ended tenant), leaseExpiry opens no cycle, and tenancyEnd's " +
 			"own missing_relist relists the unit unless another approved tenancy now holds it. " +
+			"GiveNotice{leaseAppKey, moveOutDate} records that the tenancy ends EARLY, on a move-out date inside the " +
+			"term — the tenant's own notice (consumer scope=self, the acting identity is this application's applicant via " +
+			"the applicationFor link), the landlord's early end (the same self grant, the acting identity manages the " +
+			"application's own unit), or an operator's by hand — writing the .notice aspect {moveOutAt, givenAt, givenBy} " +
+			"CREATE-ONLY (a recorded notice is never changed here). It reads the application, its .tenancy and its " +
+			".signature (REQUIRED declared reads — NoTenancy on an undecided application, LeaseNotSigned on an unsigned " +
+			"one) and its .notice (a declared OptionalRead — NoticeAlreadyGiven when live); refuses TenancyEnded once " +
+			"endedAt is set, MoveOutBeforeToday when the move-out precedes the UTC calendar day of submittedAt (a " +
+			"same-day move-out is admitted), MoveOutBeforeStart when it is on or before leaseStart, and MoveOutAfterEnd " +
+			"when it is on or after leaseEnd (the term ends on its own date; nothing to record). moveOutDate is a date-only " +
+			"fact — a bare YYYY-MM-DD, or an RFC3339 instant read as its UTC calendar day — stored as that day's midnight " +
+			"UTC. Under an OPEN renewal cycle the notice " +
+			"is admitted — the tenant declines by leaving; SignRenewal refuses NoticeGiven and the tenancyEnd target ends " +
+			"the term on the move-out even while the cycle is open. Emits leaseapp.noticeGiven{leaseAppKey, moveOutAt, " +
+			"givenBy}. " +
 			"RecordApplicationLoss{leaseAppKey} is operator-granted (never person-facing) and records that an application lost its " +
 			"unit to another applicant — the directOp leaseApplicationComplete's missing_lossRecorded gap dispatches once an " +
 			"undecided application's unit reads leased, and runnable by hand via the CLI under the primordial admin (as EndTenancy; " +
@@ -240,7 +259,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months — a whole number ≥ 1 (CreateLeaseApplication; required when moveInDate is supplied; a zero, negative or fractional count is refused InvalidTerms, as is one read back at the first approve)."},` +
 			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent, > 0 when supplied (CreateLeaseApplication; optional, only with moveInDate; zero or negative is refused InvalidTerms). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
 			`"leaseAppId":{"type":"string","description":"Optional bare NanoID for the application vertex (CreateLeaseApplication); absent → minted. The write-ahead seam, mirroring service-domain's instanceId."},` +
-			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), backfill (BackfillLeaseTerms), re-point at a different unit (ReassignLeaseUnit), whose lease term to record as ended (EndTenancy), or whose loss of its unit to another applicant to record (RecordApplicationLoss); required, validated alive."},` +
+			`"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the application to sign (SignLease), withdraw (WithdrawLeaseApplication), decide (DecideLeaseApplication), backfill (BackfillLeaseTerms), re-point at a different unit (ReassignLeaseUnit), whose lease term to record as ended (EndTenancy), whose tenancy to give notice on (GiveNotice), or whose loss of its unit to another applicant to record (RecordApplicationLoss); required, validated alive."},` +
+			`"moveOutDate":{"type":"string","description":"The date the tenant moves out — a DATE-ONLY fact: a bare YYYY-MM-DD, or an RFC3339 instant read as its UTC calendar day (the clock part is dropped; 2027-04-01T00:00:00-07:00 records 2027-04-01) (GiveNotice; required). Stored as .notice.moveOutAt = that day's midnight UTC. Must be today (the UTC calendar day of submittedAt) or later, after the term's leaseStart and before its leaseEnd; a value that parses as neither shape is refused InvalidArgument."},` +
 			`"newUnitKey":{"type":"string","description":"vtx.unit.<NanoID> of the unit to re-point the application's appliesToUnit link at (ReassignLeaseUnit; required, validated alive). The operator repair for an application whose unit was tombstoned."},` +
 			`"decision":{"type":"string","enum":["approved","declined"],"description":"The landlord's leasing decision (DecideLeaseApplication; required). approved opens the listing-leased gate (the unit leases); declined is a terminal disposition. The recorded .decision aspect's value is approved|declined|lost — lost is written by RecordApplicationLoss when the unit went to another applicant, never submitted here."},` +
 			`"reason":{"type":"string","description":"Optional free-text rationale for a DecideLeaseApplication decline (applicant feedback + a fair-housing record). Stored on the .decision aspect and projected as the declineReason lens column; ignored on an approve."},` +
@@ -407,16 +427,33 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			{
 				Name:    "EndTenancy — record that a lease term ended",
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>"},
-				ExpectedOutcome: "Reads the application and its .tenancy (both declared in ContextHint.Reads — required). " +
+				ExpectedOutcome: "Reads the application and its .tenancy (both declared in ContextHint.Reads — required) and " +
+					"its .notice (declared in ContextHint.OptionalReads; the term's end is the recorded move-out when a " +
+					"notice precedes leaseEnd, else leaseEnd — an undeclared .notice falls back to leaseEnd). " +
 					"If .tenancy already carries endedAt, no-ops with zero mutations and no event (idempotent under " +
-					"at-least-once dispatch; no primaryKey). If op.submittedAt is before .tenancy.leaseEnd, rejects " +
+					"at-least-once dispatch; no primaryKey). If op.submittedAt is before that end, rejects " +
 					"NotYetEnded naming the end's UTC calendar date. Otherwise rewrites .tenancy with every existing field " +
-					"preserved (leaseStart, renewalOpensAt, a renewed term's termStart / rentAmount) plus endedAt = leaseEnd, " +
+					"preserved (leaseStart, renewalOpensAt, a renewed term's termStart / rentAmount) plus endedAt = that end, " +
 					"pinned to the revision the read hydrated (a concurrent SignRenewal rewrite RevisionConflicts). Emits " +
-					"leaseapp.tenancyEnded{leaseAppKey, leaseEnd}. Returns primaryKey. Operator-only (Weaver's service " +
+					"leaseapp.tenancyEnded{leaseAppKey, leaseEnd, endedAt}. Returns primaryKey. Operator-only (Weaver's service " +
 					"actor via the tenancyEnd target, or by hand). Rejects a non-existent application (UnknownLeaseApplication) " +
 					"or one with no .tenancy / no leaseEnd (NoTenancy) — including a submission that failed to declare the " +
 					".tenancy read, which is refused rather than read on demand.",
+			},
+			{
+				Name:    "GiveNotice — record that a tenancy ends early",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "moveOutDate": "2027-03-31"},
+				ExpectedOutcome: "Reads the application, its .tenancy and its .signature (all declared in ContextHint.Reads — " +
+					"required) and its .notice (declared in ContextHint.OptionalReads). On the platform-validated self path " +
+					"the caller is the tenant (the applicationFor link keyed on the acting identity is live — declared in " +
+					"OptionalReads) or else the landlord (require_manages on the application's own unit; AuthDenied " +
+					"otherwise); an operator is admitted on the standing grant. Rejects NoTenancy (no .tenancy), " +
+					"LeaseNotSigned (no .signature), TenancyEnded (endedAt set), NoticeAlreadyGiven (.notice live), " +
+					"MoveOutBeforeToday / MoveOutBeforeStart / MoveOutAfterEnd (the move-out is not from today on and " +
+					"strictly inside [leaseStart, leaseEnd)). Otherwise writes .notice {moveOutAt: 2027-03-31T00:00:00Z, " +
+					"givenAt: <op.submittedAt, canonical UTC>, givenBy: tenant|landlord|operator} create-only. Emits " +
+					"leaseapp.noticeGiven{leaseAppKey, moveOutAt, givenBy}. Returns primaryKey. Rejects a non-existent " +
+					"application (UnknownLeaseApplication) or a malformed moveOutDate (InvalidArgument).",
 			},
 			{
 				Name:    "RecordApplicationLoss — record that an application lost its unit to another applicant",
@@ -760,6 +797,55 @@ func tenantNameAspectDDL() pkgmgr.DDLSpec {
 				Name:            "executed-lease tenant-name aspect",
 				Payload:         map[string]any{"value": "Alice Smith"},
 				ExpectedOutcome: "Stored ENCRYPTED as vtx.leaseapp.<NanoID>.tenantName, written CREATE-ONLY by SignLease, DEK custodied on the executedLeaseRecord retention-class holder. Never projected by any lens; egressed only via the declared subject.tenantName.data.value path.",
+			},
+		},
+	}
+}
+
+// tenancyNoticeAspectDDL declares the leaseapp's .notice aspect — the recorded
+// fact that a tenancy ends early. Written ONCE by GiveNotice (create-only; a
+// change of date is not modelled), never rewritten: it is its own aspect
+// rather than a .tenancy field because .tenancy already has two whole-aspect
+// writers (DecideLeaseApplication, SignRenewal) and a third would put the
+// notice under SignRenewal's rewrite. Three readers key on it: the tenancyEnd
+// lens (the term's effective end, termEnd = min(moveOutAt, leaseEnd), arms
+// the timer and overrides the open-renewal hold), EndTenancy (endedAt =
+// termEnd), and SignRenewal (refuses NoticeGiven); leaseExpiry opens no
+// renewal cycle on a lease under notice, and semantic-contracts'
+// leaseRentSettlement shortens the rent clause's term to the move-out.
+// Not sensitive: a move-out date and who recorded it are lease facts, not
+// personal data.
+func tenancyNoticeAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "tenancyNotice",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"GiveNotice"},
+		Description: "Tenancy-notice aspect (lease-signing). Stored as vtx.leaseapp.<NanoID>.notice (class tenancyNotice) " +
+			"= {moveOutAt, givenAt, givenBy}: the recorded fact that the tenancy ends EARLY, on moveOutAt (a date-only fact: " +
+			"midnight UTC of the move-out's UTC calendar day, canonical-UTC RFC3339), given at givenAt (the op's submittedAt) by givenBy ∈ tenant | landlord " +
+			"| operator (which probe admitted the caller: the applicationFor link, the manages link, or the standing " +
+			"operator grant). Written CREATE-ONLY by GiveNotice — once, never rewritten; a recorded notice is not changed. " +
+			"Read by the tenancyEnd lens (the term's effective end is the earlier of moveOutAt and leaseEnd; a notice " +
+			"overrides the open-renewal hold), by EndTenancy (endedAt = that end), by SignRenewal (NoticeGiven — a lease " +
+			"under notice cannot be renewed), by leaseExpiry (no renewal cycle opens), by the renewalsRead / " +
+			"leaseApplicationsRead / landlordLeaseApplicationsRead read models (notice_move_out_at / notice_given_at / " +
+			"notice_given_by), and by semantic-contracts' leaseRentSettlement (the rent clause's term is shortened to the " +
+			"move-out). Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"moveOutAt":{"type":"string"},"givenAt":{"type":"string"},"givenBy":{"type":"string","enum":["tenant","landlord","operator"]}},` +
+			`"required":["moveOutAt","givenAt","givenBy"]}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"moveOutAt": "The move-out date as midnight UTC of its calendar day, canonical-UTC RFC3339 (a date-only fact: an instant supplied with a clock part is recorded as its UTC calendar day). Strictly inside the term (after leaseStart, before leaseEnd) and not before the UTC calendar day the notice was given. The term's effective end from here on.",
+			"givenAt":   "When the notice was recorded — the op's submittedAt, canonical UTC.",
+			"givenBy":   "Who recorded it: tenant (the application's own applicant, via the applicationFor link), landlord (a manager of the application's unit, via the manages link), or operator (the standing grant).",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "tenancy-notice aspect",
+				Payload:         map[string]any{"moveOutAt": "2027-03-31T00:00:00Z", "givenAt": "2027-02-14T09:30:00Z", "givenBy": "tenant"},
+				ExpectedOutcome: "Stored as vtx.leaseapp.<NanoID>.notice, written CREATE-ONLY by GiveNotice. The tenancyEnd lens now arms its timer on 2027-03-31T00:00:00Z (if that precedes leaseEnd) and EndTenancy records endedAt there; SignRenewal refuses NoticeGiven; leaseExpiry opens no cycle.",
 			},
 		},
 	}

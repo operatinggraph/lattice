@@ -7,13 +7,16 @@ import (
 )
 
 // clauseDDLScript handles CreateClause + InspectPremises + SupersedeClause +
-// BackfillClauseTerm. Known-key reads only (validates the lease/account/
-// inspector/conditionedOn/superseded-clause vertex by the keys the caller
-// lists in ContextHint.Reads; BackfillClauseTerm reads the clause's .terms
-// and the lease's .tenancy the same way, and its .status as an
-// absence-tolerant OptionalRead). Root data stays {} on the clause (D5): the
-// prose/terms/status/inspection are aspects, the governed lease, charged
-// account, assigned inspector, condition, and amended predecessor are links.
+// BackfillClauseTerm + ShortenClauseTerm. Known-key reads only (validates the
+// lease/account/inspector/conditionedOn/superseded-clause vertex by the keys
+// the caller lists in ContextHint.Reads; BackfillClauseTerm reads the
+// clause's .terms and the lease's .tenancy the same way, and its .status as
+// an absence-tolerant OptionalRead; ShortenClauseTerm reads the clause's
+// .terms and the lease's .notice as REQUIRED declared reads, and the
+// clause's .status the same absence-tolerant way). Root data stays {} on the
+// clause (D5): the prose/terms/status/inspection are aspects, the governed
+// lease, charged account, assigned inspector, condition, and amended
+// predecessor are links.
 //
 // The untermed recurring window (loftspace-ledger's RecurringChargePeriod)
 // is baked in at package-init time via strings.Replace: BackfillClauseTerm
@@ -452,6 +455,149 @@ def execute(state, op):
                    "data": {"clauseKey": clause_key, "leaseAppKey": lease_key,
                             "validFrom": valid_from, "validUntil": valid_until,
                             "chargeValidUntil": new_due}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": clause_key}}
+
+    if ot == "ShortenClauseTerm":
+        # A recorded early move-out shortens the termed rent clause's
+        # validUntil to the earlier of the lease's .notice moveOutAt and the
+        # clause's own term end, so billing stops at the actual move-out
+        # instead of running to the original term's end. Dispatched by the
+        # leaseRentSettlement playbook's missing_termShortened gap
+        # (lenses.go) — one clause per pass, the missing_term idiom: several
+        # overrunning clauses on one lease (the original plus a renewal, say)
+        # are shortened one per pass and the gap re-opens for the next.
+        clause_key = required_string(p, "clauseKey")
+        parts_of(clause_key, "clauseKey", "clause")
+        lease_key = required_string(p, "leaseAppKey")
+        _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
+
+        if not vertex_alive(state, clause_key):
+            fail("UnknownClause: " + clause_key)
+
+        terms_key = clause_key + ".terms"
+        if not vertex_alive(state, terms_key):
+            fail("InvalidState: " + clause_key + " has no .terms aspect")
+        terms_doc = state[terms_key]
+        terms = terms_doc.data
+        valid_from = terms.get("validFrom")
+        if valid_from == None:
+            fail("NotTermed: " + clause_key + " carries no term to shorten; BackfillClauseTerm terms it first")
+        valid_until = terms.get("validUntil")
+        if valid_until == None:
+            # Every clause that carries validFrom carries validUntil too
+            # (mint_clause and BackfillClauseTerm write both together, never
+            # one alone) — this guards the compare below against a corrupt
+            # half-term rather than trusting that invariant blindly.
+            fail("NotTermed: " + clause_key + "'s term is missing validUntil")
+
+        # The lease's .notice is a REQUIRED declared read: the gap only opens
+        # once a notice is recorded, so its absence here means the
+        # dispatcher never declared it, not that none exists.
+        notice_key = lease_key + ".notice"
+        if not vertex_alive(state, notice_key):
+            fail("NoNotice: " + lease_key + " has no recorded notice")
+        move_out_at = state[notice_key].data.get("moveOutAt")
+        if move_out_at == None:
+            fail("NoNotice: " + lease_key + " has no recorded notice")
+
+        # The clause must govern THIS lease, off its own outbound governs
+        # walk — both the Contract #1 governs.leaseapp. spelling and the
+        # legacy governs.lease. one (BackfillClauseTerm's re-key may not have
+        # reached this clause yet). A clause carries exactly one governs
+        # link, written once at mint, so one page suffices.
+        # read-posture: (e) relation=governs epoch=none -- a clause carries
+        # exactly one governs link, written once at mint; nothing else
+        # writes the relation, so there is no concurrent mutator to fence.
+        page, _ = kv.Links(clause_key, "governs", "out", None, 8)
+        governs_this_lease = False
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            segs = lk.key.split(".")
+            if len(segs) != 6 or (segs[4] != "leaseapp" and segs[4] != "lease"):
+                continue
+            if segs[5] != lease_id:
+                fail("InvalidState: " + clause_key + " governs " + segs[5] + ", not " + lease_key)
+            governs_this_lease = True
+        if not governs_this_lease:
+            fail("InvalidState: " + clause_key + " does not govern " + lease_key)
+
+        # new_until is computed FIRST, and the no-op guard compares against
+        # IT — never against the raw move_out_at. A term already collapsed to
+        # validFrom carries validUntil == validFrom, which can be well AFTER
+        # move_out_at (that is exactly why it collapsed there), so a guard
+        # keyed on move_out_at alone would never recognize it as settled and
+        # would keep rewriting .terms/.status and re-emitting the event on
+        # every dispatch. Guarding on new_until instead makes a collapsed (or
+        # already-capped) term a true fixed point: valid_until <= new_until
+        # holds as soon as valid_until == new_until, so a repeat dispatch is a
+        # clean no-op. The lens's own overrunClauseKey CASE (lenses.go)
+        # separately excludes a collapsed or completed clause from candidacy
+        # entirely, so this guard is belt-and-suspenders for a stale
+        # in-flight dispatch, not the primary defense.
+        new_until = move_out_at
+        if new_until < valid_from:
+            new_until = valid_from
+
+        if valid_until <= new_until:
+            # Idempotent no-op: an earlier pass already shortened the term to
+            # (or inside) the move-out, or the term already ends there —
+            # nothing left to shorten (the EndTenancy/SetListingStatus no-op
+            # shape: empty mutations, no primaryKey).
+            return {"mutations": [], "events": [], "response": {}}
+
+        # A term collapsed to validFrom (new_until == valid_from, a renewal
+        # clause whose term starts after the move-out) is the recorded fact
+        # that the clause bills nothing: clauseSatisfaction's periodStart <
+        # validUntil conjunct and DebitAccount's TermExhausted refusal both
+        # fail closed on it. The lens excludes a collapsed clause from
+        # overrunClauseKey candidacy once this lands, so it is picked here
+        # exactly once.
+        new_terms = {}
+        for k, v in terms.items():
+            new_terms[k] = v
+        new_terms["validUntil"] = new_until
+
+        status_key = clause_key + ".status"
+        if not (status_key in state and vertex_alive(state, status_key)):
+            fail("InvalidState: " + clause_key + "'s .status was not hydrated; declare it in optionalReads")
+        status_doc = state[status_key]
+        status_data = {}
+        for k, v in status_doc.data.items():
+            status_data[k] = v
+        due = status_data.get("chargeValidUntil")
+        if due == None:
+            due = valid_from
+        # A due at or past the new term's end means the final period is
+        # already billed: the clause is complete, the same mark
+        # BackfillClauseTerm and DebitAccount leave for the same fact. A
+        # clause DebitAccount already completed (period=oneTime's cousin: a
+        # termed monthly clause whose final charge landed before the notice)
+        # keeps its ORIGINAL completedAt — this op only caps validUntil
+        # further, it does not re-mark a completion that already happened.
+        already_completed = status_data.get("state") == "completed"
+        if due >= new_until:
+            status_data["state"] = "completed"
+            if not already_completed:
+                status_data["completedAt"] = time.rfc3339_utc(op.submittedAt)
+
+        # Both writes pin to the hydrated revision (the EndTenancy OCC shape,
+        # not BackfillClauseTerm's unconditioned one): a concurrent
+        # BackfillClauseTerm or DebitAccount landing between this op's
+        # hydration and its commit must conflict rather than being silently
+        # overwritten by a shortening computed from a stale term or due date.
+        mutations = [
+            {"op": "update", "key": terms_key, "expectedRevision": terms_doc.revision,
+             "document": {"class": "clauseTerms", "isDeleted": False,
+                          "vertexKey": clause_key, "localName": "terms", "data": new_terms}},
+            {"op": "update", "key": status_key, "expectedRevision": status_doc.revision,
+             "document": {"class": "clauseStatus", "isDeleted": False,
+                          "vertexKey": clause_key, "localName": "status", "data": status_data}},
+        ]
+        events = [{"class": "clause.termShortened",
+                   "data": {"clauseKey": clause_key, "leaseAppKey": lease_key,
+                            "validUntil": new_until, "chargeValidUntil": due}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": clause_key}}
 

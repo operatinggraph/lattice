@@ -57,6 +57,16 @@ type protectedApplicationRow struct {
 	TenancyTermStart  *string  `json:"tenancyTermStart"`
 	TenancyRentAmount *float64 `json:"tenancyRentAmount"`
 	TenancyEndedAt    *string  `json:"tenancyEndedAt"`
+	// The recorded notice (GiveNotice) — null until the tenant or landlord
+	// records a move-out date. NoticeMoveOutAt is the date-only fact the
+	// term ends early (midnight-UTC — render by fmtUTCDate, never
+	// toLocaleDateString); NoticeGivenAt is the instant the op recorded it;
+	// NoticeGivenBy is tenant/landlord/operator, per which probe admitted
+	// the caller. A notice is NOT terminal — the lease stays live
+	// (TenancyEndedAt unset) until the term actually ends.
+	NoticeMoveOutAt *string `json:"noticeMoveOutAt"`
+	NoticeGivenAt   *string `json:"noticeGivenAt"`
+	NoticeGivenBy   *string `json:"noticeGivenBy"`
 	// The anchored executed-lease artifact's pointers (null until the platform's
 	// docGen + attach convergence lands the signedLease attachment). The
 	// lease-document GET streams the bytes by DocStoreName.
@@ -106,6 +116,7 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        decline_reason, terms_move_in_date, terms_lease_term_months,
        terms_requested_rent, tenancy_lease_start, tenancy_lease_end,
        tenancy_term_start, tenancy_rent_amount, tenancy_ended_at,
+       notice_move_out_at, notice_given_at, notice_given_by,
        doc_store_name, doc_filename, doc_content_type,
        profile_submitted, income_to_rent_met, employment_verified, reference_count,
        has_co_applicant, has_guarantor, guarantor_income_to_rent_met,
@@ -155,6 +166,7 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 			&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 			&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
 			&row.TenancyRentAmount, &row.TenancyEndedAt,
+			&row.NoticeMoveOutAt, &row.NoticeGivenAt, &row.NoticeGivenBy,
 			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified, &row.ReferenceCount,
 			&row.HasCoApplicant, &row.HasGuarantor, &row.GuarantorIncomeToRentMet,
@@ -188,6 +200,7 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        terms_move_in_date, terms_lease_term_months, terms_requested_rent,
        tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
        tenancy_rent_amount, tenancy_ended_at,
+       notice_move_out_at, notice_given_at, notice_given_by,
        doc_store_name, doc_filename, doc_content_type,
        profile_submitted, income_to_rent_met, employment_verified, reference_count,
        has_co_applicant, has_guarantor, guarantor_income_to_rent_met,
@@ -222,6 +235,7 @@ func queryApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entit
 		&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 		&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
 		&row.TenancyRentAmount, &row.TenancyEndedAt,
+		&row.NoticeMoveOutAt, &row.NoticeGivenAt, &row.NoticeGivenBy,
 		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified, &row.ReferenceCount,
 		&row.HasCoApplicant, &row.HasGuarantor, &row.GuarantorIncomeToRentMet,

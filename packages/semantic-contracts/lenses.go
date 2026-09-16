@@ -58,8 +58,8 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: LeaseRentSettlementTarget + ".{actorSuffix}",
-				BodyColumns: []string{"violating", "missing_terms", "missing_account", "missing_clause", "missing_term", "entityKey", "leaseAppKey", "accountKey",
-					"leaseStart", "termStart", "leaseEnd", "termRentCents", "untermedClauseKey"},
+				BodyColumns: []string{"violating", "missing_terms", "missing_account", "missing_clause", "missing_term", "missing_termShortened", "entityKey", "leaseAppKey", "accountKey",
+					"leaseStart", "termStart", "leaseEnd", "termRentCents", "untermedClauseKey", "overrunClauseKey", "moveOutAt"},
 				EmptyBehavior: "delete",
 				KeyColumn:     "entityId",
 				Freshness:     "auto",
@@ -128,6 +128,35 @@ func Lenses() []pkgmgr.LensSpec {
 //     clause makes untermedClauseCount non-zero, which holds missing_clause
 //     shut, and missing_clause requires untermedClauseCount = 0, which makes
 //     untermedClauseKey null.
+//   - `missing_termShortened` — the tenant has given notice (l.notice.data.
+//     moveOutAt, LoftSpace's "a tenant gives notice, a lease ends early"
+//     design) and a termed, unconditioned monthly clause governing this
+//     lease runs past that date (validUntil > moveOutAt): overrunClauseKey is
+//     that clause's key, the same max(CASE WHEN ... THEN c.key ELSE null END)
+//     one-per-pass shape as untermedClauseKey above, so several overrunning
+//     clauses (the original term's plus a renewal's) are shortened one at a
+//     time and the gap re-opens for the next. Weaver dispatches
+//     ShortenClauseTerm{clauseKey: overrunClauseKey, leaseAppKey} (this
+//     package), which caps validUntil at max(moveOutAt, validFrom) and
+//     completes the clause once its recorded due reaches the new validUntil.
+//     Gated on validFrom <> null (a termed clause only — an untermed one is
+//     missing_term's job first) and moveOutAt <> null (no notice, nothing to
+//     shorten to). termClauseCount above still counts a clause this gap has
+//     already shortened (its validFrom still equals termStart), so shortening
+//     never re-opens missing_clause and mints a duplicate.
+//     `AND validUntil > validFrom AND status.state <> 'completed'` keep a
+//     clause the shortening has already reached out of candidacy: a term
+//     collapsed to validFrom (validUntil == validFrom) still runs past a
+//     moveOutAt that predates the term's own start, and a clause the script
+//     has marked completed can still carry a validUntil past moveOutAt — both
+//     satisfy every OTHER conjunct forever, so without this pair the row would
+//     re-select the same clause on every mark-lease reclaim with nothing left
+//     to change. Excluding either shape is also what makes the max()
+//     one-per-pass selection actually reach every overrunning clause on a
+//     lease: once the picked one drops out of candidacy, its sibling (a
+//     renewal's clause overrunning the same notice, say) is the sole remaining
+//     max() and is selected on the very next pass, never starved behind a
+//     candidate that no longer needs picking.
 //
 // The term the rent clause covers is the lease's CURRENT one. termStart is
 // l.tenancy.data.termStart — the renewed term's start, which SignRenewal
@@ -187,9 +216,11 @@ WITH
   l.tenancy.data.leaseEnd AS leaseEnd,
   coalesce(l.tenancy.data.termStart, l.tenancy.data.leaseStart) AS termStart,
   coalesce(l.tenancy.data.rentAmount, l.terms.data.requestedRent) AS termRent,
+  l.notice.data.moveOutAt AS moveOutAt,
   count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = coalesce(l.tenancy.data.termStart, l.tenancy.data.leaseStart)) THEN c.key ELSE null END) AS termClauseCount,
   count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = null) THEN c.key ELSE null END) AS untermedClauseCount,
-  max(CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = null) THEN c.key ELSE null END) AS untermedClauseKey
+  max(CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = null) THEN c.key ELSE null END) AS untermedClauseKey,
+  max(CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom <> null) AND (l.notice.data.moveOutAt <> null) AND (c.terms.data.validUntil > l.notice.data.moveOutAt) AND (c.terms.data.validUntil > c.terms.data.validFrom) AND (c.status.data.state <> 'completed') THEN c.key ELSE null END) AS overrunClauseKey
 WHERE (decision = 'approved')
 RETURN
   entityKey AS actorKey,
@@ -200,12 +231,15 @@ RETURN
   termStart,
   leaseEnd,
   untermedClauseKey,
+  overrunClauseKey,
+  moveOutAt,
   (CASE WHEN termRent = null THEN null ELSE (termRent * 100) END) AS termRentCents,
   (requestedRent = null) AS missing_terms,
   ((requestedRent <> null) AND (accountKey = null)) AS missing_account,
   ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) AS missing_clause,
   ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null)) AS missing_term,
-  ((requestedRent = null) OR ((requestedRent <> null) AND (accountKey = null)) OR ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) OR ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null))) AS violating
+  ((overrunClauseKey <> null)) AS missing_termShortened,
+  ((requestedRent = null) OR ((requestedRent <> null) AND (accountKey = null)) OR ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) OR ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null)) OR ((overrunClauseKey <> null))) AS violating
 `
 
 // clauseSatisfactionSpec is the one-row-per-clause satisfaction cypher (§3.2

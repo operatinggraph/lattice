@@ -121,6 +121,12 @@ read	DecideLeaseApplication	lnk.identity.<id>.manages.unit.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.worksAt.building.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.worksAt.unit.<id>
 read	EndVisitSeries	lnk.identity.<id>.worksAt.building.<id>
+# GiveNotice's landlord probe (require_manages, packages/lease-signing/
+# scripts.go): the manages link is keyed by the unit the application's own
+# appliesToUnit walk resolves -- the same link-shaped follow-up
+# DecideLeaseApplication's row above carries. Reached only on the
+# platform-validated self path when the tenant link is absent.
+read	GiveNotice	lnk.identity.<id>.manages.unit.<id>
 # JoinWaitlist runs CreateBooking's staff-standing confinement verbatim
 # (prepare_booking_common -> require_workplace, packages/wellness-domain/
 # ddls.go), so it inherits the same undeclarable worksAt follow-up: the

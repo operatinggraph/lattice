@@ -196,7 +196,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"pastDueBookings":                   "booking:bookedBy,forSession|identity:bookedBy|session:forSession",
 	"renewalComplete":                   "identity:applicationFor,manages,providedTo|leaseapp:applicationFor,appliesToUnit,renews|renewal:renews|service:providedTo|unit:appliesToUnit,manages",
 	"staleAssignedTasks":                "identity:assignedTo|task:assignedTo",
-	"staleUserTasks":                    "identity:scopedTo|leaseapp:scopedTo|meta:forOperation|renewal:scopedTo|task:forOperation,scopedTo",
+	"staleUserTasks":                    "identity:scopedTo|leaseapp:renews,scopedTo|meta:forOperation|renewal:renews,scopedTo|task:forOperation,scopedTo",
 	"supersededBackgroundChecks":        "identity:providedTo|meta:instanceOf|service:instanceOf,providedTo",
 	"tenancyEnd":                        "leaseapp:appliesToUnit,renews|renewal:renews|unit:appliesToUnit", // leaseExpiry's walk without the landlord hop; the unit's other applications ride the same appliesToUnit relation
 	"unroutedTasks":                     "role:queuedFor|task:queuedFor",

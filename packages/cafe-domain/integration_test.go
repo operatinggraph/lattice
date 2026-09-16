@@ -465,6 +465,17 @@ func seedTenancy(t *testing.T, ctx context.Context, conn *substrate.Conn, leaseK
 	})
 }
 
+// seedTenancyEnded stamps the lease-signing .tenancy aspect the way
+// EndTenancy rewrites it once a tenancy has actually ended — endedAt
+// recorded alongside leaseEnd, which for a resident who gave notice sits
+// months ahead of endedAt (the term's nominal end, not the actual one).
+func seedTenancyEnded(t *testing.T, ctx context.Context, conn *substrate.Conn, leaseKey, leaseStart, leaseEnd, endedAt string) {
+	t.Helper()
+	seedAspect(t, ctx, conn, leaseKey, "tenancy", "tenancy", map[string]any{
+		"leaseStart": leaseStart, "leaseEnd": leaseEnd, "renewalOpensAt": leaseEnd, "endedAt": endedAt,
+	})
+}
+
 // TestOpenTab_RejectsEndedTenancy proves a house tab closes to a lease the
 // moment its term ends: the rent clause already stops billing at leaseEnd,
 // and a moved-out resident must not keep charging the same ledger. The
@@ -510,6 +521,40 @@ func TestOpenTab_RejectsEndedTenancy(t *testing.T) {
 	if outcome, reply = testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
 		openTabEnv("cdopentenancynone001", seedLease(t, ctx, conn, "BBCAFEDMNTNCYNQNEHJK"), "2026-07-07T12:00:00Z")); outcome != processor.OutcomeAccepted {
 		t.Fatalf("OpenTab with no .tenancy: outcome = %q error = %+v, want accepted", outcome, reply.Error)
+	}
+}
+
+// TestOpenTab_RejectsEndedTenancy_EndedAtBeforeLeaseEnd proves a resident
+// who gave notice loses house-tab access the moment their recorded early
+// move-out (endedAt) is reached, not months later when the term's nominal
+// leaseEnd finally arrives — endedAt is the FACT the tenancy ended; leaseEnd
+// is only ever a fallback for a lease EndTenancy has not caught up with yet.
+// The positive vector runs first: no endedAt recorded yet + a future
+// leaseEnd still opens.
+func TestOpenTab_RejectsEndedTenancy_EndedAtBeforeLeaseEnd(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "tenancynotice")
+
+	// Positive first: no endedAt recorded, leaseEnd still months out — opens.
+	notYetNoticed := seedLease(t, ctx, conn, "BBCAFEDMNTNCYNTCEHJK")
+	seedTenancy(t, ctx, conn, notYetNoticed, "2026-01-01T00:00:00Z", "2027-08-01T00:00:00Z")
+	if outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		openTabEnv("cdopentnnotice000001", notYetNoticed, "2026-09-15T12:00:00Z")); outcome != processor.OutcomeAccepted {
+		t.Fatalf("OpenTab with no endedAt and a future leaseEnd: outcome = %q error = %+v, want accepted", outcome, reply.Error)
+	}
+
+	// A resident who gave notice: endedAt (2026-09-15, the recorded
+	// move-out) sits MONTHS before leaseEnd (2027-08-01) — the tenancy has
+	// ended even though the lease's nominal term has not.
+	noticed := seedLease(t, ctx, conn, "BBCAFEDMNTNCYNTCEDHJ")
+	seedTenancyEnded(t, ctx, conn, noticed, "2026-01-01T00:00:00Z", "2027-08-01T00:00:00Z", "2026-09-15T00:00:00Z")
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		openTabEnv("cdopentnnotice000002", noticed, "2026-09-20T12:00:00Z"))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("OpenTab past recorded endedAt, leaseEnd still future: outcome = %q, want rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "TenancyEnded: this lease's tenancy ended on 2026-09-15") {
+		t.Fatalf("OpenTab past endedAt rejected with %+v, want TenancyEnded naming the recorded endedAt (2026-09-15), not leaseEnd", reply.Error)
 	}
 }
 

@@ -278,6 +278,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "tenancy_term_start", Type: "text"},
 				{Name: "tenancy_rent_amount", Type: "double precision"},
 				{Name: "tenancy_ended_at", Type: "text"},
+				{Name: "notice_move_out_at", Type: "text"},
+				{Name: "notice_given_at", Type: "text"},
+				{Name: "notice_given_by", Type: "text"},
 				{Name: "doc_store_name", Type: "text"},
 				{Name: "doc_filename", Type: "text"},
 				{Name: "doc_content_type", Type: "text"},
@@ -445,6 +448,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "tenancy_term_start", Type: "text"},
 				{Name: "tenancy_rent_amount", Type: "double precision"},
 				{Name: "tenancy_ended_at", Type: "text"},
+				{Name: "notice_move_out_at", Type: "text"},
+				{Name: "notice_given_at", Type: "text"},
+				{Name: "notice_given_by", Type: "text"},
 				{Name: "doc_store_name", Type: "text"},
 				{Name: "doc_filename", Type: "text"},
 				{Name: "doc_content_type", Type: "text"},
@@ -1310,7 +1316,11 @@ RETURN
 //     renewal episode re-minted while an earlier signing task is still open
 //     (a revoke+enable, or a leg advance after the earlier task's grant) puts
 //     two SignRenewal tasks in the tenant's inbox; whichever signs, the
-//     other is obsolete.
+//     other is obsolete. OR the renewed leaseapp (one hop, renewal-[:renews]->
+//     leaseapp) carries a .notice or a .tenancy.endedAt: SignRenewal refuses
+//     NoticeGiven / TenancyEnded off exactly those two facts (renewal_scripts.go)
+//     and renewalComplete's open gate closes on the same two, so a signing
+//     task minted before either landed is an offer the op will refuse.
 //
 // The status='open' gate excludes an already complete/cancelled task (nothing
 // left to converge — orphanedTaskGrantsSpec's own reasoning, orchestration-base
@@ -1324,6 +1334,7 @@ OPTIONAL MATCH (t)-[:forOperation]->(op:meta)
 OPTIONAL MATCH (t)-[:scopedTo]->(onbIdentity:identity)
 OPTIONAL MATCH (t)-[:scopedTo]->(sigApp:leaseapp)
 OPTIONAL MATCH (t)-[:scopedTo]->(termsRenewal:renewal)
+OPTIONAL MATCH (termsRenewal)-[:renews]->(renewedApp:leaseapp)
 WITH
   t.key AS entityKey,
   op.data.operationType AS opType,
@@ -1332,7 +1343,9 @@ WITH
   sigApp.applicationSignals.data.submittedAt AS sigSignalsAt,
   termsRenewal.terms.data.setAt AS termsSetAt,
   termsRenewal.guarantorVerification.data.verifiedAt AS guarantorVerifiedAt,
-  termsRenewal.renewalSignature.data.signedAt AS renewalSignedAt
+  termsRenewal.renewalSignature.data.signedAt AS renewalSignedAt,
+  renewedApp.notice.data.moveOutAt AS renewedNoticeAt,
+  renewedApp.tenancy.data.endedAt AS renewedTenancyEndedAt
 RETURN
   entityKey AS actorKey,
   entityKey,
@@ -1343,13 +1356,13 @@ RETURN
    ((opType = 'SetApplicantProfile') AND (sigSignalsAt <> null)) OR
    ((opType = 'SetRenewalTerms') AND (termsSetAt <> null)) OR
    ((opType = 'VerifyGuarantor') AND (guarantorVerifiedAt <> null)) OR
-   ((opType = 'SignRenewal') AND (renewalSignedAt <> null))) AS missing_cancellation,
+   ((opType = 'SignRenewal') AND ((renewalSignedAt <> null) OR (renewedNoticeAt <> null) OR (renewedTenancyEndedAt <> null)))) AS missing_cancellation,
   (((opType = 'RecordIdentityPII') AND (onbSsn <> null)) OR
    ((opType = 'SignLease') AND (sigSignedAt <> null)) OR
    ((opType = 'SetApplicantProfile') AND (sigSignalsAt <> null)) OR
    ((opType = 'SetRenewalTerms') AND (termsSetAt <> null)) OR
    ((opType = 'VerifyGuarantor') AND (guarantorVerifiedAt <> null)) OR
-   ((opType = 'SignRenewal') AND (renewalSignedAt <> null))) AS violating
+   ((opType = 'SignRenewal') AND ((renewalSignedAt <> null) OR (renewedNoticeAt <> null) OR (renewedTenancyEndedAt <> null)))) AS violating
 `
 
 // leaseApplicationsReadSpec is the protected Postgres read model's cypher (D1.3
@@ -1417,6 +1430,12 @@ RETURN
 //     stay out of the read model until they are well-formed.) The
 //     landlord/residence anchor is a later increment (needs cap-read.residence +
 //     a landlord→unit ownership link loftspace-domain does not model yet).
+//   - notice_move_out_at / notice_given_at / notice_given_by — the lease's
+//     recorded notice (.notice, written once by GiveNotice), the same aspect
+//     the tenancyEnd lens ends the term on and SignRenewal refuses NoticeGiven
+//     off; null on every lease without one. The card offers "Give notice" on
+//     a live, signed tenancy with none and says "moving out <date>" once one
+//     is recorded. Both application read lenses project the three columns.
 //   - doc_store_name / doc_filename / doc_content_type — the ANCHORED
 //     executed-lease artifact's pointers, the columns the app's GET
 //     /api/lease-document streams by (ObjectGet under RLS). Projected ONLY when
@@ -1467,6 +1486,9 @@ WITH
   app.tenancy.data.termStart     AS tenancyTermStart,
   app.tenancy.data.rentAmount    AS tenancyRentAmount,
   app.tenancy.data.endedAt       AS tenancyEndedAt,
+  app.notice.data.moveOutAt      AS noticeMoveOutAt,
+  app.notice.data.givenAt        AS noticeGivenAt,
+  app.notice.data.givenBy        AS noticeGivenBy,
   (app.applicationSignals.data.submittedAt <> null)      AS profileSubmitted,
   app.applicationSignals.data.incomeToRentMet            AS incomeToRentMet,
   app.applicationSignals.data.employmentVerified         AS employmentVerified,
@@ -1510,6 +1532,9 @@ RETURN
   tenancyTermStart               AS tenancy_term_start,
   tenancyRentAmount              AS tenancy_rent_amount,
   tenancyEndedAt                 AS tenancy_ended_at,
+  noticeMoveOutAt                AS notice_move_out_at,
+  noticeGivenAt                  AS notice_given_at,
+  noticeGivenBy                  AS notice_given_by,
   profileSubmitted                AS profile_submitted,
   incomeToRentMet                 AS income_to_rent_met,
   employmentVerified               AS employment_verified,
@@ -1633,6 +1658,9 @@ WITH
   app.tenancy.data.termStart     AS tenancyTermStart,
   app.tenancy.data.rentAmount    AS tenancyRentAmount,
   app.tenancy.data.endedAt       AS tenancyEndedAt,
+  app.notice.data.moveOutAt      AS noticeMoveOutAt,
+  app.notice.data.givenAt        AS noticeGivenAt,
+  app.notice.data.givenBy        AS noticeGivenBy,
   (app.applicationSignals.data.submittedAt <> null)      AS profileSubmitted,
   app.applicationSignals.data.incomeToRentMet            AS incomeToRentMet,
   app.applicationSignals.data.employmentVerified         AS employmentVerified,
@@ -1673,6 +1701,9 @@ RETURN
   tenancyTermStart               AS tenancy_term_start,
   tenancyRentAmount              AS tenancy_rent_amount,
   tenancyEndedAt                 AS tenancy_ended_at,
+  noticeMoveOutAt                AS notice_move_out_at,
+  noticeGivenAt                  AS notice_given_at,
+  noticeGivenBy                  AS notice_given_by,
   profileSubmitted               AS profile_submitted,
   incomeToRentMet                AS income_to_rent_met,
   employmentVerified              AS employment_verified,

@@ -315,14 +315,18 @@ func notYourLease(hats subjectHats) string {
 // MissingLocation distinguishes an empty CoveringLocations caused by a data
 // gap (the appliesToUnit target is gone or never wired) from the ordinary
 // "no workplace reaches this lease" answer — see leaseWorkplacesSpec
-// (cafe-domain/lenses.go). LeaseEnd carries no `omitempty`: residents.go
-// gates the resident's own Open Tab button on it, and an omitted key would
-// read identically to a lease with no projected term.
+// (cafe-domain/lenses.go). LeaseEnd and EndedAt carry no `omitempty`:
+// residents.go gates the resident's own Open Tab button on them, and an
+// omitted key would read identically to a lease with no projected term.
+// EndedAt is the recorded FACT the tenancy ended (a resident's own notice,
+// months before LeaseEnd, or the term simply running out); LeaseEnd stays
+// the term's nominal end for a lease with no EndedAt recorded yet.
 type leaseWorkplaceProjection struct {
 	LeaseAppKey       string   `json:"leaseAppKey"`
 	MissingLocation   bool     `json:"missingLocation"`
 	CoveringLocations []string `json:"coveringLocations"`
 	LeaseEnd          string   `json:"leaseEnd"`
+	EndedAt           string   `json:"endedAt"`
 }
 
 // leaseWorkplaceRows lists and decodes every row of the cafe-domain
@@ -337,7 +341,7 @@ func (s *server) leaseWorkplaceRows(ctx context.Context) ([]leaseWorkplaceProjec
 	bucket := cafedomain.LeaseWorkplacesBucket
 	keys, err := s.conn.KVListKeys(ctx, bucket)
 	if err != nil {
-		return nil, fmt.Errorf("list %s: %w (is cafe-domain 0.15.0 installed and the Refractor projecting?)", bucket, err)
+		return nil, fmt.Errorf("list %s: %w (is cafe-domain 0.15.1 installed and the Refractor projecting?)", bucket, err)
 	}
 	get := s.kvGetter(ctx, bucket)
 	rows := make([]leaseWorkplaceProjection, 0, len(keys))

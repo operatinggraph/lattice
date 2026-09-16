@@ -30,3 +30,35 @@ func TestSearchLandlordColumns_SelectEveryLensBoolean(t *testing.T) {
 		}
 	}
 }
+
+// searchLandlordChipTextColumns are the non-boolean read_landlord_lease_applications
+// columns a search-surface render function reads directly (dispChip / a
+// disposition line), beyond the boolean sweep above: renderSearchApplicationRow's
+// notice chip reads a.noticeMoveOutAt (app.js). Extend this list — and its
+// renderer — together whenever a search row grows another text-column chip.
+var searchLandlordChipTextColumns = []string{"notice_move_out_at"}
+
+// TestSearchLandlordColumns_SelectsEveryChipTextColumn is
+// TestSearchLandlordColumns_SelectEveryLensBoolean's non-boolean sibling: a
+// text column a search-row renderer reads for a chip must be selected by
+// searchLandlordColumns too, the same "omitted column reads as undefined"
+// failure mode the boolean pin guards, just not caught by a Type=="boolean"
+// filter.
+func TestSearchLandlordColumns_SelectsEveryChipTextColumn(t *testing.T) {
+	selected := map[string]bool{}
+	for _, name := range regexp.MustCompile(`[a-z_]+`).FindAllString(searchLandlordColumns, -1) {
+		selected[name] = true
+	}
+	known := map[string]bool{}
+	for _, col := range landlordProtectedColumns() {
+		known[col.Name] = true
+	}
+	for _, name := range searchLandlordChipTextColumns {
+		if !known[name] {
+			t.Fatalf("searchLandlordChipTextColumns names %q, which is not a read_landlord_lease_applications column at all — landlordProtectedColumns() is stale or the name is wrong", name)
+		}
+		if !selected[name] {
+			t.Errorf("read_landlord_lease_applications column %q is read by a search-row chip but not selected by searchLandlordColumns; the search surface's rows would read it as undefined", name)
+		}
+	}
+}
