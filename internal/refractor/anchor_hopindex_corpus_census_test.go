@@ -98,6 +98,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	// re-executing the cypher once per actor an undirected BFS reaches.
 	"capabilityServiceAccess": hopIndexed,
 	"clauseSatisfaction":      hopIndexed,
+	"clinicArrearsReminders":  hopIndexed,
 	"clinicNoShowSettlement":  hopIndexed,
 	"clinicSiteBackfill":      hopIndexed,
 	// Multi-walk (`len(branches) > 1`, ruleinstall.go): the pipeline installs one

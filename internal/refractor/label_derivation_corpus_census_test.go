@@ -155,6 +155,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"clinicAppointmentsRead":         {narrow, "appointment building identity patient provider", modeLabel},
 	"clinicIdentitiesRead":           {narrow, "identity", modeRelation},
 	"clinicLedgerHistory":            {narrow, "appointment clinicaccount clinictransaction patient", modeLabel},
+	"clinicArrearsReminders":         {narrow, "clinicaccount patient", modeRelation},
 	"clinicNoShowSettlement":         {narrow, "appointment clinicaccount clinictransaction patient", modeLabel},
 	"clinicPatientAccounts":          {narrow, "clinicaccount patient", modeRelation},
 	"clinicPatientReadGrants":        {narrow, "patient", modeRelation},

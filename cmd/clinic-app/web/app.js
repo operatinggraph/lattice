@@ -3895,7 +3895,11 @@ function moneyAmount(cents) {
 // the ledger balance header all append beside a debtor — "" for no row (not
 // yet fetched, or the patient owes nothing), the common case, so a caller can
 // append the result unconditionally. Mirrors wellness's arrearsBadgeText
-// (cmd/wellness-app/web/app.js:2915).
+// (cmd/wellness-app/web/app.js:2915). When the row carries reminderSentAt (the
+// account's own recorded SEND INTENT), appends "· reminded <date>" — the UTC
+// calendar day (slice(0, 10)) of the recorded stamp, the same slice every
+// arrears-date surface in this file uses, so a reminder date never reads
+// differently in two places.
 function arrearsBadgeText(row) {
   if (!row || !(Number(row.balanceCents) > 0)) return "";
   let text = "owes " + moneyAmount(row.balanceCents);
@@ -3903,7 +3907,19 @@ function arrearsBadgeText(row) {
     const days = Number(row.daysOverdue) || 0;
     text += " · " + days + (days === 1 ? " day" : " days") + " overdue";
   }
+  if (row.reminderSentAt) text += " · reminded " + row.reminderSentAt.slice(0, 10);
   return text;
+}
+
+// apptArrearsLine is the desk's flag beside Check in — "💳 " + arrearsBadgeText
+// for a patient who owes something, "" when row is absent or the balance is
+// not positive (arrearsBadgeText's own early return covers that; this
+// function just names it explicitly so a caller can skip creating the DOM
+// node at all). The clinic never refuses care on debt (clinic-arrears-
+// reminder-2026-09-15.md verdict item 1) — this only ever informs the desk.
+function apptArrearsLine(row) {
+  if (!row || !(Number(row.balanceCents) > 0)) return "";
+  return "💳 " + arrearsBadgeText(row);
 }
 
 // overdueBookingPrompt is the confirm() message submitBook shows before
@@ -4149,11 +4165,15 @@ function selfPayCapMessage(owedCents, cents) {
   return "";
 }
 
-function renderLedger(data) {
-  const balanceEl = $("#ledger-balance");
-  const list = $("#ledger-list");
-  const empty = $("#ledger-empty");
-
+// ledgerBalanceLine renders GET /api/ledger's response as the statement's one
+// balance line — owed / credit / paid-in-full, the due-or-overdue suffix, and
+// (owed > 0 only) a reminder suffix off reminderSentAt, the account's own
+// recorded SEND INTENT (the delivery fact lives in .arrearsNotification, not
+// here — clinic-arrears-reminder-2026-09-15.md verdict item 5). The date is
+// the UTC calendar day (slice(0, 10)) of the recorded stamp, the same slice
+// arrearsBadgeText uses, so the ledger panel and the roster badge never
+// disagree about which day a reminder went out.
+function ledgerBalanceLine(data) {
   const owed = data.balanceCents || 0;
   let balanceLine;
   if (owed > 0) balanceLine = "Balance owed: " + moneyAmount(owed);
@@ -4167,7 +4187,16 @@ function renderLedger(data) {
       balanceLine += " · due " + localDate(data.dueDate);
     }
   }
-  balanceEl.textContent = balanceLine;
+  if (owed > 0 && data.reminderSentAt) balanceLine += " · a reminder was sent " + data.reminderSentAt.slice(0, 10);
+  return balanceLine;
+}
+
+function renderLedger(data) {
+  const balanceEl = $("#ledger-balance");
+  const list = $("#ledger-list");
+  const empty = $("#ledger-empty");
+
+  balanceEl.textContent = ledgerBalanceLine(data);
 
   const txs = data.transactions || [];
   list.innerHTML = "";
@@ -5269,6 +5298,15 @@ function renderApptCard(a, opts) {
   documented.className = "meta documented";
   documented.textContent = encounterSummary(a);
 
+  // The desk's debt flag beside Check in (clinic-arrears-reminder-2026-09-15.md
+  // verdict item 6b) — never on the patient's own self-service card
+  // (opts.asSelf): the clinic never refuses care on debt, so this only informs
+  // the desk, and the patient's own statement (the ledger panel) already
+  // speaks for them. Absent for a patient who owes nothing.
+  const arrears = document.createElement("div");
+  arrears.className = "meta arrears";
+  if (!opts.asSelf) arrears.textContent = apptArrearsLine(state.arrears.get(a.patientKey));
+
   // The clinical note itself, when the signed-in actor is entitled to read it
   // back (state.myEncounters, populated by loadMyEncounters from the
   // PROTECTED, provider-self-or-patient-self-or-WildcardAnchor
@@ -5457,6 +5495,7 @@ function renderApptCard(a, opts) {
   if (reminder.textContent) card.append(reminder);
   if (documented.textContent) card.append(documented);
   if (noteBlock) card.append(noteBlock);
+  if (arrears.textContent) card.append(arrears);
   card.append(actions);
   return card;
 }

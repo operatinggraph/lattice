@@ -10,12 +10,13 @@ import (
 )
 
 // ledgerUIDecls lifts the shipped moneyAmount/customerMemo/shortKey/localDate/
-// arrearsBadgeText/overdueBookingPrompt/ledgerLineLabel/visitPickerOptions/
-// openChargeOptions/defaultWaiveTarget declarations out of the embedded
+// arrearsBadgeText/apptArrearsLine/overdueBookingPrompt/ledgerLineLabel/
+// visitPickerOptions/openChargeOptions/defaultWaiveTarget/
+// selfPayCapMessage/ledgerBalanceLine declarations out of the embedded
 // app.js — the followup_addressed_test.go / lease_term_ui_test.go pattern:
 // the REAL shipped source runs here, not a copy, so these pins are a
 // statement about what ships. moneyAmount/customerMemo/shortKey/localDate
-// are dependencies the other seven call; all are self-contained (no
+// are dependencies the other calls call; all are self-contained (no
 // DOM/state), so goja can evaluate them directly.
 var ledgerUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction moneyAmount\(cents\) \{\n.*?\n\}\n`),
@@ -23,12 +24,14 @@ var ledgerUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction shortKey\(key\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction localDate\(instant\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction arrearsBadgeText\(row\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction apptArrearsLine\(row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction overdueBookingPrompt\(name, row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction ledgerLineLabel\(t, byKey\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction visitPickerOptions\(appts\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction openChargeOptions\(transactions\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction defaultWaiveTarget\(options\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction selfPayCapMessage\(owedCents, cents\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction ledgerBalanceLine\(data\) \{\n.*?\n\}\n`),
 }
 
 // ledgerUITestHarness is test scaffolding only (never extracted from app.js):
@@ -116,6 +119,8 @@ func TestArrearsBadgeText(t *testing.T) {
 		{"positive, not overdue", map[string]interface{}{"balanceCents": 2500}, "owes $25"},
 		{"overdue, 1 day (singular)", map[string]interface{}{"balanceCents": 6000, "isOverdue": true, "daysOverdue": 1}, "owes $60 · 1 day overdue"},
 		{"overdue, 3 days (plural)", map[string]interface{}{"balanceCents": 6000, "isOverdue": true, "daysOverdue": 3}, "owes $60 · 3 days overdue"},
+		{"overdue and reminded", map[string]interface{}{"balanceCents": 2500, "isOverdue": true, "daysOverdue": 22, "reminderSentAt": "2026-09-15T08:00:00Z"}, "owes $25 · 22 days overdue · reminded 2026-09-15"},
+		{"not overdue but reminded still appends", map[string]interface{}{"balanceCents": 2500, "reminderSentAt": "2026-09-15T08:00:00Z"}, "owes $25 · reminded 2026-09-15"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := run(t, tc.row); got != tc.want {
@@ -448,5 +453,91 @@ func TestSelfPayCapMessage(t *testing.T) {
 	}
 	if got := run(nil, 100); got != "" {
 		t.Fatalf("an unknown balance never blocks, got %q", got)
+	}
+}
+
+// TestApptArrearsLine pins the desk's appointment-card debt flag: a positive
+// row renders "💳 " + arrearsBadgeText, a zero/absent row renders nothing —
+// the two cases renderApptCard's own `if (arrears.textContent)` guard relies
+// on to decide whether the line is appended at all.
+func TestApptArrearsLine(t *testing.T) {
+	vm := ledgerUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("apptArrearsLine"))
+	if !ok {
+		t.Fatal("apptArrearsLine is not a function after evaluating its declaration")
+	}
+	run := func(t *testing.T, row map[string]interface{}) string {
+		t.Helper()
+		arg := goja.Value(goja.Undefined())
+		if row != nil {
+			arg = vm.ToValue(row)
+		}
+		res, err := fn(goja.Undefined(), arg)
+		if err != nil {
+			t.Fatalf("apptArrearsLine(%v) threw: %v", row, err)
+		}
+		return res.String()
+	}
+	for _, tc := range []struct {
+		name string
+		row  map[string]interface{}
+		want string
+	}{
+		{"no row (undefined)", nil, ""},
+		{"zero balance", map[string]interface{}{"balanceCents": 0}, ""},
+		{"positive row, not overdue", map[string]interface{}{"balanceCents": 2500}, "💳 owes $25"},
+		{"positive row, overdue and reminded", map[string]interface{}{"balanceCents": 2500, "isOverdue": true, "daysOverdue": 22, "reminderSentAt": "2026-09-15T08:00:00Z"}, "💳 owes $25 · 22 days overdue · reminded 2026-09-15"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := run(t, tc.row); got != tc.want {
+				t.Errorf("apptArrearsLine(%v) = %q, want %q", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLedgerBalanceLine pins renderLedger's factored-out balance-line pure
+// function: owed / credit / paid-in-full, the due-or-overdue suffix, and (owed
+// > 0 only) the reminder suffix off reminderSentAt.
+func TestLedgerBalanceLine(t *testing.T) {
+	vm := ledgerUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("ledgerBalanceLine"))
+	if !ok {
+		t.Fatal("ledgerBalanceLine is not a function after evaluating its declaration")
+	}
+	run := func(t *testing.T, data map[string]interface{}) string {
+		t.Helper()
+		res, err := fn(goja.Undefined(), vm.ToValue(data))
+		if err != nil {
+			t.Fatalf("ledgerBalanceLine(%v) threw: %v", data, err)
+		}
+		return res.String()
+	}
+	localDateFn, ok := goja.AssertFunction(vm.Get("localDate"))
+	if !ok {
+		t.Fatal("localDate is not a function after evaluating its declaration")
+	}
+	wantDueDate, err := localDateFn(goja.Undefined(), vm.ToValue("2026-12-01T12:00:00Z"))
+	if err != nil {
+		t.Fatalf("localDate(2026-12-01T12:00:00Z) threw: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		data map[string]interface{}
+		want string
+	}{
+		{"zero balance", map[string]interface{}{"balanceCents": 0}, "Balance: $0.00 (paid in full)"},
+		{"credit balance", map[string]interface{}{"balanceCents": -1500}, "Credit balance: $15"},
+		{"owed, due in the future, no reminder", map[string]interface{}{"balanceCents": 2500, "dueDate": "2026-12-01T12:00:00Z"}, "Balance owed: $25 · due " + wantDueDate.String()},
+		{"owed, overdue, no reminder", map[string]interface{}{"balanceCents": 2500, "dueDate": "2026-08-01T12:00:00Z", "isOverdue": true, "daysOverdue": 22}, "Balance owed: $25 · 22 days overdue"},
+		{"owed, overdue, reminded", map[string]interface{}{"balanceCents": 2500, "dueDate": "2026-08-01T12:00:00Z", "isOverdue": true, "daysOverdue": 22, "reminderSentAt": "2026-09-15T08:00:00Z"}, "Balance owed: $25 · 22 days overdue · a reminder was sent 2026-09-15"},
+		{"credit balance carries a reminderSentAt field but must not append it", map[string]interface{}{"balanceCents": -1500, "reminderSentAt": "2026-09-15T08:00:00Z"}, "Credit balance: $15"},
+		{"paid in full carries a reminderSentAt field but must not append it", map[string]interface{}{"balanceCents": 0, "reminderSentAt": "2026-09-15T08:00:00Z"}, "Balance: $0.00 (paid in full)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := run(t, tc.data); got != tc.want {
+				t.Errorf("ledgerBalanceLine(%v) = %q, want %q", tc.data, got, tc.want)
+			}
+		})
 	}
 }

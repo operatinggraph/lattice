@@ -2,8 +2,10 @@ package clinicledger
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// WeaverTargets returns the package's meta.weaverTarget playbook (Contract
-// #10 §10.8): clinicNoShowSettlement's three independent gaps, mirroring
+// WeaverTargets returns the package's meta.weaverTarget playbooks (Contract
+// #10 §10.8).
+//
+// clinicNoShowSettlement carries three independent gaps, mirroring
 // cafe-domain/targets.go's cafeTabSettlement shape (missing_account →
 // directOp(CreateAccount) then missing_charge → directOp(DebitAccount)) but
 // self-contained inside clinic-ledger — it already depends on clinic-domain
@@ -25,6 +27,54 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     CorrectAppointmentStatus correction to completed / cancelled, the
 //     waiver. clinic-domain's CorrectAppointmentStatus itself never touches
 //     the ledger; this target is what converges the reversal it leaves open.
+//
+// clinicArrearsReminders carries ONE gap → remediation:
+//
+//   - missing_evaluation → directOp(EvaluateClinicArrears) over the account.
+//     The op recomputes the FIFO-oldest open charge, rewrites .arrears, and —
+//     where the recomputed due date has passed and nothing has gone out for
+//     it — fires the notification. Whichever of the three ways the gap opened
+//     (never evaluated, marked stale by a partial payment, or a timer fired at
+//     a due date nothing was reminded for), the remediation is the same
+//     recomputation, which is why this target carries ONE gap rather than
+//     three.
+//
+// directOp, not a Loom pattern: a reminder is a single op, no multi-step
+// externalTask flow — the same shape clinic-reminders' visit reminder uses.
+// The bridge's notification send hangs off the op's own transactional outbox,
+// not off a pattern.
+//
+// Params{accountKey: row.entityKey} routes the candidate account into the
+// op's payload. The patient it is held for is NOT routed through Params: the
+// row's own patientKey column is OPTIONAL (an account with no live heldFor
+// patient still projects a row, with a null patientKey — lenses.go), and the
+// strategist refuses to dispatch any row whose Params reference a null
+// column (internal/weaver/strategist.go), which would silently starve the gap
+// forever for exactly the accounts most worth aging. The op instead resolves
+// the patient itself, live, off the account's own heldFor out-link — the
+// same state the row's column merely projects — so evaluation never depends
+// on which shape the row happens to be in. patientKey stays a projected
+// column here purely for operator observability (the weaver-targets read
+// model).
+//
+// Reads[row.entityKey] routes the account ROOT (the liveness guard's
+// hydration). OptionalReads[row.entityKey.arrears] routes the account's own
+// arrears state — absence-tolerant because no account carries the aspect
+// until something opens an episode on it, and a required read's absence
+// would HydrationMiss the very first evaluation of each one. That declaration
+// is what auto-conditions the op's own .arrears write on the revision it was
+// hydrated at (Contract #3 §3.2); the account DDL's derive_reads returns the
+// same key whatever a dispatcher declares, so this states the read set and
+// that guarantees it.
+//
+// Enumerations declares the bounded postedTo replay the op runs to recompute
+// the head — the walk itself is nameable up front (the hub is the row's own
+// account), the per-transaction .entry reads it discovers are not, which is
+// exactly the class-(e) split ClinicCreditAccount's own backfill replay
+// declares itself under (opmetas.go). It also declares the heldFor walk
+// patient_for_account runs to resolve the notification's patient live —
+// likewise nameable up front off the same hub, and read-drift-checked exactly
+// like postedTo.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	return []pkgmgr.WeaverTargetSpec{
 		{
@@ -77,7 +127,14 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// settles (NoFeeToSettle) — the appointment's current status, read
 					// through the same derived-aspect form. derive_reads guarantees it
 					// whatever a dispatcher declares; this states it.
-					OptionalReads: []string{"row.accountKey.balance", "row.appointmentKey.status"},
+					//
+					// row.accountKey.arrears: a charge posted to an account that owed
+					// nothing OPENS an arrears episode by writing that aspect, and a
+					// charge against one already owing reads it to decide not to; the
+					// write is OCC on the revision this declaration hydrates.
+					// Absence-tolerant: no account carries .arrears until an episode
+					// opens on it.
+					OptionalReads: []string{"row.accountKey.balance", "row.appointmentKey.status", "row.accountKey.arrears"},
 				},
 				"missing_reversal": {
 					Action:    "directOp",
@@ -107,8 +164,37 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					// OptionalReads: same derived-aspect / absence-tolerant shape as
 					// missing_charge above, and the same reason for no postedTo walk —
 					// a reversal is a staff-voice credit, so it is neither capped by the
-					// balance nor a leg that backfills one.
-					OptionalReads: []string{"row.accountKey.balance"},
+					// balance nor a leg that backfills one. row.accountKey.arrears for
+					// the same reason missing_charge declares it: a reversal that clears
+					// the balance ENDS the episode by rewriting that aspect.
+					OptionalReads: []string{"row.accountKey.balance", "row.accountKey.arrears"},
+				},
+			},
+		},
+		{
+			TargetID: ArrearsRemindersTarget,
+			Description: "A patient who owes money on their clinic account past the net term is reminded once, " +
+				"about the charge that has actually been sitting unpaid the longest. Paying it off ends the " +
+				"episode; a new charge against a settled account starts a fresh one. Nothing is refused: " +
+				"the desk sees the debt at check-in, and care goes ahead.",
+			LensRef: ArrearsRemindersTarget,
+			Gaps: map[string]pkgmgr.GapActionSpec{
+				"missing_evaluation": {
+					Action:    "directOp",
+					Operation: arrearsOp,
+					// EvaluateClinicArrears is unique to this package's
+					// clinicaccount vertexType DDL today, but pinned regardless —
+					// the same defensive shape the settlement gaps above use, and
+					// the ledger operationType namespace is global
+					// (permissions.go).
+					Class:         "clinicaccount",
+					Params:        map[string]string{"accountKey": "row.entityKey"},
+					Reads:         []string{"row.entityKey"},
+					OptionalReads: []string{"row.entityKey.arrears"},
+					Enumerations: []pkgmgr.EnumerationSpec{
+						{Hub: "row.entityKey", Relation: "postedTo", Direction: "in"},
+						{Hub: "row.entityKey", Relation: "heldFor", Direction: "out"},
+					},
 				},
 			},
 		},

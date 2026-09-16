@@ -4,7 +4,23 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	clinicledger "github.com/operatinggraph/lattice/packages/clinic-ledger"
 )
+
+// TestStatementGraceDaysMatchesClinicLedgerArrearsGraceDays pins one rule
+// stated in two languages — this handler's own grace-period constant (which
+// deriveStatement's fallback derivation uses) and clinic-ledger's
+// ArrearsGraceDays (which EvaluateClinicArrears' RECORDED dueAt stamp uses,
+// packages/clinic-ledger/scripts.go). recordedOrDerivedDueDate lets either
+// one win depending on whether an account has been evaluated yet, so a drift
+// between the two constants would silently move a patient's due date the
+// instant an evaluation first lands.
+func TestStatementGraceDaysMatchesClinicLedgerArrearsGraceDays(t *testing.T) {
+	if statementGraceDays != clinicledger.ArrearsGraceDays {
+		t.Fatalf("statementGraceDays = %d, clinicledger.ArrearsGraceDays = %d — one grace period, two languages, must never drift", statementGraceDays, clinicledger.ArrearsGraceDays)
+	}
+}
 
 // TestReadAllOrFail_FailsLoudOnAnyFetchError proves a KVGet failure on a
 // listed key aborts the whole read instead of silently vanishing the row —
@@ -117,21 +133,73 @@ func TestComputeLedgerHistory_NoTransactionsZeroBalance(t *testing.T) {
 
 func TestResolvePatientAccount_FindsMatchOrEmpty(t *testing.T) {
 	keys, get := fakeKV(map[string]any{
-		"vtx.patient.ppp":   map[string]any{"patientKey": "vtx.patient.ppp", "accountKey": "vtx.clinicaccount.xyz"},
+		"vtx.patient.ppp":   map[string]any{"patientKey": "vtx.patient.ppp", "accountKey": "vtx.clinicaccount.xyz", "arrearsDueAt": "2026-08-16T00:00:00Z", "arrearsRemindedFor": "2026-08-16T00:00:00Z", "arrearsReminderSentAt": "2026-08-20T00:00:00Z"},
 		"vtx.patient.other": map[string]any{"patientKey": "vtx.patient.other", "accountKey": ""},
 		// a tombstoned / undecodable projection entry — skipped
 		"vtx.patient.bad": map[string]any{},
 	})
 
-	if got := resolvePatientAccount(keys, get, "vtx.patient.ppp"); got != "vtx.clinicaccount.xyz" {
-		t.Errorf("resolvePatientAccount(ppp) = %q, want vtx.clinicaccount.xyz", got)
+	if got := resolvePatientAccount(keys, get, "vtx.patient.ppp"); got.AccountKey != "vtx.clinicaccount.xyz" {
+		t.Errorf("resolvePatientAccount(ppp).AccountKey = %q, want vtx.clinicaccount.xyz", got.AccountKey)
+	} else if got.ArrearsDueAt != "2026-08-16T00:00:00Z" || got.ArrearsRemindedFor != "2026-08-16T00:00:00Z" || got.ArrearsReminderSentAt != "2026-08-20T00:00:00Z" {
+		t.Errorf("resolvePatientAccount(ppp) arrears columns = %+v, want the recorded stamps to round-trip", got)
 	}
-	if got := resolvePatientAccount(keys, get, "vtx.patient.other"); got != "" {
-		t.Errorf("resolvePatientAccount(other) = %q, want empty (no account opened yet)", got)
+	if got := resolvePatientAccount(keys, get, "vtx.patient.other"); got.AccountKey != "" {
+		t.Errorf("resolvePatientAccount(other).AccountKey = %q, want empty (no account opened yet)", got.AccountKey)
 	}
-	if got := resolvePatientAccount(keys, get, "vtx.patient.unprojected"); got != "" {
-		t.Errorf("resolvePatientAccount(unprojected) = %q, want empty (no row at all)", got)
+	if got := resolvePatientAccount(keys, get, "vtx.patient.unprojected"); got.AccountKey != "" {
+		t.Errorf("resolvePatientAccount(unprojected).AccountKey = %q, want empty (no row at all)", got.AccountKey)
 	}
+}
+
+// TestRecordedOrDerivedDueDate proves the recorded stamp always wins when
+// present — the rule handleLedger/computeArrears both apply before ever
+// asking whether the recorded date is earlier or later than the derived one.
+func TestRecordedOrDerivedDueDate(t *testing.T) {
+	if got := recordedOrDerivedDueDate("2026-08-01T00:00:00Z", "2026-08-16T00:00:00Z"); got != "2026-08-01T00:00:00Z" {
+		t.Errorf("recorded present = %q, want the recorded date even though it is EARLIER than the derived one", got)
+	}
+	if got := recordedOrDerivedDueDate("", "2026-08-16T00:00:00Z"); got != "2026-08-16T00:00:00Z" {
+		t.Errorf("recorded absent = %q, want the derived date", got)
+	}
+	if got := recordedOrDerivedDueDate("", ""); got != "" {
+		t.Errorf("both absent = %q, want empty", got)
+	}
+}
+
+// TestComputeOverdue pins the before/at/after-due boundary (due AT the
+// instant counts, matching clinic-ledger's own `due_at <= evaluated_at`),
+// the +1-day arithmetic, and the fail-closed posture on an unparsable date.
+func TestComputeOverdue(t *testing.T) {
+	due := "2026-08-16T00:00:00Z"
+	t.Run("before due", func(t *testing.T) {
+		now := time.Date(2026, 8, 15, 23, 59, 59, 0, time.UTC)
+		if overdue, days := computeOverdue(due, now); overdue || days != 0 {
+			t.Errorf("got overdue=%v days=%d, want false/0", overdue, days)
+		}
+	})
+	t.Run("at due", func(t *testing.T) {
+		now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+		if overdue, days := computeOverdue(due, now); !overdue || days != 1 {
+			t.Errorf("got overdue=%v days=%d, want true/1 (due AT the instant counts)", overdue, days)
+		}
+	})
+	t.Run("one day after due", func(t *testing.T) {
+		now := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+		if overdue, days := computeOverdue(due, now); !overdue || days != 2 {
+			t.Errorf("got overdue=%v days=%d, want true/2", overdue, days)
+		}
+	})
+	t.Run("empty due date", func(t *testing.T) {
+		if overdue, days := computeOverdue("", time.Now()); overdue || days != 0 {
+			t.Errorf("got overdue=%v days=%d, want false/0", overdue, days)
+		}
+	})
+	t.Run("unparsable due date fails closed", func(t *testing.T) {
+		if overdue, days := computeOverdue("not-a-date", time.Now()); overdue || days != 0 {
+			t.Errorf("got overdue=%v days=%d, want false/0", overdue, days)
+		}
+	})
 }
 
 // TestDeriveStatement_SingleOpenDebitPastGraceIsOverdue is the base case: one
@@ -316,10 +384,10 @@ func TestComputeArrears_GroupsFiltersAndOrdersWorstFirst(t *testing.T) {
 		"vtx.clinictransaction.bad": map[string]any{},
 	})
 	visible := map[string]bool{"vtx.patient.p1": true, "vtx.patient.p2": true, "vtx.patient.p3": true, "vtx.patient.p5": true}
-	acctByPatient := map[string]string{
-		"vtx.patient.p1": "vtx.clinicaccount.a1",
-		"vtx.patient.p2": "vtx.clinicaccount.a2",
-		"vtx.patient.p3": "vtx.clinicaccount.a3",
+	acctByPatient := map[string]patientAccountProjection{
+		"vtx.patient.p1": {AccountKey: "vtx.clinicaccount.a1"},
+		"vtx.patient.p2": {AccountKey: "vtx.clinicaccount.a2"},
+		"vtx.patient.p3": {AccountKey: "vtx.clinicaccount.a3", ArrearsReminderSentAt: "2026-07-20T00:00:00Z"},
 	}
 	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
 
@@ -336,22 +404,84 @@ func TestComputeArrears_GroupsFiltersAndOrdersWorstFirst(t *testing.T) {
 	if rows[0].BalanceCents != 2000 || rows[0].AccountKey != "vtx.clinicaccount.a3" || !rows[0].IsOverdue || rows[0].DaysOverdue != 45 {
 		t.Errorf("rows[0] (p3) = %+v, want balance=2000 account=a3 overdue=true days=45", rows[0])
 	}
+	if rows[0].ReminderSentAt != "2026-07-20T00:00:00Z" {
+		t.Errorf("rows[0] (p3) ReminderSentAt = %q, want the SOURCE projection's own stamp 2026-07-20T00:00:00Z", rows[0].ReminderSentAt)
+	}
+	if rows[1].ReminderSentAt != "" {
+		t.Errorf("rows[1] (p1) ReminderSentAt = %q, want empty (no reminder recorded for this account)", rows[1].ReminderSentAt)
+	}
 	if rows[2].IsOverdue {
 		t.Errorf("rows[2] (p2) IsOverdue = true, want false (within grace)")
 	}
 }
 
+// TestComputeArrears_RecordedDueDateWinsOverDerived proves the RECORDED
+// arrears due date on the patient's account projection overrides
+// deriveStatement's own FIFO derivation, and that isOverdue/daysOverdue are
+// recomputed against the recorded date rather than deriveStatement's own
+// (now-stale) return — the sort must order on what is actually rendered.
+func TestComputeArrears_RecordedDueDateWinsOverDerived(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		// Derived due date would be 2026-08-16 (postedAt + 15 days) — NOT
+		// overdue as of "now" below. The recorded due date is much earlier
+		// (2026-07-01) and IS overdue — the recorded date must win.
+		"vtx.clinictransaction.p1a": map[string]any{"transactionKey": "vtx.clinictransaction.p1a", "patientKey": "vtx.patient.p1", "type": "debit", "amountCents": 1000, "postedAt": "2026-08-01T00:00:00Z"},
+	})
+	visible := map[string]bool{"vtx.patient.p1": true}
+	acctByPatient := map[string]patientAccountProjection{
+		"vtx.patient.p1": {AccountKey: "vtx.clinicaccount.a1", ArrearsDueAt: "2026-07-01T00:00:00Z"},
+	}
+	now := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+
+	rows := computeArrears(keys, get, visible, acctByPatient, now)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].DueDate != "2026-07-01T00:00:00Z" {
+		t.Errorf("DueDate = %q, want the RECORDED date 2026-07-01T00:00:00Z, not the derived 2026-08-16", rows[0].DueDate)
+	}
+	if !rows[0].IsOverdue || rows[0].DaysOverdue != 41 {
+		t.Errorf("IsOverdue/DaysOverdue = %v/%d, want true/41 (computed against the RECORDED date, not deriveStatement's own derived-date verdict of not-overdue)", rows[0].IsOverdue, rows[0].DaysOverdue)
+	}
+}
+
+// TestComputeArrears_AbsentRecordedFallsBackToDerived proves an account with
+// no recorded arrears due date (nothing has evaluated it yet) still uses
+// deriveStatement's own FIFO derivation, unchanged from before this
+// projection existed.
+func TestComputeArrears_AbsentRecordedFallsBackToDerived(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"vtx.clinictransaction.p1a": map[string]any{"transactionKey": "vtx.clinictransaction.p1a", "patientKey": "vtx.patient.p1", "type": "debit", "amountCents": 1000, "postedAt": "2026-08-01T00:00:00Z"},
+	})
+	visible := map[string]bool{"vtx.patient.p1": true}
+	acctByPatient := map[string]patientAccountProjection{
+		"vtx.patient.p1": {AccountKey: "vtx.clinicaccount.a1"},
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+
+	rows := computeArrears(keys, get, visible, acctByPatient, now)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].DueDate != "2026-08-16T00:00:00Z" || !rows[0].IsOverdue || rows[0].DaysOverdue != 14 {
+		t.Errorf("got DueDate=%q IsOverdue=%v DaysOverdue=%d, want the DERIVED date 2026-08-16T00:00:00Z/true/14", rows[0].DueDate, rows[0].IsOverdue, rows[0].DaysOverdue)
+	}
+}
+
 func TestResolvePatientAccounts_IndexesEveryPatient(t *testing.T) {
 	keys, get := fakeKV(map[string]any{
-		"vtx.patient.ppp":   map[string]any{"patientKey": "vtx.patient.ppp", "accountKey": "vtx.clinicaccount.xyz"},
+		"vtx.patient.ppp":   map[string]any{"patientKey": "vtx.patient.ppp", "accountKey": "vtx.clinicaccount.xyz", "arrearsReminderSentAt": "2026-08-20T00:00:00Z"},
 		"vtx.patient.other": map[string]any{"patientKey": "vtx.patient.other", "accountKey": ""},
 		"vtx.patient.bad":   map[string]any{},
 	})
 	got := resolvePatientAccounts(keys, get)
-	if got["vtx.patient.ppp"] != "vtx.clinicaccount.xyz" {
-		t.Errorf("ppp = %q, want vtx.clinicaccount.xyz", got["vtx.patient.ppp"])
+	if got["vtx.patient.ppp"].AccountKey != "vtx.clinicaccount.xyz" {
+		t.Errorf("ppp.AccountKey = %q, want vtx.clinicaccount.xyz", got["vtx.patient.ppp"].AccountKey)
+	}
+	if got["vtx.patient.ppp"].ArrearsReminderSentAt != "2026-08-20T00:00:00Z" {
+		t.Errorf("ppp.ArrearsReminderSentAt = %q, want 2026-08-20T00:00:00Z", got["vtx.patient.ppp"].ArrearsReminderSentAt)
 	}
 	if _, ok := got["vtx.patient.bad"]; ok {
-		t.Errorf("want the tombstoned entry absent from the index, got %q", got["vtx.patient.bad"])
+		t.Errorf("want the tombstoned entry absent from the index, got %+v", got["vtx.patient.bad"])
 	}
 }

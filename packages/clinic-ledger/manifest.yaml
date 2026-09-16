@@ -1,5 +1,5 @@
 name: clinic-ledger
-version: 0.5.3
+version: 0.6.0
 description: |
   Clinic patient payment ledger: the clinicaccount vertex type (ClinicCreateAccount,
   independently-minted id, one per patient via a .ledgerAccount guard aspect
@@ -28,9 +28,19 @@ description: |
   account's maintained .balance aspect (O(1), not a full-history replay). The
   key that cap reads is hydrated by the transaction DDL's own derive_reads, so
   the update it conditions never rests on a declaration the submitter writes.
-  Depends clinic-domain.
+  Also ships the arrears reminder: the account's .arrears episode aspect (a
+  charge against an account that owed nothing records the due date its own
+  postedAt implies; a payment that clears the balance ends the episode; a
+  partial one marks it stale) + the clinicArrearsReminders weaver-target
+  convergence lens, whose playbook dispatches EvaluateClinicArrears — that op
+  ages the account with the same FIFO the patient's statement runs and fires
+  ONE external.notification per arrears episode to the bridge's "notification"
+  adapter, keyed on (accountKey, dueAt). RecordClinicArrearsReminderNotification
+  records the outcome as an audit-only aspect. No clinic op refuses a debtor.
+  Depends clinic-domain + orchestration-base.
 depends:
   - clinic-domain
+  - orchestration-base
 declares:
   ddls:
     - canonicalName: clinicaccount
@@ -39,8 +49,14 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: clinicAccountBalance
       class: meta.ddl.aspectType
+    - canonicalName: clinicAccountArrears
+      class: meta.ddl.aspectType
     - canonicalName: clinictransaction
       class: meta.ddl.vertexType
+    - canonicalName: clinicArrearsNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: clinicAccountArrearsNotification
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: clinicLedgerHistory
       adapter: nats-kv
@@ -54,10 +70,16 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: clinicArrearsReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   opMetas:
     - operationType: ClinicCreateAccount
     - operationType: ClinicDebitAccount
     - operationType: ClinicCreditAccount
+    - operationType: EvaluateClinicArrears
+    - operationType: RecordClinicArrearsReminderNotification
   permissions:
     - operationType: ClinicCreateAccount
       scope: any
@@ -71,6 +93,14 @@ declares:
     - operationType: ClinicCreditAccount
       scope: self
       grantsTo: [consumer]
+    - operationType: EvaluateClinicArrears
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordClinicArrearsReminderNotification
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: clinicNoShowSettlement
       lensRef: clinicNoShowSettlement
+    - targetId: clinicArrearsReminders
+      lensRef: clinicArrearsReminders

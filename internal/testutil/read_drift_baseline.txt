@@ -385,6 +385,13 @@ walk	EndVisitSeries	vtx.visitseries.<id> withProvider out
 # .entry read this target's own doc comment (targets.go) already carries —
 # no dispatcher can name it up front.
 walk	EvaluateCafeArrears	vtx.cafetransaction.<id> reverses out
+# arrears_entries (packages/clinic-ledger/scripts.go) follows reverses off each
+# CREDIT transaction its own bounded postedTo replay discovers, to net a
+# waiver against the specific charge it names (arrears_head's rule) instead
+# of aging by plain FIFO order — the café shape exactly, one hop. The
+# transaction key only exists once that postedTo walk resolves it, so no
+# dispatcher can name it up front.
+walk	EvaluateClinicArrears	vtx.clinictransaction.<id> reverses out
 # tenant_for_account (packages/loftspace-ledger/scripts.go) resolves the
 # tenant an arrears reminder addresses TWO hops from the account: the heldFor
 # walk (declared by the loftspaceArrearsReminders playbook) names the lease,

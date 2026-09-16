@@ -32,33 +32,33 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // this test rather than reaching an install, where the same change is a silent
 // capability or read-model shift.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 4; got != want {
+	if got, want := len(Package.DDLs), 7; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 4; got != want {
+	if got, want := len(Package.Permissions), 6; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 3; got != want {
+	if got, want := len(Package.Lenses), 4; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 1; got != want {
+	if got, want := len(Package.WeaverTargets), 2; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 3; got != want {
+	if got, want := len(Package.OpMetas), 5; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
-	wantDDLs := []string{"clinicaccount", "clinicLedgerAccountGuard", "clinicAccountBalance", "clinictransaction"}
+	wantDDLs := []string{"clinicaccount", "clinicLedgerAccountGuard", "clinicAccountBalance", "clinicAccountArrears", "clinictransaction", "clinicArrearsNotificationOp", "clinicAccountArrearsNotification"}
 	for i, d := range Package.DDLs {
 		if i < len(wantDDLs) && d.CanonicalName != wantDDLs[i] {
 			t.Errorf("DDLs[%d]: got %q, want %q", i, d.CanonicalName, wantDDLs[i])
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"ClinicCreateAccount", "any"}, {"ClinicDebitAccount", "any"}, {"ClinicCreditAccount", "any"}, {"ClinicCreditAccount", "self"}}
+	wantPerms := []struct{ op, scope string }{{"ClinicCreateAccount", "any"}, {"ClinicDebitAccount", "any"}, {"ClinicCreditAccount", "any"}, {"ClinicCreditAccount", "self"}, {"EvaluateClinicArrears", "any"}, {"RecordClinicArrearsReminderNotification", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break
@@ -69,14 +69,14 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantLenses := []string{"clinicLedgerHistory", "clinicPatientAccounts", "clinicNoShowSettlement"}
+	wantLenses := []string{"clinicLedgerHistory", "clinicPatientAccounts", "clinicNoShowSettlement", "clinicArrearsReminders"}
 	for i, d := range Package.Lenses {
 		if i < len(wantLenses) && d.CanonicalName != wantLenses[i] {
 			t.Errorf("Lenses[%d]: got %q, want %q", i, d.CanonicalName, wantLenses[i])
 		}
 	}
 
-	wantTargets := []string{"clinicNoShowSettlement"}
+	wantTargets := []string{"clinicNoShowSettlement", "clinicArrearsReminders"}
 	for i, d := range Package.WeaverTargets {
 		if i < len(wantTargets) && d.TargetID != wantTargets[i] {
 			t.Errorf("WeaverTargets[%d]: got %q, want %q", i, d.TargetID, wantTargets[i])

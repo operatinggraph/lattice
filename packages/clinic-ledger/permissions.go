@@ -51,7 +51,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // clinicNoShowSettlement dispatches gives back a charge that may already have
 // been paid, so neither is bounded by what is currently owed.
 func Permissions() []pkgmgr.PermissionSpec {
-	return []pkgmgr.PermissionSpec{
+	return append([]pkgmgr.PermissionSpec{
 		{
 			OperationType: "ClinicCreateAccount",
 			Scope:         "any",
@@ -76,5 +76,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Note:          "Grants a patient the right to credit (pay down) THEIR OWN account — the account's heldFor patient's identifiedBy link must resolve to the caller's identity (scripts.go). No matching ClinicDebitAccount grant: a patient pays down a balance, never charges one.",
 			GrantsTo:      []string{"consumer"},
 		},
-	}
+		{
+			OperationType: arrearsOp,
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit EvaluateClinicArrears (ages a patient's balance and sends the one arrears reminder per episode). Dispatched by WEAVER's clinicArrearsReminders playbook — the script refuses every actor but Weaver's dispatch actor, because the account named on the payload is forwarded into a message a patient receives. Not a console operation: no consoleOperator or frontOfHouse grant is minted for it.",
+			GrantsTo:      []string{"operator"},
+		},
+	}, notificationPermissions()...)
 }

@@ -1,14 +1,17 @@
 # clinic-ledger
 
-The Clinic patient payment ledger (v0.5.0) — a per-patient financial account that records charges
+The Clinic patient payment ledger (v0.6.0) — a per-patient financial account that records charges
 (copays, invoice lines) and payments as an **append-only** transaction history. The account also
 carries a maintained `.balance` aspect (`{balanceCents}`) — an O(1) authorization cache kept in
 lockstep with every posted entry via an auto-conditioned, retry-eligible update (no explicit
 `expectedRevision` of its own); the `clinicLedgerHistory` lens remains the display source of
-truth, independently summing the full entry history.
+truth, independently summing the full entry history. It also ships the arrears reminder: a patient
+whose oldest open charge has sat unpaid past the net term is reminded once per arrears episode, and
+nothing in the clinic refuses them care for it.
 
-Depends: `clinic-domain` (the `patient` vertex type an account is `heldFor`). Install:
-`lattice-pkg install packages/clinic-ledger` (after `clinic-domain`; or `make install-clinic` onto a
+Depends: `clinic-domain` (the `patient` vertex type an account is `heldFor`) and `orchestration-base`
+(`MarkExpired` and the `freshnessExpiry` marker the arrears `@at` firing writes onto the account).
+Install: `lattice-pkg install packages/clinic-ledger` (after both; or `make install-clinic` onto a
 running stack).
 
 ## Inventory
@@ -16,21 +19,25 @@ running stack).
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (2) | `clinicaccount` (root `{}`, D5, `.balance` aspect) · `clinictransaction` (root `{}`, D5, `.entry` aspect incl. a debit-only payer dimension) |
-| **Aspect types** (2) | `clinicLedgerAccountGuard` — `vtx.patient.<id>.ledgerAccount`, the per-patient create-only uniqueness guard · `clinicAccountBalance` — `vtx.clinicaccount.<id>.balance`, the maintained running-total cache |
+| **Aspect types** (4) | `clinicLedgerAccountGuard` — `vtx.patient.<id>.ledgerAccount`, the per-patient create-only uniqueness guard · `clinicAccountBalance` — `vtx.clinicaccount.<id>.balance`, the maintained running-total cache · `clinicAccountArrears` — `vtx.clinicaccount.<id>.arrears`, the arrears-episode state · `clinicAccountArrearsNotification` — `vtx.clinicaccount.<id>.arrearsNotification`, the reminder's audit-only outcome |
 | **Links** (5) | `heldFor` (account → patient) · `postedTo` (transaction → account) · `settles` (transaction → appointment: the line IS the visit's fee) · `forVisit` (transaction → appointment: the line is FOR the visit) · `reverses` (credit → the charge it gives back) |
-| **Operations** (3) | `ClinicCreateAccount` · `ClinicDebitAccount` · `ClinicCreditAccount` |
-| **Projection lenses** (2) | `clinicLedgerHistory` (one row per transaction, carrying the visit it names and the charge it reverses) → `clinic-ledger-history` · `clinicPatientAccounts` (patient → account key lookup) → `clinic-patient-accounts` (both `nats-kv`, `full` engine) |
-| **Weaver target** (1) | `clinicNoShowSettlement` — charges the fee an appointment's status carries once, opens the account first if needed, and reverses a charge whose appointment is later corrected to a fee-less status |
+| **Operations** (5) | `ClinicCreateAccount` · `ClinicDebitAccount` · `ClinicCreditAccount` · `EvaluateClinicArrears` (Weaver-dispatched) · `RecordClinicArrearsReminderNotification` (bridge replyOp) |
+| **Projection lenses** (2) | `clinicLedgerHistory` (one row per transaction, carrying the visit it names and the charge it reverses) → `clinic-ledger-history` · `clinicPatientAccounts` (patient → account key lookup, plus the account's arrears due date / reminder timestamp) → `clinic-patient-accounts` (both `nats-kv`, `full` engine) |
+| **Weaver targets** (2) | `clinicNoShowSettlement` — charges the fee an appointment's status carries once, opens the account first if needed, and reverses a charge whose appointment is later corrected to a fee-less status · `clinicArrearsReminders` — its own convergence lens → `weaver-targets`; one gap, `missing_evaluation` → `directOp(EvaluateClinicArrears)` |
 
-All three operations are granted to `operator` and `frontOfHouse` at `scope: any` (`permissions.go`),
+The three desk operations are granted to `operator` and `frontOfHouse` at `scope: any` (`permissions.go`),
 unconfined — a patient carries no building to workplace-confine to. The front desk opens a patient's
 ledger account, records a charge, and records a payment all directly from the browser.
+`EvaluateClinicArrears` and the notification replyOp are `operator`-only: Weaver and the bridge submit
+them, nobody at a desk does.
 
 ## Key shapes (Contract #1)
 
 ```
 vtx.clinicaccount.<id>                 class=clinicaccount       root {} (D5)
 vtx.clinicaccount.<id>.balance         class=clinicAccountBalance  {balanceCents}  (O(1) cache; updated on every post)
+vtx.clinicaccount.<id>.arrears         class=clinicAccountArrears  {evaluatedAt, dueAt?, remindedFor?, sentAt?, stale?, historyTooLong?}
+vtx.clinicaccount.<id>.arrearsNotification  class=clinicAccountArrearsNotification  {status, remindedFor, sentAt}  (audit only)
 vtx.clinictransaction.<id>             class=clinictransaction   root {} (D5)
 vtx.clinictransaction.<id>.entry       class=entry               {type ∈ debit|credit, amountCents, memo?, postedAt,
                                                                    billedTo? ∈ self|insurance (debit only, default self),
@@ -161,6 +168,41 @@ the fee a second time.
 `forVisit` — a line has at most one visit), `settlesFee` (`true` when the line is that visit's fee, `false`
 otherwise) and `reversesKey` (the charge a credit reverses, or null) — the column a statement retires the named
 debit on before ageing the rest FIFO.
+
+## The arrears reminder
+
+`clinicArrearsReminders` is the target that records when a patient is told they owe the clinic money —
+café's mechanism applied to this ledger, every branch, because both store a maintained balance.
+
+The account carries a `.arrears` aspect whose whole lifetime is coarse on purpose. A charge that takes the
+balance from zero-or-below to **owing** IS the FIFO-oldest open charge, so `post_entry` can record the due
+date its own `postedAt` implies (`postedAt` + `ArrearsGraceDays`, 15 days — the same term
+`cmd/clinic-app`'s statement uses) without replaying anything; a credit that clears the balance rewrites
+the aspect to `{evaluatedAt}` alone and ends the episode. Everything in between it refuses to guess: a
+**partial** payment can move the head to a later charge with a later due date, a question only the whole
+history answers, so the entry marks the state `stale` instead. A charge against an account already in
+credit (an over-waiver or a reversal of a paid charge took it below zero) writes nothing at all — the surplus
+prepays it outright, so there is no open debit to age. An account carrying no `.balance` (the legacy set)
+can only ever mark stale — it has no before/after balance to reason from.
+
+The lens arms Weaver's `@at` at the recorded `dueAt` and opens its one gap when the timer's lapse is recorded
+on the account, when the state is `stale`, or when the account has never been evaluated. All three dispatch
+the same remediation, `EvaluateClinicArrears`, which recomputes the head with **the same FIFO the patient's
+own statement runs** (`cmd/clinic-app/ledger.go`, `deriveStatement` — a credit that names the charge it
+reverses retires that charge; every other credit offsets the oldest still-open charge first; an unapplied
+credit carries forward as surplus) and rewrites `.arrears`. A recomputed date that has passed is recorded as
+`remindedFor` — that is what closes the gap — and where **no reminder has yet gone out in this episode**
+(`sentAt` absent) the same commit stamps `sentAt` and fires `external.notification` to the bridge's
+`notification` adapter, keyed `<accountKey>:<dueAt>`, with the patient resolved live off the account's own
+`heldFor` link (never the payload; absent → still evaluated). `sentAt`, not `remindedFor`, is the send
+condition: one reminder per arrears **episode**, never one per head. A history past the replay budget
+records `historyTooLong` and goes quiet (no gap, no timer, row still visible) until the next entry that rewrites the aspect (a credit, or an episode-opening charge)
+buys one more attempt. The op is restricted to Weaver's dispatch actor.
+
+**Nothing is refused.** A clinic is not a café: `CreateAppointment`, check-in and `RecordEncounter` stay open
+to a debtor. The reminder changes what the desk and the patient *see* — `clinicPatientAccounts` carries
+`arrearsDueAt` / `arrearsRemindedFor` / `arrearsReminderSentAt` for the statement, the roster badge and the
+desk's appointment card — never what they may do.
 
 ## Where the ledger is surfaced
 
