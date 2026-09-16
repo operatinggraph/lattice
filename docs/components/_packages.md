@@ -630,7 +630,10 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   re-confirm re-stamped `.status` and carried a payload `note` over the desk's (clinic, 2026-09-16, caught cold); the
   same fire's Weaver-dispatched terminal op (`MarkPastDueNoShow`) had no clock of its own and swept `noShow` onto a
   just-moved future date. A same-value re-set on a widened leg is the EMPTY batch; a widened leg lists every field the
-  write stamps. Mechanize on the next sighting.
+  write stamps. Fourth minter (clinic `TombstoneAppointment`, 2026-09-16, caught cold): a new claim released through the
+  cells' shared release seam inherited the seam's one unguarded caller — a tombstone of an already-terminal visit
+  re-released keys a later booking held. Not gate-shaped (every minter is a different mechanism); the walk is the
+  brief's part-5 copy: for a value released through a shared seam, list the seam's callers and the state each runs in.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any

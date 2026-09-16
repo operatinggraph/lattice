@@ -134,6 +134,12 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   Date; an app that gains a date-only column adds its helper to that shape. Third sighting (clinic `amendedAt`,
   2026-09-16, caught cold): a real instant rendered by its UTC slice on the card and locale in the modal, beside a
   locale `documentedAt` on the same line — the inverse error; an instant renders locale everywhere.
+- **A shared refusal-message map serves every hat whose form routes through it — a sentence in the patient's voice
+  reaches the desk.** `friendlyBookingRejection` is read by `submitBook` and `submitReschedule` under both hats, and the
+  `SelfBookingLimit` text told a refused front-desk mover "You already have an open visit … the front desk can book
+  more". Minted: clinic self-booking cap (2026-09-16), caught cold. Check: for every new branch in a shared message
+  map, list the hats that reach it and write the sentence hat-neutral (the row's subject, never "you"), or thread the
+  hat.
 - **A new terminal state on a row is a census of every status switch and render gate in the app, not of the banner
   that named it** — `ended` reached the applicant banner and the terms panel, and missed `applicationStatus` (the
   by-unit console read an ended tenant as "Approved — leasing" and dealt it a ledger panel), the decide gate

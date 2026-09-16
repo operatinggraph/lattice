@@ -146,6 +146,11 @@ behavior becomes load-bearing. (For NATS — the substrate — the authority is 
     no-ops it. `DIFF_BASE=<base-sha> go run ./scripts/lint-package-version.go`. A test that re-installs a
     modified `Definition` over the real install derives its "one higher" version from `Package.Version`, never
     a literal — a literal turns the upgrade into a same-version skip on the next bump (lease-signing, 2026-09-13).
+  - **Every `scripts/lint-*.go` runs `STRICT=1` in CI, and most exit 0 on a FAIL without it** — a builder's
+    "all lints clean" from a bare `go run` proves nothing (2026-09-16, `lint-derive-reads-bare-vector`: an op
+    added to a script's `derive_reads` needs its `Test*UndeclaredSubmitter*` vector; the bare run printed the
+    finding and exited 0). The gate loop is `for f in scripts/lint-*.go; do STRICT=1 go run "$f" || echo "FAIL
+    $f"; done`, gated on the exit code.
   - **A `//go:build ignore` file (every `scripts/*.go`) is invisible to `golangci-lint`, so its gofmt is
     checked by CI's own `gofmt -l .` step and by nothing in the local list** — a new lint gate whose comment
     block gofmt reflows reddened `main` from a green `golangci-lint run ./...` (2026-09-14,

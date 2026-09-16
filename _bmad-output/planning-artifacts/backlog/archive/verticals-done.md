@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-14 · `0771d77e` · The desk sees a debtor and a charge names its visit — `visitRef`→`forVisit`, a fee-less `settles` refused, `reversesRef` confined, the statement aged per charge, arrears on the picker; live.
 - 2026-09-14 · `7a2809b8` · A follow-up is addressed only by a later visit with its own provider — `followUpReminders` folds `addressedAt` over the patient's visits and gates on it; `hasLaterVisit` carries the same conjuncts, goja-pinned; live.
 - 2026-09-14 · `7a2809b8` · A clinical note needs a held visit — `RecordEncounter` reads `.schedule` + `.status` at every dispatcher and refuses `VisitNotHeld` (cancelled / noShow) and `NotYetStarted`; the phantom 09-15 instance refused live.
 - 2026-09-14 · `7a2809b8` · Recorded arrival is never swept to no-show — `pastDueAppointments`' gap and `MarkPastDueNoShow` leave `checkedIn` alone (the lapse still records); the worklist's "Arrived, never closed" is the desk's observer.
