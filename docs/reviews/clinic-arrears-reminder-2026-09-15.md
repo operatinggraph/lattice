@@ -71,8 +71,9 @@ no contract surface, no fork — the café mechanism is the ratified pattern, ap
    what exists stale and mints nothing; `EvaluateClinicArrears` mints / rewrites it on every outcome. Never
    tombstoned. One writer per verb (evaluation mints/recomputes; `post_entry` opens/ends/carries).
 3. **`EvaluateClinicArrears{accountKey}`** on the `clinicaccount` vertexType DDL — café's op verbatim: actor pinned
-   to `primordialActor["weaver"]` as the first statement; paged `postedTo` replay (`ARREARS_PAGE_LIMIT` 50 ×
-   `ARREARS_MAX_PAGES` 10, `historyTooLong` recorded, never a refusal); one-hop `reverses` netting; FIFO head over
+   to `primordialActor["weaver"]` as the first statement; paged `postedTo` replay (`ArrearsPageLimit` 30 ×
+   `ArrearsMaxPages` 1 — sized by round trips against the 250 ms script wall, amended 2026-09-16, build note;
+   `historyTooLong` recorded past it, never a refusal); one-hop `reverses` netting; FIFO head over
    `(postedAt, key)`; a **15-day term** (`ARREARS_GRACE_DURATION = "360h"`, `ArrearsGraceDays = 15` exported and
    pinned equal to `cmd/clinic-app`'s `statementGraceDays` by a Go test); `remindedFor` on every due evaluation;
    `sentAt` once per EPISODE; `external.notification` keyed `accountKey:dueAt` with params `{accountKey,
@@ -180,3 +181,42 @@ no contract surface, no fork — the café mechanism is the ratified pattern, ap
    read of `.arrears`; a Facet descriptor change (no self-anchored op gains a courtesy); the desk's reminder re-send
    verb; `maxretries_evaluation`; the café / wellness / loftspace mechanisms themselves; the other four Clinic rows
    (their own units).
+
+### Build note (2026-09-16)
+
+Shipped `e880c00f` (merge of `176fe606`; CI green) + `a3b8e12d` (the replay budget; CI's `unit-refractor` job
+went red on `TestEdgeManifest_Fire1_E2E` — "activated 0/15 lenses within deadline" behind consumer-open retries, a
+package this commit never touched — and was re-run); brief `b122222d`. Live on the shared stack (clinic-ledger
+0.6.1 diff-applied, `bin/clinic-app` cycled): the nine standing accounts opened the never-evaluated gap; the first
+dispatches were refused `AuthDenied` (the grant's `cap.role-by-operation` row projects behind the target's first
+evaluation — `lattice weaver revoke` + `enable` under the Loupe operator re-dispatched them, `_packages.md` §5),
+eight evaluated in one second, five overdue accounts stamped `sentAt 07:00:33Z` and the bridge replied on each.
+The ninth — Riley Chen's, the row's own instance, 98 entries / 52 credits — **aborted at the Processor's 250 ms
+script wall**, twice, the second time alone on the host: ≈300 sequential round trips (a KV get per listed link,
+each entry's `.entry` read, each credit's `reverses` walk) at ≈2.5 ms per entry plus ≈50 ms fixed. A
+ScriptTimeout is a rejection, so the gap stayed open and Weaver would have re-dispatched the doomed replay every
+window — exactly the loop the `historyTooLong` degrade exists to prevent, and the degrade never ran because the
+500-entry budget mirrored from café was sized against the live-read budget, not the wall (CI's 5000 ms
+`PROCESSOR_SCRIPT_WALL_MS` hides it). `a3b8e12d` sizes the budget by round trips (`ArrearsPageLimit 30 ×
+ArrearsMaxPages 1`, bound into both scripts by the prelude; the degrade vector derives from them); Riley's account
+now records `historyTooLong` and goes quiet, visible in the read model, while the desk grid and her statement still
+read `$25.00 · 22 days overdue` off the derived path — **she is not reminded**, and no account past 30 lines is.
+`/api/ledger` threads `reminderSentAt` (empty for her) and the `clinicPatientAccounts` row carries the three
+columns (null). The five reminded accounts hold no live patient (`patientKey` null on the target row; demo reseeds),
+so no FE surface renders a "reminded" stamp live — the render is goja-pinned, not seen.
+
+**Verdict 3 amended where the build falsified it (2026-09-16):** the term "paged `postedTo` replay
+(`ARREARS_PAGE_LIMIT` 50 × `ARREARS_MAX_PAGES` 10)" is struck — the budget is 30 entries, and the reason is the
+wall, not taste. The same 500-entry claim stands, unmeasured, in café, wellness and loftspace; their live accounts
+are smaller today. Filed as one row (the shared mechanism's honest ceiling is ~30 entries under the production wall;
+past it no ledger reminds): `📐 needs designer pass · no-pattern: a script read that fetches an enumeration's
+follow-up aspects in one round trip, or a per-op script wall budget` — the demand side is the three siblings'
+resizing plus the clinic instance above.
+
+Deviations from the brief: the two settlement gaps declare `row.accountKey.arrears` (the brief's part-5 gotcha,
+missed by the builder, caught cold); the replyOp checks the id segment's NanoID grammar, not just the type
+(one more vector); README + DDL text no longer say "the next posted entry clears historyTooLong" (a charge against
+an already-owing balance writes nothing). Review classification (one cold pass over the package diff, a lead pass
+over the app diff): **brief-gap** — the settlement gaps' declaration (SHOULD-FIX); **design-gap** — the replay
+budget's bound (surfaced live, not by any reviewer; a second sighting of the 2026-08-07 wall lesson, appended to
+the `_packages.md` budget class); **convention** — two doc over-claims + one prior-state sentence.

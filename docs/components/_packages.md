@@ -592,7 +592,12 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   the run's extreme, pin a re-projection after the op's write) — Weaver has no episode boundary of its own; for every
   ARM of the op (no-op, collapse, complete) pin the gap FALSE over the state that arm leaves. Sighting: a lens-computed
   param the dispatched op can refuse on SHAPE (`whole_cents` on a fractional-dollar `depositAmount`) is a gap refused on every
-  pass — pin the param's admissible domain at its source (loftspace deposit, 2026-09-15, caught cold).
+  pass — pin the param's admissible domain at its source (loftspace deposit, 2026-09-15, caught cold). Sighting: a
+  replay budget mirrored as a NUMBER (500 entries) was sized against the live-read budget, not the 250 ms script wall
+  — a 98-entry account aborted at the wall, and a ScriptTimeout is a rejection the gap re-dispatches every window,
+  the loop the `historyTooLong` degrade exists to prevent; size every paged walk with a per-candidate follow-up read
+  by round trips (≈2.5 ms/entry + 50 ms fixed, measured live; CI's 5000 ms wall proves nothing) and hold the same
+  number in café / wellness / loftspace (clinic arrears, 2026-09-16, surfaced only by the live install).
 - **A standing `scope=any` write on an entity with no workplace confines by the target's STATE MACHINE, not by
   liveness** — a bind accepting any live identity lets a desk actor attach a stranger's record to their own login and
   inherit its grants (identity-domain confines to `unclaimed` for this reason). Minted: clinic `BindPatientIdentity`
