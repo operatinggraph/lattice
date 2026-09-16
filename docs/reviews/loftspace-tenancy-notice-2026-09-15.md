@@ -52,8 +52,9 @@ self probes, `BackfillClauseTerm`'s in-place term write).
 1. **A notice is a recorded fact on the leaseapp: `.notice` = `{moveOutAt, givenAt, givenBy}`** (class `tenancyNotice`),
    written once by **`GiveNotice{leaseAppKey, moveOutDate}`** (lease-signing). Its own aspect, not a `.tenancy` field:
    `.tenancy` already has two whole-aspect writers (`DecideLeaseApplication`, `SignRenewal`) and a third would put the
-   notice under `SignRenewal`'s rewrite. `moveOutDate` is a bare `YYYY-MM-DD` or RFC3339, normalized to midnight UTC
-   exactly as `moveInDate` is ([scripts.go:633-650](../../packages/lease-signing/scripts.go)); `givenBy ∈ {tenant,
+   notice under `SignRenewal`'s rewrite. `moveOutDate` is a bare `YYYY-MM-DD` or an RFC3339 instant; the recorded `moveOutAt` is a DATE-ONLY fact —
+   the instant's UTC calendar day at midnight UTC (an offset instant is read as its UTC day, never stored mid-day: a
+   mid-day `validUntil` would bill a whole rent period for a few hours); `givenBy ∈ {tenant,
    landlord, operator}` from which probe admitted the caller; `givenAt = submittedAt`.
    Refusals (state codes, each a `refusal-courtesy` at every dispatch site): `NoTenancy` (no `.tenancy` — not an
    approved lease), `LeaseNotSigned` (no `.signature`), `TenancyEnded` (`endedAt` set), `NoticeAlreadyGiven` (`.notice`
@@ -63,7 +64,7 @@ self probes, `BackfillClauseTerm`'s in-place term write).
    Grants: operator `any` + consumer `self`; in-script the self path admits the **tenant** (declared-optional
    `applicationFor` link keyed on the actor, present ⇒ tenant) else the **landlord** (`require_manages` off the
    `appliesToUnit` walk) else `AuthDenied`. Under an OPEN renewal cycle the notice is admitted (the tenant declines by
-   leaving); the cycle closes on `endedAt` per `renewalComplete`'s existing gate.
+   leaving); the cycle CLOSES on the notice (§4) and its assigned `SignRenewal` task is cancelled.
 2. **The term's effective end is `termEnd = CASE WHEN moveOutAt <> null AND moveOutAt < leaseEnd THEN moveOutAt ELSE
    leaseEnd END`, carried in BOTH languages.** `tenancyEnd` arms `freshUntil = termEnd`, opens `missing_tenancyEnded` on
    `lapsedAt >= termEnd AND (openRenewalCount = 0 OR moveOutAt <> null)` — a notice overrides the open-cycle hold —
@@ -74,23 +75,38 @@ self probes, `BackfillClauseTerm`'s in-place term write).
    operator `any`, the `BackfillClauseTerm` shape): reads the clause + `.terms` + the lease + `.notice` (required),
    `.status` (optional-hydrated, `InvalidState` if absent), verifies the clause governs THIS lease off its own `governs`
    walk, refuses `NotTermed` (no `validFrom`), no-ops (empty mutations, the `EndTenancy` idempotent shape) when
-   `validUntil <= moveOutAt`, else writes `.terms` with **`validUntil = max(moveOutAt, validFrom)`** (every other field
+   `validUntil <= max(moveOutAt, validFrom)`, else writes `.terms` with **`validUntil = max(moveOutAt, validFrom)`** (every other field
    kept) and marks `.status` `completed` when the recorded due (`chargeValidUntil`, else `validFrom`) `>=` the new
    `validUntil`. A term collapsed to `validFrom` is the recorded fact that the clause bills nothing (a renewal clause
    whose term starts after the move-out); the mint rule `validUntil > validFrom` is a mint-time argument check and its
-   DDL text says so. **The period containing the move-out is billed whole** — rent is monthly, no proration; the entry's
-   `periodEnd` is the capped `validUntil` DebitAccount already records, and the statement reads "covers … – <move-out>".
+   DDL text says so. **The period containing the move-out is billed whole** — rent is monthly, no proration; a period
+   billed AFTER the shortening records the capped `validUntil` as its `periodEnd` (the statement reads "covers … –
+   <move-out>"); a period billed before the notice keeps the `periodEnd` it recorded, and the statement's "Lease ends
+   <date> (notice given)" line is what tells the tenant.
    Dispatched by a new `leaseRentSettlement` gap **`missing_termShortened`**: `overrunClauseKey = max(CASE WHEN monthly AND
-   unconditioned AND validFrom <> null AND moveOutAt <> null AND validUntil > moveOutAt THEN c.key)`, one clause per
-   pass (the `missing_term` idiom), `Params {clauseKey: row.overrunClauseKey, leaseAppKey: row.entityKey}`. Every
+   unconditioned AND validFrom <> null AND moveOutAt <> null AND validUntil > moveOutAt AND validUntil > validFrom AND
+   status.state <> 'completed' THEN c.key)`, one clause per pass (the `missing_term` idiom) — the last two conjuncts are
+   what lets a collapsed or already-completed clause DROP OUT, so the gap closes and `max()` reaches the next
+   overrunning clause (without them a collapsed renewal clause re-opened the gap forever and could starve the original
+   clause — caught cold by two reviewers); the op's own no-op guard is `validUntil <= max(moveOutAt, validFrom)` and it
+   never re-stamps a recorded `completedAt`, `Params {clauseKey: row.overrunClauseKey, leaseAppKey: row.entityKey}`. Every
    clause on the lease — original and renewal — converges alone.
 4. **Every leg that reads the renewal question reads the notice.** `SignRenewal` refuses **`NoticeGiven`** (`.notice`
-   an OptionalRead at its descriptor, the renewal target's task leg, the FE and every seed); `leaseExpiry.missing_renewalCycle`
+   an OptionalRead at its descriptor — the renewal target's `signRenewal` leg is an `assignTask`, which carries no
+   OptionalReads, so the descriptor is the task-completion declaration — the FE reads the descriptor, and every seed
+   declares it). The refusal reads a key `SignRenewal` never writes, so `GiveNotice` also re-stamps `.tenancy`
+   UNCHANGED under OCC (`expectedRevision` = the hydrated revision): the two ops serialize on `.tenancy`'s revision
+   instead of racing past each other's hydration. `renewalComplete`'s `open` conjoins `noticeMoveOutAt = null` (the
+   notice answers the renewal question — the planner stops assigning legs toward a signature the op refuses) and
+   `staleUserTasks` cancels a `SignRenewal` task on a lease under notice or ended; `leaseExpiry.missing_renewalCycle`
    conjoins `moveOutAt = null` and `freshUntil` goes null on a notice (no cycle to open); `renewalsRead` and both
    application read lenses project `noticeMoveOutAt / noticeGivenAt / noticeGivenBy` (snake_case where the lens's
-   siblings are). The applicant gaps stay keyed on `endedAt` (a notice is not an end).
-5. **FE (`cmd/loftspace-app`).** Tenant lease card: **Give notice** (date, min = today UTC, max = the day before
-   `leaseEnd`, confirm) → after: "Notice given <date> · moving out <date>"; the renewal card hides Renew/Sign and says
+   siblings are). The applicant gaps stay keyed on `endedAt` (a notice is not an end). **Café reads the recorded end, not
+   `leaseEnd`:** `endedAt = leaseEnd` was an invariant that made `leaseEnd` a faithful proxy in café's `OpenTab`
+   `TenancyEnded` guard and the `cafeLeaseWorkplaces` / `frontDeskLeaseDetails` lenses; an early end breaks the proxy,
+   so those read `.tenancy.endedAt` first (the same declared aspect) and the café app's `tenancyEnded` reads it.
+5. **FE (`cmd/loftspace-app`).** Tenant lease card: **Give notice** (date, min = the later of today UTC and the day after `leaseStart`, max = the day before
+   `leaseEnd` — the script's three refusals mirrored — confirm) → after: "Notice given <date> · moving out <date>"; the renewal card hides Renew/Sign and says
    why (`renewalReady`, `renewalTaskStale` → `notice`). Landlord application card of a live lease: **End lease early**
    (same op, same form) and the "Notice · moving out <date>" chip on the row, the by-unit console and search. Dates are
    date-only facts: rendered by `fmtUTCDate`, the form value sent as `YYYY-MM-DD`. Facet: `GiveNotice` descriptor
@@ -187,3 +203,41 @@ file — noted in the alternatives table, not rows.)
 
 **7. Non-goals.** Changing a recorded notice; proration; a notice period; the deposit row (its return rides this
 `endedAt`); café/wellness leases (the `TenancyEnded` café refusal reads `endedAt`, which this design sets — no edit).
+
+### Build note (2026-09-15)
+
+Shipped `6e6ea0f3` (merge of `0c13785e`; CI green on the re-run — the first run failed
+`TestRenewalConvergence_InflightIsLegScopedAcrossTheStaticCheck`'s two-mark-lease `Never` window while the bridge nak'd a
+PII envelope for 8 s under host load; 3/3 local reruns + two full local suite runs green; no change of this fire touches
+the bgcheck dispatch that window counts); brief `2c4b369f`. Live on the shared stack (lease-signing 0.40.0,
+semantic-contracts 0.6.0, cafe-domain 0.15.1, front-desk 0.4.1 diff-applied; `bin/loftspace-app` / `bin/cafe-app`
+cycled): Jordan Ellis's renewed lease (`MhZY2unHEAhNv61HUpb9`, ends 2027-09-06) took `GiveNotice` for 2027-01-31 as the
+operator; within a second `leaseRentSettlement.missing_termShortened` dispatched `ShortenClauseTerm` and the renewal
+clause `BS9KrFCi1f6qKTHywm7E` reads `validUntil 2027-01-31T00:00:00Z` (still active — its recorded due 2026-10-06 bills
+Oct–Jan, then completes); `tenancyEnd` re-armed `freshUntil = termEnd = 2027-01-31`; `renewalsRead` and both application
+read models carry `notice_move_out_at 2027-01-31 · given_by operator`; the tenant home reads "Notice given · moving out
+Jan 31, 2027". The end + relist path is proven by the e2e (same-day move-out), not live — ending a showcase tenant's
+lease today was not the PO's ask.
+
+Ops lesson (not a defect of this build): a protected read lens that gains a column pauses `structural` the moment the
+package installs and LATCHES after three self-heal probes (~30 s) if `make provision-readpath` has not run yet —
+`renewalsRead` and `leaseApplicationsRead` latched, `landlordLeaseApplicationsRead` recovered on its third try.
+`lattice lens resume <id> --actor <loupe operatorActorKey>` clears a latch (the primordial admin lacks the control
+grant). Run `provision-readpath` in the same breath as the install.
+
+Deviations from the brief (all folded into the body above): the self-path predicate is `authTargetValidated AND
+authContextTarget == actor`; `moveOutAt` is truncated to its UTC calendar day; `GiveNotice` re-stamps `.tenancy`
+unchanged under OCC (the `SignRenewal` race); `renewalComplete` closes and `staleUserTasks` cancels on a notice; the
+renewal target's `assignTask` leg carries no OptionalReads (descriptor-declared); `missing_termShortened` conjoins
+`validUntil > validFrom AND state <> completed`; café's `OpenTab` guard + both lease lenses + `seed-classic-demo` read
+`endedAt` first; `lint-app-op-descriptors`' loftspace ceiling 18 → 19; the by-unit console joins the notice off the
+landlord read model (`leaseApplicationComplete` projects none); the e2e installs loftspace-ledger + semantic-contracts
+and proves the clause shortened + completed, the earlier-instant re-arm, and the cycle closing on the notice.
+
+Review classification (three cold layers over the whole diff, one fix round): **design-gap** — the collapsed-clause
+livelock (the design's own conjunct; two reviewers), the advisory `NoticeGiven` race, the planner running under a
+notice (`_packages.md`: a new "advisory refusal" class displacing the closed taxonomy-migration entry; sightings on the
+cadence, "leg" and recorded-fact entries); **brief-gap** — café's `leaseEnd` proxy (the census stopped at LoftSpace;
+recorded-fact sighting), the date-only instant; **implementation-bug** — the FE's one-hat declared read
+(`vertical-apps.md` sighting); **review-over-reach** — the "at leaseEnd" fixture row (inert in both languages, kept
+with the reason stated). Adjacent finds: none open — the seed's proxy read was fixed in the fire.

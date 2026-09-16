@@ -561,10 +561,13 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   dispatcher's own classification; before an (e)-follow-up read of a sensitive aspect read the holder's `.piiKey`
   and skip on `shredded`, the test shredding BEFORE the op and asserting acceptance; the residual race fails closed
   and loudly; on a timing-uniform path write the binding blind (`claim_timing_probe_test.go` measures the shape).
-- **A cross-package type guard must survive the migration window in BOTH directions** — old and new populations
-  are live simultaneously and nothing rewrites the old documents. Minted: dynamic-type-taxonomy B1 (`cls ==
-  "location"` would have rejected all 69 live locations; the widening arm was unpinned in 4 of 7 packages). Check:
-  a *positive* vector per live shape, not just a negative — and mutation-test each by narrowing the set.
+- **A refusal that reads a key the op never WRITES is advisory unless the racing writer shares a mutated key** —
+  the commit path conditions only mutated keys, so `SignRenewal`'s `NoticeGiven` (reads `.notice`, writes `.tenancy`)
+  hydrated before a racing `GiveNotice` (writes `.notice`, nothing shared) commits still landed a signed term on a
+  lease under notice; the sibling `TenancyEnded` never had the hole because both writers touch `.tenancy`. Minted:
+  lease-signing (2026-09-15, caught cold). Check: for every new `fail(` that reads key K, name the writer of K and
+  the key set each op mutates — if they share none, the guarded op re-stamps the shared aspect unchanged under OCC
+  (`GiveNotice` on `.tenancy`) or the design records the window as accepted.
 - **A dispatch declaration must name what the runtime actually binds** — a playbook `Params` on an OPTIONAL-hop
   column is a Weaver refusal (`strategist.go` "references row.<col>, which is null/absent") on every row where the
   hop misses, the gap open forever and every fixture seeding the hop; a descriptor hub `{actor}` for a walk the
@@ -581,10 +584,13 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   re-opens on a recorded clock lapse mints a successor per window while the prior instance stays live (lease-signing
   `bgcheckFreshnessWindow`, 2026-09-03: 3,637 instances on one identity); a level-triggered gap that stays OPEN
   across successful dispatches with CHANGED params wedges the anchor at the 4th cycle, `GapBudgetExhausted` (clinic
-  `visitSeriesDue`, 2026-09-13). Check: count the sweep's `collect_*` call sites and pin
+  `visitSeriesDue`, 2026-09-13); a gap whose closing conjunct is FALSE after the op's degenerate arm writes — `validUntil >
+  moveOutAt` after the collapse arm set `validUntil = validFrom`, re-dispatched on every mark-lease reclaim and starved
+  the sibling clause under `max()` (semantic-contracts `missing_termShortened`, 2026-09-15, two reviewers cold). Check: count the sweep's `collect_*` call sites and pin
   `Σ_arms(pages × pageLimit) / perCommit` against the script's own page constants; price a `validUntil`/`freshUntil` window as a vendor-validity policy over the stack's lifetime and name
   what retires the superseded artifact; for a gap over a growing set prove the FIRST dispatch closes it (aggregate to
-  the run's extreme, pin a re-projection after the op's write) — Weaver has no episode boundary of its own.
+  the run's extreme, pin a re-projection after the op's write) — Weaver has no episode boundary of its own; for every
+  ARM of the op (no-op, collapse, complete) pin the gap FALSE over the state that arm leaves.
 - **A standing `scope=any` write on an entity with no workplace confines by the target's STATE MACHINE, not by
   liveness** — a bind accepting any live identity lets a desk actor attach a stranger's record to their own login and
   inherit its grants (identity-domain confines to `unclaimed` for this reason). Minted: clinic `BindPatientIdentity`
@@ -599,7 +605,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   (café `PayoutCafeCredit`, 2026-09-14); `.decision = lost` left `SignLease` keyed on the mutable premise it replaced
   (2026-09-14); a refusal naming a SET (`VisitNotHeld` = cancelled ∪ noShow) left the sibling lens at `<> 'cancelled'`
   (clinic `RecordEncounter`, 2026-09-14); a landlord self grant on the charge left the FE flow's prerequisite
-  `LoftspaceCreateAccount` operator-only (loftspace, 2026-09-15). Check: before closing a guard grep the aspect's writers; a guard that reads
+  `LoftspaceCreateAccount` operator-only (loftspace, 2026-09-15); a notice ended the term at `termEnd` while
+  `renewalComplete`'s `open` gate and `staleUserTasks` kept planning toward a signature `SignRenewal` refused
+  (lease-signing, 2026-09-15, caught cold). Check: before closing a guard grep the aspect's writers; a guard that reads
   the premise a recorded fact replaces takes the fact as its own conjunct; for a new classification value grep every
   `data.get("<field>")` comparison in the package and every `status.data.value <>` conjunct in every lens gating on
   that status, in every package anchoring the type, deciding each site; for a link a refund/settlement mint walks,
@@ -628,11 +636,15 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   containing it" (an immediate double charge, 2026-09-13); `DebitAccount` read `.status ∉ state` as "never charged"
   when `CreateClause` writes it unconditionally (2026-09-13); an untermed charge's `dueAt` was the posting instant
   with the clause's recorded lapse hydrated beside it (2026-09-14); café `CreditHold` read `.arrears.sentAt` — the
-  SEND INTENT — as "a reminder went out" (2026-09-15). Check: invert the exact derivation of a recorded timestamp,
+  SEND INTENT — as "a reminder went out" (2026-09-15); café read `.tenancy.leaseEnd` as "the tenancy ended" once
+  `endedAt = leaseEnd` stopped being an invariant, and a date-only move-out was recorded as the caller's instant (both
+  2026-09-15, caught cold). Check: invert the exact derivation of a recorded timestamp,
   never re-interpret it, with a vector whose derived value and source event fall in different periods; a stamp that
   names a date reads the recorded one when it exists; for every `key in state` test on an OptionalRead prove the key
   can be absent for a live vertex, else absence means undeclared → fail closed (the negative vector submits WITHOUT
-  the declaration); state the recorded event's exact meaning at the reader.
+  the declaration); state the recorded event's exact meaning at the reader; when a fire breaks an invariant two
+  fields shared (`endedAt = leaseEnd`), grep every reader of the proxy field repo-wide; a date fact is stored as its
+  UTC calendar day.
 - **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from** — `mint_clause` wrote
   `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires; the inbound walk bound fine, a
   clause-anchored `(c)-[:governs]->(l:leaseapp)` never could (`adjacency/store.go` `OtherType: dstType`). Check: a

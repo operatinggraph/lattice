@@ -2,6 +2,11 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-14 · `4fe3ecef` · A losing applicant is told the unit went to someone else — both application read lenses project `lost_to_rival`; banner + landlord row read it; expired and lost-application tasks read-only; all 52 live rivals read it.
+- 2026-09-14 · `4fe3ecef` · A rent charge names its billing period and due date — `DebitAccount` stamps `periodStart`/`periodEnd`/`dueAt` on the `.entry` from the clause grid; both lenses project them; both statements say "covers … · due …".
+- 2026-09-14 · `b56bc0f0` · The lease is signed on the applicant's terms — `.tenancy` derives from `.terms` (listing fallback, malformed terms refused) and records `rentAmount`; both cards state what the signature commits to; Priya approved live.
+- 2026-09-14 · `b56bc0f0` · A lease that ends frees its unit — `tenancyEnd` records `endedAt = leaseEnd` via `EndTenancy` at the recorded lapse and relists; an ended tenancy is terminal in every consumer; proven through the real Weaver e2e.
+- 2026-09-14 · `b56bc0f0` · A renewed tenant's home states the current lease — both application read lenses + `renewalsRead` project the tenancy, rendered by UTC calendar date; Jordan Ellis reads $2,125 · ends 2027-09-06 live.
 - 2026-09-14 · `1402d742` · The desk sees what the café sold today — a Today panel folded from `/api/tabs` (tabs settled on the local day, gross, by item, voids, unitemized remainder), goja-pinned incl. the DST day; live.
 - 2026-09-14 · `1402d742` · A moved-out resident's lease stops taking house tabs — `OpenTab` refuses `TenancyEnded` at `.tenancy.leaseEnd`; the POS picker says so first via `frontDeskLeaseDetails`; an open tab charges until the 24 h stale-settle.
 - 2026-09-14 · `1b7b255a` · A class that ran is a record — `TombstoneSession` refuses `SessionStarted` once `startsAt <= submittedAt`, the desk hides "Call off this class" on history, the seed's litter reaper keeps started litter; refused live.

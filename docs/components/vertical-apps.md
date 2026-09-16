@@ -50,7 +50,9 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   the envelope reaches the Processor with the walk undeclared while the test harness (which declares it)
   stays green. Minted: café `CreditCafeAccount` + `RefundCafeCharge` front-desk legs (2026-09-05). Check:
   every `renderOpForm` context whose descriptor carries a `{actor}` enumeration passes `me`, and the
-  comment beside it names the enumeration, not only `buildAuthContext`.
+  comment beside it names the enumeration, not only `buildAuthContext`. Second sighting (LoftSpace `GiveNotice`,
+  2026-09-15, caught cold): a hand-built submit declared the actor-keyed `applicationFor` OptionalRead on the tenant
+  hat only while the script reads it on both — diff the FE's `reads`/`optionalReads` against the descriptor PER HAT.
 - **A count the FE promises for an op's effect must apply the op's own predicate, not a coarser key** — the
   roster's "Call off the remaining N classes" tallied upcoming occurrences per series while the op cancels
   only those still held at the confirmed studio, so one occurrence moved elsewhere made the button promise N
