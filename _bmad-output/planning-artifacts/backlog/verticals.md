@@ -21,6 +21,11 @@ the row is `🚧 blocked-on:` it (a missing *lens* is package work, built here).
 | **No ledger reminds a debtor past ~30 lines** | The arrears replay walks the account's history inside the op (≈300 round trips for 98 entries) and the 250 ms script wall aborts it; clinic degrades honestly at 30 entries, café/wellness/loftspace still promise 500. Live: Riley Chen, the one clinic debtor, is never reminded. | Cross-vertical | pkg + platform | ★★ | M | 🏗️ building · [design](../../../docs/reviews/verticals-arrears-resumable-replay-2026-09-16.md) · next: Inc 1 clinic-ledger |
 | **Facet on a literal iOS device** | The SwiftUI renderer builds + runs as a macOS proxy only. A real iOS/simulator build proves platform packaging (App Store viability), which FORK-1's freeze no longer waits on. Also unblocks real `swift test` in place of the hand-mirrored `swift run` harness. | Cross-vertical | Sally + FE Engineer | ★ | M | 🗄️ shelved (revive: a machine with full Xcode — this host has CommandLineTools only) · [design §7.10](../../implementation-artifacts/edge-showcase-app-design.md) |
 | **A just-minted applicant with no application is on no staffer's roster** | `applicantRosterRead` anchors an identity on its own key + the landlord/buildings of units it has a live application against ([lenses.go:250](../../../packages/loftspace-domain/lenses.go:250)); a claim secret lost before the first application has no roster row to re-issue from. Live: 0. | LoftSpace | pkg | ★ | S | 🗄️ shelved (revive: a PO-observed instance or a second lens needing a mint-site anchor; re-mint → merge recovers it) · [triage §4](../../../docs/reviews/verticals-designer-triage-2026-09-10.md) |
+| **A member seated from the waitlist, moved, or called off hears nothing** | Only the 24 h reminder and the arrears reminder ever go out; a promotion (`promotedAt`), a time move, and a call-off change the member's seat, charge, or refund in silence. Live: Alex was seated + charged $10 at 20:41Z for a Sep 20 class, next word due Sep 19 15:00Z. | Wellness | pkg + FE | ★★ | M | 📋 ready · a booking-change lens + notification target beside `wellnessBookingReminders` |
+| **A recurring class stops when its count runs out** | `occurrenceCount` (≤52) is the series' whole life; Evening Flow with Sam ends Sep 23 and Riverside's schedule is then empty until the desk retypes the series. A rolling horizon mints the next occurrence as the last approaches; the studio card's "runs out in N days" is the only guard today. | Wellness | pkg + FE | ★★ | M | 📋 ready · freshUntil-armed target, same shape as the reminder lens |
+| **The desk cannot seat a late walk-in** | `CreateBooking` refuses `SessionInPast` on the desk leg once `startsAt` passes — 10 s after start, live — so a walk-in at the door is neither seated, charged, nor marked attended; self-service should stay refused. | Wellness | pkg + FE | ★ | S | 📋 ready · desk leg admits until `endsAt`, courtesy on the picker |
+| **A class can be shrunk below its seated count** | `ReassignSession` accepted `capacity: 1` on a class with two seats claimed; the card reads 2/1, nobody is bumped or told, and the desk learns nothing. Refuse `CapacityBelowSeated` (or name who loses the seat). | Wellness | pkg + FE | ★ | S | 📋 ready |
+| **A repriced class relabels what a seat already paid** | `wellnessBookings.priceCents` follows the session's current price: Riley's card read $14.00 for a seat the ledger charged $10.00 after the desk repriced. Snapshot the charged price on the booking at claim, like `className`. | Wellness | pkg + FE | ★ | S | 📋 ready |
 
 **Explicitly descoped (ambitious-PO pass, 2026-07-09):** structured diagnosis/procedure coding (ICD/CPT),
 vitals, and e-prescribing were considered and deliberately NOT filed — a certified EHR is out of scope for a
@@ -40,10 +45,9 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 **Wellness joined** 2026-07-09 (`cmd/wellness-app` shipped, live on :7802) — fold it into rotation; see
 [agents/vertical-po/SKILL.md](../../../agents/vertical-po/SKILL.md) §1.
 
-- **Rotation to date:** LoftSpace ×34, Clinic ×34, Café ×25, Wellness ×21.
+- **Rotation to date:** LoftSpace ×34, Clinic ×34, Café ×25, Wellness ×22.
 - **Method:** reuse the already-up shared stack (detect NATS :4222 / app :7788/:7799/:7801/:7802), drive the real flow via `/api/op` + the lens projections as the product owner, file scored items. All four apps exist + are exercisable live (`:7788` / `:7799` / `:7801` / `:7802`).
 - **Live-stack note:** a stale bootstrap JSON vs. a recreated Core KV was a recurring dev-loop trap (2026-07-03, 2026-07-04) that silently emptied reads; `make up` now self-heals it (`109f59a`, 2026-07-05) — re-verify empty-read reports as a real product bug first.
-- **2026-09-13:** LoftSpace — drove landlord + tenant hats through portfolio/applications/renewals/tasks/ledger/withdraw; rent bills before move-in and past term end, a renewal's new rent never bills, the tenant's signature is refused; filed 4.
 - **2026-09-13:** Clinic — drove desk/provider/patient hats through schedule/status/series/follow-ups/reschedule/ledger; a visit can be completed before it starts and a recurring visit is credited on the clock; filed 4.
 - **2026-09-13:** Café — drove desk + resident hats through open/charge/void/self-order/settle/refund/arrears/menu; debt can't be written off, a refund is spent twice, no sales view; filed 4.
 - **2026-09-13:** Wellness — drove member + desk hats through schedule/book/cancel/roster/guest/release/call-off/billing/arrears/studios; a class that ran can be called off and a refund ages the wrong charge; filed 4.
@@ -54,7 +58,8 @@ dated run-logs live in git history. Rotate LoftSpace ↔ Clinic ↔ Café ↔ We
 - **2026-09-15:** LoftSpace — drove landlord + tenant + applicant hats through portfolio/queue/ledger/renewals/tasks/browse/edit-listing; the landlord's ledger buttons and Edit listing are refused, no notice, no deposit; filed 5.
 - **2026-09-15:** Clinic — drove desk/provider/patient hats through schedule/reschedule/status/document/series/ledger/arrears; a moved visit keeps its check-in, a debtor is never reminded, a note is rewritten without trace; filed 5.
 - **2026-09-16:** Café — drove resident + desk hats through self-order/open/charge/settle/posting/counter-payment/arrears/menu; a self-order is half a loop, paying at the counter is refused until the posting; filed 5.
-- **Next:** Wellness.
+- **2026-09-16:** Wellness — drove member + desk hats through book/hold/pay/waitlist/promotion/reprice/resize/walk-in/attendance/call-off; a promoted member hears nothing, a series runs out, a walk-in is refused; filed 5.
+- **Next:** LoftSpace.
 
 ## Done log — verticals (newest first)
 
