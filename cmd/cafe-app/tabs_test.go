@@ -74,3 +74,37 @@ func TestComputeTabs_SkipsRowWithNoLeaseAppKey(t *testing.T) {
 		t.Errorf("kept the wrong row: %+v", rows[0])
 	}
 }
+
+// A line's orderedAt/servedAt/servedBy pass through computeTabs unchanged —
+// the desk's orders queue and the receipt's per-line state tag both read
+// these straight off tabChargeLine, so a silently dropped or renamed field
+// here would starve both without either failing to compile.
+func TestComputeTabs_LineOrderedAndServedFieldsRoundTrip(t *testing.T) {
+	keys, get := fakeKV(map[string]any{
+		"cafeTabSettlement.open1": map[string]any{
+			"tabKey": "vtx.tab.open1", "leaseAppKey": "vtx.leaseapp.a", "totalCents": 450.0,
+			"status": "open", "openedAt": "2026-09-16T10:00:00Z",
+			"lines": []map[string]any{
+				{
+					"id": "line-1", "description": "Latte", "amountCents": 450.0, "voided": false,
+					"orderedBy": "vtx.identity.riley", "orderedAt": "2026-09-16T12:00:00Z",
+					"servedAt": "2026-09-16T12:05:00Z", "servedBy": "vtx.identity.dana",
+				},
+			},
+		},
+	})
+	rows := computeTabs(keys, get, "")
+	if len(rows) != 1 || len(rows[0].Lines) != 1 {
+		t.Fatalf("want 1 tab with 1 line, got %+v", rows)
+	}
+	line := rows[0].Lines[0]
+	if got, want := line.OrderedAt, "2026-09-16T12:00:00Z"; got != want {
+		t.Errorf("OrderedAt = %q, want %q", got, want)
+	}
+	if got, want := line.ServedAt, "2026-09-16T12:05:00Z"; got != want {
+		t.Errorf("ServedAt = %q, want %q", got, want)
+	}
+	if got, want := line.ServedBy, "vtx.identity.dana"; got != want {
+		t.Errorf("ServedBy = %q, want %q", got, want)
+	}
+}

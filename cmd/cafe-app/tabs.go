@@ -22,6 +22,9 @@ type tabChargeLineProjection struct {
 	AmountCents *float64 `json:"amountCents"`
 	Voided      bool     `json:"voided"`
 	OrderedBy   string   `json:"orderedBy"`
+	OrderedAt   string   `json:"orderedAt"`
+	ServedAt    string   `json:"servedAt"`
+	ServedBy    string   `json:"servedBy"`
 }
 
 // tabSettlementProjection is one row of the cafe-domain `cafeTabSettlement`
@@ -46,13 +49,20 @@ type tabSettlementProjection struct {
 // tabRow's own TotalCents normalization below. OrderedBy passes through
 // cafe-domain's own op.actor key unchanged (vtx.identity.<NanoID>), the same
 // full-key shape app.js already resolves via idOf()+nameForIdentity() for a
-// tab's bookerKey — a line predating the field carries "".
+// tab's bookerKey — a line predating the field carries "". OrderedAt is the
+// Charge's own op.submittedAt (RFC3339); ServedAt/ServedBy record the
+// hand-over — stamped at ring-up on a staff Charge, by MarkLineServed on a
+// self-order. A line with OrderedAt and no ServedAt is still to make; a line
+// with neither predates these fields and its state is unknown.
 type tabChargeLine struct {
 	ID          string `json:"id"`
 	Description string `json:"description"`
 	AmountCents int64  `json:"amountCents"`
 	Voided      bool   `json:"voided"`
 	OrderedBy   string `json:"orderedBy,omitempty"`
+	OrderedAt   string `json:"orderedAt,omitempty"`
+	ServedAt    string `json:"servedAt,omitempty"`
+	ServedBy    string `json:"servedBy,omitempty"`
 }
 
 // tabRow is the tab card the POS/front-desk views render.
@@ -110,7 +120,7 @@ func computeTabs(keys []string, get kvGetter, leaseAppKey string) []tabRow {
 			}
 			lines = append(lines, tabChargeLine{
 				ID: l.ID, Description: l.Description, AmountCents: amount, Voided: l.Voided,
-				OrderedBy: l.OrderedBy,
+				OrderedBy: l.OrderedBy, OrderedAt: l.OrderedAt, ServedAt: l.ServedAt, ServedBy: l.ServedBy,
 			})
 		}
 		rows = append(rows, tabRow{

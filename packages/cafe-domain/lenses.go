@@ -315,8 +315,10 @@ RETURN
 // house-tab ledger entry are the identical string.
 //
 // `lines` is likewise a plain array pass-through of `t.status.data.lines`
-// (the itemized {id, description, amountCents, voided, orderedBy} entries
-// Charge/VoidCharge maintain — orderedBy = the Charge's own op.actor),
+// (the itemized {id, description, amountCents, voided, orderedBy, orderedAt,
+// servedAt?, servedBy?} entries Charge/VoidCharge/MarkLineServed maintain —
+// orderedBy = the Charge's own op.actor, servedAt absent while a self-order
+// is still to make),
 // mirroring clinic-domain's `.hours.data.windows` pass-through (lenses.go) —
 // Cypher needs no `collect()` to project a field that is already an array on
 // the aspect. cmd/cafe-app renders it as the itemized receipt breakdown,

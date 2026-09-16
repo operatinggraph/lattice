@@ -74,8 +74,18 @@ menu item's own `.price.name`, or an off-menu `Charge`'s caller-supplied `descri
 default) so a tab (open or settled) shows what was actually rung up, not just the sum — the `cafeTabSettlement`
 lens projects it verbatim and the Weaver-dispatched `DebitAccount` posts the same string as the
 settled ledger entry's `memo`. The structured itemization lives beside it in `.status.lines` — one
-`{id, description, amountCents, voided, orderedBy}` entry per `Charge`, the receipt's own record — so on
-every tab that can still be voided, `totalCents` equals the sum of its non-voided lines.
+`{id, description, amountCents, voided, orderedBy, orderedAt, servedAt?, servedBy?}` entry per `Charge`, the
+receipt's own record — so on every tab that can still be voided, `totalCents` equals the sum of its non-voided
+lines.
+
+A line also records whether it was handed over. A staff ring-up is served at the counter, so `Charge` on the
+staff leg stamps `servedAt = orderedAt` / `servedBy` at ring-up; a self-ordered line carries neither until the
+desk submits `MarkLineServed{tabKey, lineId}` (operator/`frontOfHouse` only, confined to the tab's own building
+the way `VoidCharge` is; refuses `LineVoided`, `LineAlreadyServed`, `UnknownChargeLine`, `TabNotOpen`). A line
+with `orderedAt` and no `servedAt` is still to make — the desk's orders queue is exactly those lines, oldest
+first, read off the `lines` column `cafeTabSettlement` already projects; a line with neither predates the
+field and its state is unknown. `VoidCharge` and `MarkLineServed` both copy the line whole and overwrite only
+the key they own, so neither drops what the other recorded.
 
 ## Self-order menu catalog
 

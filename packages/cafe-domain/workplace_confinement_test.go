@@ -855,3 +855,69 @@ func TestWorkplace_ChargeCatalogItemListsAppliesToUnitOnce(t *testing.T) {
 		t.Fatalf("staff Charge with menuItemKey at ANOTHER building = %v, want Rejected", got)
 	}
 }
+
+// TestWorkplace_MarkLineServedStaffConfinedToWorkplace: MarkLineServed is
+// staff-only with no ownership proof, so — exactly as for VoidCharge — the
+// workplace walk is the ONLY thing confining it. A front-of-house staffer hands
+// over a self-order at their OWN building and is refused at another, the
+// refusal writing nothing.
+func TestWorkplace_MarkLineServedStaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	doc := wcStaffCapDoc()
+	doc.PlatformPermissions = append(doc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "MarkLineServed", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, doc)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcserve")
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+
+	// One resident holds both leases (a test topology), so both tabs carry a
+	// self-ordered, unserved line-1.
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	tabs := map[string]string{}
+	for _, tc := range []struct{ leaseID, leaseKey, unitID, label string }{
+		{wcLeaseAID, leaseA, wcUnitAID, "wcsrva"}, {wcLeaseBID, leaseB, wcUnitBID, "wcsrvb"},
+	} {
+		appFor := "lnk.leaseapp." + tc.leaseID + ".applicationFor.identity." + domainConsumerID
+		testutil.SeedLink(t, ctx, conn, appFor, "applicationFor", tc.leaseKey, domainConsumerKey)
+		tab := openTab(t, ctx, conn, cp, cons, tc.label+"tab00000000001", tc.leaseKey)
+		item := createMenuItem(t, ctx, conn, cp, cons, tc.label+"itm00000000001", "Latte", 450, "vtx.unit."+tc.unitID)
+		selfOrder(t, ctx, conn, cp, cons, tc.label+"ord00000000001", tab, item, appFor, "2026-07-20T12:10:00Z")
+		tabs[tc.leaseKey] = tab
+	}
+	tabA, tabB := tabs[leaseA], tabs[leaseB]
+
+	// Positive sibling first: at their OWN building the staffer's serve lands.
+	testutil.PublishOp(t, conn, markLineServedEnv("wcsrvaserve000000001", tabA, "line-1", wcStaffKey, "2026-07-20T12:30:00Z"))
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("staff MarkLineServed at its OWN workplace = %v, want Accepted "+
+			"(the positive sibling — if this fails the negative proves nothing)", got)
+	}
+	_, linesA := tabLines(t, ctx, conn, tabA)
+	if got, want := linesA[0]["servedBy"], wcStaffKey; got != want {
+		t.Fatalf("tabA lines[0].servedBy = %v, want %q", got, want)
+	}
+
+	// At ANOTHER building the same call is refused before the line lookup.
+	testutil.PublishOp(t, conn, markLineServedEnv("wcsrvbserve000000001", tabB, "line-1", wcStaffKey, "2026-07-20T12:31:00Z"))
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
+		t.Fatalf("staff MarkLineServed at ANOTHER building = %v, want Rejected", got)
+	}
+	// A fabricated authContext.target — self, then the tab's own lease — must
+	// not exempt a scope=any caller: the exemption keys on a target the
+	// PLATFORM validated, and no task validates one for this op.
+	for _, tc := range []struct{ label, target string }{
+		{"wcsrvbforgeself00001", wcStaffKey}, {"wcsrvbforgelease0001", leaseB},
+	} {
+		env := markLineServedEnv(tc.label, tabB, "line-1", wcStaffKey, "2026-07-20T12:32:00Z")
+		env.AuthContext = &processor.AuthContext{Target: tc.target}
+		testutil.PublishOp(t, conn, env)
+		if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
+			t.Fatalf("staff MarkLineServed at ANOTHER building with a FORGED authContext.target %s = %v, want Rejected", tc.target, got)
+		}
+	}
+	_, linesB := tabLines(t, ctx, conn, tabB)
+	if _, has := linesB[0]["servedAt"]; has {
+		t.Fatalf("tabB lines[0] carries servedAt %v — a denied MarkLineServed must write nothing", linesB[0]["servedAt"])
+	}
+}

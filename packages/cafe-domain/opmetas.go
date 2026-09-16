@@ -200,6 +200,38 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 		},
 		{
+			OperationType: "MarkLineServed",
+			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a MarkLineServed target
+			// refusal-courtesy(facet): LineVoided, LineAlreadyServed: none — Facet's tab browse projects no per-line column, so the generic form takes a free lineId and the script's own recorded-state refusal is the answer
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Mark an order served",
+				Description: "Record that a self-ordered line on an open tab was handed over.",
+				Icon:        "receipt",
+				Tone:        "primary",
+				SubmitLabel: "Mark served",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"tabKey":{"type":"string","description":"vtx.tab.<NanoID> of the open tab the order is on — auto-filled from the tab being viewed."},` +
+				`"lineId":{"type":"string","description":"id of one entry in the tab's own .status.lines to mark served; refused if it was voided or is already served."}},` +
+				`"required":["tabKey","lineId"]}`,
+			FieldDescriptions: map[string]string{
+				"tabKey": "The tab the order is on — auto-filled by the client from the tab being viewed (dispatch.targetField), not user-entered.",
+				"lineId": "The id of the specific order line handed over, from the tab's own .status.lines — servedAt and servedBy are stamped from the submission, never from the caller.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "tab",
+				AuthContext: "standing",
+				TargetField: "tabKey",
+				TargetType:  "tab",
+				Reads:       []string{"{payload.tabKey}", "{payload.tabKey}.status"},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
 			OperationType: "Settle",
 			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a Settle target
 			Presentation: &pkgmgr.OpPresentationSpec{

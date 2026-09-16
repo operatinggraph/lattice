@@ -86,6 +86,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "OpenTab", Scope: "any"},
 			{OperationType: "Charge", Scope: "any"},
 			{OperationType: "VoidCharge", Scope: "any"},
+			{OperationType: "MarkLineServed", Scope: "any"},
 			{OperationType: "Settle", Scope: "any"},
 			{OperationType: "SettleStaleTab", Scope: "any"},
 			{OperationType: "BackfillTabStaleAt", Scope: "any"},

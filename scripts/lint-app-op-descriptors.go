@@ -233,7 +233,11 @@ var appOpCeilings = map[string]int{
 	// this ceiling already counts, submitting a payload assembled entirely
 	// from that card's own data attributes (menuItemKey, the flipped
 	// available bool). Not a new descriptor-catalog gap.
-	"cmd/cafe-app": 9,
+	// 10: MarkLineServed is the Front Desk Orders panel's row button — a
+	// zero-navigation row action reusing the Settle/Void row-button ceremony
+	// this ceiling already counts, its payload (tabKey, lineId) assembled
+	// from the row's own data attributes. Not a new descriptor-catalog gap.
+	"cmd/cafe-app": 10,
 	// 15: StartVisitSeries moved off this app's own hardcoded literal onto
 	// internal/descriptorform (verticals-designer-triage-2026-08-27.md §2 work-
 	// list item 2) — its intervalDays/startAt/activeUntil now render from the

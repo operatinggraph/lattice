@@ -1,8 +1,8 @@
 name: cafe-domain
-version: 0.15.1
+version: 0.16.0
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
-  VoidCharge/Settle/SettleStaleTab/BackfillTabStaleAt, OCC-conditioned
+  VoidCharge/MarkLineServed/Settle/SettleStaleTab/BackfillTabStaleAt, OCC-conditioned
   running total) + the
   tabStatus aspect type + the cafeTabSettlement actorAggregate convergence
   lens (missing_account/missing_charge) + the §10.8 playbook dispatching
@@ -36,9 +36,13 @@ description: |
   VoidCharge{tabKey, lineId} corrects a mis-tapped charge (operator/frontOfHouse only) by
   voiding one specific .status.lines entry by its id, deriving the amount from the line
   itself rather than trusting a caller-supplied amountCents. Every Charge appends a
-  structured {id, description, amountCents, voided} entry to .status.lines, the itemized
-  breakdown a receipt renders instead of a flat string; .status.itemsMemo is re-derived from
-  the live (non-voided) lines on every Charge/VoidCharge, a comma-joined running summary.
+  structured {id, description, amountCents, voided, orderedBy, orderedAt} entry to
+  .status.lines, the itemized breakdown a receipt renders instead of a flat string; a staff
+  ring-up's entry is served at ring-up (servedAt/servedBy), a self-order's is unserved until
+  the desk submits MarkLineServed{tabKey, lineId} (operator/frontOfHouse only, confined like
+  VoidCharge), so the lines with orderedAt and no servedAt are the desk's orders queue.
+  .status.itemsMemo is re-derived from the live (non-voided) lines on every
+  Charge/VoidCharge, a comma-joined running summary.
   cafeTabSettlement projects both columns so a tab shows what was rung up, and the
   Weaver-dispatched DebitAccount posts the itemsMemo string as the settled ledger entry's memo.
   The cafeLeaseWorkplaces
@@ -104,6 +108,9 @@ declares:
     - operationType: VoidCharge
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: MarkLineServed
+      scope: any
+      grantsTo: [operator, frontOfHouse]
     - operationType: Settle
       scope: any
       grantsTo: [operator, frontOfHouse]
@@ -140,6 +147,7 @@ declares:
     - operationType: OpenTab
     - operationType: Charge
     - operationType: VoidCharge
+    - operationType: MarkLineServed
     - operationType: Settle
     - operationType: CreateMenuItem
     - operationType: RetireMenuItem
