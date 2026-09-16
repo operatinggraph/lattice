@@ -593,13 +593,14 @@ func TestCafeArrears_SiblingTargetLapseDoesNotOpen(t *testing.T) {
 // TestCafeArrears_HistoryTooLongGoesQuiet pins the degrade posture, and it is
 // the ONE vector where a recorded lapse must NOT open the gap. An account whose
 // transaction history outran the evaluation's replay budget carries
-// historyTooLong: the op cannot compute a head for it, so leaving the gap open
-// would have Weaver re-dispatch an evaluation that can only fail again, every
-// window, forever, with nothing sent and nothing said. Both suppressions are
-// asserted together — a lens that killed only the gap would still arm an @at at
-// a dueAt no evaluation could confirm, and one that killed only the timer would
-// still re-dispatch. The row itself stays projected, which is the operator's
-// signal in the weaver-targets bucket.
+// historyTooLong with the budget it exhausted: the op cannot compute a head
+// for it under that budget, so leaving the gap open would have Weaver
+// re-dispatch an evaluation that can only fail again, every window, forever,
+// with nothing sent and nothing said. Both suppressions are asserted together
+// — a lens that killed only the gap would still arm an @at at a dueAt no
+// evaluation could confirm, and one that killed only the timer would still
+// re-dispatch. The row itself stays projected, which is the operator's signal
+// in the weaver-targets bucket.
 func TestCafeArrears_HistoryTooLongGoesQuiet(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
@@ -609,6 +610,7 @@ func TestCafeArrears_HistoryTooLongGoesQuiet(t *testing.T) {
 		"dueAt":          "2026-08-06T14:20:00Z",
 		"evaluatedAt":    "2026-08-22T09:00:00Z",
 		"historyTooLong": true,
+		"historyBudget":  ArrearsPageLimit * ArrearsMaxPages,
 	})
 	// The lapse IS recorded and nothing was reminded for it: without the
 	// historyTooLong conjunct this is TestCafeArrears_Due exactly, so the vector
@@ -619,9 +621,165 @@ func TestCafeArrears_HistoryTooLongGoesQuiet(t *testing.T) {
 	require.Len(t, rows, 1, "the row must stay projected — quiet is not invisible")
 	v := rows[0].Values
 	require.Equal(t, true, v["historyTooLong"], "the operator reads this column off the weaver-targets row")
+	require.EqualValues(t, ArrearsPageLimit*ArrearsMaxPages, v["historyBudget"], "and the budget the flag was recorded under")
 	require.Equal(t, false, v["missing_evaluation"], "an evaluation that cannot succeed must not be re-dispatched every window")
 	require.Equal(t, false, v["violating"])
 	require.Nil(t, v["freshUntil"], "and no timer arms at a due date no evaluation could confirm")
+}
+
+// TestCafeArrears_HistoryTooLongUnderSmallerBudgetRearms is the way a raised
+// budget reaches the accounts a smaller one parked. A flag recorded under a
+// budget below the current one — or with no budget recorded at all — does not
+// prove the current evaluation cannot succeed, so it does not suppress the GAP:
+// missing_evaluation's budget arm opens it for exactly one evaluation, which
+// either finalizes or re-records the flag at the current budget (and
+// TestCafeArrears_HistoryTooLongGoesQuiet takes over). Two shapes: the
+// recorded-but-smaller budget, and the absent one — `historyBudget >= N` is
+// false on a null, so NOT of it is true, and absence reads as smaller.
+// freshUntil stays suppressed regardless: ANY recorded historyTooLong means no
+// dueAt has been confirmed by the CURRENT evaluation, so the timer never arms
+// on the flag's say-so alone, whatever budget it was recorded under.
+func TestCafeArrears_HistoryTooLongUnderSmallerBudgetRearms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	// Flagged under a smaller recorded budget; no lapse, nothing stale.
+	f.mkArrearsAccount(t, "smallbudget", map[string]any{
+		"dueAt":          "2026-09-11T10:00:00Z",
+		"evaluatedAt":    "2026-08-22T09:00:00Z",
+		"historyTooLong": true,
+		"historyBudget":  30,
+	})
+	// Flagged with no budget recorded, no due date, evaluated.
+	f.mkArrearsAccount(t, "nobudget", map[string]any{
+		"evaluatedAt":    "2026-08-22T09:00:00Z",
+		"historyTooLong": true,
+	})
+
+	rows := f.projectArrears(t, "smallbudget_acct")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["missing_evaluation"], "a flag recorded under a smaller budget opens the gap for one evaluation under the current one")
+	require.Equal(t, true, v["violating"])
+	require.EqualValues(t, 30, v["historyBudget"])
+	require.Nil(t, v["freshUntil"], "the smaller-budget flag still suppresses the TIMER — no dueAt has been confirmed by the current evaluation")
+
+	rows = f.projectArrears(t, "nobudget_acct")
+	require.Len(t, rows, 1)
+	v = rows[0].Values
+	require.Equal(t, true, v["historyTooLong"])
+	require.Nil(t, v["historyBudget"])
+	require.Equal(t, true, v["missing_evaluation"], "no recorded budget reads as a smaller one — the account is re-armed once")
+	require.Equal(t, true, v["violating"])
+	require.Nil(t, v["freshUntil"], "no due date recorded, so nothing to arm")
+}
+
+// TestCafeArrears_MidReplayPhaseGaps pins the continuation shape. An
+// evaluation part-way through a history longer than one page leaves a
+// checkpoint whose phase flips on every page; while it stands the row is
+// neither pending nor due — missing_evaluation is false and freshUntil null,
+// whatever the lapse or the stale mark say, because the head is unknown until
+// the enumeration is exhausted — and exactly ONE phase gap is open, the one
+// naming the recorded phase. That gap's directOp writes the other phase, so
+// the gap that dispatched a page is closed by that page's own write and the
+// next page is dispatched by its sibling. Both phases are pinned, the fixture
+// otherwise identical to TestCafeArrears_Due plus a stale mark, so a
+// checkpoint that failed to gate either arm reds here.
+func TestCafeArrears_MidReplayPhaseGaps(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	for _, phase := range []string{ArrearsPhaseA, ArrearsPhaseB} {
+		name := "replay" + phase
+		f.mkArrearsAccount(t, name, map[string]any{
+			"dueAt":       "2026-08-06T14:20:00Z",
+			"evaluatedAt": "2026-07-22T14:20:00Z",
+			"stale":       true,
+			"replay": map[string]any{
+				"phase":       phase,
+				"cursor":      "lnk.cafetransaction.BBREPLAYTXAHJKMNPQRS.postedTo.cafeaccount." + f.ids[name+"_acct"],
+				"pages":       2,
+				"debits":      map[string]any{"BBREPLAYTXAHJKMNPQRS": map[string]any{"postedAt": "2026-07-22T14:20:00Z", "amountCents": 2500}},
+				"reversed":    map[string]any{},
+				"creditCents": 0,
+			},
+		})
+		f.recordLapse(t, name+"_acct", map[string]string{CafeArrearsRemindersTarget: "2026-08-06T14:20:00Z"})
+
+		rows := f.projectArrears(t, name+"_acct")
+		require.Len(t, rows, 1)
+		v := rows[0].Values
+		require.Equal(t, false, v["missing_evaluation"], "phase %s: a replay in progress is not an evaluation to dispatch — the lapse and the stale mark wait for the finalize page", phase)
+		require.Equal(t, phase == ArrearsPhaseA, v["missing_replay_a"], "phase %s", phase)
+		require.Equal(t, phase == ArrearsPhaseB, v["missing_replay_b"], "phase %s", phase)
+		require.Equal(t, true, v["violating"], "phase %s: the open phase gap is what drives the next page", phase)
+		require.Nil(t, v["freshUntil"], "phase %s: no timer arms at a due date the replay has not confirmed", phase)
+		require.Equal(t, true, v["replaying"], "phase %s", phase)
+		require.EqualValues(t, 2, v["replayPages"], "phase %s", phase)
+	}
+}
+
+// TestCafeArrears_NoCheckpointNoPhaseGap is the vector the two above are
+// measured against: the SAME due shape with no checkpoint is violating through
+// missing_evaluation alone, both phase gaps false. Without it a lens that
+// projected a phase gap on every row would pass the mid-replay pins.
+func TestCafeArrears_NoCheckpointNoPhaseGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.mkArrearsAccount(t, "nocheckpoint", map[string]any{
+		"dueAt":       "2026-08-06T14:20:00Z",
+		"evaluatedAt": "2026-07-22T14:20:00Z",
+	})
+	f.recordLapse(t, "nocheckpoint_acct", map[string]string{CafeArrearsRemindersTarget: "2026-08-06T14:20:00Z"})
+
+	rows := f.projectArrears(t, "nocheckpoint_acct")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["missing_evaluation"])
+	require.Equal(t, false, v["missing_replay_a"], "no checkpoint, no continuation")
+	require.Equal(t, false, v["missing_replay_b"])
+	require.Equal(t, true, v["violating"])
+	require.Equal(t, false, v["replaying"])
+	require.Nil(t, v["replayPages"])
+}
+
+// TestCafeArrears_MalformedCheckpointReopensEvaluation pins the failure mode
+// of the phase chain: a checkpoint whose phase is neither value opens NO
+// phase gap, and without this vector's conjunct it would also close
+// missing_evaluation — a row with a recorded replay and no gap at all, parked
+// forever with nobody dispatched. The replay conjunct admits such a
+// checkpoint, so the evaluation gap re-opens and the op (which treats an
+// unresumable checkpoint as absent) restarts at page 1.
+func TestCafeArrears_MalformedCheckpointReopensEvaluation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.mkArrearsAccount(t, "badphase", map[string]any{
+		"evaluatedAt": "2026-07-22T14:20:00Z",
+		"stale":       true,
+		"replay": map[string]any{
+			"phase":       "x",
+			"cursor":      "lnk.cafetransaction.BBREPLAYTXAHJKMNPQRS.postedTo.cafeaccount." + f.ids["badphase_acct"],
+			"pages":       1,
+			"debits":      map[string]any{},
+			"reversed":    map[string]any{},
+			"creditCents": 0,
+		},
+	})
+
+	rows := f.projectArrears(t, "badphase_acct")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_replay_a"], "an unknown phase is neither continuation")
+	require.Equal(t, false, v["missing_replay_b"])
+	require.Equal(t, true, v["missing_evaluation"], "so the evaluation gap re-opens rather than leaving the row with no gap")
+	require.Equal(t, true, v["violating"])
+	require.Equal(t, true, v["replaying"], "the operator still sees the recorded checkpoint")
 }
 
 // TestCafeArrears_HistoryTooLongClearedReopens is the positive vector the one
