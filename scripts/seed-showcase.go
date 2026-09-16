@@ -1370,8 +1370,10 @@ func seedRileyClinicWorld(ctx context.Context, conn *substrate.Conn, adminKey, t
 				"followUpDate": completedStart.AddDate(0, 0, 28).Format("2006-01-02"),
 			},
 			&processor.ContextHint{
-				Reads:         []string{completedApptKey, completedApptKey + ".schedule"},
-				OptionalReads: []string{completedApptKey + ".status"},
+				Reads: []string{completedApptKey, completedApptKey + ".schedule"},
+				// .encounter + .documentation: absent on the first record,
+				// present when the op amends (record-or-amend).
+				OptionalReads: []string{completedApptKey + ".status", completedApptKey + ".encounter", completedApptKey + ".documentation"},
 			})
 	}
 

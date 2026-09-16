@@ -531,7 +531,11 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"link (appointment→provider). Both links follow Contract #1 §1.1 (the later-arriving appointment is the " +
 			"source). RescheduleAppointment rewrites the .schedule aspect with new startsAt/endsAt (re-deriving " +
 			"remindAt = startsAt − 24h so the clinic-reminders @at re-arms for a not-yet-sent reminder), leaving the " +
-			"links + status untouched; an omitted reason clears it (the caller carries the existing reason); a " +
+			"links untouched; a confirmed or checkedIn visit returns to scheduled (the confirmation was for the old " +
+			"date, and a recorded arrival must not exempt a moved visit from the past-due sweep — the " +
+			"clinic.appointmentRescheduled event carries statusReset: true), a scheduled one is re-stamped " +
+			"unchanged in the same batch (so a concurrent patient confirm of the old date conflicts under OCC), " +
+			"a never-set status is left absent; an omitted reason clears it (the caller carries the existing reason); a " +
 			"terminal appointment is never moved (TerminalStatus). " +
 			"SetAppointmentStatus upserts the .status aspect to one of {scheduled, confirmed, checkedIn, completed, " +
 			"cancelled, noShow}, with an optional audit note (a cancel / no-show reason, stored on .status distinct " +
@@ -540,11 +544,15 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"Transitioning to noShow also stores a noShowFeeCents amount on .status " +
 			"(caller-supplied positive number, or a 2500 default when omitted) — the billing consequence a no-show " +
 			"otherwise lacked; clinic-ledger's clinicNoShowSettlement lens bills the fee's presence on the current " +
-			"status, whichever op wrote it, with a DebitAccount charge. A patient's OWN cancel (the consumer scope=self " +
-			"grant, status=cancelled only) reads a three-state clock against .schedule.startsAt: at or after startsAt " +
+			"status, whichever op wrote it, with a DebitAccount charge. A patient may cancel or confirm their OWN " +
+			"appointment (the consumer scope=self grant, status=cancelled or confirmed; any other value is AuthDenied). " +
+			"A patient's own cancel reads a three-state clock against .schedule.startsAt: at or after startsAt " +
 			"it is refused VisitStarted (the front desk records the outcome); inside the 24-hour late-cancel window " +
 			"(startsAt − 24h, the reminder lead) it lands with lateCancel: true and the 2500 no-show fee on .status; " +
-			"earlier it is free. A patient's own RescheduleAppointment reads the same clock: VisitStarted once started, " +
+			"earlier it is free. A patient's own confirm is refused AuthDenied once the desk has checked the patient " +
+			"in (a self write never undoes the desk's record) and VisitStarted at or after startsAt; inside the " +
+			"24-hour window it lands (confirming is what the reminder asks for), and confirmed → confirmed is " +
+			"idempotent. A patient's own RescheduleAppointment reads the same clock: VisitStarted once started, " +
 			"LateReschedule inside the window (cancel, or call the desk — a free late move would sidestep the fee). " +
 			"Staff paths are unaffected. The terminal statuses {cancelled, completed, noShow} are FINAL: " +
 			"re-setting the same terminal value is idempotent (a cancelled re-set carries lateCancel + noShowFeeCents " +
@@ -567,13 +575,21 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"been booked since, and is out of scope. RecordEncounter is refused VisitNotHeld against a cancelled or noShow appointment (a visit " +
 			"that did not take place cannot be documented) and NotYetStarted ahead of .schedule.startsAt (the same " +
 			"inclusive, soft-clock boundary SetAppointmentStatus's terminal transitions read) — completed / scheduled " +
-			"/ confirmed / checkedIn past their start document normally; this op never writes .status. It upserts two " +
-			"sibling aspects along the sensitivity boundary: .encounter — the " +
-			"raw clinical record {summary, assessment?, plan?}, SENSITIVE, its DEK custodied on the clinicalRecord " +
+			"/ confirmed / checkedIn past their start document normally; this op never writes .status. It is " +
+			"record-or-amend over two sibling aspects along the sensitivity boundary: .encounter — the " +
+			"raw clinical record {summary, assessment, plan, superseded}, SENSITIVE, its DEK custodied on the clinicalRecord " +
 			"retention class (never on the patient's identity), readable only through the clinicEncountersRead Secure Lens, which decrypts it at projection for the treating provider — and .documentation " +
-			"— the OPERATIONAL, non-PHI signals {documentedAt (derived from op.submittedAt), followUpRequested, " +
+			"— the OPERATIONAL, non-PHI signals {documentedAt, amendedAt?, followUpRequested, " +
 			"followUpDate?} that the clinicAppointments lens DOES project (presence-of-documentation + " +
-			"follow-up scheduling, never the clinical content). TombstoneAppointment soft-deletes the appointment. The " +
+			"follow-up scheduling, never the clinical content). With no record yet (no live .documentation carrying " +
+			"a documentedAt) it writes the first record: documentedAt = op.submittedAt, superseded = []. With a " +
+			"record present it AMENDS: the current text moves onto superseded with the instant it was recorded " +
+			"(the prior amendedAt, else documentedAt), documentedAt is preserved as when the visit was FIRST " +
+			"documented, amendedAt = op.submittedAt says when the current text was recorded, and the follow-up " +
+			"signals are the payload's. An amendment that changes nothing (same three texts, same followUpRequested, " +
+			"same normalized followUpDate) writes nothing and emits nothing; a change to the follow-up signals alone " +
+			"rewrites .documentation (amendedAt carried, .encounter not written); past 40 superseded versions " +
+			"(MAX_ENCOUNTER_AMENDMENTS) a text amendment is refused AmendmentLimit; a text longer than 4000 bytes is InvalidArgument. TombstoneAppointment soft-deletes the appointment. The " +
 			"clinic's booking grid is a mandatory 15-minute cadence (:00/:15/:30/:45; SlotGridViolation if startsAt/endsAt " +
 			"misalign, AppointmentTooLong past 24h/96 cells): CreateAppointment AND RescheduleAppointment discretize " +
 			"[startsAt,endsAt) into its covered 15-minute cells and CLAIM a deterministic slot-claim aspect per cell on " +
@@ -604,7 +620,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"the orchestration-internal SetAppointmentStatus(noShow) counterpart clinic-reminders' pastDueAppointments " +
 			"Weaver target dispatches once a non-terminal appointment's .schedule.endsAt passes with no staff status " +
 			"update: a no-op if the appointment already reached a terminal status by dispatch time (an at-least-once " +
-			"race, never clobbers a legitimate completed/cancelled outcome) OR if the provider's .timeOff covers the " +
+			"race, never clobbers a legitimate completed/cancelled outcome), if its .schedule.endsAt is still ahead " +
+			"of op.submittedAt (the visit was moved after the lapse it was armed on — the sweep re-arms on the new " +
+			"date), OR if the provider's .timeOff covers the " +
 			"visit (the missed visit is the provider's unavailability, not the patient's no-show, so front desk " +
 			"resolves it manually instead of the sweep silently blaming the patient), otherwise the SAME .status " +
 			"upsert (deliberately with NO noShowFeeCents — the automated sweep marks a documentation lapse, not a " +
@@ -722,8 +740,10 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"provider/patient slot-claim cells the appointment no longer needs and claims the newly-covered ones, " +
 					"conflict-checked against both the provider's book (SlotConflict) and the patient's book " +
 					"(PatientDoubleBook) — a collision leaves the original booking's claims fully intact. The forPatient / " +
-					"withProvider links + the .status aspect are untouched. An omitted reason clears it (the caller carries " +
-					"the existing reason). Returns primaryKey.",
+					"withProvider links are untouched; a confirmed or checkedIn .status is reset to {value: scheduled} in " +
+					"the same batch (the event carries statusReset: true), a scheduled one is re-stamped unchanged, an " +
+					"absent one is left alone. An " +
+					"omitted reason clears it (the caller carries the existing reason). Returns primaryKey.",
 			},
 			{
 				Name:    "SetAppointmentStatus — confirm an appointment",
@@ -808,11 +828,12 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"followUpRequested": true,
 					"followUpDate":      "2027-01-15T15:00:00Z",
 				},
-				ExpectedOutcome: "Validates the appointment is alive + class=appointment, then upserts two sibling aspects: .encounter — " +
-					"the RAW clinical record {summary, assessment, plan} (an unfilled optional written as \"\"), SENSITIVE, DEK custodied on the clinicalRecord retention " +
+				ExpectedOutcome: "Validates the appointment is alive + class=appointment, then records or amends two sibling aspects: .encounter — " +
+					"the RAW clinical record {summary, assessment, plan, superseded} (an unfilled optional written as \"\"; superseded = [] on the first record), SENSITIVE, DEK custodied on the clinicalRecord retention " +
 					"class and readable only through the clinicEncountersRead Secure Lens — and .documentation — the OPERATIONAL signals {documentedAt (= op.submittedAt, canonical " +
-					"UTC), followUpRequested, followUpDate?} that the clinicAppointments lens DOES project. Unconditioned upsert (re-runnable — a provider can " +
-					"correct the note). Returns primaryKey.",
+					"UTC, when the visit was FIRST documented), followUpRequested, followUpDate?} that the clinicAppointments lens DOES project. A second submission " +
+					"with different content is an amendment: the prior text is appended to superseded with its recordedAt, documentedAt is preserved, amendedAt = op.submittedAt " +
+					"is recorded; an identical re-submit writes nothing; a follow-up-only change rewrites .documentation alone; past 40 superseded versions a text amendment is refused AmendmentLimit. Returns primaryKey.",
 			},
 		},
 	}
@@ -944,7 +965,7 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     statusAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"},
+		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "RescheduleAppointment"},
 		Description: "Appointment status aspect (clinic). Stored as vtx.appointment.<NanoID>.status (class " +
 			"appointmentStatus) = {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?, " +
 			"noShowFeeCents?, lateCancel?, correctedFrom?}. Non-sensitive. Written by CreateAppointment (initial scheduled), SetAppointmentStatus " +
@@ -956,8 +977,11 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 			"value it overwrote — and carries noShowFeeCents onto a noShow exactly as the first transition does, none " +
 			"onto completed / cancelled), and MarkPastDueNoShow " +
 			"(the same noShow transition, Weaver-dispatched once a non-terminal " +
-			"appointment's endsAt passes unattended, deliberately fee-less) — whose appointment vertexType DDL " +
-			"owns both scripts; this aspect-type DDL is the step-6 write gate. The fee's PRESENCE on the current " +
+			"appointment's endsAt passes unattended, deliberately fee-less), and RescheduleAppointment (a " +
+			"confirmed or checkedIn visit that is moved is reset to {value: scheduled} — the confirmation was for " +
+			"the old date, and a recorded arrival must not exempt a moved visit from the past-due sweep; the note " +
+			"is dropped with the transition it belonged to) — whose appointment vertexType DDL " +
+			"owns every script here; this aspect-type DDL is the step-6 write gate. The fee's PRESENCE on the current " +
 			"value is what clinic-ledger's clinicNoShowSettlement bills, whichever writer set it, and its absence on a " +
 			"charged appointment is what it reverses. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
@@ -976,7 +1000,7 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 			{
 				Name:            "appointment status aspect",
 				Payload:         map[string]any{"value": "confirmed"},
-				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.status; written by CreateAppointment / SetAppointmentStatus.",
+				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.status; written by CreateAppointment / SetAppointmentStatus, reset to scheduled by RescheduleAppointment when a confirmed / checkedIn visit is moved.",
 			},
 		},
 	}
@@ -1161,8 +1185,12 @@ func encounterAspectTypeDDL() pkgmgr.DDLSpec {
 		Sensitive:         true,
 		Custody:           pkgmgr.CustodySpec{Kind: pkgmgr.CustodyKindRetentionClass, RetentionClass: clinicalRecordRetentionClass},
 		Description: "Appointment encounter aspect (clinic). Stored as vtx.appointment.<NanoID>.encounter (class " +
-			"appointmentEncounter) = {summary, assessment, plan} — the raw clinical record, written by RecordEncounter (an unfilled optional is written as the empty string, so the plaintext shape is fixed and clinicEncountersRead's per-field secure columns never see a missing field) " +
-			"(whose appointment vertexType DDL owns the script). SENSITIVE: its DEK is custodied on the clinicalRecord " +
+			"appointmentEncounter) = {summary, assessment, plan, superseded} — the raw clinical record, written by RecordEncounter (an unfilled optional is written as the empty string, so the plaintext shape is fixed and clinicEncountersRead's per-field secure columns never see a missing field) " +
+			"(whose appointment vertexType DDL owns the script). summary / assessment / plan are the CURRENT text; " +
+			"superseded is the record's history — one {summary, assessment, plan, recordedAt} per amendment, in order, " +
+			"the text each amendment replaced and the instant that text was recorded ([] on the first record; bounded " +
+			"at 40 entries, AmendmentLimit past it). The history is retained in the record, not rendered: " +
+			"clinicEncountersRead projects the current text only. SENSITIVE: its DEK is custodied on the clinicalRecord " +
 			"retention-class holder (RetentionClasses), not on the patient's identity — the record survives " +
 			"ShredIdentityKey on its patient as a pseudonymized retained record, rather than becoming unrecoverable " +
 			"alongside the patient's directly-identifying .name/.email/.phone. The operational, non-PHI post-visit " +
@@ -1172,18 +1200,26 @@ func encounterAspectTypeDDL() pkgmgr.DDLSpec {
 			"it at projection. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"summary":{"type":"string"},"assessment":{"type":"string"},"plan":{"type":"string"}}}`,
+			`{"summary":{"type":"string"},"assessment":{"type":"string"},"plan":{"type":"string"},` +
+			`"superseded":{"type":"array","items":{"type":"object","properties":{"summary":{"type":"string"},"assessment":{"type":"string"},"plan":{"type":"string"},"recordedAt":{"type":"string"}}}}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"summary":    "Visit summary / clinical note (RAW PHI — decrypted at projection into clinicEncountersRead for the treating provider).",
-			"assessment": "Clinical assessment / diagnosis (RAW PHI — decrypted at projection into clinicEncountersRead for the treating provider). Written as \"\" when unfilled.",
-			"plan":       "Treatment plan / orders (RAW PHI — decrypted at projection into clinicEncountersRead for the treating provider). Written as \"\" when unfilled.",
+			"summary":    "Current visit summary / clinical note (RAW PHI — decrypted at projection into clinicEncountersRead for the treating provider).",
+			"assessment": "Current clinical assessment / diagnosis (RAW PHI — decrypted at projection into clinicEncountersRead for the treating provider). Written as \"\" when unfilled.",
+			"plan":       "Current treatment plan / orders (RAW PHI — decrypted at projection into clinicEncountersRead for the treating provider). Written as \"\" when unfilled.",
+			"superseded": "The record's history, oldest first: one {summary, assessment, plan, recordedAt} per amendment — the text that amendment replaced, and recordedAt the instant that text was recorded (the prior amendedAt, or documentedAt for the first version). [] on the first record; at most 40 entries (AmendmentLimit). RAW PHI, encrypted with the rest of the aspect; never projected.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name:            "appointment encounter aspect",
-				Payload:         map[string]any{"summary": "Annual checkup, vitals normal.", "assessment": "Essential hypertension, well-controlled."},
+				Name:            "appointment encounter aspect — first record",
+				Payload:         map[string]any{"summary": "Annual checkup, vitals normal.", "assessment": "Essential hypertension, well-controlled.", "plan": "", "superseded": []any{}},
 				ExpectedOutcome: "Stored ENCRYPTED as vtx.appointment.<NanoID>.encounter, written by RecordEncounter, DEK custodied on the clinicalRecord retention-class holder. Rendered back to the treating provider through clinicEncountersRead, which decrypts it at projection.",
+			},
+			{
+				Name: "appointment encounter aspect — amended once",
+				Payload: map[string]any{"summary": "Annual checkup, vitals normal; BP re-taken 128/82.", "assessment": "Essential hypertension, well-controlled.", "plan": "",
+					"superseded": []any{map[string]any{"summary": "Annual checkup, vitals normal.", "assessment": "Essential hypertension, well-controlled.", "plan": "", "recordedAt": "2026-07-01T15:30:00Z"}}},
+				ExpectedOutcome: "The current text after one amendment; the first version sits under superseded with the instant it was recorded (the sibling .documentation's documentedAt). The sibling .documentation carries amendedAt for this write.",
 			},
 		},
 	}
@@ -1209,28 +1245,36 @@ func documentationAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"RecordEncounter"},
 		Description: "Appointment documentation aspect (clinic). Stored as vtx.appointment.<NanoID>.documentation " +
-			"(class appointmentDocumentation) = {documentedAt, followUpRequested, followUpDate?} — the OPERATIONAL, " +
+			"(class appointmentDocumentation) = {documentedAt, amendedAt?, followUpRequested, followUpDate?} — the OPERATIONAL, " +
 			"non-PHI half of the post-visit record, written by RecordEncounter (whose appointment vertexType DDL owns " +
 			"the script) alongside the sensitive .encounter aspect. It is a SEPARATE aspect from .encounter because " +
 			"step 6.5 encrypts an entire aspect's data map: a non-sensitive field sharing the sensitive aspect's data " +
 			"would be encrypted along with the clinical content and unreadable to every plain lens, so the " +
 			"aspect-level sensitivity boundary forces this split. Consumed by clinicAppointments, " +
 			"clinicAppointmentsRead, and providerAppointmentsRead (clinic-domain's own lenses) and by " +
-			"clinic-reminders' followUpReminders. Declaration-only: no op handler.",
+			"clinic-reminders' followUpReminders. documentedAt is when the visit was FIRST documented and is " +
+			"preserved across amendments; amendedAt is when the current TEXT was recorded, present once the text " +
+			"has been amended (a follow-up-only change carries it). Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"documentedAt":{"type":"string"},"followUpRequested":{"type":"boolean"},"followUpDate":{"type":"string"}}}`,
+			`{"documentedAt":{"type":"string"},"amendedAt":{"type":"string"},"followUpRequested":{"type":"boolean"},"followUpDate":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"documentedAt":      "When the visit was documented (RFC3339, = op.submittedAt). Operational — projected. A non-null documentedAt IS the \"visit documented\" presence signal.",
+			"documentedAt":      "When the visit was FIRST documented (RFC3339, = the first RecordEncounter's op.submittedAt; preserved by every amendment). Operational — projected. A non-null documentedAt IS the \"visit documented\" presence signal.",
+			"amendedAt":         "When the current TEXT was recorded (RFC3339, = the text-amending RecordEncounter's op.submittedAt; a change to the follow-up signals alone carries it unchanged). Absent until the text is first amended. Operational — projected.",
 			"followUpRequested": "Whether a follow-up is needed. Operational — projected.",
 			"followUpDate":      "Suggested follow-up date (RFC3339 / date). Operational — projected when followUpRequested.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
-				Name:            "appointment documentation aspect",
+				Name:            "appointment documentation aspect — first record",
 				Payload:         map[string]any{"documentedAt": "2026-07-01T15:30:00Z", "followUpRequested": false},
 				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.documentation; written by RecordEncounter. Read by clinicAppointments and followUpReminders.",
+			},
+			{
+				Name:            "appointment documentation aspect — amended",
+				Payload:         map[string]any{"documentedAt": "2026-07-01T15:30:00Z", "amendedAt": "2026-07-02T09:10:00Z", "followUpRequested": false},
+				ExpectedOutcome: "The same record after an amendment: documentedAt unchanged (first documented), amendedAt the amending op's submittedAt. The sibling .encounter's superseded list holds the replaced text.",
 			},
 		},
 	}
@@ -3078,6 +3122,24 @@ def normalize_follow_up_date(s):
 APPOINTMENT_STATUSES = ["scheduled", "confirmed", "checkedIn", "completed", "cancelled", "noShow"]
 TERMINAL_STATUSES = ["cancelled", "completed", "noShow"]
 
+# The bound on each of RecordEncounter's three clinical texts, in BYTES
+# (Starlark len() on a string counts bytes; the descriptor's maxLength is the
+# same number in characters, so a multi-byte character is charged more than
+# once here). It is what sizes the history cap below.
+ENCOUNTER_FIELD_MAX_BYTES = 4000
+
+# The most superseded versions one visit's clinical record carries: each text
+# amendment appends the text it replaces to .encounter's superseded list, and
+# the list lives inside the one encrypted aspect, so the whole plaintext must
+# stay inside one NATS message. Byte arithmetic: a version is at most three
+# ENCOUNTER_FIELD_MAX_BYTES texts, 12,000 B; the current text plus 40
+# superseded versions is 41 × 12,000 B ≈ 492 KB of plaintext (JSON keys and
+# recordedAt stamps are noise beside it); step 6.5's envelope base64-encodes
+# the ciphertext (×4/3, ≈ ×1.34 with the JSON around it) ≈ 660 KB — under
+# NATS's 1 MiB max_payload with room for the batch's other mutations, the
+# tracker and the outbox aspect. Past the bound the op refuses AmendmentLimit.
+MAX_ENCOUNTER_AMENDMENTS = 40
+
 GRID_MINUTES_STR = ["00", "15", "30", "45"]
 GRID_STEP = "15m"
 MAX_SLOT_CELLS = 96  # 24h of 15-minute cells -- a generous backstop, not an expected ceiling
@@ -3600,10 +3662,27 @@ def execute(state, op):
         # RescheduleAppointment's dispatcher (cmd/clinic-app/web/app.js
         # submitReschedule)
         cur_status = kv.Read(appt_key + ".status")
+        # A moved visit is on the schedule: a confirmed or checked-in one goes
+        # back to scheduled — the confirmation was for the old date (the
+        # re-armed reminder asks for it again), and a recorded arrival for a
+        # visit moved to next week would exempt it from the past-due sweep, so
+        # a later no-show would never be recorded or billed (status_reset says
+        # so on the event; the note is dropped with the transition that
+        # recorded it — neither carries a fee). A scheduled one is re-stamped
+        # unchanged: every LIVE non-terminal .status is written, as a bare
+        # update on a declared key conditioned on the hydrated revision, so a
+        # patient's own confirm hydrated against the old schedule conflicts
+        # under OCC instead of landing a confirmation on the moved visit.
+        # An absent or tombstoned .status is left untouched.
+        write_status = False
+        status_reset = False
         if cur_status != None and not cur_status.isDeleted:
             cur_val = cur_status.data.get("value")
             if cur_val in TERMINAL_STATUSES:
                 fail("TerminalStatus: appointment " + appt_key + " is " + str(cur_val) + " (terminal); cannot reschedule — cancelled/completed/noShow are final")
+            write_status = True
+            if cur_val in ("confirmed", "checkedIn"):
+                status_reset = True
 
         # The appointment's CURRENT .schedule, read once for the two things below
         # that need it: the patient-self clock, and the release-old / claim-new
@@ -3656,8 +3735,9 @@ def execute(state, op):
             sched["reason"] = reason
 
         # Unconditioned upsert of the WHOLE .schedule aspect (the caller round-trips
-        # the reason; an omitted reason clears it; forPatient / withProvider links +
-        # .status untouched — the move keeps the same provider / patient). Vacated
+        # the reason; an omitted reason clears it; forPatient / withProvider links
+        # untouched — the move keeps the same provider / patient; .status is
+        # rewritten only by the reset above). Vacated
         # cells release via an UNCONDITIONED tombstone (known-live from old_cells, so
         # no read needed); newly-covered cells run through claim_cell exactly as
         # Create does (reject / CAS-revive / create). If ANY to_claim cell collides,
@@ -3665,6 +3745,8 @@ def execute(state, op):
         # rejected, so a failed reschedule leaves the original booking's claims fully
         # intact (design §2.5).
         mutations = [make_aspect_upsert(appt_key, "schedule", "appointmentSchedule", sched)]
+        if write_status:
+            mutations.append(make_aspect_upsert(appt_key, "status", "appointmentStatus", {"value": "scheduled"}))
         for c in to_release:
             cc = slot_cellcode(c)
             mutations.append(make_tombstone(provider + ".slot" + cc))
@@ -3675,8 +3757,10 @@ def execute(state, op):
         for c in to_claim:
             cc = slot_cellcode(c)
             mutations.append(claim_cell(patient, cc, "patientSlotClaim", "PatientDoubleBook", "patient"))
-        events = [{"class": "clinic.appointmentRescheduled",
-                   "data": {"appointmentKey": appt_key, "startsAt": starts_at, "endsAt": ends_at}}]
+        event_data = {"appointmentKey": appt_key, "startsAt": starts_at, "endsAt": ends_at}
+        if status_reset:
+            event_data["statusReset"] = True
+        events = [{"class": "clinic.appointmentRescheduled", "data": event_data}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": appt_key}}
 
@@ -3705,19 +3789,21 @@ def execute(state, op):
 
         status = required_status(p)
 
-        # Patient-self (consumer's scope=self grant only): restricted to cancel —
-        # a self-service patient may cancel their own appointment but never mark
-        # confirmed/checkedIn/completed/noShow (those stay operator-only; this is
-        # a value restriction on TOP OF the identity binding, since a self grant
-        # binds WHO but says nothing about WHICH status). Checked, and identity
-        # bound, before the terminal/idempotent branching below so a self-scoped
-        # caller must prove ownership even on an idempotent re-cancel (empty for
-        # the standing operator grant — scope=any never sets authContext).
+        # Patient-self (consumer's scope=self grant only): restricted to cancel
+        # or confirm — a self-service patient may cancel or confirm their own
+        # appointment but never mark checkedIn/completed/noShow (those stay
+        # staff-only; this is a value restriction on TOP OF the identity
+        # binding, since a self grant binds WHO but says nothing about WHICH
+        # status). Checked, and identity bound, before the terminal/idempotent
+        # branching below so a self-scoped caller must prove ownership even on
+        # an idempotent re-cancel (empty for the standing operator grant —
+        # scope=any never sets authContext). A self confirm is further gated
+        # once the current status is known, below.
         # authcontext-target: (ownership) the target must be this appointment's
         # patient's identifiedBy identity, so a forged one only fails closed.
         if op.authContextTarget != "":
-            if status != "cancelled":
-                fail("AuthDenied: a patient may only cancel their own appointment (status must be cancelled)")
+            if status not in ("cancelled", "confirmed"):
+                fail("AuthDenied: a patient may only cancel or confirm their own appointment (status must be cancelled or confirmed)")
             self_patient = required_string(p, "patient")
             _, self_patient_id = parts_of(self_patient, "patient", "patient")
             _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
@@ -3726,7 +3812,7 @@ def execute(state, op):
             # self-service caller
             identified_by = kv.Read(identified_by_lnk)
             if identified_by == None or identified_by.isDeleted:
-                fail("AuthDenied: a patient may only cancel their own appointment")
+                fail("AuthDenied: a patient may only cancel or confirm their own appointment")
             # The binding proves the caller owns the patient they NAME; this
             # proves that patient is this appointment's. Ordered after the
             # binding because it answers differently for a real endpoint than a
@@ -3756,6 +3842,39 @@ def execute(state, op):
             cur_val = cur_status.data.get("value")
             if cur_val in TERMINAL_STATUSES and status != cur_val:
                 fail("TerminalStatus: appointment " + appt_key + " is " + str(cur_val) + " (terminal); cannot transition to " + status + " — cancelled/completed/noShow are final")
+        # A patient's own confirm, after the ownership binding above and the
+        # current-status read. An already-confirmed visit is the EMPTY batch:
+        # nothing is re-stamped (a staff-written note on .status stays as it
+        # is) and no event is emitted — a re-confirm changes nothing, so it is
+        # idempotent under at-least-once and reads no clock. primaryKey stays
+        # OUT of the response (the write-footprint reply constraint). A FIRST
+        # confirm is gated: a visit the desk has already checked in is not the
+        # patient's to write over (the same posture the staff guard takes
+        # toward another building's records), and a visit cannot be confirmed
+        # once it has begun — self_visit_clock's "started"; "late" is fine,
+        # confirming inside 24 h is exactly what the reminder invites. The
+        # write is exactly {value: confirmed}: the payload's note is IGNORED
+        # on this path (the audit note is a staff record — a patient's own
+        # confirm never carries one). No fee, no cells move.
+        # authcontext-target: (selector) its presence selects the patient-self
+        # gates — a stricter branch, never an exemption; ownership was proven
+        # by the identifiedBy binding + require_matching_patient above.
+        if op.authContextTarget != "" and status == "confirmed":
+            if cur_val == "confirmed":
+                return {"mutations": [], "events": [], "response": {}}
+            if cur_val == "checkedIn":
+                fail("AuthDenied: appointment " + appt_key + " is checkedIn — the desk has already checked you in, so the visit cannot be confirmed over it")
+            # read-posture: (a) declared in contextHint.reads by the self
+            # dispatcher (cmd/clinic-app/web/app.js setStatus) — CreateAppointment
+            # always writes .schedule, so its absence is a correctness error.
+            self_sched = kv.Read(appt_key + ".schedule")
+            if self_visit_clock(appt_key, self_sched, op.submittedAt) == "started":
+                fail("VisitStarted: appointment " + appt_key + " started at " + self_sched.data.get("startsAt") + " (submitted " + time.rfc3339_utc(op.submittedAt) + "); a visit cannot be confirmed once it has begun — the front desk records the outcome")
+            mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", {"value": "confirmed"})]
+            events = [{"class": "clinic.appointmentStatusSet",
+                       "data": {"appointmentKey": appt_key, "status": "confirmed"}}]
+            return {"mutations": mutations, "events": events,
+                    "response": {"primaryKey": appt_key}}
         # Optional audit note (cancel / no-show reason for billing + records).
         # Stored on the .status aspect, distinct from the .schedule visit reason.
         # Omitted → the .status carries only {value} (an unconditioned upsert, so a
@@ -3929,10 +4048,10 @@ def execute(state, op):
         # (e.g. staff completed/cancelled it between the lens's last projection and
         # this dispatch): never clobber an already-final outcome with noShow.
         cur_val = None
-        # read-posture: (a) declared in contextHint.reads — unlike
-        # SetAppointmentStatus's human dispatcher, this op's only caller (the
-        # pastDueAppointments playbook) always needs this read, so it is required,
-        # not optional: absence here is a correctness error, not a branch.
+        # read-posture: (d) declared in contextHint.optionalReads by this op's
+        # only caller (the pastDueAppointments playbook) — a never-set status is
+        # exactly the visit the sweep closes, so absence is a branch, not an
+        # error.
         cur_status = kv.Read(appt_key + ".status")
         if cur_status != None and not cur_status.isDeleted:
             cur_val = cur_status.data.get("value")
@@ -3957,8 +4076,9 @@ def execute(state, op):
         if provider == None or patient == None:
             fail("MissingBinding: appointment " + appt_key + " has no bound provider/patient; cannot auto no-show")
 
-        # read-posture: (a) declared in contextHint.reads — same key SetAppointmentStatus's
-        # terminal branch reads, always needed here (MarkPastDueNoShow is always terminal).
+        # read-posture: (a) declared in contextHint.reads by the pastDueAppointments
+        # playbook — same key SetAppointmentStatus's terminal branch reads, always
+        # needed here (MarkPastDueNoShow is always terminal).
         schedule = kv.Read(appt_key + ".schedule")
 
         # A provider time-off range covering this visit means the provider was
@@ -3973,6 +4093,16 @@ def execute(state, op):
         if schedule != None and not schedule.isDeleted:
             starts_at = schedule.data.get("startsAt")
             ends_at = schedule.data.get("endsAt")
+            # The visit the sweep is closing must actually have ended: a
+            # dispatch that raced a RescheduleAppointment reads the MOVED
+            # .schedule here (it is hydrated), and its endsAt is now ahead of
+            # this dispatch's submittedAt — the lapse it was armed on belongs
+            # to the old date. No-op; the lens re-arms at the new endsAt and
+            # dispatches again if that one lapses. Same soft, inclusive
+            # boundary the other clocks read (canonical whole-second UTC on
+            # both sides, so lexical order is chronological).
+            if ends_at != None and ends_at > time.rfc3339_utc(op.submittedAt):
+                return {"mutations": [], "events": [], "response": {}}
             if starts_at != None and ends_at != None and time_off_overlap(provider, starts_at, ends_at) != None:
                 return {"mutations": [], "events": [], "response": {}}
 
@@ -4136,6 +4266,19 @@ def execute(state, op):
         if cls != "appointment":
             fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
 
+        # Payload shape, checked before any read: each of the three texts is
+        # bounded at ENCOUNTER_FIELD_MAX_BYTES (the InputSchema's maxLength,
+        # enforced here because the cap on the superseded history below is
+        # sized in bytes and a bound the script does not hold is not a bound).
+        # Starlark len() on a string counts BYTES, so a multi-byte character
+        # spends more than one of them.
+        summary = required_string(p, "summary")
+        assessment = optional_string(p, "assessment")
+        plan = optional_string(p, "plan")
+        for field, text in [("summary", summary), ("assessment", assessment), ("plan", plan)]:
+            if text != None and len(text) > ENCOUNTER_FIELD_MAX_BYTES:
+                fail("InvalidArgument: " + field + " exceeds " + str(ENCOUNTER_FIELD_MAX_BYTES) + " bytes (" + str(len(text)) + ")")
+
         # Standing provider-binding guard, mirroring RescheduleAppointment /
         # SetAppointmentStatus: a bound provider may document THEIR OWN
         # appointment; anyone else falls back to the workplace walk, which a
@@ -4187,22 +4330,16 @@ def execute(state, op):
         # raises the privacy-critical alarm. Omitting an optional field would fire
         # that alarm on the ordinary case — a visit with no separate assessment —
         # and drown the signal it exists to carry.
-        summary = required_string(p, "summary")
-        assessment = optional_string(p, "assessment")
-        plan = optional_string(p, "plan")
         enc = {"summary": summary,
                "assessment": assessment if assessment != None else "",
                "plan": plan if plan != None else ""}
-        # documentedAt is OPERATIONAL (when the visit was documented) — derived
-        # from op.submittedAt, normalized to canonical whole-second UTC
-        # (time.rfc3339_utc — pure, no clock read). A non-null documentedAt IS
-        # the "visit documented" presence signal the lens surfaces.
-        doc = {"documentedAt": time.rfc3339_utc(op.submittedAt),
-               # followUpRequested is OPERATIONAL, non-PHI (the existence of a
-               # follow-up, like an appointment time — projected). The clinical REASON
-               # for a follow-up lives in .encounter's plan field, RAW PHI decrypted at
-               # projection into clinicEncountersRead for the treating provider only.
-               "followUpRequested": optional_bool(p, "followUpRequested")}
+        # followUpRequested is OPERATIONAL, non-PHI (the existence of a
+        # follow-up, like an appointment time — projected). The clinical REASON
+        # for a follow-up lives in .encounter's plan field, RAW PHI decrypted at
+        # projection into clinicEncountersRead for the treating provider only.
+        # The follow-up signals are the payload's on every write — the form
+        # re-sends them, and followUpReminders keeps reading the same two keys.
+        doc = {"followUpRequested": optional_bool(p, "followUpRequested")}
         follow_date = optional_string(p, "followUpDate")
         if doc["followUpRequested"]:
             # A follow-up with no target date can never come due, so
@@ -4213,11 +4350,97 @@ def execute(state, op):
             # Normalized to a full canonical-UTC RFC3339 instant so the optional
             # clinic-reminders follow-up reminder can arm an @at timer at it.
             doc["followUpDate"] = normalize_follow_up_date(follow_date)
-        # Unconditioned upsert of both aspects (re-runnable — a provider can
-        # correct the note). The .schedule / .status aspects + the forPatient /
-        # withProvider links are untouched.
-        mutations = [make_aspect_upsert(appt_key, "encounter", "appointmentEncounter", enc),
-                     make_aspect_upsert(appt_key, "documentation", "appointmentDocumentation", doc)]
+
+        # Record-or-amend. "A record exists" is what the lenses' own presence
+        # rule says it is: a live .documentation carrying a documentedAt — never
+        # .encounter's presence. Both prior aspects are hydrated (decrypted at
+        # step 4 for the sensitive one), so an amendment can carry the text it
+        # replaces; a record whose class key was destroyed faults the declared
+        # read before this runs, and refusing to amend what cannot be read is
+        # the honest outcome.
+        # read-posture: (d) declared in contextHint.optionalReads by every
+        # RecordEncounter dispatcher — absent is the first record.
+        prior_doc = kv.Read(appt_key + ".documentation")
+        # read-posture: (d) declared in contextHint.optionalReads by every
+        # RecordEncounter dispatcher — absent is the first record.
+        prior_enc = kv.Read(appt_key + ".encounter")
+        # Every instant here derives from op.submittedAt, normalized to canonical
+        # whole-second UTC (time.rfc3339_utc — pure, no clock read).
+        now = time.rfc3339_utc(op.submittedAt)
+        recorded = (prior_doc != None and not prior_doc.isDeleted
+                    and prior_doc.data.get("documentedAt") not in (None, ""))
+        write_encounter = True
+        if not recorded:
+            # The first record. documentedAt is when the visit was FIRST
+            # documented — the presence signal the lenses surface; superseded
+            # starts empty so the plaintext shape is fixed from the first
+            # write.
+            enc["superseded"] = []
+            doc["documentedAt"] = now
+        else:
+            # A record exists. documentedAt is PRESERVED whatever follows.
+            # The follow-up signals are the payload's on every write.
+            prior_data = prior_doc.data
+            prior_text = {"summary": "", "assessment": "", "plan": ""}
+            superseded = []
+            if prior_enc != None and not prior_enc.isDeleted:
+                for field in ["summary", "assessment", "plan"]:
+                    v = prior_enc.data.get(field)
+                    prior_text[field] = v if v != None else ""
+                prior_superseded = prior_enc.data.get("superseded")
+                if prior_superseded != None:
+                    superseded = list(prior_superseded)
+            text_changed = (prior_text["summary"] != enc["summary"]
+                            or prior_text["assessment"] != enc["assessment"]
+                            or prior_text["plan"] != enc["plan"])
+            follow_up_changed = (prior_data.get("followUpRequested") != doc["followUpRequested"]
+                                 or prior_data.get("followUpDate") != doc.get("followUpDate"))
+            # "Amended" is a claim that something changed: the same three
+            # texts, the same followUpRequested and the same normalized
+            # followUpDate write nothing and emit nothing. primaryKey stays OUT
+            # of the response — the write-footprint reply constraint
+            # (commit_path.go) rejects a script-named primaryKey with no
+            # matching mutation.
+            if not text_changed and not follow_up_changed:
+                return {"mutations": [], "events": [], "response": {}}
+            doc["documentedAt"] = prior_data.get("documentedAt")
+            if text_changed:
+                # A TEXT amendment: the current text moves onto the superseded
+                # list with the instant it was recorded (the prior amendedAt
+                # when the record has been amended before, else its
+                # documentedAt), the new text becomes current, and amendedAt
+                # says when the current text was recorded. A prior plaintext
+                # written before superseded existed reads as an empty list.
+                if len(superseded) >= MAX_ENCOUNTER_AMENDMENTS:
+                    fail("AmendmentLimit: appointment " + appt_key + " already carries " + str(len(superseded)) + " superseded versions of its clinical record (the bound is " + str(MAX_ENCOUNTER_AMENDMENTS) + "); the record cannot be amended again")
+                recorded_at = prior_data.get("amendedAt")
+                if recorded_at == None:
+                    recorded_at = prior_data.get("documentedAt")
+                entry = {"summary": prior_text["summary"],
+                         "assessment": prior_text["assessment"],
+                         "plan": prior_text["plan"],
+                         "recordedAt": recorded_at}
+                enc["superseded"] = superseded + [entry]
+                doc["amendedAt"] = now
+            else:
+                # Only the follow-up signals changed: the text stands as
+                # recorded, so .encounter is not written (its history and its
+                # revision do not move) and the prior amendedAt, if any, is
+                # carried — it dates the current TEXT, which this write does
+                # not touch.
+                write_encounter = False
+                if prior_data.get("amendedAt") != None:
+                    doc["amendedAt"] = prior_data.get("amendedAt")
+        # Each write is a bare update on a declared key, so the commit
+        # conditions it on the hydrated revision: two concurrent amendments
+        # cannot both build on the same prior. A text amendment and the first
+        # record land both aspects in one batch; a follow-up-only change lands
+        # .documentation alone. The .schedule / .status aspects + the
+        # forPatient / withProvider links are untouched.
+        mutations = []
+        if write_encounter:
+            mutations.append(make_aspect_upsert(appt_key, "encounter", "appointmentEncounter", enc))
+        mutations.append(make_aspect_upsert(appt_key, "documentation", "appointmentDocumentation", doc))
         events = [{"class": "clinic.appointmentEncounterRecorded",
                    "data": {"appointmentKey": appt_key}}]
         return {"mutations": mutations, "events": events,

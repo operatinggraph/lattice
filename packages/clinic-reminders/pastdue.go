@@ -148,7 +148,16 @@ func pastDueAppointmentsTarget() pkgmgr.WeaverTargetSpec {
 				Action:    "directOp",
 				Operation: pastDueNoShowOp,
 				Params:    map[string]string{"appointmentKey": "row.entityKey"},
-				Reads:     []string{"row.entityKey"},
+				// The op reads the appointment's .schedule (the visit clocks and
+				// the cell release) on every dispatch, so it is REQUIRED; .status
+				// is OPTIONAL because a never-set status is exactly the visit
+				// this sweep exists to close. Declaring both hands the Processor
+				// the hydrated revisions its bare .status update is conditioned
+				// on — an undeclared key is served by the live seam and its write
+				// lands unconditioned, so a reschedule committing between this
+				// dispatch's read and its commit would be overwritten.
+				Reads:         []string{"row.entityKey", "row.entityKey.schedule"},
+				OptionalReads: []string{"row.entityKey.status"},
 			},
 		},
 	}

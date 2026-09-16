@@ -83,7 +83,7 @@ func TestPackage_DDLs(t *testing.T) {
 		"patientDemographics":       {"CreatePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"},
 		"providerProfile":           {"CreateProvider", "SetProviderProfile"},
 		"appointmentSchedule":       {"CreateAppointment", "RescheduleAppointment"},
-		"appointmentStatus":         {"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow"},
+		"appointmentStatus":         {"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "RescheduleAppointment"},
 		"providerHours":             {"SetProviderHours"},
 		"providerTimeOff":           {"SetProviderTimeOff"},
 		"providerSlotClaim":         {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
@@ -521,7 +521,10 @@ func TestPackage_ScriptGuards(t *testing.T) {
 		`make_aspect_upsert(appt_key, "encounter", "appointmentEncounter"`, // RecordEncounter upserts the sensitive .encounter half
 		`make_aspect_upsert(appt_key, "documentation", "appointmentDocumentation"`, // RecordEncounter upserts the operational .documentation half
 		`clinic.appointmentEncounterRecorded`,                                      // RecordEncounter event
-		`"documentedAt": time.rfc3339_utc(op.submittedAt)`,                         // operational documentedAt derived from submittedAt
+		`now = time.rfc3339_utc(op.submittedAt)`,                                   // documentedAt / amendedAt derived from submittedAt
+		`MAX_ENCOUNTER_AMENDMENTS`,                                                 // the superseded history's bound (AmendmentLimit)
+		`"AmendmentLimit: `,                                                        // the refusal past the bound
+		`enc["superseded"] = superseded + [entry]`,                                 // an amendment appends the replaced text
 		`cannot record encounter on appointment `,                                  // RecordEncounter's standing provider-binding guard
 	} {
 		if !strings.Contains(appointmentDDLScript, want) {

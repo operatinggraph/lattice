@@ -27,6 +27,14 @@ import (
 //  6. TestClinic_StaffCancel_InsideWindow_NoFee — the staff path has no window
 //  7. TestClinic_CorrectAppointmentStatus_NoShowCarriesFee — a correction onto noShow writes the fee (default / caller / refused non-positive); onto completed / cancelled writes none
 //
+// The patient's own confirm — the same ownership binding and clock, no fee:
+//
+//  8. TestClinic_SelfConfirm_BeforeStart      — accepted with the clock open AND late (confirming inside 24 h is what the reminder invites); a re-confirm is the empty batch, before and after start
+// 8b. TestClinic_SelfConfirm_NeverCarriesANote — a self confirm writes exactly {value: confirmed} (the payload's note is ignored); a self re-confirm re-stamps nothing, so a staff note on .status survives it
+//  9. TestClinic_SelfConfirm_VisitStarted     — refused VisitStarted at and after startsAt
+// 10. TestClinic_SelfConfirm_CheckedIn_Denied — refused AuthDenied once the desk has checked the patient in; the arrival stays recorded
+// 11. TestClinic_SelfConfirm_OnlyOwnAndOnlyCancelOrConfirm — a stranger's identity is refused AuthDenied; a self completed is still AuthDenied; the staff confirm carries no clock
+//
 // Every submit carries an explicit submittedAt: the clock is read against the
 // visit's own startsAt, and both boundaries are inclusive on the stricter side.
 
@@ -70,6 +78,32 @@ func lcSelfCancel(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 	label, apptKey, providerKey, patientKey, note, submittedAt string) (processor.MessageOutcome, string) {
 	t.Helper()
 	payload := `{"appointmentKey":"` + apptKey + `","status":"cancelled","provider":"` + providerKey + `","patient":"` + patientKey + `"`
+	if note != "" {
+		payload += `,"note":"` + note + `"`
+	}
+	payload += `}`
+	patientID := patientKey[len("vtx.patient."):]
+	return lcSelfSubmit(t, ctx, conn, cp, cons, label, "SetAppointmentStatus", payload, submittedAt,
+		clRescheduleReads(apptKey, providerKey, patientKey),
+		[]string{apptKey + ".status", "lnk.patient." + patientID + ".identifiedBy.identity." + clConsumerID})
+}
+
+// lcSelfStatus is the patient's own SetAppointmentStatus(status) with the
+// self dispatcher's declared reads (app.js setStatus on the self path: the
+// appointment, its .schedule, both endpoint links; optional: the current
+// .status and the identifiedBy ownership probe) — the descriptor's own
+// declaration, whichever status is set.
+func lcSelfStatus(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
+	label, apptKey, providerKey, patientKey, status, submittedAt string) (processor.MessageOutcome, string) {
+	t.Helper()
+	return lcSelfStatusNote(t, ctx, conn, cp, cons, label, apptKey, providerKey, patientKey, status, "", submittedAt)
+}
+
+// lcSelfStatusNote is lcSelfStatus with a payload note.
+func lcSelfStatusNote(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
+	label, apptKey, providerKey, patientKey, status, note, submittedAt string) (processor.MessageOutcome, string) {
+	t.Helper()
+	payload := `{"appointmentKey":"` + apptKey + `","status":"` + status + `","provider":"` + providerKey + `","patient":"` + patientKey + `"`
 	if note != "" {
 		payload += `,"note":"` + note + `"`
 	}
@@ -448,4 +482,196 @@ func TestClinic_CorrectAppointmentStatus_NoShowCarriesFee(t *testing.T) {
 		t.Fatalf("value = %v correctedFrom = %v, want cancelled / completed", st["value"], st["correctedFrom"])
 	}
 	lcAssertNoFee(t, st, "correction to cancelled")
+}
+
+func TestClinic_SelfConfirm_BeforeStart(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "selfconfirm-open")
+
+	patientKey := lcLinkedPatient(t, ctx, conn, cp, cons, "lcpat0010", "Early Confirmer")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "lcprv0010", "Dr. Confirm", "Cardiology")
+	apptKey := lcBook(t, ctx, conn, cp, cons, "lcappt0010", patientKey, providerKey, "2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z")
+
+	// Clock open (one second before the 24 h window): confirmed, nothing else
+	// on .status, cells still held.
+	outcome, reason := lcSelfStatus(t, ctx, conn, cp, cons, "lcconf00001", apptKey, providerKey, patientKey, "confirmed", "2026-07-19T08:59:59Z")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("self confirm with the clock open: outcome = %v reason = %q, want Accepted", outcome, reason)
+	}
+	st := clStatusData(t, ctx, conn, apptKey)
+	if st["value"] != "confirmed" || len(st) != 1 {
+		t.Fatalf("status after self confirm = %v, want exactly {value: confirmed}", st)
+	}
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
+
+	// A re-confirm is the empty batch: before start (inside the window) and
+	// after start alike — nothing changes, no clock is read, and .status is
+	// not re-stamped (its revision stays put).
+	rev := clRevision(t, ctx, conn, apptKey+".status")
+	for i, at := range []string{"2026-07-19T09:00:00Z", "2026-07-20T09:00:00Z", "2026-07-20T12:00:00Z"} {
+		outcome, reason = lcSelfStatus(t, ctx, conn, cp, cons, fmt.Sprintf("lcreconf%03d", i+1), apptKey, providerKey, patientKey, "confirmed", at)
+		if outcome != processor.OutcomeAccepted {
+			t.Fatalf("self re-confirm at %s: outcome = %v reason = %q, want Accepted (idempotent)", at, outcome, reason)
+		}
+		if got := clRevision(t, ctx, conn, apptKey+".status"); got != rev {
+			t.Fatalf("self re-confirm at %s re-stamped .status (%d → %d); want the empty batch", at, rev, got)
+		}
+	}
+
+	// Clock LATE (exactly at startsAt − 24h, the instant a cancel would owe the
+	// fee): a FIRST confirm still lands, and carries no fee field — confirming
+	// inside the window is what the reminder invites.
+	appt2Key := lcBook(t, ctx, conn, cp, cons, "lcappt0011", patientKey, providerKey, "2026-07-21T09:00:00Z", "2026-07-21T09:30:00Z")
+	outcome, reason = lcSelfStatus(t, ctx, conn, cp, cons, "lcconf00002", appt2Key, providerKey, patientKey, "confirmed", "2026-07-20T09:00:00Z")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("self confirm with the clock late: outcome = %v reason = %q, want Accepted", outcome, reason)
+	}
+	st = clStatusData(t, ctx, conn, appt2Key)
+	if st["value"] != "confirmed" {
+		t.Fatalf("status after late self confirm = %v, want confirmed", st["value"])
+	}
+	lcAssertNoFee(t, st, "late self confirm")
+	// One second before start: still late, still accepted.
+	appt3Key := lcBook(t, ctx, conn, cp, cons, "lcappt0012", patientKey, providerKey, "2026-07-22T09:00:00Z", "2026-07-22T09:30:00Z")
+	outcome, reason = lcSelfStatus(t, ctx, conn, cp, cons, "lcconf00003", appt3Key, providerKey, patientKey, "confirmed", "2026-07-22T08:59:59Z")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("self confirm one second before start: outcome = %v reason = %q, want Accepted", outcome, reason)
+	}
+}
+
+func TestClinic_SelfConfirm_VisitStarted(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "selfconfirm-started")
+
+	patientKey := lcLinkedPatient(t, ctx, conn, cp, cons, "lcpat0013", "Late Confirmer")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "lcprv0013", "Dr. Clock", "Cardiology")
+	apptKey := lcBook(t, ctx, conn, cp, cons, "lcappt0013", patientKey, providerKey, "2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z")
+
+	// Exactly AT startsAt (the boundary is inclusive) and well after it.
+	for i, at := range []string{"2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z"} {
+		outcome, reason := lcSelfStatus(t, ctx, conn, cp, cons, fmt.Sprintf("lccfstart%03d", i+1), apptKey, providerKey, patientKey, "confirmed", at)
+		if outcome != processor.OutcomeRejected || !strings.HasPrefix(reason, "VisitStarted:") {
+			t.Fatalf("self confirm at %s: outcome = %v reason = %q, want Rejected VisitStarted", at, outcome, reason)
+		}
+	}
+	if st := clStatusData(t, ctx, conn, apptKey); st["value"] != "scheduled" {
+		t.Fatalf("status after refused self confirms = %v, want scheduled (unchanged)", st["value"])
+	}
+}
+
+func TestClinic_SelfConfirm_CheckedIn_Denied(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "selfconfirm-checkedin")
+
+	patientKey := lcLinkedPatient(t, ctx, conn, cp, cons, "lcpat0014", "Arrived Confirmer")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "lcprv0014", "Dr. Desk", "Cardiology")
+	apptKey := lcBook(t, ctx, conn, cp, cons, "lcappt0014", patientKey, providerKey, "2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z")
+
+	// The desk records arrival (checkedIn carries no clock).
+	reads, optionalReads := clStatusReads(apptKey, false, providerKey, patientKey)
+	clSubmitAt(t, ctx, conn, cp, cons, "lcarr00001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"checkedIn","provider":"`+providerKey+`","patient":"`+patientKey+`","note":"arrived early"}`,
+		"2026-07-20T08:40:00Z", reads, optionalReads, processor.OutcomeAccepted)
+
+	// The patient's own confirm — even with the clock open — must not write
+	// over the desk's record.
+	outcome, reason := lcSelfStatus(t, ctx, conn, cp, cons, "lccfarr0001", apptKey, providerKey, patientKey, "confirmed", "2026-07-18T09:00:00Z")
+	if outcome != processor.OutcomeRejected || !strings.HasPrefix(reason, "AuthDenied:") || !strings.Contains(reason, "checked you in") {
+		t.Fatalf("self confirm over checkedIn: outcome = %v reason = %q, want Rejected AuthDenied naming the check-in", outcome, reason)
+	}
+	st := clStatusData(t, ctx, conn, apptKey)
+	if st["value"] != "checkedIn" || st["note"] != "arrived early" {
+		t.Fatalf("status after refused self confirm = %v, want the desk's checkedIn + note untouched", st)
+	}
+}
+
+func TestClinic_SelfConfirm_OnlyOwnAndOnlyCancelOrConfirm(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "selfconfirm-scope")
+
+	own := lcLinkedPatient(t, ctx, conn, cp, cons, "lcpat0015", "Own Patient")
+	stranger := createPatient(t, ctx, conn, cp, cons, "lcpat0016", "Stranger Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "lcprv0015", "Dr. Scope", "Cardiology")
+	ownAppt := lcBook(t, ctx, conn, cp, cons, "lcappt0015", own, providerKey, "2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z")
+	strangerAppt := lcBook(t, ctx, conn, cp, cons, "lcappt0016", stranger, providerKey, "2026-07-20T10:00:00Z", "2026-07-20T10:30:00Z")
+
+	// A stranger's appointment: the consumer identity is not the patient's
+	// identifiedBy, so the ownership binding refuses before any clock.
+	outcome, reason := lcSelfStatus(t, ctx, conn, cp, cons, "lccfstr0001", strangerAppt, providerKey, stranger, "confirmed", "2026-07-18T09:00:00Z")
+	if outcome != processor.OutcomeRejected || !strings.HasPrefix(reason, "AuthDenied:") {
+		t.Fatalf("self confirm of a stranger's appointment: outcome = %v reason = %q, want Rejected AuthDenied", outcome, reason)
+	}
+	if st := clStatusData(t, ctx, conn, strangerAppt); st["value"] != "scheduled" {
+		t.Fatalf("stranger's status = %v, want scheduled (unchanged)", st["value"])
+	}
+
+	// The widened value restriction admits cancel and confirm only: a self
+	// completed (and every other staff value) is still AuthDenied.
+	for _, status := range []string{"completed", "checkedIn", "noShow", "scheduled"} {
+		outcome, reason = lcSelfStatus(t, ctx, conn, cp, cons, "lccf"+status, ownAppt, providerKey, own, status, "2026-07-20T09:30:00Z")
+		if outcome != processor.OutcomeRejected || !strings.HasPrefix(reason, "AuthDenied:") || !strings.Contains(reason, "cancel or confirm") {
+			t.Fatalf("self %s: outcome = %v reason = %q, want Rejected AuthDenied naming cancel or confirm", status, outcome, reason)
+		}
+	}
+	if st := clStatusData(t, ctx, conn, ownAppt); st["value"] != "scheduled" {
+		t.Fatalf("own status after refused self writes = %v, want scheduled", st["value"])
+	}
+
+	// The staff confirm is unchanged: no clock (after start), and it may
+	// confirm over a check-in — the desk sets any non-terminal status freely.
+	reads, optionalReads := clStatusReads(ownAppt, false, providerKey, own)
+	clSubmitAt(t, ctx, conn, cp, cons, "lcstcf0001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+ownAppt+`","status":"checkedIn","provider":"`+providerKey+`","patient":"`+own+`"}`,
+		"2026-07-20T08:50:00Z", reads, optionalReads, processor.OutcomeAccepted)
+	clSubmitAt(t, ctx, conn, cp, cons, "lcstcf0002", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+ownAppt+`","status":"confirmed","provider":"`+providerKey+`","patient":"`+own+`"}`,
+		"2026-07-20T09:30:00Z", reads, optionalReads, processor.OutcomeAccepted)
+	if st := clStatusData(t, ctx, conn, ownAppt); st["value"] != "confirmed" {
+		t.Fatalf("staff confirm after start over checkedIn: status = %v, want confirmed", st["value"])
+	}
+}
+
+func TestClinic_SelfConfirm_NeverCarriesANote(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "selfconfirm-note")
+
+	patientKey := lcLinkedPatient(t, ctx, conn, cp, cons, "lcpat0017", "Noted Patient")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "lcprv0017", "Dr. Note", "Cardiology")
+
+	// A FIRST self confirm with a payload note writes exactly {value: confirmed}.
+	apptKey := lcBook(t, ctx, conn, cp, cons, "lcappt0017", patientKey, providerKey, "2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z")
+	outcome, reason := lcSelfStatusNote(t, ctx, conn, cp, cons, "lcnote00001", apptKey, providerKey, patientKey, "confirmed", "see you there", "2026-07-18T09:00:00Z")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("self confirm with a note: outcome = %v reason = %q, want Accepted", outcome, reason)
+	}
+	if st := clStatusData(t, ctx, conn, apptKey); st["value"] != "confirmed" || len(st) != 1 {
+		t.Fatalf("status after a self confirm with a note = %v, want exactly {value: confirmed} (the note is ignored)", st)
+	}
+
+	// The desk confirms with a note; the patient's re-confirm — with and
+	// without a note of their own — re-stamps nothing: the revision holds and
+	// the desk's note survives.
+	appt2Key := lcBook(t, ctx, conn, cp, cons, "lcappt0018", patientKey, providerKey, "2026-07-21T09:00:00Z", "2026-07-21T09:30:00Z")
+	reads, optionalReads := clStatusReads(appt2Key, false, providerKey, patientKey)
+	clSubmitAt(t, ctx, conn, cp, cons, "lcnote00002", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+appt2Key+`","status":"confirmed","provider":"`+providerKey+`","patient":"`+patientKey+`","note":"confirmed by phone"}`,
+		"2026-07-18T09:00:00Z", reads, optionalReads, processor.OutcomeAccepted)
+	rev := clRevision(t, ctx, conn, appt2Key+".status")
+	for i, note := range []string{"", "my own note"} {
+		outcome, reason = lcSelfStatusNote(t, ctx, conn, cp, cons, fmt.Sprintf("lcnote%05d", i+3), appt2Key, providerKey, patientKey, "confirmed", note, "2026-07-19T09:00:00Z")
+		if outcome != processor.OutcomeAccepted {
+			t.Fatalf("self re-confirm (note %q): outcome = %v reason = %q, want Accepted", note, outcome, reason)
+		}
+		if got := clRevision(t, ctx, conn, appt2Key+".status"); got != rev {
+			t.Fatalf("self re-confirm (note %q) re-stamped .status (%d → %d); want the empty batch", note, rev, got)
+		}
+		if st := clStatusData(t, ctx, conn, appt2Key); st["value"] != "confirmed" || st["note"] != "confirmed by phone" {
+			t.Fatalf("status after self re-confirm (note %q) = %v, want the desk's confirmed + note untouched", note, st)
+		}
+	}
 }

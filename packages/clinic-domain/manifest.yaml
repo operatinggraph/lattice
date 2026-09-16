@@ -1,5 +1,5 @@
 name: clinic-domain
-version: 0.36.2
+version: 0.37.0
 depends:
   - location-domain
 description: |

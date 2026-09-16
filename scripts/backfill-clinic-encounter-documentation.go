@@ -20,6 +20,16 @@
 // atomically in one batch), so this script, like BackfillPatientRegistration,
 // is a one-time manual repair, not a standing auto-remediation loop.
 //
+// Boundary: this repair reaches only a stack whose Processor runs WITHOUT a
+// Vault. RecordEncounter reads the appointment's `.encounter` as a declared
+// optional read (its amend arm carries the prior text forward), and step-4
+// hydration of a sensitive aspect that holds no ciphertext envelope faults
+// (`resolve key holder … no keyId`) before the script runs — so against a
+// Vault-wired stack every row this script targets is refused, and the row
+// stays as it was. The shared dev stack carries no plaintext `.encounter`
+// (census 2026-09-16: 9 rows, all enveloped), so there is nothing left for
+// this script to repair there.
+//
 // Run via: go run ./scripts/backfill-clinic-encounter-documentation.go
 // (needs NATS_URL / NATS_NKEY / BOOTSTRAP_JSON_PATH, same as the seed-*
 // scripts — see `make seed-classic-demo`'s recipe in the Makefile).
@@ -122,8 +132,10 @@ func main() {
 
 		submitOp(ctx, conn, adminKey, "RecordEncounter", "appointment", payload,
 			&processor.ContextHint{
-				Reads:         []string{apptKey, apptKey + ".schedule"},
-				OptionalReads: []string{apptKey + ".status"},
+				Reads: []string{apptKey, apptKey + ".schedule"},
+				// .encounter + .documentation: the op's record-or-amend reads
+				// (absent .documentation takes the first-record arm).
+				OptionalReads: []string{apptKey + ".status", apptKey + ".encounter", apptKey + ".documentation"},
 			})
 		fmt.Printf("==> backfilled documentation: %s\n", apptKey)
 		fixed++
