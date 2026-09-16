@@ -112,3 +112,51 @@ func TestRescheduleAppointment_UndeclaredSubmitter_MovesAppointment(t *testing.T
 		t.Fatalf("schedule = %v, want the moved time — the derivation must hydrate the appointment root, its .schedule and the endpoint links for the move to run at all", sd)
 	}
 }
+
+// TestTombstoneAppointment_UndeclaredSubmitter_ReleasesCells: a
+// TombstoneAppointment declaring only the mandatory operator-role enumeration
+// tombstones a live appointment and releases its held cells. derive_reads'
+// own optionalReads carries the appointment root, its .status (the terminal
+// check that decides whether the release runs at all) and .schedule (the cell
+// set to release) and the withProvider/forPatient links, so each read sees the
+// live document rather than tripping the read-drift guard on an undeclared
+// live kv.Read. The assertion is the op's effect on the freed cell: with the
+// .schedule derivation removed the release reads nothing and the cell stays
+// claimed.
+func TestTombstoneAppointment_UndeclaredSubmitter_ReleasesCells(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "tombstonenodecl")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "ndcltbpat000001", "Ines Farrow")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "ndcltbprv000001", "Dr. Kofi Mensah", "Neurology")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "ndcltbappt0000001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-01T15:00:00Z","endsAt":"2026-07-01T15:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-01T15:00:00Z")
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("clnodecltombstone001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneAppointment",
+		Actor:         clStaffActorKey,
+		SubmittedAt:   clSubmittedAnchor,
+		Class:         "appointment",
+		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","patient":"` + patientKey + `","provider":"` + providerKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Enumerations: []processor.EnumerationHint{
+				{Hub: clStaffActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("outcome = %v, want Accepted (reply=%+v)", outcome, reply)
+	}
+	if adoc := clReadDoc(t, ctx, conn, apptKey); adoc["isDeleted"] != true {
+		t.Fatalf("appointment isDeleted = %v, want true", adoc["isDeleted"])
+	}
+	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-01T15:00:00Z")
+	clAssertSlotClaimReleased(t, ctx, conn, patientKey, "2026-07-01T15:00:00Z")
+}
