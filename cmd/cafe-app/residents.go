@@ -40,13 +40,17 @@ type leaseApplicationProjection struct {
 // to a lease with no projected term. EndedAt is the recorded FACT the
 // tenancy ended (an early move-out via GiveNotice, or the term simply
 // running out); LeaseEnd stays the term's nominal end for a lease with no
-// EndedAt recorded yet.
+// EndedAt recorded yet. TabLimitCents is the lease's effective house tab
+// limit (effectiveTabLimit, policies.go) — a pointer with no `omitempty`, so
+// a lease whose chain records no policy serializes as null (no limit) and is
+// never mistaken for a $0 limit that closes self-service.
 type residentRow struct {
-	LeaseAppKey string `json:"leaseAppKey"`
-	BookerKey   string `json:"bookerKey"`
-	Approved    bool   `json:"approved"`
-	LeaseEnd    string `json:"leaseEnd"`
-	EndedAt     string `json:"endedAt"`
+	LeaseAppKey   string `json:"leaseAppKey"`
+	BookerKey     string `json:"bookerKey"`
+	Approved      bool   `json:"approved"`
+	LeaseEnd      string `json:"leaseEnd"`
+	EndedAt       string `json:"endedAt"`
+	TabLimitCents *int64 `json:"tabLimitCents"`
 }
 
 // computeResidents decodes every leaseApplicationComplete row, sorted by
@@ -88,22 +92,18 @@ type tenancyEnd struct {
 }
 
 // leaseTenancyEnds resolves every leaseAppKey's own tenancy end off the
-// cafe-domain cafeLeaseWorkplaces lens (leaseWorkplaceRows, readauth.go) — a
+// caller's already-fetched cafeLeaseWorkplaces rows (leaseWorkplaceRows, readauth.go) — a
 // row with no projected term (or one this pass never read at all) is simply
 // absent from the map, which callers read as the zero tenancyEnd (no term),
 // never as an error condition of its own.
-func (s *server) leaseTenancyEnds(ctx context.Context) (map[string]tenancyEnd, error) {
-	rows, err := s.leaseWorkplaceRows(ctx)
-	if err != nil {
-		return nil, err
-	}
+func leaseTenancyEnds(rows []leaseWorkplaceProjection) map[string]tenancyEnd {
 	ends := make(map[string]tenancyEnd, len(rows))
 	for _, p := range rows {
 		if p.LeaseEnd != "" || p.EndedAt != "" {
 			ends[p.LeaseAppKey] = tenancyEnd{LeaseEnd: p.LeaseEnd, EndedAt: p.EndedAt}
 		}
 	}
-	return ends, nil
+	return ends
 }
 
 // handleResidents implements GET /api/residents — the lease-applicant
@@ -114,6 +114,13 @@ func (s *server) leaseTenancyEnds(ctx context.Context) (map[string]tenancyEnd, e
 // answers the resident case exactly: a resident's own leases are precisely the
 // rows whose applicant is them, so both hats ask visibleLeases the same
 // question and this roster needs no second rule of its own.
+//
+// Each row also carries tabLimitCents — the lease's effective house tab
+// limit, joined from cafeHousePolicies over the lease's coveringLocations
+// (leaseHouseLimits, policies.go; null when no covering location records a
+// policy) — the resident-readable half of the TabLimitExceeded fact the
+// resident's own Charge / OpenTab refuse on, and the figure the POS card
+// warns the desk with.
 //
 // Each row also carries leaseEnd and endedAt, joined from cafe-domain's
 // cafeLeaseWorkplaces lens by leaseAppKey (leaseTenancyEnds) — the
@@ -148,11 +155,13 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	leaseEnds, err := s.leaseTenancyEnds(ctx)
+	workplaceRows, err := s.leaseWorkplaceRows(ctx)
 	if err != nil {
 		s.writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	leaseEnds := leaseTenancyEnds(workplaceRows)
+	limits := s.leaseHouseLimits(ctx, workplaceRows)
 	filtered := make([]residentRow, 0, len(rows))
 	for _, row := range rows {
 		if !visible.admits(row.LeaseAppKey) {
@@ -161,6 +170,9 @@ func (s *server) handleResidents(w http.ResponseWriter, r *http.Request) {
 		end := leaseEnds[row.LeaseAppKey]
 		row.LeaseEnd = end.LeaseEnd
 		row.EndedAt = end.EndedAt
+		if limit, ok := limits[row.LeaseAppKey]; ok {
+			row.TabLimitCents = &limit
+		}
 		filtered = append(filtered, row)
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"residents": filtered})

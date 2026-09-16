@@ -1198,3 +1198,55 @@ func TestCafeIdentitiesRead_NoLeaseKeepsSelfAnchorOnly(t *testing.T) {
 	require.ElementsMatch(t, []any{f.ids["staffonly"]}, rows[0].Values["authz_anchors"],
 		"no lease application means no fan-out, but the self-anchor must still be present")
 }
+
+// projectExpanded runs spec with the `location*` taxonomy label resolved to
+// the three concrete levels location-domain declares — the expansion the
+// Refractor pipeline installs from the live subtypeOf snapshot
+// (UseFullEngine), applied here by hand the way the engine's own seed-scan
+// taxonomy tests do, since this fixture has no pipeline.
+func (f *cdFixture) projectExpanded(t *testing.T, spec string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(spec)
+	require.NoError(t, err, "spec must parse on the full engine")
+	expanded := full.WithLabelExpansion(cr.(*full.CompiledRule),
+		map[string]map[string]struct{}{"location": {"unit": {}, "building": {}, "property": {}}})
+	out, err := eng.ExecuteWith(context.Background(), expanded, ruleengine.EventContext{Parameters: map[string]any{
+		"now": now, "projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// TestHousePolicies_OneRowPerPolicyLocation proves housePoliciesSpec: a
+// location carrying a .cafePolicy projects one row keyed by its own key with
+// tabLimitCents and its .presentation name; a location at any level with no
+// policy projects nothing (absent = no limit recorded); a location whose
+// aspect carries a foreign class projects nothing either.
+func TestHousePolicies_OneRowPerPolicyLocation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newCdFixture(t)
+	buildingKey := f.vtx(t, "riverside", "building")
+	f.aspect(t, "riverside", "cafePolicy", "cafeHousePolicy", map[string]any{"tabLimitCents": 5000.0})
+	f.aspect(t, "riverside", "presentation", "locationPresentation", map[string]any{"name": "Riverside"})
+	propertyKey := f.vtx(t, "estate", "property")
+	f.aspect(t, "estate", "cafePolicy", "cafeHousePolicy", map[string]any{"tabLimitCents": 0.0})
+	f.vtx(t, "unit4b", "unit")
+	f.vtx(t, "annex", "building")
+	f.aspect(t, "annex", "cafePolicy", "somethingElse", map[string]any{"tabLimitCents": 100.0})
+
+	rows := f.projectExpanded(t, housePoliciesSpec)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["key"].(string)] = r.Values
+	}
+	require.Len(t, rows, 2, "only the two locations carrying a cafeHousePolicy aspect project: %v", byKey)
+	require.Equal(t, buildingKey, byKey[buildingKey]["locationKey"])
+	require.Equal(t, 5000.0, byKey[buildingKey]["tabLimitCents"])
+	require.Equal(t, "Riverside", byKey[buildingKey]["name"])
+	require.Equal(t, 0.0, byKey[propertyKey]["tabLimitCents"], "a $0 policy (self-service closed) projects, not dropped")
+	require.Nil(t, byKey[propertyKey]["name"], "a location with no .presentation projects a null name")
+}

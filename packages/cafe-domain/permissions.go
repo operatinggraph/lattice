@@ -128,6 +128,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
+			OperationType: "SetCafePolicy",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to record the house's self-service tab limit on a location, confined to a workplace the staffer worksAt (or an ancestor of it) — CreateMenuItem's own confinement. No consumer grant: a house rule is the desk's to set, and the resident's own Charge is what it binds.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
 			OperationType: "UpdateMenuItem",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to rename and/or reprice a catalog item, confined to the item's own served-at workplace — a rename and a reprice are the same act on the same .price aspect, so one op covers both.",

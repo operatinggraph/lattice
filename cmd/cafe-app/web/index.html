@@ -85,6 +85,22 @@
       </form>
     </div>
     <div id="menu-body"></div>
+    <div class="panel" id="house-policy-panel">
+      <h2>House tab limit</h2>
+      <p class="lead" id="house-policy-current">Loading…</p>
+      <form id="house-limit-form">
+        <div class="field-row">
+          <div class="field">
+            <label for="house-limit-dollars">Self-service tab limit</label>
+            <input type="text" id="house-limit-dollars" inputmode="decimal" placeholder="50.00" />
+          </div>
+        </div>
+        <p class="meta">A resident's own order that would take their tab past this is refused; the desk may ring past it. 0 closes self-service tabs at this house.</p>
+        <div class="panel-actions">
+          <button type="submit" id="house-limit-submit">Save house limit</button>
+        </div>
+      </form>
+    </div>
   </section>
 
   <section id="view-resident" role="tabpanel" hidden>

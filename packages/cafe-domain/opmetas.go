@@ -89,6 +89,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{
 			OperationType: "OpenTab",
 			// refusal-courtesy(facet): CreditHold, InvalidState, LeaseNotApproved, OpenTabAlreadyExists, TenancyEnded: none — leaseAppKey is dispatch.contextParams-resolved ({me.leaseapp}); OpenTab declares no dispatch.targetType and renders no field, so Facet offers no lease picker to hide or drop any of these against
+			// refusal-courtesy(facet): TabLimitExceeded: none — the house's .cafePolicy is projected by cafeHousePolicies (lenses.go), not by any edge-manifest lens Facet reads, so the generic form cannot see a closed house; the refusal toast names the desk
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Open a house tab",
 				Description: "Start a café tab billed to your lease.",
@@ -129,6 +130,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "Charge",
 			// refusal-courtesy(facet): ItemUnavailable: drop — entityRefCandidates (cmd/facet/web/app.js) drops menuitem rows edgeEntityMenuItemsTail (packages/edge-manifest/lenses.go) projects available:false
 			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a Charge target
+			// refusal-courtesy(facet): TabLimitExceeded: none — the house limit (cafeHousePolicies, lenses.go) and the tab's running total are not projected by the edge-manifest lenses Facet's menu picker reads, so the generic form cannot cap the pick; the refusal toast names the limit, the tab's total and the desk
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Order an item",
 				Description: "Add a menu item to your open tab.",
@@ -369,6 +371,35 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetField: "menuItemKey",
 				TargetType:  "menuitem",
 				Reads:       []string{"{payload.menuItemKey}", "{payload.menuItemKey}.price"},
+				// The operator-role confinement probe (ddls.go
+				// actor_holds_operator, reached through require_workplace).
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
+			OperationType: "SetCafePolicy",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Set the house tab limit",
+				Description: "Record how much a resident may self-order on one house tab at this location.",
+				Icon:        "cafe",
+				Tone:        "primary",
+				SubmitLabel: "Save house limit",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"locationKey":{"type":"string","description":"vtx.<locationType>.<NanoID> of the house whose limit this is — must be a location you worksAt (or an ancestor of it)."},` +
+				`"tabLimitCents":{"type":"integer","minimum":0,"description":"The self-service tab limit in whole cents; 0 closes self-service tabs at this house."}},` +
+				`"required":["locationKey","tabLimitCents"]}`,
+			FieldDescriptions: map[string]string{
+				"locationKey":   "The house (building or property) the limit applies to. Confined to a location you worksAt (or an ancestor of it) unless you are the operator.",
+				"tabLimitCents": "The limit, entered in dollars — e.g. 50.00. A resident's own order that would take their tab past it is refused; the desk may ring past it. 0 closes self-service tabs here.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:         "menuitem",
+				AuthContext:   "standing",
+				Reads:         []string{"{payload.locationKey}"},
+				OptionalReads: []string{"{payload.locationKey}.cafePolicy"},
 				// The operator-role confinement probe (ddls.go
 				// actor_holds_operator, reached through require_workplace).
 				Enumerations: []pkgmgr.EnumerationSpec{

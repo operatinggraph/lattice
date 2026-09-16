@@ -108,6 +108,7 @@ var plainRetractionCorpusVerdicts = map[string]retractionVerdict{
 	"applicantRosterRead":            {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"augurProposals":                 {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"availableListings":              {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
+	"cafeHousePolicies":              {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportNone},
 	"cafeIdentitiesRead":             {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"cafeLeaseAccounts":              {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"cafeLeaseWorkplaces":            {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},

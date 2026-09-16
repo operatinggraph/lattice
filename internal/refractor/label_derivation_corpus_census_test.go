@@ -260,6 +260,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// widening it is safe, but a label DROPPING out is how a broad lens quietly
 	// stops being judged against a type it reads.
 	"cafeIdentitiesRead":  {broad, "identity leaseapp", modeBroad},
+	"cafeHousePolicies":   {narrow, "location", modeRelation},
 	"cafeLeaseWorkplaces": {broad, "leaseapp", modeBroad},
 	"capabilityEphemeral": {broad, "identity role task", modeBroad},
 	// `location` is the ABSTRACT label the lens carries with the `*` sigil; the

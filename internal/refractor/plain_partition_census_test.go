@@ -62,6 +62,7 @@ var plainPartitionCorpusVerdicts = map[string]partitionVerdict{
 	"applicantRosterRead":            {oneRowPerAnchor: true, partitions: true, identifying: []string{"identity_id"}, diffRetraction: false},
 	"augurProposals":                 {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"availableListings":              {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
+	"cafeHousePolicies":              {oneRowPerAnchor: false, partitions: false, identifying: nil, diffRetraction: false},
 	"cafeIdentitiesRead":             {oneRowPerAnchor: true, partitions: true, identifying: []string{"identity_id"}, diffRetraction: false},
 	"cafeLeaseAccounts":              {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"cafeLeaseWorkplaces":            {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
@@ -147,8 +148,12 @@ var partitionOnlyLenses = []string{
 // each is refused is a property of its cypher rather than of this mechanism:
 // capabilityRoleIndex keys on an operation type that binds the permission, with
 // no column naming the role; opCatalog keys on the anchor's own root field
-// rather than on its key.
+// rather than on its key; cafeHousePolicies anchors on the `location*`
+// taxonomy sigil, for which no single anchor key prefix exists (the
+// expanded set spans three concrete labels), so neither predicate can name
+// the anchor a row identifies.
 var partitionRefusedLenses = []string{
+	"cafeHousePolicies",
 	"capabilityRoleIndex",
 	"opCatalog",
 }

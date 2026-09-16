@@ -120,6 +120,7 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	// One of the plain lenses the derivation acts on: its neighbour events
 	// narrow to the derived anchors rather than rescanning the corpus. Its
 	// `containedIn` range is a ranged hop the walk steps.
+	"cafeHousePolicies":              {hasNeighbour: false, reason: rootExpandedAnchor, closure: ""},
 	"cafeLeaseWorkplaces":            {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"cafeLedgerHistory":              {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"capabilityAuthorContext":        {hasNeighbour: false, reason: rootIndexed, closure: closureNA},

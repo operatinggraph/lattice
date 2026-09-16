@@ -237,7 +237,15 @@ var appOpCeilings = map[string]int{
 	// zero-navigation row action reusing the Settle/Void row-button ceremony
 	// this ceiling already counts, its payload (tabKey, lineId) assembled
 	// from the row's own data attributes. Not a new descriptor-catalog gap.
-	"cmd/cafe-app": 10,
+	// 11: SetCafePolicy is the Manage Menu view's House tab limit panel
+	// (loadHousePolicy, app.js), one dollar field submitted beside the same
+	// view's hand-built Add-item form (CreateMenuItem, already counted) and
+	// resolving its locationKey the way that form does — off the session's
+	// own worksAt anchor, never a schema-rendered field. Its descriptor is
+	// renderable, but the panel is a single prefilled input that shows the
+	// current policy above it; a descriptor-rendered form would re-ask for
+	// the workplace. The wellness SetStudioProfile shape (16 below).
+	"cmd/cafe-app": 11,
 	// 15: StartVisitSeries moved off this app's own hardcoded literal onto
 	// internal/descriptorform (verticals-designer-triage-2026-08-27.md §2 work-
 	// list item 2) — its intervalDays/startAt/activeUntil now render from the

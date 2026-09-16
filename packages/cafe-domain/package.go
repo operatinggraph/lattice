@@ -103,7 +103,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "cafe-domain",
-	Version: "0.17.0",
+	Version: "0.18.0",
 	Description: "Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/VoidCharge/MarkLineServed/Settle/" +
 		"SettleStaleTab/BackfillTabStaleAt, OCC-conditioned running total) + the tabStatus aspect type + the cafeTabSettlement " +
 		"actorAggregate convergence lens (missing_account/missing_charge/missing_payment) + the §10.8 playbook dispatching " +

@@ -3,6 +3,7 @@ package cafedomain_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -391,7 +392,8 @@ func wcMenuCapDoc() *processor.CapabilityDoc {
 		processor.PlatformPermission{OperationType: "RetireMenuItem", Scope: "any"},
 		processor.PlatformPermission{OperationType: "SetMenuItemAvailability", Scope: "any"},
 		processor.PlatformPermission{OperationType: "SetMenuItemLocation", Scope: "any"},
-		processor.PlatformPermission{OperationType: "UpdateMenuItem", Scope: "any"})
+		processor.PlatformPermission{OperationType: "UpdateMenuItem", Scope: "any"},
+		processor.PlatformPermission{OperationType: "SetCafePolicy", Scope: "any"})
 	return doc
 }
 
@@ -962,5 +964,62 @@ func TestWorkplace_MarkLineServedStaffConfinedToWorkplace(t *testing.T) {
 	_, linesB := tabLines(t, ctx, conn, tabB)
 	if _, has := linesB[0]["servedAt"]; has {
 		t.Fatalf("tabB lines[0] carries servedAt %v — a denied MarkLineServed must write nothing", linesB[0]["servedAt"])
+	}
+}
+
+// wcSubmitSetCafePolicy submits SetCafePolicy{locationKey, tabLimitCents} as
+// an arbitrary actor on the standing path, declaring exactly what a staff
+// caller would — the location in Reads, its .cafePolicy as the class-(d)
+// OptionalRead, the holdsRole enumeration the confinement walk needs.
+func wcSubmitSetCafePolicy(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	cp *processor.CommitPath, cons jetstream.Consumer, label, locationKey string, tabLimitCents int, actorKey string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetCafePolicy",
+		Actor:         actorKey,
+		SubmittedAt:   "2026-08-05T12:09:00Z",
+		Class:         "menuitem",
+		Payload:       json.RawMessage(`{"locationKey":"` + locationKey + `","tabLimitCents":` + strconv.Itoa(tabLimitCents) + `}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{locationKey},
+			OptionalReads: []string{locationKey + ".cafePolicy"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: actorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	msg := ""
+	if reply != nil && reply.Error != nil {
+		msg = reply.Error.Message
+	}
+	return outcome, msg
+}
+
+// TestWorkplace_SetCafePolicyStaffConfinedToWorkplace proves SetCafePolicy
+// confines a front-of-house staffer to a location their workplace covers —
+// the payload's own locationKey, CreateMenuItem's confinement — and that the
+// refusal is the confinement, not the location guard. An op tested only as
+// the operator has never run this guard.
+func TestWorkplace_SetCafePolicyStaffConfinedToWorkplace(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcMenuCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcsetpolicy")
+	seedWorkplaceTopology(t, ctx, conn)
+
+	if got, msg := wcSubmitSetCafePolicy(t, ctx, conn, cp, cons, "wcscpa00000000000001", wcBuildingAKey, 5000, wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff SetCafePolicy at its OWN workplace = %v (%s), want Accepted", got, msg)
+	}
+	got, msg := wcSubmitSetCafePolicy(t, ctx, conn, cp, cons, "wcscpb00000000000002", wcBuildingBKey, 5000, wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff SetCafePolicy at ANOTHER building = %v, want Rejected", got)
+	}
+	if !strings.Contains(msg, "AuthDenied") {
+		t.Fatalf("staff SetCafePolicy at ANOTHER building rejected with %q, want the workplace confinement's AuthDenied", msg)
+	}
+	if keyExists(t, ctx, conn, wcBuildingBKey+".cafePolicy") {
+		t.Fatalf("building B carries a .cafePolicy after a refused staff write")
 	}
 }

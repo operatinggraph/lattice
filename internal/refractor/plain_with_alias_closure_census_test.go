@@ -73,6 +73,7 @@ var withAliasClosureBuckets = map[string]string{
 	"applicantRosterRead":            closureA,
 	"augurProposals":                 closureA,
 	"availableListings":              closureA,
+	"cafeHousePolicies":              closureB,
 	"cafeIdentitiesRead":             closureA,
 	"cafeLeaseAccounts":              closureA,
 	"cafeLeaseWorkplaces":            closureA,

@@ -41,7 +41,7 @@ func newTestConn(t *testing.T) *substrate.Conn {
 	}
 	t.Cleanup(conn.Close)
 
-	for _, bucket := range []string{weaverTargetsBucket, cafeledger.LeaseAccountsBucket, cafeledger.LedgerHistoryBucket, cafedomain.MenuCatalogBucket, cafedomain.LeaseWorkplacesBucket,
+	for _, bucket := range []string{weaverTargetsBucket, cafeledger.LeaseAccountsBucket, cafeledger.LedgerHistoryBucket, cafedomain.MenuCatalogBucket, cafedomain.LeaseWorkplacesBucket, cafedomain.HousePoliciesBucket,
 		frontdesk.BookingsBucket, frontdesk.LeaseDetailsBucket, frontdesk.VisitsBucket} {
 		if _, err := conn.JetStream().CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: bucket}); err != nil {
 			t.Fatalf("create %s bucket: %v", bucket, err)

@@ -1,5 +1,5 @@
 name: cafe-domain
-version: 0.17.0
+version: 0.18.0
 description: |
   Café house-tab POS session domain: the tab vertex type (OpenTab/Charge/
   VoidCharge/MarkLineServed/Settle/SettleStaleTab/BackfillTabStaleAt, OCC-conditioned
@@ -74,6 +74,8 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: menuItemPrice
       class: meta.ddl.aspectType
+    - canonicalName: cafeHousePolicy
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: cafeTabSettlement
       adapter: nats-kv
@@ -86,6 +88,10 @@ declares:
     - canonicalName: menuCatalog
       adapter: nats-kv
       bucket: cafe-menu-catalog
+      engine: full
+    - canonicalName: cafeHousePolicies
+      adapter: nats-kv
+      bucket: cafe-house-policies
       engine: full
     - canonicalName: cafeLeaseWorkplaces
       adapter: nats-kv
@@ -137,6 +143,9 @@ declares:
     - operationType: SetMenuItemLocation
       scope: any
       grantsTo: [operator, frontOfHouse]
+    - operationType: SetCafePolicy
+      scope: any
+      grantsTo: [operator, frontOfHouse]
     - operationType: UpdateMenuItem
       scope: any
       grantsTo: [operator, frontOfHouse]
@@ -154,5 +163,6 @@ declares:
     - operationType: CreateMenuItem
     - operationType: RetireMenuItem
     - operationType: SetMenuItemAvailability
+    - operationType: SetCafePolicy
     - operationType: SetMenuItemLocation
     - operationType: UpdateMenuItem

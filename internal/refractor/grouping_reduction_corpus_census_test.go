@@ -85,6 +85,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"augurProposals":                    {"p", 0},
 	"availableListings":                 {"p", 0},
 	"backgroundCheckFreshness":          {"p p!lapsedAt", 0},
+	"cafeHousePolicies":                 {"p", 0},
 	"cafeIdentitiesRead":                {"p", 0},
 	"cafeLeaseAccounts":                 {"p", 0},
 	"cafeArrearsReminders":              {"p", 0},

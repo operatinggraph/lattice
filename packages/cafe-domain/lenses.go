@@ -35,6 +35,16 @@ const LeaseWorkplacesBucket = "cafe-lease-workplaces"
 // lenses are the only application query surface).
 const MenuCatalogBucket = "cafe-menu-catalog"
 
+// HousePoliciesBucket is the NATS-KV read model the cafeHousePolicies lens
+// projects into — one row per location carrying a .cafePolicy aspect
+// (SetCafePolicy, ddls.go), keyed by the location's own key. It is the P5
+// surface for the house's self-service tab limit: cmd/cafe-app composes a
+// lease's effective limit as the MINIMUM over the lease's coveringLocations
+// (cafeLeaseWorkplaces) that appear here — the same tightest-policy rule
+// OpenTab / Charge apply on the resident-self leg — and the desk's Manage
+// Menu panel reads and sets its own workplace's row.
+const HousePoliciesBucket = "cafe-house-policies"
+
 // Lenses returns the package's Lens declarations: the `cafeTabSettlement`
 // actorAggregate convergence lens (§10.2) anchored on tab, the
 // `cafeStaleTabSettlement` sibling convergence lens (also anchored on tab)
@@ -87,12 +97,21 @@ func Lenses() []pkgmgr.LensSpec {
 			Spec:          menuCatalogSpec,
 		},
 		{
-			CanonicalName: "cafeLeaseWorkplaces",
+			CanonicalName: "cafeHousePolicies",
 			Class:         "meta.lens",
 			Adapter:       "nats-kv",
-			Bucket:        LeaseWorkplacesBucket,
+			Bucket:        HousePoliciesBucket,
 			Engine:        "full",
-			Spec:          leaseWorkplacesSpec,
+			Spec:          housePoliciesSpec,
+		},
+		{
+			CanonicalName: "cafeLeaseWorkplaces",
+
+			Class:   "meta.lens",
+			Adapter: "nats-kv",
+			Bucket:  LeaseWorkplacesBucket,
+			Engine:  "full",
+			Spec:    leaseWorkplacesSpec,
 		},
 		{
 			// cafeIdentitiesRead — the protected Postgres identity-name lens
@@ -284,6 +303,26 @@ RETURN
   loc.key AS servedAt,
   (loc.key = null) AS missingLocation,
   [(m)-[:servedAt]->(sloc)-[:containedIn*0..7]->(c) | c.key] AS coveringLocations`
+
+// housePoliciesSpec projects one row per location that records a café house
+// policy — the .cafePolicy aspect SetCafePolicy writes (ddls.go). The head
+// is `(loc:location*)`, the abstract label with the taxonomy sigil, so the
+// row set admits a policy at any location level (unit / building / property,
+// and any leaf a later package declares) without this lens naming the
+// levels — the same reason service-location's capabilityServiceAccess uses
+// it. The WHERE keeps only locations carrying the aspect: a location with no
+// policy projects no row (absent = no limit recorded, the op's own reading),
+// and a tombstoned aspect drops its row the way a tombstoned vertex drops out
+// of the MATCH. `name` is the location's own .presentation display name
+// (location-domain's SetLocationPresentation), null when never set — a
+// label for the desk's panel, never a key.
+const housePoliciesSpec = `MATCH (loc:location*)
+WHERE loc.cafePolicy.class = 'cafeHousePolicy'
+RETURN
+  loc.key AS key,
+  loc.key AS locationKey,
+  loc.cafePolicy.data.tabLimitCents AS tabLimitCents,
+  loc.presentation.data.name AS name`
 
 // tabSettlementSpec is the one-row-per-tab convergence cypher: a settled tab
 // with a positive total needs its charge posted onto the resident's
