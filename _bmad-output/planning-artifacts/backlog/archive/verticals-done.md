@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-15 · `6e6ea0f3` · A tenant gives notice and a lease ends early — `GiveNotice` records `.notice`, the term ends at `termEnd`, the renewal closes; live ([design](../../../docs/reviews/loftspace-tenancy-notice-2026-09-15.md)).
+- 2026-09-15 · `c44e1f44` · "Rent owed" says how late — `.arrears` on the rent account, one reminder per episode after a 5-day grace; N days overdue on every surface ([design](../../../docs/reviews/loftspace-rent-arrears-2026-09-15.md)).
 - 2026-09-15 · `ff87debd` · A landlord records a charge and a payment on a lease they manage — `LoftspaceRecordCharge` (S9 refused a `DebitAccount` self grant) + `CreditAccount`/`LoftspaceCreateAccount` self grants behind the manages walk; live.
 - 2026-09-15 · `8424b038` · A landlord edits the listing and address of a unit they manage — `SetListing` + `SetUnitAddress` gain the consumer self grant behind the `manages` probe; Facet descriptors flip to self; live.
 - 2026-09-15 · `f3f353d5` · A component dossier holds at most the 12 entries it states for itself — `lint-board` counts them (`--selftest` replays the minting revision); `_packages.md` folded 20 → 12 / 27 → 13 KB, `substrate.md` 13 → 12.

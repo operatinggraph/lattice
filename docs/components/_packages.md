@@ -662,6 +662,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   closing conjunct borrowed from a sibling timer's fired marker never fires when that timer DISARMS on a terminal
   status — read the sibling's `freshUntil` null arm before borrowing its marker, and bound on the recorded fact
   (`at < endsAt`) instead.
+  Tenth (clinic time-off displacement, 2026-09-17, builder-caught): a new KIND on a two-legged op-meta reached the
+  send leg's enum and re-check but not the REPLY leg that parses the kind back out of `externalRef` — every outcome
+  would have been refused `InvalidArgument`; the leg of an enum is every op that reads the value, the reply op included.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
@@ -704,6 +707,10 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   Sighting (lease-signing `MoveInBeforeAvailable`, 2026-09-17, caught cold): a refusal compared two INSTANTS where
   every surface — the seeds' wall-clock `availableFrom` beside a bare same-day `moveInDate`, Facet's `datetime-local`,
   the FE `min` — promises a DAY; a date fact is compared on its UTC calendar day, and the grounding runs the producers.
+  Sighting (clinic time-off displacement, 2026-09-17, caught cold; first: the arrears statement order, 2026-09-16): a
+  `time.rfc3339_utc(op.submittedAt)` stamp read as the identity of the WRITE — it records an instant, whole seconds, so
+  two writes in one second share it and a `checkedFor <> stamp` gap latched the first save's verdict; a change key is
+  `op.requestId` with the instant kept beside it, an order carries a total tie key.
 - **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from** — `mint_clause` wrote
   `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires; the inbound walk bound fine, a
   clause-anchored `(c)-[:governs]->(l:leaseapp)` never could (`adjacency/store.go` `OtherType: dstType`). Check: a

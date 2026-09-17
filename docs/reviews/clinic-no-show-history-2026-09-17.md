@@ -72,3 +72,16 @@ selected patient's future visits and paged; the roster row is the one slice ever
    the lens's `= 'noShow'`, the prompt states "recorded no-shows", never "missed visits".
 6. **Adjacent finds:** none.
 7. **Non-goals:** a rolling window; splitting sweep vs desk no-shows; any refusal on booking; the patient's own view.
+
+### Build note (2026-09-17)
+
+Shipped `14db5c33` (merge of `646ecf68`; brief `c75ba6e2`). Lead review (S). Live on the shared stack (`make
+refresh-clinic`: clinic-domain 0.41.0 → 0.42.0 updated=4; `provision-readpath` added the two columns after one
+auto-recovered structural pause on `clinicPatientsRead`; `bin/clinic-app` cycled 15:07:34): `read_clinic_patients`
+reads Riley Chen `41 | 2026-09-17T16:00:00Z`, Classic Demo Patient `29 | 2026-09-17T10:00:00Z`, both rows carrying the
+count. The prompt and badge are goja-pinned (`ledger_ui_test.go`); no browser verify. `Columns` type `integer` (the
+adapter passes the type verbatim into `ADD COLUMN IF NOT EXISTS`; no `int*` precedent existed). Two finds from the
+displacement fire's review absorbed here: `TestChangeNotices_CancelByWithoutAtNotTold` gains the marker-present vector
+that alone discriminates its `at <> null` conjunct, and `verify-package-clinic-domain.go`'s permission census gains
+`MarkPastDueNoShow` and `BackfillAppointmentSite`. Review classification: none beyond the absorbed finds (a dead
+singular branch on the ≥ 2 prompt removed at admit).

@@ -45,43 +45,49 @@ the time-off write; reminder + sweep read it; the patient told. Live: 0 provider
 
 ## Verdict — *a time-off write is a recorded event; each visit it covers records its displacement; the reminder and the sweep stand down and the patient is told once*
 
-1. **`.timeOff` gains `setAt`.** `SetProviderTimeOff` stamps `setAt = time.rfc3339_utc(op.submittedAt)` on every
-   write, a clear (`ranges: []`) included — the event the per-visit check is keyed on. Re-stamped on every write,
-   dies with the aspect. A legacy `.timeOff` with no `setAt` triggers nothing (live: none exist).
+1. **`.timeOff` gains `setAt` and `setRef`.** `SetProviderTimeOff` stamps `setAt = time.rfc3339_utc(op.submittedAt)`
+   (the human-readable instant) and `setRef = op.requestId` (the per-write key — unique per save, stable across a
+   redelivery of the same op) on every write, a clear (`ranges: []`) included. The per-visit check is keyed on
+   `setRef`, never `setAt` (amended at build, 2026-09-17, caught cold): `rfc3339_utc` is whole seconds, so two saves
+   inside one wall-second with an evaluation in flight would read `checkedFor = setAt` on the FIRST save's verdict
+   and latch it until the provider's next edit. Both re-stamped on every write, die with the aspect. A legacy
+   `.timeOff` with no `setRef` triggers nothing (live: none exist).
 2. **A `.displacement` aspect on the appointment** (class `appointmentDisplacement`, declared in clinic-domain
    beside `appointmentStatus`; `PermittedCommands: [CreateAppointment, RescheduleAppointment,
-   EvaluateAppointmentDisplacement]`): `{displaced: bool, checkedFor?: <the .timeOff.setAt it was evaluated
+   EvaluateAppointmentDisplacement]`): `{displaced: bool, checkedFor?: <the .timeOff.setRef it was evaluated
    against>, at, from?, to?, reason?}`. Lifetime: created by whichever writer runs first; `checkedFor` follows the
-   provider's latest `setAt`; `at` stamps when `displaced` FLIPS and is carried when it does not (the notice keys on
+   provider's latest `setRef`; `at` stamps when `displaced` FLIPS and is carried when it does not (the notice keys on
    it — a provider re-saving their time-off must not re-tell a still-displaced patient); `from/to/reason` are the
    covering range when displaced, absent otherwise; dies with the appointment. Three writers, one arbitration:
-   `CreateAppointment` and `RescheduleAppointment` write `{displaced: false, checkedFor: <setAt if the provider's
+   `CreateAppointment` and `RescheduleAppointment` write `{displaced: false, checkedFor: <setRef if the provider's
    .timeOff carries one>, at}` as a bare upsert right after their `enforce_time_off` passes (they have just proved
    the visit clear of the current ranges, and a displaced visit the desk moves to a free slot must read clear at
    once, not at the next time-off edit); `EvaluateAppointmentDisplacement` writes the evaluated truth. The
    Processor serializes the three on the key; a stale evaluation is corrected by the level gap on the next
    projection. `time_off_overlap` is refactored over a `time_off_aspect(provider)` helper so the writers read the
-   aspect once for both the overlap and `setAt` (the existing `# read-posture: (c)` config read, unchanged).
+   aspect once for both the overlap and `setRef` (a `# read-posture: (c)` config read on the booking and sweep legs;
+   served hydrated on the evaluation leg, whose playbook lists the key in `Reads` — both stated on the annotation).
 3. **One level-triggered lens in `clinic-reminders`: `appointmentDisplacements`** (anchor appointment,
-   `actorAggregate`, `weaver-targets`, no `freshUntil`): `missing_displacement_check = pr.timeOff.data.setAt <> null
-   AND a.displacement.data.checkedFor <> pr.timeOff.data.setAt AND nonTerminalAppointment AND NOT
-   (freshnessExpiry.byTarget.pastDueAppointments >= endsAt)`. Columns `entityKey, providerKey, timeOffSetAt,
-   checkedFor, displaced, startsAt, endsAt, status`, the gap, `violating`. `withProvider` is the same 0..1 hop the
-   sibling lenses walk; the gap's own `setAt <> null` conjunct makes `providerKey` and `timeOffSetAt` non-null on
-   every violating row, which is what licenses templating them (`Params` only on columns the gap's conjunct
-   requires non-null). The gap closes on the op's write (`checkedFor = setAt`), on the visit going terminal, and on
+   `actorAggregate`, `weaver-targets`, no `freshUntil`): `missing_displacement_check = pr.timeOff.data.setRef <> null
+   AND a.displacement.data.checkedFor <> pr.timeOff.data.setRef AND nonTerminalAppointment AND NOT
+   (freshnessExpiry.byTarget.pastDueAppointments >= endsAt)`. Columns `entityKey, providerKey, timeOffSetRef,
+   timeOffSetAt, checkedFor, displaced, startsAt, endsAt, status`, the gap, `violating`. `withProvider` is the same
+   0..1 hop the sibling lenses walk; the gap's own `setRef <> null` conjunct makes `providerKey` and `timeOffSetRef`
+   non-null on every violating row, which is what licenses templating them (`Params` only on columns the gap's conjunct
+   requires non-null). The gap closes on the op's write (`checkedFor = setRef`), on the visit going terminal, and on
    the recorded end; a closed column retires the latch. Cadence: one dispatch per (time-off write × live future
    visit of that provider); a new booking never dispatches (its writer stamps `checkedFor`).
 4. **One op in clinic-domain: `EvaluateAppointmentDisplacement{appointmentKey, providerKey, checkedFor}`**
    (operator grant, the `MarkPastDueNoShow` idiom — dispatched by Weaver's service actor; playbook `Reads
-   [row.entityKey, row.entityKey.schedule, row.providerKey, row.providerKey.timeOff]`, `OptionalReads
-   [row.entityKey.status, row.entityKey.displacement]`). Liveness-guards the appointment (`UnknownAppointment`,
+   [row.entityKey, row.entityKey.schedule, row.providerKey.timeOff]` (the provider root is never read),
+   `OptionalReads [row.entityKey.status, row.entityKey.displacement]`, `Enumerations [{row.entityKey withProvider
+   out}]` for the one bounded walk the script runs). Liveness-guards the appointment (`UnknownAppointment`,
    `WrongClass`); resolves the provider live off `withProvider` (`appointment_provider`, the bounded (e) read the
    sweep uses) and refuses `ProviderMismatch` when the param names another; a terminal status is the empty batch
-   (nothing to displace). Evaluates against the LIVE `.timeOff` — `checkedFor` is informational (a time-off
-   re-written between projection and dispatch is evaluated as it now stands; the truth written converges faster
+   (nothing to displace). Evaluates against the LIVE `.timeOff` — `checkedFor` (an opaque ref, required non-empty) is informational (a
+   time-off re-written between projection and dispatch is evaluated as it now stands; the truth written converges faster
    than a refusal would, and the write is idempotent) — with `time_off_overlap`'s half-open test over
-   `.schedule.{startsAt, endsAt}`. Writes `.displacement = {displaced, checkedFor: <live setAt, omitted when the
+   `.schedule.{startsAt, endsAt}`. Writes `.displacement = {displaced, checkedFor: <live setRef, omitted when the
    aspect is absent or carries none>, at: <stamp on flip, carry otherwise>, from/to/reason when displaced}` as a
    create when absent, bare update otherwise (the hydrated key conditions it). Emits `clinic.appointmentDisplaced`
    / `clinic.appointmentReinstated` only on a flip. Mints no vertex.
@@ -99,7 +105,9 @@ the time-off write; reminder + sweep read it; the patient told. Live: 0 provider
    `displaced, displacedAt, displacedFor`. The playbook gains `missing_displaced_notice → RecordAppointmentChangeNotice
    {appointmentKey: row.entityKey, kind: displaced, changeRef: row.displacedAt}`, `Reads [row.entityKey,
    row.entityKey.status, row.entityKey.schedule]`, `OptionalReads [row.entityKey.changeNotice,
-   row.entityKey.displacement]`. The op's `kind` enum gains `displaced`; its re-check: `.displacement.displaced ==
+   row.entityKey.displacement]`. The op's `kind` enum gains `displaced`, and so does the reply leg's — `RecordAppointmentChangeNotification` splits
+   the bridge's `externalRef` on the kind and refuses one it does not know, so the outcome of every displaced notice
+   would otherwise be refused `InvalidArgument` (amended at build, 2026-09-17); its re-check: `.displacement.displaced ==
    True AND .displacement.at == changeRef` on a non-terminal status, else `StaleChange`; it writes `displacedFor`
    carrying the other two kinds' fields; the notification params carry `changeType: displaced` plus the covering
    `from`/`to`. A reinstatement (displaced → false) is not told — the reminder resumes and says the visit stands
@@ -209,3 +217,42 @@ fixes one harm, tells nobody, and hides the fact from every lens.
 7. **Non-goals:** deciding a displaced visit's terminal fate (the desk closes it — recorded at :4362); telling the
    patient about a reinstatement; replacing the desk card's client-side conflict badge or the worklist's predicate;
    a backfill of `setAt` on a legacy `.timeOff`; a real vendor adapter; the time-zone row.
+
+### Build note (2026-09-17)
+
+Shipped `3464e817` (merge of `cb0669fe`; brief `ac4fc5d3`). CI red once on `TestRefractor_E2E_P99` (p50 37 ms, p95
+10 s — a one-off stall in a package this fire's code never touched; the census pin tables were the only refractor
+edit), green on the rerun of that job alone. Live on the shared stack (`make refresh-clinic`: clinic-domain 0.40.0 →
+0.41.0 created=11 updated=19, clinic-reminders 0.13.0 → 0.14.0 created=9 updated=24; `provision-readpath` grew the two
+protected tables by `displaced`/`displaced_from`/`displaced_to`; `bin/clinic-app` cycled 14:43:47; the new lens
+replayed the stream from lag 1035 to 0 in ≈8 min, never paused): `SetProviderTimeOff` on `zJjptLYizx4vDU6KRt9i`
+covering 2026-09-21 10:00–12:00 at 21:52:23Z (`setRef vQZHAh…`) → the 11:00 visit `SNxJ9C…` read `.displacement
+{displaced: true, checkedFor: vQZHAh…, at: 21:52:26Z, from, to, reason}` and its five future siblings `displaced:
+false`; `appointmentReminders` and `pastDueAppointments` rows both `violating: false` with `freshUntil` still armed
+(2026-09-20T11:00Z / 2026-09-21T11:30Z); one `RecordAppointmentChangeNotice{displaced}` dispatch, bridge outcome
+`completed` at 21:52:31Z, `.changeNotice` carrying the visit's prior `movedFor`; `read_provider_appointments` read
+`t | 10:00 | 12:00 | told 21:52:31Z`. The clear (`ranges: []`, 21:53:44Z) re-evaluated all six to `displaced: false`
+with `checkedFor` on the new `setRef`; the notice row stayed closed (`displacedFor` keeps the told `at`). The
+provider's time-off is left cleared, as it was. The card line is goja-pinned (`displacement_ui_test.go`); no browser
+verify (the displaced state was cleared in the drive).
+
+Deviations from the design body, amended above where they stand: (1) **the per-visit check keys on `setRef =
+op.requestId`, not `setAt`** — `rfc3339_utc` is whole seconds, so two saves inside one wall-second with an
+evaluation in flight would have latched the first save's verdict until the provider's next edit (caught cold; the
+strict-order-needs-a-tie-row class); (2) **the reply leg admits kind `displaced`** — `RecordAppointmentChangeNotification`
+splits the bridge's `externalRef` on the kind and would have refused every displaced outcome `InvalidArgument`
+(builder-caught); (3) the playbook declares the `withProvider` walk as an `Enumerations` entry and drops the never-read
+provider root from `Reads`. Recorded as accepted: a displaced visit whose end passes rests `scheduled, displaced: true`
+with `checkedFor` frozen — every gap reads false once the past-due timer fires, so a later time-off clear does not
+re-evaluate it and the card says "the clinic will reschedule" until the desk closes it (the :4362 posture, minus the
+wasted dispatches); the eval racing a time-off write converges on the next projection (the advisory-refusal class).
+
+Review classification (component: `_packages`): **design-gap ×2** — a level gap keyed on a whole-second stamp
+(second sighting of *strict order over a recorded stamp needs a tie row*: the first was the arrears statement order,
+2026-09-16), and a new kind on a two-legged op-meta whose REPLY leg's kind set the design never opened (a *"leg" of a
+guard* sighting — the leg here is the reply op that parses the kind back); **implementation-bug ×0**; **brief-gap ×1**
+— the brief's touch-list named `notifications.go` for the precedent fire but not for this one; **convention ×1** —
+a required read declared for a root the script never hydrates (N1); **review over-reach** — none. No adjacent find
+filed; the builder's two out-of-scope notes (`TestChangeNotices_CancelByWithoutAtNotTold` cannot discriminate its
+`at <> null` conjunct without a marker; `MarkPastDueNoShow` / `BackfillAppointmentSite` absent from
+`verify-package-clinic-domain.go`'s permission census) are fixed in the no-show-history unit of this same batch.
