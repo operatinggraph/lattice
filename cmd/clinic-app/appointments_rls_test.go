@@ -133,6 +133,9 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		{Name: "follow_up_reminder_sent_at", Type: "text"},
 		{Name: "documented_at", Type: "text"},
 		{Name: "amended_at", Type: "text"},
+		{Name: "status_at", Type: "text"},
+		{Name: "status_by", Type: "text"},
+		{Name: "change_notice_sent_at", Type: "text"},
 		{Name: "follow_up_requested", Type: "boolean"},
 		{Name: "follow_up_date", Type: "text"},
 	}
@@ -158,8 +161,8 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 
 	// Seed: patient A's appointment (anchor A) + patient B's appointment (anchor
 	// B); self-grants for both.
-	exec(`INSERT INTO read_clinic_appointments (appointment_id, entity_key, starts_at, status, patient_key, patient_name, authz_anchors, projection_seq)
-	      VALUES ('appt-A', 'vtx.appointment.appt-A', '2026-07-01T15:00:00Z', 'scheduled', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', $1, 1)`, []string{subPatientA})
+	exec(`INSERT INTO read_clinic_appointments (appointment_id, entity_key, starts_at, status, status_at, status_by, patient_key, patient_name, authz_anchors, projection_seq)
+	      VALUES ('appt-A', 'vtx.appointment.appt-A', '2026-07-01T15:00:00Z', 'scheduled', '2026-06-28T09:00:00Z', 'staff', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', $1, 1)`, []string{subPatientA})
 	exec(`INSERT INTO read_clinic_appointments (appointment_id, entity_key, starts_at, status, patient_key, patient_name, authz_anchors, projection_seq)
 	      VALUES ('appt-B', 'vtx.appointment.appt-B', '2026-07-02T15:00:00Z', 'scheduled', 'vtx.patient.`+subPatientB+`', 'Bob Nguyen', $1, 1)`, []string{subPatientB})
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -214,6 +217,12 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 		if len(rows) != 1 || rows[0].EntityKey != "vtx.appointment.appt-A" {
 			t.Fatalf("A must see exactly appt-A, got %+v", rows)
+		}
+		if got := rows[0].StatusAt; got == nil || *got != "2026-06-28T09:00:00Z" {
+			t.Fatalf("statusAt must come through the JSON, got %v", got)
+		}
+		if got := rows[0].StatusBy; got == nil || *got != "staff" {
+			t.Fatalf("statusBy must come through the JSON, got %v", got)
 		}
 	})
 

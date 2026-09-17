@@ -71,6 +71,9 @@ func TestProviderScheduleReadBoundary_RLS_Enforcement(t *testing.T) {
 		{Name: "follow_up_reminder_sent_at", Type: "text"},
 		{Name: "documented_at", Type: "text"},
 		{Name: "amended_at", Type: "text"},
+		{Name: "status_at", Type: "text"},
+		{Name: "status_by", Type: "text"},
+		{Name: "change_notice_sent_at", Type: "text"},
 		{Name: "follow_up_requested", Type: "boolean"},
 		{Name: "follow_up_date", Type: "text"},
 	}

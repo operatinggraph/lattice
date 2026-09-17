@@ -5294,6 +5294,25 @@ function renderApptCard(a, opts) {
     reminder.textContent = "🔔 Reminder sent" + (isNaN(r) ? "" : " · " + r.toLocaleString());
   }
 
+  // How long a checked-in patient has waited, or when/by whom a terminal
+  // visit was closed out (the clinicAppointments lens's statusAt/statusBy
+  // columns) — a pure function of the row so it needs no timer to stay
+  // correct at render time. Both hats see it: it is a fact about the visit,
+  // never clinical content.
+  const statusClock = document.createElement("div");
+  statusClock.className = "meta status-clock";
+  statusClock.textContent = statusClockLabel(a, Date.now());
+
+  // Once a desk cancel or move has told the patient (clinic-reminders'
+  // RecordAppointmentChangeNotice, surfaced via changeNoticeSentAt). Absent
+  // until sent — same idiom as the reminder-sent line above.
+  const changeNotice = document.createElement("div");
+  changeNotice.className = "meta change-notice";
+  if (a.changeNoticeSentAt) {
+    const cn = new Date(a.changeNoticeSentAt);
+    changeNotice.textContent = "📣 Patient told" + (isNaN(cn) ? "" : " · " + cn.toLocaleString());
+  }
+
   // The "visit documented" presence signal + any requested follow-up (the
   // clinicAppointments lens's operational encounter columns). Absent until the
   // visit is documented. This div never carries clinical content — `a` is a
@@ -5511,6 +5530,8 @@ function renderApptCard(a, opts) {
   if (reason.textContent) card.append(reason);
   if (statusNote.textContent) card.append(statusNote);
   if (reminder.textContent) card.append(reminder);
+  if (statusClock.textContent) card.append(statusClock);
+  if (changeNotice.textContent) card.append(changeNotice);
   if (documented.textContent) card.append(documented);
   if (noteBlock) card.append(noteBlock);
   if (arrears.textContent) card.append(arrears);
@@ -5536,6 +5557,54 @@ function encounterSummary(a) {
     if (!isNaN(ad)) t += " · amended " + ad.toLocaleDateString();
   }
   return t;
+}
+
+// relativeAgo renders the elapsed time since an ISO instant as the card's
+// short-form age ("just now" / "N min ago" / "N h M min ago" / "N d ago"),
+// floored to whole units and never negative — an `isoAt` in the future (clock
+// skew between the writer and this reader) reads "just now" rather than a
+// confusing negative duration. "" for a missing or unparseable isoAt.
+function relativeAgo(isoAt, nowMs) {
+  if (!isoAt) return "";
+  const t = new Date(isoAt).getTime();
+  if (isNaN(t)) return "";
+  let diffSec = Math.floor((nowMs - t) / 1000);
+  if (diffSec < 0) diffSec = 0;
+  if (diffSec < 60) return "just now";
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return mins + " min ago";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) {
+    return hrs + " h " + (mins % 60) + " min ago";
+  }
+  const days = Math.floor(hrs / 24);
+  return days + " d ago";
+}
+
+// statusClockLabel renders the card's status-clock line off the clinic-domain
+// lenses' statusAt/statusBy columns: a checked-in visit shows how long the
+// patient has been waiting; a terminal visit (cancelled/completed/noShow)
+// shows the past-tense STATUS_PAST word and the local moment it happened,
+// with a courtesy suffix naming who moved it when that matters to the desk
+// (a patient's own cancel, or the past-due sweep's no-show). "" for
+// scheduled/confirmed, or a terminal/checkedIn row with no statusAt (a status
+// that records no moment).
+function statusClockLabel(a, nowMs) {
+  const status = a.status;
+  if (status === "checkedIn" && a.statusAt) {
+    return "⏱ Checked in " + relativeAgo(a.statusAt, nowMs);
+  }
+  if (status === "cancelled" || status === "completed" || status === "noShow") {
+    if (!a.statusAt) return "";
+    const word = STATUS_PAST[status] || status;
+    const cap = word.charAt(0).toUpperCase() + word.slice(1);
+    const d = new Date(a.statusAt);
+    let label = cap + " · " + (isNaN(d) ? "" : d.toLocaleString());
+    if (a.statusBy === "patient") label += " (by the patient)";
+    else if (a.statusBy === "sweep") label += " (past-due sweep)";
+    return label;
+  }
+  return "";
 }
 
 function statusClass(status) {

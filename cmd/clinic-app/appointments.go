@@ -157,6 +157,9 @@ type protectedAppointmentRow struct {
 	FollowUpReminderSentAt *string `json:"followUpReminderSentAt,omitempty"`
 	DocumentedAt           *string `json:"documentedAt,omitempty"`
 	AmendedAt              *string `json:"amendedAt,omitempty"`
+	StatusAt               *string `json:"statusAt,omitempty"`
+	StatusBy               *string `json:"statusBy,omitempty"`
+	ChangeNoticeSentAt     *string `json:"changeNoticeSentAt,omitempty"`
 	FollowUpRequested      bool    `json:"followUpRequested,omitempty"`
 	FollowUpDate           *string `json:"followUpDate,omitempty"`
 }
@@ -185,6 +188,7 @@ SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''
        patient_key, COALESCE(patient_name, unlinked_patient_name), provider_key, provider_name, provider_specialty,
        site_key, site_name,
        reminder_sent_at, follow_up_reminder_sent_at, documented_at, amended_at,
+       status_at, status_by, change_notice_sent_at,
        COALESCE(follow_up_requested, false), follow_up_date
 FROM read_clinic_appointments
 ORDER BY starts_at, appointment_id`
@@ -224,6 +228,7 @@ func queryMyAppointments(ctx context.Context, pool pgxBeginner, actorID string) 
 			&row.PatientKey, &row.PatientName, &row.ProviderKey, &row.ProviderName, &row.ProviderSpecialty,
 			&row.SiteKey, &row.SiteName,
 			&row.ReminderSentAt, &row.FollowUpReminderSentAt, &row.DocumentedAt, &row.AmendedAt,
+			&row.StatusAt, &row.StatusBy, &row.ChangeNoticeSentAt,
 			&row.FollowUpRequested, &row.FollowUpDate,
 		); err != nil {
 			return nil, err
@@ -289,6 +294,7 @@ SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''
        COALESCE(patient_key, ''), COALESCE(patient_name, unlinked_patient_name), provider_key, provider_name, provider_specialty,
        site_key, site_name,
        reminder_sent_at, follow_up_reminder_sent_at, documented_at, amended_at,
+       status_at, status_by, change_notice_sent_at,
        COALESCE(follow_up_requested, false), follow_up_date
 FROM read_provider_appointments
 ORDER BY starts_at, appointment_id`
@@ -323,6 +329,7 @@ func queryMyProviderSchedule(ctx context.Context, pool pgxBeginner, actorID stri
 			&row.PatientKey, &row.PatientName, &row.ProviderKey, &row.ProviderName, &row.ProviderSpecialty,
 			&row.SiteKey, &row.SiteName,
 			&row.ReminderSentAt, &row.FollowUpReminderSentAt, &row.DocumentedAt, &row.AmendedAt,
+			&row.StatusAt, &row.StatusBy, &row.ChangeNoticeSentAt,
 			&row.FollowUpRequested, &row.FollowUpDate,
 		); err != nil {
 			return nil, err
