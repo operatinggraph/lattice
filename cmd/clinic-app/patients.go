@@ -62,7 +62,7 @@ type protectedPatientRow struct {
 // the empty string for a shredded identified patient — see
 // protectedPatientRow's Name doc.
 const selectPatientsSQL = `
-SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key, no_show_count, last_no_show_at
+SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key, COALESCE(no_show_count, 0), last_no_show_at
 FROM read_clinic_patients
 ORDER BY COALESCE(name, unlinked_name, ''), patient_key`
 
@@ -74,7 +74,7 @@ ORDER BY COALESCE(name, unlinked_name, ''), patient_key`
 // searchable by their plaintext unlinked_name instead of silently dropping
 // out of every filtered query.
 const selectPatientsFilteredSQL = `
-SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key, no_show_count, last_no_show_at
+SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key, COALESCE(no_show_count, 0), last_no_show_at
 FROM read_clinic_patients
 WHERE COALESCE(name, unlinked_name) ILIKE $1
 ORDER BY COALESCE(name, unlinked_name, ''), patient_key

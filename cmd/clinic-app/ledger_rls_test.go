@@ -56,6 +56,8 @@ func TestLedgerReadBoundary_WildcardRequiredNonWildcardDenied(t *testing.T) {
 		{Name: "identity_key", Type: "text"},
 		{Name: "email", Type: "text"},
 		{Name: "phone", Type: "text"},
+		{Name: "no_show_count", Type: "integer"},
+		{Name: "last_no_show_at", Type: "text"},
 	})
 	if err != nil {
 		t.Fatalf("build protected DDL: %v", err)
@@ -164,6 +166,8 @@ func TestArrearsReadBoundary_EmptyVisibleSetVsWildcard(t *testing.T) {
 		{Name: "identity_key", Type: "text"},
 		{Name: "email", Type: "text"},
 		{Name: "phone", Type: "text"},
+		{Name: "no_show_count", Type: "integer"},
+		{Name: "last_no_show_at", Type: "text"},
 	})
 	if err != nil {
 		t.Fatalf("build protected DDL: %v", err)
