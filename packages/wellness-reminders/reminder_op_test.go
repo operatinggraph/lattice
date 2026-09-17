@@ -55,10 +55,11 @@ const (
 	wrRemindedFor     = "2026-07-01T15:00:00Z"
 )
 
-// wrStaffCapDoc grants the staff actor RecordBookingReminder at Scope:"any"
-// with the operator role — deliberately the SAME grant Weaver holds. That is
-// what makes the negative test below attributable: the refusal can only come
-// from the script's actor guard, never from a missing or narrower grant.
+// wrStaffCapDoc grants the staff actor RecordBookingReminder and
+// RecordBookingChangeNotice at Scope:"any" with the operator role —
+// deliberately the SAME grants Weaver holds. That is what makes the negative
+// tests attributable: the refusal can only come from the script's actor
+// guard, never from a missing or narrower grant.
 func wrStaffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -70,6 +71,7 @@ func wrStaffCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "RecordBookingReminder", Scope: "any"},
+			{OperationType: "RecordBookingChangeNotice", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -77,7 +79,7 @@ func wrStaffCapDoc() *processor.CapabilityDoc {
 	}
 }
 
-// wrWeaverCapDoc grants Weaver's primordial dispatch actor the same op. Read
+// wrWeaverCapDoc grants Weaver's primordial dispatch actor the same ops. Read
 // through a func, not a package var: bootstrap's primordial globals are
 // populated by SetupPackageTestEnv's EnsurePrimordials, well after package var
 // initialization.
@@ -92,6 +94,7 @@ func wrWeaverCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "RecordBookingReminder", Scope: "any"},
+			{OperationType: "RecordBookingChangeNotice", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

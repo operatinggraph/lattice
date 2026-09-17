@@ -26,11 +26,13 @@ package wellnessreminders
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/lenstest"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
@@ -469,6 +471,7 @@ func TestReminders_NoSession(t *testing.T) {
 func TestBookingLenses_ReferenceNoClockParameter(t *testing.T) {
 	for _, tc := range []struct{ name, spec string }{
 		{"wellnessBookingReminders", wellnessBookingRemindersSpec},
+		{"wellnessBookingChangeNotices", wellnessBookingChangeNoticesSpec},
 		{"pastDueBookings", pastDueBookingsSpec},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -493,22 +496,37 @@ func TestBookingLenses_ReferenceNoClockParameter(t *testing.T) {
 // the other leaves a lens reading an entry nothing ever writes — a gap that can
 // never open, with every row still projecting and every seeded-marker test still
 // passing.
+//
+// A lens that projects no freshUntil arms no timer, so nothing ever writes an
+// entry under its target id; such a lens must NOT read one (a read of an entry
+// with no writer is a conjunct that can never flip). wellnessBookingChangeNotices
+// is that lens: level-triggered, it reads only the sibling pastDueBookings entry
+// as its class-over term.
 func TestBookingLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
-	specs := map[string]string{}
+	specs := map[string]pkgmgr.LensSpec{}
 	for _, l := range Lenses() {
-		specs[l.CanonicalName] = l.Spec
+		specs[l.CanonicalName] = l
 	}
-	var checked int
+	var checked, levelTriggered int
 	for _, tgt := range WeaverTargets() {
-		spec, ok := specs[tgt.LensRef]
+		lens, ok := specs[tgt.LensRef]
 		require.Truef(t, ok, "target %s names lens %s, which this package must declare", tgt.TargetID, tgt.LensRef)
-		require.Containsf(t, spec, "byTarget."+tgt.TargetID,
+		if !slices.Contains(lens.Output.BodyColumns, "freshUntil") {
+			require.NotContainsf(t, lens.Spec, "byTarget."+tgt.TargetID,
+				"lens %s arms no timer (no freshUntil), so no entry is ever written under %q — reading one is a dead conjunct",
+				tgt.LensRef, tgt.TargetID)
+			levelTriggered++
+			continue
+		}
+		require.Containsf(t, lens.Spec, "byTarget."+tgt.TargetID,
 			"lens %s must read the marker under its own target id %q — the timer that fires writes that entry and no other",
 			tgt.LensRef, tgt.TargetID)
 		checked++
 	}
 	require.Equal(t, 2, checked,
 		"wellnessBookingReminders and pastDueBookings each read a recorded lapse; a drop here is a lens that went back to a clock")
+	require.Equal(t, 1, levelTriggered,
+		"wellnessBookingChangeNotices is the one level-triggered target; a freshUntil column appearing on it is a timer nothing designed")
 }
 
 // TestBookingLenses_AgreeOnTheStatusThatArmsTheEndTimer pins the wellness half of
@@ -520,15 +538,17 @@ func TestBookingLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
 // not would hold the reminder gap open with no term able to close it, so the op
 // would refuse every dispatch until the retry budget stood exhausted.
 //
-// Here the two agree by construction rather than by a shared exclusion list:
-// both require status = 'booked' EXACTLY, a positive equality on one value. That
+// Here the lenses agree by construction rather than by a shared exclusion list:
+// each requires status = 'booked' EXACTLY, a positive equality on one value. That
 // is stronger than the appointment pair's agreement and cannot drift into a
 // partial overlap — but only while it stays an equality on the same literal,
-// which is what this pins.
+// which is what this pins. wellnessBookingChangeNotices closes its two gaps on
+// the same pastDueBookings entry, so the same coupling binds it.
 func TestBookingLenses_AgreeOnTheStatusThatArmsTheEndTimer(t *testing.T) {
 	for name, spec := range map[string]string{
-		"wellnessBookingReminders": wellnessBookingRemindersSpec,
-		"pastDueBookings":          pastDueBookingsSpec,
+		"wellnessBookingReminders":     wellnessBookingRemindersSpec,
+		"wellnessBookingChangeNotices": wellnessBookingChangeNoticesSpec,
+		"pastDueBookings":              pastDueBookingsSpec,
 	} {
 		require.Containsf(t, spec, "(b.status.data.value = 'booked')",
 			"%s must gate on status = 'booked' exactly — the reminder gate closes on a marker only "+

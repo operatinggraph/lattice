@@ -1,5 +1,5 @@
 name: wellness-reminders
-version: 0.3.7
+version: 0.4.0
 description: |
   Wellness class reminder — the wellness vertical's first orchestration. A
   one-shot @at convergence over wellness-domain's booking: the .reminder
@@ -13,6 +13,14 @@ description: |
   external.notification off its own outbox to the bridge's "notification"
   adapter; RecordBookingReminderNotification records the outcome as an
   audit-only aspect (does not gate the convergence lens above).
+  Also ships the booking-change notice: the .changeNotice marker aspect +
+  RecordBookingChangeNotice op and the wellnessBookingChangeNotices
+  weaver-target lens — level-triggered (no freshUntil, no timer): a seat
+  promoted from the waitlist (.status.promotedAt) is told once, a class
+  moved to a new time (startsAt drifted from the time the member was last
+  told) is told once per move. Each notice is keyed on the change itself
+  (<bookingKey>:<kind>:<changeRef>) and sent off the op's own outbox;
+  wellness-domain's RecordBookingChangeNotification records the outcome.
   Also ships pastDueBookings, the auto-no-show closer: freshUntil = the
   session's own .schedule.endsAt (no derived deadline), gap opens once a
   `booked` booking's class ends with no attendance mark. The §10.8 playbook
@@ -35,8 +43,16 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: bookingReminderNotification
       class: meta.ddl.aspectType
+    - canonicalName: bookingChangeNoticeOp
+      class: meta.ddl.vertexType
+    - canonicalName: bookingChangeNotice
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: wellnessBookingReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: wellnessBookingChangeNotices
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
@@ -51,11 +67,17 @@ declares:
     - operationType: RecordBookingReminderNotification
       scope: any
       grantsTo: [operator]
+    - operationType: RecordBookingChangeNotice
+      scope: any
+      grantsTo: [operator]
   weaverTargets:
     - targetId: wellnessBookingReminders
       lensRef: wellnessBookingReminders
+    - targetId: wellnessBookingChangeNotices
+      lensRef: wellnessBookingChangeNotices
     - targetId: pastDueBookings
       lensRef: pastDueBookings
   opMetas:
     - operationType: RecordBookingReminder
     - operationType: RecordBookingReminderNotification
+    - operationType: RecordBookingChangeNotice

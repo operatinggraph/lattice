@@ -34,33 +34,33 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // this test rather than reaching an install, where the same change is a
 // silent capability or read-model shift.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 4; got != want {
+	if got, want := len(Package.DDLs), 6; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 2; got != want {
+	if got, want := len(Package.Permissions), 3; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 2; got != want {
+	if got, want := len(Package.Lenses), 3; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 2; got != want {
+	if got, want := len(Package.WeaverTargets), 3; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 2; got != want {
+	if got, want := len(Package.OpMetas), 3; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
-	wantDDLs := []string{"bookingReminderOp", "bookingReminder", "bookingReminderNotificationOp", "bookingReminderNotification"}
+	wantDDLs := []string{"bookingReminderOp", "bookingReminder", "bookingReminderNotificationOp", "bookingReminderNotification", "bookingChangeNoticeOp", "bookingChangeNotice"}
 	for i, d := range Package.DDLs {
 		if i < len(wantDDLs) && d.CanonicalName != wantDDLs[i] {
 			t.Errorf("DDLs[%d]: got %q, want %q", i, d.CanonicalName, wantDDLs[i])
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"RecordBookingReminder", "any"}, {"RecordBookingReminderNotification", "any"}}
+	wantPerms := []struct{ op, scope string }{{"RecordBookingReminder", "any"}, {"RecordBookingReminderNotification", "any"}, {"RecordBookingChangeNotice", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break
@@ -71,14 +71,14 @@ func TestPackage_StructurePins(t *testing.T) {
 		}
 	}
 
-	wantLenses := []string{"wellnessBookingReminders", "pastDueBookings"}
+	wantLenses := []string{"wellnessBookingReminders", "wellnessBookingChangeNotices", "pastDueBookings"}
 	for i, d := range Package.Lenses {
 		if i < len(wantLenses) && d.CanonicalName != wantLenses[i] {
 			t.Errorf("Lenses[%d]: got %q, want %q", i, d.CanonicalName, wantLenses[i])
 		}
 	}
 
-	wantTargets := []string{"wellnessBookingReminders", "pastDueBookings"}
+	wantTargets := []string{"wellnessBookingReminders", "wellnessBookingChangeNotices", "pastDueBookings"}
 	for i, d := range Package.WeaverTargets {
 		if i < len(wantTargets) && d.TargetID != wantTargets[i] {
 			t.Errorf("WeaverTargets[%d]: got %q, want %q", i, d.TargetID, wantTargets[i])
@@ -120,5 +120,28 @@ func TestPastDueBookings_NoShowFeeIsATypedZero(t *testing.T) {
 	n, ok := decoded.(float64)
 	if !ok || n != 0 {
 		t.Fatalf("literal %q decodes to %#v, want the JSON number 0", literal, decoded)
+	}
+}
+
+// TestRecordBookingChangeNotice_MarkerUpdateIsOCCPinned pins the shape of the
+// .changeNotice write in recordChangeNoticeScript: the op READS the marker
+// (a declared optionalRead) and writes it, so the update must carry
+// `expectedRevision: existing.revision` — a promotion notice and a move
+// notice converging on one booking each carry the other's field forward, and
+// only the pin turns a concurrent write in between into a conflict that
+// re-runs rather than an overwrite that drops a field. The create branch is
+// the absent case and needs no pin.
+func TestRecordBookingChangeNotice_MarkerUpdateIsOCCPinned(t *testing.T) {
+	for _, want := range []string{
+		`existing = kv.Read(booking_key + ".changeNotice")`,
+		`"op": "update", "key": marker_key, "expectedRevision": existing.revision`,
+		`"op": "create", "key": marker_key`,
+		`marker["promotedFor"] = change_ref`,
+		`marker["movedFor"] = change_ref`,
+		`for field in ["promotedFor", "movedFor"]:`,
+	} {
+		if !strings.Contains(recordChangeNoticeScript, want) {
+			t.Errorf("recordChangeNoticeScript must contain %q", want)
+		}
 	}
 }

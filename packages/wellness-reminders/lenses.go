@@ -11,11 +11,18 @@ import (
 // binding Weaver reads.
 const WellnessBookingRemindersTarget = "wellnessBookingReminders"
 
+// WellnessBookingChangeNoticesTarget is the §10.8 TargetID == the
+// wellnessBookingChangeNotices lens's OutputKeyPattern prefix — the
+// §10.2↔§10.8 binding Weaver reads.
+const WellnessBookingChangeNoticesTarget = "wellnessBookingChangeNotices"
+
 // Lenses returns the package's weaver-target convergence lenses:
 // wellnessBookingReminders, the ~24h-ahead class reminder (mirrors
 // clinic-reminders' appointmentReminders lens, anchored on booking instead
 // of appointment — a wellness session has MANY bookers, so the reminder
-// marker, and hence the anchor, lives per-booking, not per-session), and
+// marker, and hence the anchor, lives per-booking, not per-session);
+// wellnessBookingChangeNotices, the level-triggered promotion / time-move
+// notice (changenotice.go owns the op; the lens is below); and
 // pastDueBookings, the auto-no-show closer (pastdue.go; mirrors
 // clinic-reminders' pastDueAppointments).
 func Lenses() []pkgmgr.LensSpec {
@@ -32,6 +39,22 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "booking",
 				OutputKeyPattern: "wellnessBookingReminders.{actorSuffix}",
 				BodyColumns:      []string{"violating", "missing_reminder", "entityKey", "freshUntil", "startsAt", "endsAt", "remindAt", "reminderSentAt", "remindedFor", "status", "sessionKey", "bookerKey"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+			},
+		},
+		{
+			CanonicalName:  "wellnessBookingChangeNotices",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           wellnessBookingChangeNoticesSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "booking",
+				OutputKeyPattern: "wellnessBookingChangeNotices.{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_promotion_notice", "missing_move_notice", "entityKey", "sessionKey", "bookerKey", "status", "startsAt", "endsAt", "classStartsAt", "promotedAt", "className", "promotedFor", "movedFor", "noticeSentAt"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -147,3 +170,93 @@ RETURN
   ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_reminder,
   ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS violating`,
 	PastDueBookingsTarget, WellnessBookingRemindersTarget)
+
+// wellnessBookingChangeNoticesSpec is the one-row-per-booking change-notice
+// convergence cypher: a member whose seat was handed over from the waitlist,
+// or whose class was moved to a new time, is told once per change. Unlike
+// the reminder spec above it projects NO freshUntil and arms NO timer — both
+// gaps are level-triggered states over recorded facts, not deadlines: a
+// promotion is `promotedAt` present, a move is the session's startsAt having
+// drifted from the time the member was last told. There is nothing to wait
+// for; the row is violating the moment the fact lands and converged the
+// moment the notice is recorded.
+//
+// The lifecycle for one booking:
+//
+//   - PromoteWaitlistedBookings (wellness-domain) stamps .status.promotedAt
+//     on the seat it hands over; that instant never changes again. With no
+//     .changeNotice yet, promotedFor is null and `null <> promotedAt` is true
+//     → missing_promotion_notice opens. RecordBookingChangeNotice{kind:
+//     promoted, changeRef: row.promotedAt} writes .changeNotice.promotedFor =
+//     promotedAt → the equality closes the gap. Because promotedAt is written
+//     once, this gap converges exactly once per booking.
+//   - CreateBooking / JoinWaitlist snapshot the class time the seat was
+//     claimed for as .status.classStartsAt, and every later .status writer
+//     carries it. ReassignSession rewrites the session's .schedule.startsAt
+//     and records nothing about the move, so "moved since the member was
+//     told" is startsAt <> coalesce(movedFor, classStartsAt): movedFor is the
+//     startsAt the last move notice was for, and classStartsAt is the time
+//     the member booked against — the coalesce is "the last time the member
+//     was told", whichever notice that was. RecordBookingChangeNotice{kind:
+//     moved, changeRef: row.startsAt} writes movedFor = startsAt → closed. A
+//     SECOND move makes startsAt drift from the recorded movedFor → the gap
+//     reopens and a fresh notice (a fresh externalRef) goes out.
+//   - classStartsAt <> null guards the move gap: a booked seat claimed
+//     before the snapshot existed carries no classStartsAt, so coalesce
+//     would resolve null and `startsAt <> null` would read TRUE — a false
+//     "your class moved" to a member whose class never moved. Such a seat
+//     stays quiet for every move rather than being told a fiction once:
+//     with no baseline there is nothing to compare the current time against.
+//   - se.schedule.data.startsAt <> null guards BOTH gaps: a tombstoned
+//     session unbinds the OPTIONAL forSession walk (the rule engine drops a
+//     dead neighbour), so a called-off class projects null startsAt for
+//     every seat until wellness-domain's release drains it. Without the
+//     guard the move gap would read `null <> classStartsAt` as a move, and
+//     the promotion gap would dispatch an op whose sessionKey param is null.
+//     The call-off notice is ReleaseOrphanedBooking's own, emitted in the
+//     batch that tombstones the booking (wellness-domain) — never this lens's.
+//   - status = 'booked': only a confirmed seat is told. A waitlisted booker
+//     has no seat to be moved or promoted into yet; attended / noShow means
+//     the class already happened.
+//   - NOT (b.freshnessExpiry.data.byTarget.pastDueBookings >= endsAt) — the
+//     class is OVER, a recorded fact from the sibling pastDueBookings
+//     target's fired @at on this same booking anchor (exactly the conjunct
+//     the reminder spec reads). A notice for a class that has ended is moot,
+//     and the closed column retires any GapBudgetExhausted latch the open
+//     window accumulated. While nothing has fired, NOT(false) leaves the
+//     gaps open — the default a not-yet-ended class needs.
+//
+// Every operand is stored graph data; the lens reads no clock. `<>` is the
+// engine's two-valued null test (null <> 'x' true, null <> null false), which
+// is what lets the absent-marker case open the gap and the absent-fact case
+// (no promotedAt, no classStartsAt) keep it closed. violating repeats both
+// gap expressions verbatim — the engine has no column references in RETURN.
+//
+// One-row-per-anchor: forSession / bookedBy are 0..1 (CreateBooking /
+// JoinWaitlist write exactly one of each), so the OPTIONAL walks do not fan
+// out. bookerKey / className / noticeSentAt / endsAt are INFORMATIONAL;
+// entityKey, sessionKey, promotedAt, startsAt and the three bools are
+// load-bearing for dispatch (the target's Params template off them). Built
+// with fmt.Sprintf so the sibling target id comes from its constant; the
+// cypher has no negated relationship pattern, only scalar NOT comparisons.
+var wellnessBookingChangeNoticesSpec = fmt.Sprintf(`MATCH (b:booking {key: $actorKey})
+OPTIONAL MATCH (b)-[:forSession]->(se:session)
+OPTIONAL MATCH (b)-[:bookedBy]->(id:identity)
+RETURN
+  b.key AS actorKey,
+  b.key AS entityKey,
+  se.key AS sessionKey,
+  id.key AS bookerKey,
+  b.status.data.value AS status,
+  se.schedule.data.startsAt AS startsAt,
+  se.schedule.data.endsAt AS endsAt,
+  b.status.data.classStartsAt AS classStartsAt,
+  b.status.data.promotedAt AS promotedAt,
+  b.status.data.className AS className,
+  b.changeNotice.data.promotedFor AS promotedFor,
+  b.changeNotice.data.movedFor AS movedFor,
+  b.changeNotice.data.sentAt AS noticeSentAt,
+  ((b.status.data.promotedAt <> null) AND (b.changeNotice.data.promotedFor <> b.status.data.promotedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_promotion_notice,
+  ((b.status.data.classStartsAt <> null) AND (se.schedule.data.startsAt <> null) AND (se.schedule.data.startsAt <> coalesce(b.changeNotice.data.movedFor, b.status.data.classStartsAt)) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_move_notice,
+  (((b.status.data.promotedAt <> null) AND (b.changeNotice.data.promotedFor <> b.status.data.promotedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) OR ((b.status.data.classStartsAt <> null) AND (se.schedule.data.startsAt <> null) AND (se.schedule.data.startsAt <> coalesce(b.changeNotice.data.movedFor, b.status.data.classStartsAt)) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt))) AS violating`,
+	PastDueBookingsTarget)

@@ -183,6 +183,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"visitSeriesDue":                    hopIndexed,
 	"visitSeriesSiteBackfill":           hopIndexed,
 	"wellnessArrearsReminders":          hopIndexed,
+	"wellnessBookingChangeNotices":      hopIndexed,
 	"wellnessBookingReminders":          hopIndexed,
 	"wellnessClassPriceSettlement":      hopIndexed,
 	"wellnessNoShowSettlement":          hopIndexed,
