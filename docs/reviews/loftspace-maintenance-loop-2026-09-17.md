@@ -39,9 +39,13 @@ widening** (decision 2), prepared uncommitted for Andrew per CLAUDE.md.
   wired at approval since `a8299552` — the tenancy self probe the PO names.
 - **Tasks.** `CreateTask{queue: vtx.role.<id>, forOperation: vtx.meta.<opMeta>, scopedTo, expiresAt (required), taskId?}`
   ([orchestration-base/ddls.go:110-118](../../packages/orchestration-base/ddls.go)); a queue is ROLE-only —
-  `lnk.task.<id>.queuedFor.role.<roleId>` ([ddls.go:39](../../packages/orchestration-base/ddls.go)) — "at the building" is
-  the claimant's own confinement (the roster + `ResolveWorkOrder`'s task-path bind), exactly the shape the seed mints
-  (`queue: backOfHouse`, [seed-showcase.go:493-503](../../scripts/seed-showcase.go)). `CreateTask` is `operator`-granted
+  `lnk.task.<id>.queuedFor.role.<roleId>` ([ddls.go:39](../../packages/orchestration-base/ddls.go)) — and **nothing confines
+  the claimant to the building**: `ClaimTask` checks `holdsRole` alone and `ResolveWorkOrder`'s task path skips the
+  workplace walk once resource-bound ([ddls.go:636-642](../../packages/maintenance-domain/ddls.go)), so any holder of
+  `backOfHouse` anywhere may claim and resolve any queued order (the exposure the seed's one daily task already carried;
+  the showcase has one building). A location-scoped role queue is a platform primitive with no precedent — filed
+  (cold review, 2026-09-17, struck the earlier "the claimant's own confinement" reading here). The seed's shape is
+  `queue: backOfHouse` ([seed-showcase.go:493-503](../../scripts/seed-showcase.go)). `CreateTask` is `operator`-granted
   ([permissions.go:50](../../packages/orchestration-base/permissions.go)) — Weaver's service actor holds it. Task root is
   `{status ∈ open|complete|cancelled, expiresAt}`; expiry is not a transition — an open role-queued task past its
   `expiresAt` is `orchestration-base`'s `unroutedTasks` → `surface UnroutedTasks` (Contract #10 weaver §action table),
@@ -75,8 +79,10 @@ widening** (decision 2), prepared uncommitted for Andrew per CLAUDE.md.
    `entityKey`, `resolvedAt = wo.resolution.data.resolvedAt`, `openTaskCount = count(DISTINCT CASE WHEN t.data.status =
    'open' THEN t.key ELSE null END)` (the `otherLiveTenancyCount` CASE shape over orchestration-base's own status
    fragment), `missing_task = (resolvedAt = null) AND (openTaskCount = 0)`, `violating = missing_task`. A cancelled task
-   re-opens the gap (re-queued); an expired-but-open one does not (that is `unroutedTasks`' surfaced issue, not a
-   re-queue — decided with the platform, not against it); a resolution closes it whoever resolved. Gap:
+   re-opens the gap (re-queued), and so does a task `CompleteTask`-ed without a resolution (the order is unresolved and
+   nobody holds it; human-paced — one re-queue per human completion); an expired-but-open one does not (that is
+   `unroutedTasks`' surfaced issue, not a re-queue — decided with the platform, not against it); a resolution closes it
+   whoever resolved. Gap:
    `missing_task: {Action: assignTask, Operation: ResolveWorkOrder, Queue: "vtx.role." + pkgmgr.RoleID("identity-domain",
    "backOfHouse"), Target: row.entityKey}` — the literal role key the seed uses. Package `0.2.12 → 0.3.0`.
 2. **Weaver `assignTask` gains a `Queue` arm** (`internal/pkgmgr` + `internal/weaver`): `GapActionSpec.Queue` (and the
@@ -95,7 +101,12 @@ widening** (decision 2), prepared uncommitted for Andrew per CLAUDE.md.
    `elif not actor_holds_operator(op.actor): enforce_workplace([loc], …)`. The self leg binds the validated target
    to the actor AND the actor to the unit — the "resource bind" the script's own comment demanded; a staff self
    submission is refused (staff submit standing). The op-meta stays `standing` (`{me.workplace}` — Facet's staff form
-   is untouched); the tenant leg's dispatcher is loftspace-app's hand-built submit, which declares the link.
+   is untouched); the tenant leg's dispatcher is loftspace-app's hand-built submit, which declares the link. **The self
+   grant reaches Facet's consumer catalog too** (`edgeCatalog`'s held-role walk filters no scope), where a `standing`
+   descriptor is unanswerable for a tenant (no workplace; and a standing envelope carries no target for a self row to
+   authorize) — so `edgeCatalog` excludes a `scope=self` grant on a `standing`-descriptor op (edge-manifest 0.17.19): a self
+   grant needs a target, a standing descriptor sends none, no authorable shape, no offer. A tenant-authorable Facet leg
+   needs a per-grant-scope dispatch variant on one op-meta — no such vocabulary exists; filed as a designer row.
    `.report.reportedBy` already records the actor; nothing more is stored.
 4. **"Report an issue" on the tenant card**, mirroring `renderGiveNoticeControl` + `submitGiveNotice`: offered while
    `row.landlordApproved && !row.tenancyEndedAt` (a residing tenant; the op's `NotResident` is the truth if the spine
@@ -120,7 +131,8 @@ widening** (decision 2), prepared uncommitted for Andrew per CLAUDE.md.
    `location-domain` (its only `Depends`), the residence-spine decision 5 rule: a chain that ships a client of an op
    installs the package that owns the op. `refresh-loftspace` already chains `provision-readpath` for the new protected
    lens.
-8. **Non-goals.** No re-queue of an expired-open task (decision 1); no building-located orders on the landlord panel;
+8. **Non-goals.** No re-queue of an expired-open task (decision 1; the landlord panel's `queued` therefore includes a
+   task past its `expiresAt` — the operator's `UnroutedTasks` issue is where that surfaces); no building-located orders on the landlord panel;
    no tenant list of reports; no change to `ResolveWorkOrder`'s grants; `proposedOp` stays assignee-only; Facet's
    staff `ReportIssue` form unchanged.
 
@@ -177,3 +189,33 @@ is the "two writers" item (checklist 5) resolved by removing the second writer.
 name and is the mechanism the ask's `CreateTask(queue: backOfHouse)` requires (grounding: no arm, no `directOp` route);
 the seed change removes a second writer the gap would race. Declared dependency re-verified both ways: the residence
 spine (`a8299552`) is load-bearing for decision 3 and shipped; nothing here is load-bearing for anything unbuilt.
+
+**Build note (2026-09-17).** Deviations from the brief, each an increment of the same mechanism: `workOrderQueue` is
+`{key: $actorKey}`-anchored with `actorKey` aliased (the weaver-targets actorAggregate idiom, not the bare MATCH sketched);
+the residence link is read from `state` alone (an undeclared submitter fails closed with no live read); the self leg
+selects its bind by the caller's STATED target — `authContextTarget == actor` first, then a foreign validated target
+refused, then the standing walk — because `matchPlatformPermission` returns whichever grant row was written first, so a
+dual-hat actor keyed on `authTargetValidated` could land on the staff conjunct at their own home; `landlordWorkOrdersRead`'s
+task tail is written anchor-first (`(wo)<-[:scopedTo]-(t:task)`) after the scan-root census read the far-node-first form as
+a bucket scan; `edgeCatalog` withholds a self grant on a standing descriptor (decision 3); Loupe's parse/render/author
+contracts and the bridge's NL author carry `queue`; `edge-manifest` 0.17.19. The seed no longer mints the task.
+
+**Shipped `ea15ca76` (merge of `79329b2d`), CI green, live 2026-09-17.** `bin/lattice-pkg` + `bin/lattice` rebuilt first,
+`make orchestration` cycled weaver/bridge, `reinstall-package` maintenance-domain 0.2.12 → 0.3.0 and edge-manifest,
+`refresh-loftspace` (loftspace-domain 0.13.2 → 0.14.0 + `provision-readpath` + the app), `cycle-loupe`, `cycle-gateway`.
+Weaver queued the 49-day-old "Kitchen tap is dripping" order 2 s after the upgrade (`vtx.task.bSWRNrozxAk8zQ2dXhhX`,
+`queuedFor` backOfHouse, `expiresAt` +30 d); all 18 orders project, `read_landlord_work_orders` holds 17 rows unlatched.
+Jordan Ellis, through the app's own path (dev-login → session token → Gateway, self authContext, the residesIn link
+declared): another unit → `NotResident`; his own unit → `vtx.workorder.whDpTDRwQiJmA6PfFhdF`, queued by the gap within 8 s
+(`vtx.task.xpJ9HJA4FYCYULrQTxdf`), first row of Nora Vance's `/api/landlord/work-orders` (`scope: rls`, 18 rows) and of her
+Maintenance panel (`normal · queued`). Jordan's SYNC manifest carries no `ReportIssue` row; the back-of-house tech's still
+does via `backOfHouse`. The three other vertical apps link `pkgmgr` for types only and were not cycled.
+
+**Review classification (one cold pass over the whole diff, 5 SHOULD-FIX, all fixed before merge):** design-gap ×2 (the
+"claimant's confinement" claim — `ClaimTask` checks `holdsRole` alone; the dual-hat order dependence — both now `_packages.md`
+sightings), brief-gap ×2 (Facet's consumer catalog — a client the census never walked; Loupe + bridge dropping the wire
+field — a new `loupe.md` dossier entry), implementation ×1 (`CompleteTask` without a resolution — pinned as the re-queue
+arm), convention ×3 (a dangling doc name in six files, two narrations, the Makefile comment). The refractor scan-root census
+caught the far-node-first OPTIONAL MATCH — mechanized already. Filed as designer rows (`verticals.md`): a location-scoped
+role queue; per-grant-scope dispatch variants on one op-meta.
+

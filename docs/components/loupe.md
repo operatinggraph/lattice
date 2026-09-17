@@ -112,3 +112,15 @@ single-identity loopback tool. The platform-side pieces it would consume have si
 **Personal Lens** (per-identity security-filtered projection, Fires 1–5) are all ✅ built and in use by
 the vertical apps. What remains is Loupe-specific — wiring per-identity auth into its own request path —
 and is not yet scheduled.
+
+## Review keeps catching (dossier)
+
+The recurring review-finding classes for the console — fire briefs copy the applicable entries into part 5
+(`agents/fire-brief-template.md`), the item-close review appends new ones (`agents/steward/SKILL.md` §4). Capped at 12.
+
+- **A widened Weaver wire field is silently dropped by Loupe's parse contract** — `weaverActionContract` re-declares
+  `GapAction`'s JSON shape by hand, so a field added to `internal/weaver/registry.go` (the `assignTask` `queue` arm) reaches
+  the console as `→ ?` and cannot be authored through `weaverauthor`/the bridge's NL author. Minted: 2026-09-17, caught
+  cold. Check: for every json tag on `weaver.GapAction` name its twin in `cmd/loupe/weaver.go`, `weaverauthor.go`,
+  `web/js/logic/weaverauthor.js` and `internal/bridge/capability_author.go`; a second sighting mechanizes the tag diff.
+

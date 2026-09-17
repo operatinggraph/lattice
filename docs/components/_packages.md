@@ -601,7 +601,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   `Σ_arms(pages × pageLimit) / perCommit` against the script's own page constants; price a `validUntil`/`freshUntil` window as a vendor-validity policy over the stack's lifetime and name
   what retires the superseded artifact; for a gap over a growing set prove the FIRST dispatch closes it (aggregate to
   the run's extreme, pin a re-projection after the op's write) — Weaver has no episode boundary of its own; for every
-  ARM of the op (no-op, collapse, complete) pin the gap FALSE over the state that arm leaves. Sighting: a lens-computed
+  ARM of the op (no-op, collapse, complete) pin the gap FALSE over the state that arm leaves — and every arm of every
+  NEIGHBOUR op that writes the gap's inputs (`CompleteTask` without a resolution re-opens `missing_task`; stated and
+  pinned, 2026-09-17, caught cold). Sighting: a lens-computed
   param the dispatched op can refuse on SHAPE (`whole_cents` on a fractional-dollar `depositAmount`) is a gap refused on every
   pass — pin the param's admissible domain at its source (loftspace deposit, 2026-09-15, caught cold). Sighting: a replay budget mirrored as a NUMBER (500) was sized against the live-read budget, not the 250 ms wall — a
   98-entry account aborted, and a ScriptTimeout is a rejection the gap re-dispatches forever (clinic arrears, 2026-09-16,
@@ -642,6 +644,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   Fifth minter (café counter payment, 2026-09-16, caught cold): a PLAYBOOK-dispatched leg inherited the human
   leg's balance cap and parked real cash — a dispatcher is a leg, bounded by the fact it dispatches from.
   Sixth minter (arrears checkpoint, 2026-09-16): a writer that writes NOTHING is still a leg of a value it must clear.
+  Seventh (maintenance `ReportIssue` self leg, 2026-09-17, caught cold): a widened leg that selects its bind by
+  `authTargetValidated` runs the STAFF conjunct for a dual-hat actor when the `any` row was written first — select the
+  bind by the caller's stated target (a self-named target opts INTO the stricter bind, never out of one).
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
@@ -653,7 +658,8 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   `wellnessWaitlistPromotion` counted `status = booked` while its op read seat cells (2026-09-06); `tenancyEnd`'s
   `missing_relist` and `missing_listingLeased` disagreed on "live rival" (2026-09-14, a relist/lease ping-pong); the
   `tenancyEnd` consumer table left `renewalComplete` alone "by construction" while `EndTenancy` walks no renewals
-  (2026-09-14). Check: for every `byTarget.<t>` a lens reads, both gates sit on ONE shared status fragment pinned on
+  (2026-09-14); maintenance `workOrderQueue` claimed "at the building is the claimant's confinement" while `ClaimTask`
+  checks `holdsRole` alone and the resolve task path skips the worksAt walk (2026-09-17, caught cold). Check: for every `byTarget.<t>` a lens reads, both gates sit on ONE shared status fragment pinned on
   the shipped specs (`TestCapabilityEphemeral_ArmsShareTheirTargetsRelationAndStatusFragment` is the shape); for each
   gap conjunct name the op-side read that answers the same question, and a membership test applied to a neighbour is
   the neighbour's OWN claim predicate, verbatim; for every `freshUntil` a lens projects name the reader of its marker
