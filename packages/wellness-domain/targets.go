@@ -2,13 +2,15 @@ package wellnessdomain
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// WeaverTargets returns the package's two meta.weaverTarget playbooks
+// WeaverTargets returns the package's three meta.weaverTarget playbooks
 // (Contract #10 §10.8): missing_release → directOp(ReleaseOrphanedBooking)
-// over a booking whose class was called off, and missing_promotion →
+// over a booking whose class was called off, missing_promotion →
 // directOp(PromoteWaitlistedBookings) over a class holding both a free seat
-// and a live waitlist. Both mirror clinic-ledger/targets.go's shape but stay
-// self-contained inside wellness-domain — it already owns both the booking
-// DDL and the session DDL, so no cross-package dependency is needed.
+// and a live waitlist, and missing_occurrence / missing_led_occurrence →
+// directOp(ExtendSessionSeries) over a rolling series whose window has
+// moved. All mirror clinic-ledger/targets.go's shape but stay self-contained
+// inside wellness-domain — it already owns the booking, session and
+// sessionseries DDLs, so no cross-package dependency is needed.
 //
 // Class pins the "booking" DDL: ReleaseOrphanedBooking is unique to this
 // package today, but an unpinned directOp fails closed (MissingClass)
@@ -91,6 +93,79 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			},
 		},
 		waitlistPromotionTarget(),
+		seriesHorizonTarget(),
+	}
+}
+
+// seriesHorizonTarget returns the §10.8 playbook for the rolling-series
+// convergence: two gaps, one op. missing_occurrence and
+// missing_led_occurrence both dispatch ExtendSessionSeries over the SERIES,
+// where the moving window is recorded (lenses.go's seriesHorizonSpec); they
+// are two gaps rather than one because the instructor is nullable and a
+// Params entry templated off a null row column is a Weaver data error, not a
+// dropped field — the led gap conjuncts on instructorKey present and passes
+// it, the unled gap conjuncts on it absent and does not.
+//
+// Class pins the "sessionseries" DDL, which admits the op (its
+// PermittedCommands, ddls.go): an unpinned directOp fails closed
+// (MissingClass) the moment any other installed package claims the same
+// operationType, so it is pinned regardless, the same defensive shape the
+// other two targets use.
+//
+// Params carries the row's own pin: the occurrence the horizon recorded as
+// next (nextStartsAt/nextEndsAt) and the studio the series' atStudio link
+// resolved to. The op refuses StaleHorizon unless the payload still matches
+// the horizon it hydrates, so a row that lagged a dispatch or a move is
+// refused rather than trusted (ddls.go).
+//
+// Reads declares what the script hard-requires: the series vertex
+// (vertex_alive's UnknownSeries check), its .definition (the shape to mint)
+// and its .horizon (the pin and the write), and the studio root
+// (require_live_typed). None is null on a violating row — the lens is
+// anchored on the series, extendAt <> null is every gap's own conjunct, and
+// studioKey <> null is too (the atStudio hop is OPTIONAL, so a series whose
+// studio was retired projects no gap at all rather than a dispatch with a
+// null Params column).
+//
+// Enumerations puts both walks the script runs on the envelope: the series'
+// own atStudio link (the studio confirmation, walked rather than read by a
+// caller-supplied key) and the studio's locatedAt link (studio_locations,
+// snapshotted onto the minted occurrence's atLocation links), each
+// hub-templated off a row column the payload carries. The per-cell
+// studioSlotClaim/instructorSlotClaim probes are class-(g): the script's
+// own derive_reads computes them from the payload (CreateSession's arm), so
+// no dispatcher names them.
+func seriesHorizonTarget() pkgmgr.WeaverTargetSpec {
+	gap := func(params map[string]string) pkgmgr.GapActionSpec {
+		return pkgmgr.GapActionSpec{
+			Action:    "directOp",
+			Operation: "ExtendSessionSeries",
+			Class:     "sessionseries",
+			Params:    params,
+			Reads:     []string{"row.seriesKey", "row.seriesKey.definition", "row.seriesKey.horizon", "row.studioKey"},
+			Enumerations: []pkgmgr.EnumerationSpec{
+				{Hub: "row.seriesKey", Relation: "atStudio", Direction: "out"},
+				{Hub: "row.studioKey", Relation: "locatedAt", Direction: "out"},
+			},
+		}
+	}
+	return pkgmgr.WeaverTargetSpec{
+		TargetID: SeriesHorizonTarget,
+		Description: "A rolling class never runs out. When the earliest class of a rolling run starts, the " +
+			"next one on its cadence is put on the books, so the run always has its full count of " +
+			"classes ahead — until the desk calls it off.",
+		LensRef: SeriesHorizonTarget,
+		Gaps: map[string]pkgmgr.GapActionSpec{
+			"missing_occurrence": gap(map[string]string{
+				"seriesKey": "row.seriesKey", "studio": "row.studioKey",
+				"startsAt": "row.nextStartsAt", "endsAt": "row.nextEndsAt",
+			}),
+			"missing_led_occurrence": gap(map[string]string{
+				"seriesKey": "row.seriesKey", "studio": "row.studioKey",
+				"startsAt": "row.nextStartsAt", "endsAt": "row.nextEndsAt",
+				"instructor": "row.instructorKey",
+			}),
+		},
 	}
 }
 

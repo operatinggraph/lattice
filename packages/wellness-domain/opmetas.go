@@ -595,6 +595,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"capacity":{"type":"integer","title":"Capacity","minimum":1,"maximum":200,"description":"How many people may book a seat, shared by every occurrence."},` +
 				`"intervalDays":{"type":"integer","title":"Repeat every (days)","minimum":1,"maximum":365,"description":"Days between occurrences — 7 for weekly."},` +
 				`"occurrenceCount":{"type":"integer","title":"Number of occurrences","minimum":2,"maximum":52,"description":"How many classes to schedule, first included."},` +
+				`"rolling":{"type":"boolean","title":"Keep rolling","description":"Keep this many classes on the books: each time the earliest one starts, the next on the cadence is scheduled automatically, until the run is called off."},` +
 				`"instructor":{"type":"string","title":"Instructor","description":"vtx.instructor.<NanoID> leading every occurrence."}},` +
 				`"required":["studio","name","startsAt","endsAt","capacity","intervalDays","occurrenceCount"]}`,
 			FieldDescriptions: map[string]string{
@@ -605,6 +606,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"capacity":        "How many seats each occurrence has, 1 to 200, shared by the whole series.",
 				"intervalDays":    "How many days apart each occurrence falls — 7 for a weekly class, 14 for biweekly.",
 				"occurrenceCount": "How many occurrences to schedule at once, first included (2 to 52). For a single class, use Schedule a class instead.",
+				"rolling":         "Optional. Ticked, the run keeps this many classes on the books: each time the earliest one starts, the next on the cadence is scheduled automatically (led by the same instructor, at the same price), until the run is called off. Left off, the count is the run's whole life.",
 				"instructor":      "Optional. The instructor leading every occurrence. Omitted leaves the series unassigned.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
@@ -690,6 +692,60 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// the actor's own holdsRole links (actor_holds_operator).
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{payload.seriesKey}", Relation: "partOf", Direction: "in"},
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				},
+			},
+		},
+		{
+			OperationType: "StopSessionSeries",
+			// refusal-courtesy(facet): NotRolling, WrongStudio: hide — no lens projects a sessionseries entity (TargetType sessionseries has no browsable row; edge-manifest's edgeEntitySessions carries only session occurrences, per this file's own doc comment above), so Facet never resolves a target and never offers this op.
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Stop a rolling class",
+				Description: "Stop this run from scheduling any further classes. Every class already on the grid stays as it is.",
+				Icon:        "stop",
+				Tone:        "destructive",
+				SubmitLabel: "Stop rolling",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"seriesKey":{"type":"string","description":"vtx.sessionseries.<NanoID> of the rolling class to stop — auto-filled from the series being viewed."},` +
+				`"studio":{"type":"string","title":"Studio","description":"vtx.studio.<NanoID> — must be the series' actual studio."}},` +
+				`"required":["seriesKey","studio"]}`,
+			FieldDescriptions: map[string]string{
+				"seriesKey": "The rolling class being stopped — auto-filled by the client from the series being viewed (dispatch.targetField), not user-entered. Only the run's own scheduling stops; every class already on the grid, and the series record itself, survive.",
+				"studio":    "The studio this recurring class runs at — it must be the series' own studio, so a mismatched value is rejected.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       sessionSeriesVertexDDL,
+				AuthContext: "standing",
+				TargetField: "seriesKey",
+				TargetType:  sessionSeriesVertexDDL,
+				// `{entity.studioKey}` fills the studio off the series row
+				// being viewed, exactly as TombstoneSessionSeries's does.
+				ContextParams: map[string]string{
+					"studio": "{entity.studioKey}",
+				},
+				// The series vertex is hydrated (vertex_alive + class_of read
+				// it from declared state, not live KV), so its absence is a
+				// correctness error, not a rejection the script renders.
+				Reads: []string{"{payload.seriesKey}"},
+				// The studio confirmation probe (WrongStudio is the rejection
+				// the script renders on absence), the studio vertex the
+				// front-of-house binder's studio_locations walk re-proves
+				// live, and the series' .horizon (absence or a horizon with
+				// no extendAt is the NotRolling rejection) — the script's own
+				// derive_reads derives the same three off the payload for a
+				// dispatcher that declares nothing. No walk past these: the
+				// stop is the one series verb that never enumerates the
+				// run's occurrences.
+				OptionalReads: []string{
+					"lnk.sessionseries.{payload.seriesKey:id}.atStudio.studio.{payload.studio:id}",
+					"{payload.studio}",
+					"{payload.seriesKey}.horizon",
+				},
+				// The operator-role confinement probe: the workplace-exempt
+				// short-circuit walks the actor's own holdsRole links
+				// (actor_holds_operator).
+				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
 				},
 			},

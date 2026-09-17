@@ -321,7 +321,16 @@ var appOpCeilings = map[string]int{
 	// beside it already hand-assembles. Rendering one field of one card
 	// through a second, catalog-driven paradigm would fragment that card's
 	// authorship, not close a descriptor-catalog gap.
-	"cmd/wellness-app": 16,
+	// 17: StopSessionSeries is the roster's "Stop rolling" button beside the
+	// series call-off (renderCancelClass, app.js) — the rolling run's
+	// walk-free off switch, a zero-input row action whose whole payload is
+	// the series key and studio key of the class on screen, exactly the
+	// call-off's shape. Its descriptor exists (wellness-domain/opmetas.go)
+	// and declares TargetType `sessionseries`, the same target no entity
+	// lens projects, so the descriptor path cannot resolve it for the same
+	// reason 14/15 cannot. The three series literals migrate together when a
+	// series-entity lens lands.
+	"cmd/wellness-app": 17,
 }
 
 // quotedOpLike matches a quoted PascalCase identifier — the shape every

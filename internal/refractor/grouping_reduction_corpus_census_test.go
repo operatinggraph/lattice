@@ -213,6 +213,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"wellnessNoShowSettlement":          {"key(accountKey entityKey feeCents identityKey status) p", 0},
 	"wellnessOrphanedBookingSettlement": {"p p!liveSessionKey", 0},
 	"wellnessWaitlistPromotion":         {"key(capacity entityKey lapsedAt startsAt) p!lapsedAt", 0},
+	"wellnessSeriesHorizon":             {"p", 0},
 	"wellnessRefundSettlement":          {"key(accountKey amountCents entityKey refundMemo) p!refundMemo", 0},
 	"wellnessSessions":                  {"p", 0},
 	"wellnessStudios":                   {"p", 0},

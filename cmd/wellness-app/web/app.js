@@ -1144,7 +1144,11 @@ function scheduleCard(se, myStatusBySession, seriesCounts, hasApprovedLease, gat
   // not booking the run. The count comes from the grid's own rows, so it is
   // whatever THIS list can see.
   const upcoming = se.seriesKey && seriesCounts ? seriesCounts.get(seriesCountKey(se)) || 0 : 0;
-  const series = upcoming > 0 ? '<div class="meta">' + esc("Recurring · " + upcoming + " upcoming") + "</div>" : "";
+  // A rolling run says so: its count is the window the horizon keeps ahead,
+  // not the run's end (seriesRolling, wellnessSessions).
+  const series = upcoming > 0
+    ? '<div class="meta">' + esc("Recurring · " + upcoming + " upcoming" + (se.seriesRolling ? " · rolling" : "")) + "</div>"
+    : "";
   // The on-hold note replaces the button entirely rather than disabling it —
   // there is nothing left to click, only the balance to pay off (My Classes).
   // It never promises the hold lifts the instant the balance is paid: the
@@ -2501,6 +2505,12 @@ function renderCancelClass(sessionKey) {
   // confirm and the op's front-of-house walk resolves no workplace for it —
   // only the operator can clear that run, and only per class for the desk.
   const offerSeries = !!se.seriesKey && !se.missingStudio && isStaff() && upcoming > 1;
+  // A rolling run's off switch is its own control: StopSessionSeries walks
+  // nothing (a long-lived run's history outgrows the call-off's partOf walk),
+  // so it is offered down to the run's last class — the call-off above stays
+  // on its own count and also stops the run when its walk succeeds.
+  const offerStop = !!se.seriesKey && !se.missingStudio && isStaff() && !!se.seriesRolling;
+  const seriesVerb = "Call off the remaining " + upcoming + " classes in this series" + (se.seriesRolling ? " and stop it rolling" : "");
 
   // TombstoneSession refuses SessionStarted once startsAt <= submittedAt
   // (packages/wellness-domain/ddls.go) — the same at-the-boundary reading
@@ -2510,16 +2520,39 @@ function renderCancelClass(sessionKey) {
   // — it cancels the run's still-upcoming siblings, which this one class
   // having started does not change.
   const started = !!(se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
-  if (started && !offerSeries) return;
+  if (started && !offerSeries && !offerStop) return;
 
   const wrap = document.createElement("div");
   wrap.className = "card-actions";
   wrap.innerHTML = started ? "" : '<button id="cancel-class" class="danger">Call off this class</button>';
   if (offerSeries) {
     wrap.innerHTML +=
-      '<button id="cancel-series" class="danger">' + esc("Call off the remaining " + upcoming + " classes in this series") + "</button>";
+      '<button id="cancel-series" class="danger">' + esc(seriesVerb) + "</button>";
+  }
+  if (offerStop) {
+    wrap.innerHTML += '<button id="stop-series">Stop rolling — keep the classes already scheduled</button>';
   }
   document.getElementById("roster-body").appendChild(wrap);
+  if (offerStop) {
+    document.getElementById("stop-series").addEventListener("click", async () => {
+      const btn = document.getElementById("stop-series");
+      // Irreversible — there is no resume verb, and a re-created run collides
+      // with the classes still on the grid — so, like the call-off beside it,
+      // it asks first.
+      if (!window.confirm("Stop this series rolling? The classes already scheduled stay on the books; no further ones are added.")) return;
+      btn.disabled = true;
+      try {
+        await stopSeries(se);
+        toast("Series stopped rolling — its scheduled classes stay on the books.", true);
+        staffSessionsCache = null;
+        document.getElementById("roster-session").dataset.loaded = "";
+        setTimeout(loadRoster, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  }
   if (!started) {
     document.getElementById("cancel-class").addEventListener("click", async () => {
       const btn = document.getElementById("cancel-class");
@@ -2542,7 +2575,7 @@ function renderCancelClass(sessionKey) {
     // This one cancels classes the staffer is not looking at, so it asks
     // first — the only destructive control in this app whose blast radius is
     // wider than the row it sits on.
-    if (!window.confirm("Call off the remaining " + upcoming + " classes in this series? Classes that already ran are not affected.")) return;
+    if (!window.confirm(seriesVerb + "? Classes that already ran are not affected.")) return;
     btn.disabled = true;
     try {
       await cancelSeries(se);
@@ -2714,7 +2747,7 @@ async function cancelClass(se, leaderInstructorKey) {
 // in-script off the series' own studio.
 // refusal-courtesy: TombstoneSessionSeries/NoUpcomingOccurrences: hide — renderCancelClass only renders the series control when `offerSeries` (upcoming > 1, upcomingSeriesCounts); with none (or exactly one) still-upcoming occurrence, cancelSeries is never reachable.
 // refusal-courtesy: TombstoneSessionSeries/WrongStudio: unreachable — studio is always se.studioKey, the series' own known studio (payload.studio); the form offers no way to pick a different one.
-// refusal-courtesy: TombstoneSessionSeries/SeriesWalkBound: none — a data-scale limit on the partOf walk, unrelated to any field this form submits.
+// refusal-courtesy: TombstoneSessionSeries/SeriesWalkBound: none — a data-scale limit on the partOf walk, unrelated to any field this form submits; a long-lived rolling run's history reaches it, and the Stop control beside this one (stopSeries, walk-free) is the path that still ends the run, its remaining classes called off per class.
 // refusal-courtesy: TombstoneSessionSeries/SessionTooLong: none — this call sends no span; each occurrence's own already-validated schedule is what release_cells_mutations reads (SessionTooLong is enforced once, at CreateSession/CreateSessionSeries mint time).
 async function cancelSeries(se) {
   await opOrThrow(
@@ -2742,6 +2775,29 @@ async function cancelSeries(se) {
       payload: { seriesKey: se.seriesKey, studio: se.studioKey },
     },
     "call off the series",
+    false,
+  );
+}
+
+// stopSeries submits StopSessionSeries — the rolling run's off switch. It
+// writes only the series' .horizon (packages/wellness-domain/ddls.go), so
+// unlike cancelSeries it declares no partOf walk; the classes already on the
+// grid stay, and the desk calls them off per class or with the call-off
+// control. The studio probe + studio are the same (d)-declared pair
+// cancelSeries sends; .horizon itself is derived server-side by the DDL's
+// own derive_reads off the payload's seriesKey.
+// refusal-courtesy: StopSessionSeries/NotRolling: hide — renderCancelClass renders the Stop control only when the row carries seriesRolling (wellnessSessions projects the series' live extendAt); a run stopped since the page loaded is refused by the op and the toast says so.
+// refusal-courtesy: StopSessionSeries/WrongStudio: unreachable — studio is always se.studioKey, the series' own known studio, the same fixed payload cancelSeries sends.
+async function stopSeries(se) {
+  await opOrThrow(
+    {
+      operationType: "StopSessionSeries",
+      class: "sessionseries",
+      reads: [se.seriesKey],
+      optionalReads: ["lnk.sessionseries." + idOf(se.seriesKey) + ".atStudio.studio." + idOf(se.studioKey), se.studioKey],
+      payload: { seriesKey: se.seriesKey, studio: se.studioKey },
+    },
+    "stop the series rolling",
     false,
   );
 }
@@ -3703,6 +3759,11 @@ function studioGridWarning(s, sessions) {
   if (!upcoming.length) {
     return '<p class="studio-grid-dry" style="color:#b00020;font-weight:600;">Schedule is empty — no upcoming classes at this studio.</p>';
   }
+  // A rolling run on the books mints its next class as each one starts
+  // (seriesRolling, wellnessSessions), so the schedule it carries never
+  // runs out — the horizon measured below would call a run that keeps
+  // itself ahead "running out" on every day of its window.
+  if (upcoming.some((se) => !!se.seriesRolling)) return "";
   const lastEnds = upcoming.reduce((max, se) => {
     const t = new Date(se.endsAt || se.startsAt).getTime();
     return Math.max(max, t);
@@ -3785,6 +3846,7 @@ function studioCard(s, sessions) {
     '<div class="field"><label>Led by</label><select id="sess-instr-' + id + '"></select></div>' +
     '<div class="field"><label>Repeat every (days)</label><input type="number" id="sess-interval-' + id + '" min="1" max="365" value="7" /></div>' +
     '<div class="field"><label>Number of classes</label><input type="number" id="sess-repeat-' + id + '" min="1" max="52" value="1" /></div>' +
+    '<div class="field"><label><input type="checkbox" id="sess-rolling-' + id + '" /> Keep rolling — the next class is added as each one starts, so this many stay on the books</label></div>' +
     '<button id="sess-create-' + id + '">Schedule class</button>' +
     "</div>" +
     "</div>"
@@ -3887,6 +3949,7 @@ function wireStudioCard(s) {
       instructor: instrSelect,
       intervalDays: document.getElementById("sess-interval-" + id),
       repeatCount: document.getElementById("sess-repeat-" + id),
+      rolling: document.getElementById("sess-rolling-" + id),
       submit: document.getElementById("sess-create-" + id),
     });
   });
@@ -4180,6 +4243,10 @@ async function createSession(studioKey, els) {
     return;
   }
   if (!(repeatCount >= 1 && repeatCount <= 52)) { toast("Number of classes must be 1–52.", false); return; }
+  if (repeatCount === 1 && els.rolling && els.rolling.checked) {
+    toast("Keep rolling needs a recurring class — set Number of classes to 2 or more.", false);
+    return;
+  }
   els.submit.disabled = true;
   try {
     const isSeries = repeatCount > 1;
@@ -4197,6 +4264,8 @@ async function createSession(studioKey, els) {
     if (isSeries) {
       payload.intervalDays = intervalDays;
       payload.occurrenceCount = repeatCount;
+      // A one-off has no cadence to roll on; the flag rides the series only.
+      if (els.rolling && els.rolling.checked) payload.rolling = true;
     }
     // studioSlotClaim/instructorSlotClaim cells are no longer declared here —
     // the DDL's own derive_reads(op) (packages/wellness-domain/ddls.go)

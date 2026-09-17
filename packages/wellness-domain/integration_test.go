@@ -85,6 +85,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "CreateSessionSeries", Scope: "any"},
 			{OperationType: "TombstoneSessionSeries", Scope: "any"},
 			{OperationType: "ReassignSessionSeries", Scope: "any"},
+			{OperationType: "StopSessionSeries", Scope: "any"},
 			{OperationType: "TombstoneSession", Scope: "any"},
 			{OperationType: "ReassignSession", Scope: "any"},
 			{OperationType: "CreateBooking", Scope: "any"},
@@ -93,6 +94,7 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "SetBookingAttendance", Scope: "any"},
 			{OperationType: "ReleaseOrphanedBooking", Scope: "any"},
 			{OperationType: "PromoteWaitlistedBookings", Scope: "any"},
+			{OperationType: "ExtendSessionSeries", Scope: "any"},
 			{OperationType: "RecordBookingChangeNotification", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
@@ -102,11 +104,13 @@ func domainCapDoc() *processor.CapabilityDoc {
 }
 
 // domainWeaverCapDoc grants Weaver's primordial dispatch actor
-// ReleaseOrphanedBooking — the op's Starlark pins op.actor to
-// primordialActor["weaver"] (ddls.go): it forwards a call-off notice into an
-// external.notification body, so any wider submitter set is a forged send.
-// domainCapDoc holds the same grant on the op — an operator-role holder that
-// is NOT Weaver is exactly the forged-submitter vector the guard rejects.
+// ReleaseOrphanedBooking and ExtendSessionSeries — both ops' Starlark pins
+// op.actor to primordialActor["weaver"] (ddls.go): the first forwards a
+// call-off notice into an external.notification body, so any wider submitter
+// set is a forged send; the second mints a class on a studio's grid outside
+// the desk's workplace confinement, so any wider submitter set is a forged
+// schedule. domainCapDoc holds the same grants — an operator-role holder that
+// is NOT Weaver is exactly the forged-submitter vector each guard rejects.
 func domainWeaverCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{
@@ -118,6 +122,7 @@ func domainWeaverCapDoc() *processor.CapabilityDoc {
 		Lanes:                  []string{"default"},
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "ReleaseOrphanedBooking", Scope: "any"},
+			{OperationType: "ExtendSessionSeries", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

@@ -210,6 +210,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"wellnessNoShowSettlement":          "booking:bookedBy,settles|identity:bookedBy,heldFor|wellnessaccount:heldFor|wellnesstransaction:settles",
 	"wellnessOrphanedBookingSettlement": "booking:forSession|session:forSession",
 	"wellnessWaitlistPromotion":         "booking:forSession|session:forSession",
+	"wellnessSeriesHorizon":             "sessionseries:atStudio|studio:atStudio",
 	"wellnessRefundSettlement":          "wellnessrefund:settlesRefund|wellnesstransaction:settlesRefund",
 }
 

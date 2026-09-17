@@ -189,6 +189,7 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"wellnessNoShowSettlement":          hopIndexed,
 	"wellnessOrphanedBookingSettlement": hopIndexed,
 	"wellnessWaitlistPromotion":         hopIndexed,
+	"wellnessSeriesHorizon":             hopIndexed,
 	"wellnessRefundSettlement":          hopIndexed,
 }
 

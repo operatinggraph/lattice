@@ -360,6 +360,59 @@ func TestWellnessSessions_JoinsSeries(t *testing.T) {
 	require.Nil(t, oneOff["seriesKey"], "a session with no partOf link projects a null seriesKey")
 }
 
+// TestWellnessSessions_SeriesRolling pins the column the desk reads to tell a
+// run the platform keeps on the books from one whose count is its whole life:
+// true only while the occurrence's series carries a live .horizon.extendAt —
+// false on a non-rolling series (no .horizon), on a stopped one (the call-off
+// drops extendAt), and on a one-off (no series at all) — all in the same
+// projection so the column is proved to discriminate.
+func TestWellnessSessions_SeriesRolling(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	rollingOcc := f.vtx(t, "rollingocc", "session")
+	f.vtx(t, "rollingseries", "sessionseries")
+	f.aspect(t, "rollingseries", "horizon", "sessionSeriesHorizon", map[string]any{
+		"nextStartsAt": "2026-08-05T18:00:00Z", "nextEndsAt": "2026-08-05T19:00:00Z",
+		"extendAt": "2026-07-08T18:00:00Z", "mintedCount": 4.0,
+	})
+	f.aspect(t, "rollingocc", "schedule", "sessionSchedule", map[string]any{
+		"name": "Evening Flow", "startsAt": "2026-07-08T18:00:00Z", "endsAt": "2026-07-08T19:00:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "partOf", "rollingocc", "rollingseries")
+
+	stoppedOcc := f.vtx(t, "stoppedocc", "session")
+	f.vtx(t, "stoppedseries", "sessionseries")
+	f.aspect(t, "stoppedseries", "horizon", "sessionSeriesHorizon", map[string]any{
+		"nextStartsAt": "2026-08-05T18:00:00Z", "nextEndsAt": "2026-08-05T19:00:00Z",
+		"mintedCount": 4.0, "stoppedAt": "2026-07-09T10:00:00Z",
+	})
+	f.aspect(t, "stoppedocc", "schedule", "sessionSchedule", map[string]any{
+		"name": "Evening Flow", "startsAt": "2026-07-15T18:00:00Z", "endsAt": "2026-07-15T19:00:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "partOf", "stoppedocc", "stoppedseries")
+
+	plainOcc := f.vtx(t, "plainocc", "session")
+	f.vtx(t, "plainseries", "sessionseries")
+	f.aspect(t, "plainocc", "schedule", "sessionSchedule", map[string]any{
+		"name": "Power Flow", "startsAt": "2026-07-08T18:00:00Z", "endsAt": "2026-07-08T19:00:00Z", "capacity": 20.0,
+	})
+	f.edge(t, "partOf", "plainocc", "plainseries")
+
+	oneOffKey := f.vtx(t, "oneoff", "session")
+	f.aspect(t, "oneoff", "schedule", "sessionSchedule", map[string]any{
+		"name": "Drop-in Sculpt", "startsAt": "2026-07-09T18:00:00Z", "endsAt": "2026-07-09T19:00:00Z", "capacity": 12.0,
+	})
+
+	rows := f.project(t, wellnessSessionsSpec)
+	require.Len(t, rows, 4, "one row per session")
+	require.Equal(t, true, wdRowByKey(rows, rollingOcc)["seriesRolling"], "a live extendAt on the series is the rolling window")
+	require.Equal(t, false, wdRowByKey(rows, stoppedOcc)["seriesRolling"], "a stopped horizon (no extendAt) is not rolling")
+	require.Equal(t, false, wdRowByKey(rows, plainOcc)["seriesRolling"], "a series with no horizon is not rolling")
+	require.Equal(t, false, wdRowByKey(rows, oneOffKey)["seriesRolling"], "a one-off has no series to roll")
+}
+
 // TestWellnessBookings_JoinsSessionAndBooker proves the roster / my-classes
 // join: one row per booking, with both the session neighbour (sessionName,
 // startsAt/endsAt) and booker neighbour (bookerKey) resolved.
@@ -1758,4 +1811,238 @@ func TestWellnessWaitlistPromotion_NoBookings_NotViolating(t *testing.T) {
 	require.Equal(t, false, v["missing_promotion"], "an empty class strands nobody")
 	require.Equal(t, false, v["violating"])
 	require.Nil(t, v["freshUntil"], "no waitlist, nothing to arm a deadline for")
+}
+
+// ---- wellnessSeriesHorizon ------------------------------------------------
+
+// projectSeriesHorizonAt runs the anchored wellnessSeriesHorizon spec for one
+// series, mirroring projectWaitlistPromotionAt's shape on the third
+// convergence lens's anchor type.
+func (f *wdFixture) projectSeriesHorizonAt(t *testing.T, seriesName string) []ruleengine.ProjectionResult {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	eng := full.New()
+	cr, err := eng.Parse(seriesHorizonSpec)
+	require.NoError(t, err, "wellnessSeriesHorizon cypher must parse on the full engine")
+	seriesKey := "vtx." + f.types[f.ids[seriesName]] + "." + f.ids[seriesName]
+	out, err := eng.ExecuteWith(context.Background(), cr, ruleengine.EventContext{Parameters: map[string]any{
+		"actorKey":    seriesKey,
+		"now":         now,
+		"projectedAt": now,
+	}}, f.adjKV, f.coreKV)
+	require.NoError(t, err)
+	return out
+}
+
+// The horizon every rolling-series vector seeds: a 4-class weekly run from
+// Jul 8, whose next occurrence is Aug 5 and whose window moves at the Jul 8
+// class's own start.
+const (
+	horizonExtendAt     = "2026-07-08T18:00:00Z"
+	horizonNextStartsAt = "2026-08-05T18:00:00Z"
+	horizonNextEndsAt   = "2026-08-05T19:00:00Z"
+)
+
+// mkRollingSeries seeds a series vtx + its .horizon aspect + the atStudio
+// edge to a live studio (unless withStudio is false), led by instructorName
+// when non-empty. extendAt "" leaves the field OFF the aspect — the stopped
+// shape TombstoneSessionSeries writes.
+func (f *wdFixture) mkRollingSeries(t *testing.T, name, extendAt, instructorName string, withStudio bool) {
+	t.Helper()
+	f.vtx(t, name, "sessionseries")
+	horizon := map[string]any{
+		"nextStartsAt": horizonNextStartsAt, "nextEndsAt": horizonNextEndsAt, "mintedCount": 4.0,
+	}
+	if extendAt != "" {
+		horizon["extendAt"] = extendAt
+	} else {
+		horizon["stoppedAt"] = "2026-07-09T10:00:00Z"
+	}
+	if instructorName != "" {
+		horizon["instructor"] = "vtx.instructor." + f.ids[instructorName]
+	}
+	f.aspect(t, name, "horizon", "sessionSeriesHorizon", horizon)
+	if withStudio {
+		f.vtx(t, name+"studio", "studio")
+		f.edge(t, "atStudio", name, name+"studio")
+	}
+}
+
+// recordHorizonLapse writes the freshnessExpiry marker MarkExpired commits
+// when the @at this row armed fires — under THIS target's byTarget key, on
+// the SERIES (the row's entityKey).
+func (f *wdFixture) recordHorizonLapse(t *testing.T, seriesName, at string) {
+	t.Helper()
+	f.aspect(t, seriesName, "freshnessExpiry", "freshnessExpiry", map[string]any{
+		"expiredAt": at,
+		"byTarget":  map[string]any{SeriesHorizonTarget: at},
+	})
+}
+
+func requireHorizonClosed(t *testing.T, v map[string]any) {
+	t.Helper()
+	require.Equal(t, false, v["missing_occurrence"])
+	require.Equal(t, false, v["missing_led_occurrence"])
+	require.Equal(t, false, v["violating"])
+}
+
+// TestWellnessSeriesHorizon_NotRolling_NothingArmed: a series with no
+// .horizon (the desk did not ask for rolling) projects a null freshUntil and
+// both gaps shut — the install changes nothing for an existing series.
+func TestWellnessSeriesHorizon_NotRolling_NothingArmed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "plain", "sessionseries")
+	f.vtx(t, "plainstudio", "studio")
+	f.edge(t, "atStudio", "plain", "plainstudio")
+
+	v := f.projectSeriesHorizonAt(t, "plain")[0].Values
+	require.Nil(t, v["freshUntil"], "no horizon, nothing to arm")
+	require.Nil(t, v["extendAt"])
+	requireHorizonClosed(t, v)
+	requireIntColumn(t, v, "maxretries_occurrence", maxOccurrenceRetries)
+	requireIntColumn(t, v, "maxretries_led_occurrence", maxOccurrenceRetries)
+}
+
+// TestWellnessSeriesHorizon_RollingArmed_NotViolating is the common case and
+// the positive vector for freshUntil: a rolling series whose window has not
+// moved yet arms the deadline on extendAt — the earliest class's own start —
+// and both gaps stay shut until the recorded lapse reaches it.
+func TestWellnessSeriesHorizon_RollingArmed_NotViolating(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkRollingSeries(t, "rolling", horizonExtendAt, "", true)
+
+	v := f.projectSeriesHorizonAt(t, "rolling")[0].Values
+	require.Equal(t, "vtx.sessionseries."+f.ids["rolling"], v["seriesKey"])
+	require.Equal(t, "vtx.studio."+f.ids["rollingstudio"], v["studioKey"])
+	require.Equal(t, horizonNextStartsAt, v["nextStartsAt"])
+	require.Equal(t, horizonNextEndsAt, v["nextEndsAt"])
+	require.Equal(t, horizonExtendAt, v["extendAt"])
+	require.Nil(t, v["instructorKey"])
+	require.Nil(t, v["lapsedAt"], "no timer has fired")
+	require.Equal(t, horizonExtendAt, v["freshUntil"], "the timer arms on the window's earliest start, a recorded fact")
+	requireHorizonClosed(t, v)
+}
+
+// TestWellnessSeriesHorizon_Lapsed_MissingOccurrence is the gap the fire
+// exists to open: the fired MarkExpired recorded the lapse at extendAt, so
+// the unled window is owed its next class — missing_occurrence, not the led
+// gap (the horizon names no instructor, and the led gap's Params would
+// template off a null column).
+func TestWellnessSeriesHorizon_Lapsed_MissingOccurrence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkRollingSeries(t, "rolling", horizonExtendAt, "", true)
+	f.recordHorizonLapse(t, "rolling", horizonExtendAt)
+
+	v := f.projectSeriesHorizonAt(t, "rolling")[0].Values
+	require.Equal(t, horizonExtendAt, v["lapsedAt"])
+	require.Nil(t, v["freshUntil"], "a lapsed deadline is not re-armed until the horizon moves")
+	require.Equal(t, true, v["missing_occurrence"])
+	require.Equal(t, false, v["missing_led_occurrence"], "no instructor to pass — the unled gap owns this row")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestWellnessSeriesHorizon_LapsedLed_MissingLedOccurrence is the led twin:
+// the same lapse on a series whose horizon records an instructor opens the
+// led gap alone, carrying the instructor key its Params pass.
+func TestWellnessSeriesHorizon_LapsedLed_MissingLedOccurrence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.vtx(t, "sam", "instructor")
+	f.mkRollingSeries(t, "rolling", horizonExtendAt, "sam", true)
+	f.recordHorizonLapse(t, "rolling", horizonExtendAt)
+
+	v := f.projectSeriesHorizonAt(t, "rolling")[0].Values
+	require.Equal(t, "vtx.instructor."+f.ids["sam"], v["instructorKey"])
+	require.Equal(t, false, v["missing_occurrence"], "the unled gap must not dispatch a led run without its instructor")
+	require.Equal(t, true, v["missing_led_occurrence"])
+	require.Equal(t, true, v["violating"])
+}
+
+// TestWellnessSeriesHorizon_Extended_ClosesAndRearms pins the re-projection
+// after ExtendSessionSeries moved the horizon one interval past the recorded
+// lapse: the gap reads shut on the same lapse, and freshUntil re-arms on the
+// new extendAt — one dispatch closes the gap, and the standing lapse never
+// re-opens it.
+func TestWellnessSeriesHorizon_Extended_ClosesAndRearms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	const movedExtendAt = "2026-07-15T18:00:00Z"
+	f.mkRollingSeries(t, "rolling", movedExtendAt, "", true)
+	f.recordHorizonLapse(t, "rolling", horizonExtendAt)
+
+	v := f.projectSeriesHorizonAt(t, "rolling")[0].Values
+	require.Equal(t, horizonExtendAt, v["lapsedAt"], "the lapse the fired timer recorded stands")
+	require.Equal(t, movedExtendAt, v["freshUntil"], "re-armed on the moved window's earliest start")
+	requireHorizonClosed(t, v)
+}
+
+// TestWellnessSeriesHorizon_MovedBackBehindLapse_GapOpensWithoutTimer pins
+// the accepted behaviour of a backward ReassignSessionSeries: the shifted
+// extendAt lands at or before the lapse the fired timer already recorded, so
+// the gap reads open on the standing lapse with no timer armed (freshUntil
+// null), and the platform mints one slot per dispatch until the horizon
+// stands occurrenceCount slots ahead of the moved cadence — the window
+// counts cadence slots, and an earlier run has that on its books.
+func TestWellnessSeriesHorizon_MovedBackBehindLapse_GapOpensWithoutTimer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	const movedBackExtendAt = "2026-07-06T18:00:00Z"
+	f.mkRollingSeries(t, "rolling", movedBackExtendAt, "", true)
+	f.recordHorizonLapse(t, "rolling", horizonExtendAt)
+
+	v := f.projectSeriesHorizonAt(t, "rolling")[0].Values
+	require.Equal(t, horizonExtendAt, v["lapsedAt"], "the lapse recorded before the move stands")
+	require.Nil(t, v["freshUntil"], "a deadline already behind the recorded lapse arms nothing")
+	require.Equal(t, true, v["missing_occurrence"], "the gap opens on the standing lapse alone")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestWellnessSeriesHorizon_Stopped_NothingArmed: the call-off dropped
+// extendAt (stoppedAt recorded), so even a standing lapse opens nothing and
+// no deadline is armed — the roll is over.
+func TestWellnessSeriesHorizon_Stopped_NothingArmed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkRollingSeries(t, "stopped", "", "", true)
+	f.recordHorizonLapse(t, "stopped", horizonExtendAt)
+
+	v := f.projectSeriesHorizonAt(t, "stopped")[0].Values
+	require.Nil(t, v["extendAt"])
+	require.Nil(t, v["freshUntil"])
+	requireHorizonClosed(t, v)
+}
+
+// TestWellnessSeriesHorizon_StudioGone_GapShut: a series whose studio was
+// retired has no live atStudio target, so studioKey projects null and both
+// gaps stay shut even on a lapse — Params templated off a null column would
+// be a Weaver data error, so the conjunct keeps the dispatch from forming.
+func TestWellnessSeriesHorizon_StudioGone_GapShut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	f.mkRollingSeries(t, "rolling", horizonExtendAt, "", true)
+	f.tombstoneVtx(t, "rollingstudio")
+	f.recordHorizonLapse(t, "rolling", horizonExtendAt)
+
+	v := f.projectSeriesHorizonAt(t, "rolling")[0].Values
+	require.Nil(t, v["studioKey"], "a tombstoned studio is not a live atStudio target")
+	requireHorizonClosed(t, v)
 }
