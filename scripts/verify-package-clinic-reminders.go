@@ -7,10 +7,15 @@
 // package has been correctly installed (after its deps orchestration-base +
 // clinic-domain). Asserts:
 //
-//	2 DDLs: appointmentReminderOp (vertexType, RecordAppointmentReminder — the op
+//	6 DDLs: appointmentReminderOp (vertexType, RecordAppointmentReminder — the op
 //	  handler) + appointmentReminder (aspectType, RecordAppointmentReminder — the
-//	  step-6 .reminder write gate), each with its self-description aspects.
-//	1 permission vertex: RecordAppointmentReminder, scope any, grantedBy operator.
+//	  step-6 .reminder write gate); appointmentChangeNoticeOp + appointmentChangeNotice
+//	  (RecordAppointmentChangeNotice, the .changeNotice write gate);
+//	  appointmentChangeNotificationOp + appointmentChangeNotification
+//	  (RecordAppointmentChangeNotification, the .changeNotification write gate),
+//	  each with its self-description aspects.
+//	3 permission vertices: RecordAppointmentReminder, RecordAppointmentChangeNotice,
+//	  RecordAppointmentChangeNotification — each scope any, grantedBy operator.
 //	1 meta.lens: appointmentReminders (the weaver-target convergence lens).
 //	1 meta.weaverTarget: appointmentReminders (the §10.8 playbook).
 //	1 package vertex + manifest aspect (name=clinic-reminders).
@@ -36,6 +41,9 @@ const (
 	remPackageName  = "clinic-reminders"
 	remCoreKVBucket = "core-kv"
 	remOp           = "RecordAppointmentReminder"
+
+	changeNoticeOp       = "RecordAppointmentChangeNotice"
+	changeNotificationOp = "RecordAppointmentChangeNotification"
 )
 
 type ddlCheck struct {
@@ -109,6 +117,10 @@ func main() {
 	ddlChecks := []ddlCheck{
 		{canonical: "appointmentReminderOp", class: "meta.ddl.vertexType", ops: []string{remOp}},
 		{canonical: "appointmentReminder", class: "meta.ddl.aspectType", ops: []string{remOp}},
+		{canonical: "appointmentChangeNoticeOp", class: "meta.ddl.vertexType", ops: []string{changeNoticeOp}},
+		{canonical: "appointmentChangeNotice", class: "meta.ddl.aspectType", ops: []string{changeNoticeOp}},
+		{canonical: "appointmentChangeNotificationOp", class: "meta.ddl.vertexType", ops: []string{changeNotificationOp}},
+		{canonical: "appointmentChangeNotification", class: "meta.ddl.aspectType", ops: []string{changeNotificationOp}},
 	}
 
 	for _, dc := range ddlChecks {
@@ -177,35 +189,39 @@ func main() {
 		}
 	}
 
-	// The RecordAppointmentReminder permission vertex + scope + grantedBy-operator.
+	// One permission vertex per operator-granted op this script covers —
+	// RecordAppointmentReminder, RecordAppointmentChangeNotice and
+	// RecordAppointmentChangeNotification — each scope any + grantedBy-operator.
 	operatorRoleID := bootstrap.RoleOperatorID
-	permID := ""
-	for key := range allKeys {
-		if !strings.HasPrefix(key, "vtx.permission.") {
+	for _, wantOp := range []string{remOp, changeNoticeOp, changeNotificationOp} {
+		permID := ""
+		for key := range allKeys {
+			if !strings.HasPrefix(key, "vtx.permission.") {
+				continue
+			}
+			parts := strings.Split(key, ".")
+			if len(parts) != 3 {
+				continue
+			}
+			env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
+			if err != nil {
+				continue
+			}
+			if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
+				continue
+			}
+			data, _ := env["data"].(map[string]any)
+			if opType, _ := data["operationType"].(string); opType == wantOp {
+				permID = parts[2]
+				break
+			}
+		}
+		if permID == "" {
+			fail("vtx.permission.*[operationType="+wantOp+"]", "not found in Core KV")
 			continue
 		}
-		parts := strings.Split(key, ".")
-		if len(parts) != 3 {
-			continue
-		}
-		env, err := pkgverify.GetEnvelope(ctx, coreKV, key)
-		if err != nil {
-			continue
-		}
-		if isDeleted, _ := env["isDeleted"].(bool); isDeleted {
-			continue
-		}
-		data, _ := env["data"].(map[string]any)
-		if opType, _ := data["operationType"].(string); opType == remOp {
-			permID = parts[2]
-			break
-		}
-	}
-	if permID == "" {
-		fail("vtx.permission.*[operationType="+remOp+"]", "not found in Core KV")
-	} else {
 		permKey := "vtx.permission." + permID
-		ok(fmt.Sprintf("%s operationType=%s", permKey, remOp))
+		ok(fmt.Sprintf("%s operationType=%s", permKey, wantOp))
 		if env, err := pkgverify.GetEnvelope(ctx, coreKV, permKey); err == nil {
 			data, _ := env["data"].(map[string]any)
 			if scope, _ := data["scope"].(string); scope != "any" {

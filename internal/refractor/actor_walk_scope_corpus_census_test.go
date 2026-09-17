@@ -110,6 +110,7 @@ const corpusWalkScopeMinimum = 55
 // the descriptor hop being pruned, which is what this scope buys.
 var corpusActorWalkScopeDigests = map[string]string{
 	"applicantOnboarding":            "identity:applicationFor,scopedTo|leaseapp:applicationFor,appliesToUnit|meta:forOperation|task:forOperation,scopedTo|unit:appliesToUnit",
+	"appointmentChangeNotices":       "appointment:forPatient|patient:forPatient",
 	"appointmentReminders":           "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
 	"augurDispatchPending":           "none",
 	"backgroundCheckFreshness":       "none",

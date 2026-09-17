@@ -40,10 +40,12 @@ const (
 )
 
 // crOps are the ops the staff actor needs: clinic-domain's create ops + the
-// clinic-reminders ops (reminders + the recurring visit series).
+// clinic-reminders ops (reminders, the change notice + its replyOp, the
+// recurring visit series).
 var crOps = []string{
 	"CreatePatient", "CreateProvider", "CreateAppointment", "RecordAppointmentReminder", "RecordFollowUpReminder",
 	"RecordAppointmentReminderNotification", "RecordFollowUpReminderNotification",
+	"RecordAppointmentChangeNotice", "RecordAppointmentChangeNotification",
 	"StartVisitSeries", "PauseVisitSeries", "ResumeVisitSeries", "EndVisitSeries", "AdvanceVisitSeries",
 	"BackfillVisitSeriesSite", "SetVisitSeriesSite",
 }
@@ -69,7 +71,8 @@ func crStaffCapDoc() *processor.CapabilityDoc {
 }
 
 // crWeaverCapDoc grants Weaver's primordial dispatch actor the two reminder ops
-// whose scripts pin op.actor to `primordialActor["weaver"]`. Read through a
+// and the change-notice op, whose scripts pin op.actor to
+// `primordialActor["weaver"]`. Read through a
 // func, not a package var: bootstrap's primordial globals are populated by
 // SetupPackageTestEnv's EnsurePrimordials, well after package var init.
 //
@@ -90,6 +93,7 @@ func crWeaverCapDoc() *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "RecordAppointmentReminder", Scope: "any"},
 			{OperationType: "RecordFollowUpReminder", Scope: "any"},
+			{OperationType: "RecordAppointmentChangeNotice", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

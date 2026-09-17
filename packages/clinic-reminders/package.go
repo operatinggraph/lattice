@@ -58,11 +58,25 @@
 // nextDueAt on that visit's own start time, past the visit that satisfied it, so
 // the gap folds shut on the next projection (visitSeriesDueSpec, visitseries.go).
 //
-// Both reminder ops also fire the actual notification send off their own
-// transactional outbox to the bridge's "notification" adapter (notifications.go
-// — RecordAppointmentReminderNotification / RecordFollowUpReminderNotification
-// record the outcome as an audit-only aspect; neither gates the convergence
-// lenses above, which stay keyed on .reminder/.followUpReminder unchanged). See
+// The desk's own changes are told too (changenotice.go): a staff cancel or a
+// staff move is a recorded fact on the appointment (.status {at, by} /
+// .schedule {movedAt, movedBy}, stamped by clinic-domain at the transition),
+// and the appointmentChangeNotices lens is level-triggered on it — no timer,
+// no deadline: one gap per change kind, keyed on the recorded moment, closed
+// by the .changeNotice marker RecordAppointmentChangeNotice writes.
+//
+//	vtx.appointment.<id>.changeNotice = {cancelledFor?, movedFor?, sentAt}  (class appointmentChangeNotice — this package)
+//	op RecordAppointmentChangeNotice{appointmentKey, kind: cancelled|moved, changeRef}  (create-or-update on a live appointment; refuses StaleChange)
+//	lens appointmentChangeNotices (weaver-target, full)  (cancelledFor <> status.at / movedFor <> schedule.movedAt gates, desk-authored only)
+//	playbook missing_cancel_notice / missing_move_notice → directOp(RecordAppointmentChangeNotice, changeRef: row.statusAt | row.movedAt)
+//
+// Both reminder ops and the notice op also fire the actual notification send
+// off their own transactional outbox to the bridge's "notification" adapter
+// (notifications.go — RecordAppointmentReminderNotification /
+// RecordFollowUpReminderNotification / RecordAppointmentChangeNotification
+// record the outcome as an audit-only aspect; none gates the convergence
+// lenses above, which stay keyed on .reminder / .followUpReminder /
+// .changeNotice unchanged). See
 // _bmad-output/implementation-artifacts/clinic-reminders-notification-adapter-design.md.
 //
 // Depends clinic-domain (the appointment/patient/provider vertex types + the
@@ -77,7 +91,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-reminders",
-	Version: "0.12.2",
+	Version: "0.13.0",
 	Description: "Clinic appointment & follow-up reminders + recurring visit series + the auto no-show closer (the " +
 		"clinic vertical's orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
 		"RecordFollowUpReminder ops, the appointmentReminders + followUpReminders weaver-target convergence lenses " +
@@ -92,10 +106,14 @@ var Package = pkgmgr.Definition{
 		"it is seen at as an atSite link (visitseries→building) — the staff-visibility anchor visitSeriesRead " +
 		"falls back to once the series' provider is tombstoned and the practicesAt walk yields nothing — " +
 		"backfilled by the visitSeriesSiteBackfill convergence lens's BackfillVisitSeriesSite directOp when the " +
-		"provider practises at exactly one site, and set by hand with SetVisitSeriesSite when it does not. Both " +
-		"reminder ops also fire " +
+		"provider practises at exactly one site, and set by hand with SetVisitSeriesSite when it does not. The " +
+		"appointmentChangeNotices lens tells a patient once about each change the desk makes to their visit — a " +
+		"staff cancel (keyed on .status.at) or a staff move (keyed on .schedule.movedAt) — level-triggered on the " +
+		"recorded fact, closed by the .changeNotice marker RecordAppointmentChangeNotice writes. Both " +
+		"reminder ops and the notice op also fire " +
 		"external.notification off their own outbox to the bridge's \"notification\" adapter; " +
-		"RecordAppointmentReminderNotification / RecordFollowUpReminderNotification record the outcome. Depends " +
+		"RecordAppointmentReminderNotification / RecordFollowUpReminderNotification / " +
+		"RecordAppointmentChangeNotification record the outcome. Depends " +
 		"clinic-domain + orchestration-base.",
 	Depends:       []string{"clinic-domain", "orchestration-base"},
 	DDLs:          DDLs(),

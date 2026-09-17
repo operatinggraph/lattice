@@ -23,6 +23,7 @@ package clinicreminders
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/operatinggraph/lattice/internal/lenstest"
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/refractor/adjacency"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine"
 	"github.com/operatinggraph/lattice/internal/refractor/ruleengine/full"
@@ -490,19 +492,33 @@ func requireClockFree(t *testing.T, name, spec string) {
 // seeded marker still passing. Derived from the shipped target specs, so a new
 // deadline-driven target is covered the day it lands rather than when someone
 // remembers to add a row.
+//
+// A lens that projects no freshUntil arms no timer, so nothing ever writes an
+// entry under its target id; such a lens must NOT read one (a read of an entry
+// with no writer is a conjunct that can never flip). appointmentChangeNotices
+// is that lens: level-triggered, it reads only the sibling pastDueAppointments
+// entry as its visit-over term. visitSeriesDue and visitSeriesSiteBackfill read
+// no freshnessExpiry marker at all.
 func TestConvergenceLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
-	specs := map[string]string{}
+	specs := map[string]pkgmgr.LensSpec{}
 	for _, l := range Lenses() {
-		specs[l.CanonicalName] = l.Spec
+		specs[l.CanonicalName] = l
 	}
-	var checked int
+	var checked, levelTriggered int
 	for _, tgt := range WeaverTargets() {
-		spec, ok := specs[tgt.LensRef]
+		lens, ok := specs[tgt.LensRef]
 		require.Truef(t, ok, "target %s names lens %s, which this package must declare", tgt.TargetID, tgt.LensRef)
-		if !strings.Contains(spec, "freshnessExpiry") {
+		if !strings.Contains(lens.Spec, "freshnessExpiry") {
 			continue
 		}
-		require.Containsf(t, spec, "byTarget."+tgt.TargetID,
+		if !slices.Contains(lens.Output.BodyColumns, "freshUntil") {
+			require.NotContainsf(t, lens.Spec, "byTarget."+tgt.TargetID,
+				"lens %s arms no timer (no freshUntil), so no entry is ever written under %q — reading one is a dead conjunct",
+				tgt.LensRef, tgt.TargetID)
+			levelTriggered++
+			continue
+		}
+		require.Containsf(t, lens.Spec, "byTarget."+tgt.TargetID,
 			"lens %s reads a freshness marker but not under its own target id %q — the timer that fires writes an entry this cypher never reads",
 			tgt.LensRef, tgt.TargetID)
 		checked++
@@ -511,6 +527,9 @@ func TestConvergenceLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
 		"appointmentReminders, followUpReminders and pastDueAppointments each read a recorded lapse; visitSeriesDue "+
 			"reads a qualifying visit instead of a freshnessExpiry marker, so it is deliberately not one of the "+
 			"three — a drop below 3 is a lens that went back to a clock")
+	require.Equal(t, 1, levelTriggered,
+		"appointmentChangeNotices is the one level-triggered target that reads the sibling's recorded end; a freshUntil "+
+			"column appearing on it is a timer nothing designed")
 }
 
 // TestReminders_TerminalStatusNeverViolates is the agreement vector between the

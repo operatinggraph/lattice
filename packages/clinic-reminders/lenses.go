@@ -10,6 +10,11 @@ import (
 // lens's OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads.
 const AppointmentRemindersTarget = "appointmentReminders"
 
+// AppointmentChangeNoticesTarget is the §10.8 TargetID == the
+// appointmentChangeNotices lens's OutputKeyPattern prefix — the §10.2↔§10.8
+// binding Weaver reads.
+const AppointmentChangeNoticesTarget = "appointmentChangeNotices"
+
 // nonTerminalAppointment is the "this visit has not reached a terminal outcome"
 // test, as one cypher fragment spliced into BOTH appointment-anchored deadline
 // lenses (appointmentReminders here, pastDueAppointments in pastdue.go).
@@ -28,13 +33,15 @@ const AppointmentRemindersTarget = "appointmentReminders"
 const nonTerminalAppointment = `(a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow')`
 
 // Lenses returns the package's weaver-target convergence lenses: appointmentReminders
-// (the ~24h-ahead appointment reminder), followUpReminders (the at-the-date
+// (the ~24h-ahead appointment reminder), appointmentChangeNotices (the
+// level-triggered desk-cancel / desk-move notice — changenotice.go owns the op;
+// the lens is below), followUpReminders (the at-the-date
 // follow-up reminder, followups.go), visitSeriesDue (the recurring visit-series
 // gap, visitseries.go), visitSeriesSiteBackfill (the series'
 // missing atSite link, visitseries_site.go — the one gap here that is not
 // deadline-driven at all: it converges a MISSING RELATIONSHIP, the
 // clinicSiteBackfill idiom), and pastDueAppointments (the auto
-// no-show closer, pastdue.go). The first two invert lease-signing's
+// no-show closer, pastdue.go). The reminder and follow-up lenses invert lease-signing's
 // freshness re-open — where lease projects freshUntil to RE-OPEN a converged gap at
 // a deadline, these project freshUntil = the deadline to OPEN the reminder gap when
 // it passes (see appointmentRemindersSpec / followUpRemindersSpec). visitSeriesDue
@@ -59,6 +66,22 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "appointment",
 				OutputKeyPattern: "appointmentReminders.{actorSuffix}",
 				BodyColumns:      []string{"violating", "missing_reminder", "entityKey", "freshUntil", "startsAt", "endsAt", "remindAt", "reminderSentAt", "remindedFor", "status", "patientKey", "providerKey"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+			},
+		},
+		{
+			CanonicalName:  "appointmentChangeNotices",
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           appointmentChangeNoticesSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "appointment",
+				OutputKeyPattern: "appointmentChangeNotices.{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_cancel_notice", "missing_move_notice", "entityKey", "patientKey", "status", "statusAt", "statusBy", "startsAt", "endsAt", "movedAt", "movedBy", "cancelledFor", "movedFor", "noticeSentAt"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -200,3 +223,92 @@ RETURN
   ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_reminder,
   ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS violating`,
 	nonTerminalAppointment, PastDueAppointmentsTarget, AppointmentRemindersTarget)
+
+// appointmentChangeNoticesSpec is the one-row-per-appointment change-notice
+// convergence cypher: a patient whose visit the desk cancelled, or moved to a
+// new time, is told once per change. Unlike appointmentRemindersSpec it
+// projects NO freshUntil and arms NO timer — both gaps are level-triggered
+// states over recorded facts, not deadlines: a cancel is .status {value:
+// cancelled, by: staff, at}, a move is .schedule {movedAt, movedBy: staff},
+// both stamped by clinic-domain's writers at the transition. There is
+// nothing to wait for; the row is violating the moment the fact lands and
+// converged the moment the notice is recorded.
+//
+// The lifecycle for one appointment:
+//
+//   - SetAppointmentStatus(cancelled) / CorrectAppointmentStatus(cancelled)
+//     (clinic-domain) stamp .status.at = op.submittedAt and .status.by =
+//     staff on the desk's leg. With no .changeNotice yet, cancelledFor is
+//     null and `null <> at` is true → missing_cancel_notice opens.
+//     RecordAppointmentChangeNotice{kind: cancelled, changeRef: row.statusAt}
+//     writes .changeNotice.cancelledFor = at → the equality closes the gap.
+//     A same-value re-write (a note added to the cancelled visit) CARRIES at,
+//     so the gap stays closed; a correction to another value and back stamps
+//     a fresh at and is told again, once.
+//   - RescheduleAppointment stamps .schedule.movedAt = op.submittedAt and
+//     movedBy on every call. With no movedFor, `null <> movedAt` is true →
+//     missing_move_notice opens. RecordAppointmentChangeNotice{kind: moved,
+//     changeRef: row.movedAt} writes movedFor = movedAt → closed. A SECOND
+//     move stamps a fresh movedAt that differs from the recorded movedFor →
+//     the gap reopens and a fresh notice (a fresh externalRef) goes out.
+//   - by = 'staff' / movedBy = 'staff': only the desk's change is told; a
+//     patient's own cancel or move (by/movedBy = patient) and the sweep's
+//     no-show (by = sweep) are not. `=` on a null operand is FALSE in this
+//     engine (nil-false), so a legacy .status written before at/by existed
+//     reads `null = 'staff'` false and is never told — the 23 cancelled
+//     visits live at install are silent, by design (no backfill: the moment
+//     was never recorded).
+//   - at <> null guards the cancel gap the same way: a cancelled status with
+//     a by but no at (unconstructible today, but the two fields are
+//     independent keys) has no changeRef to dispatch and stays closed rather
+//     than opening a gap the op can only refuse. movedAt <> null guards the
+//     move gap for the same reason.
+//   - nonTerminalAppointment on the move gap only: a moved-then-cancelled
+//     visit gets the cancel notice alone (there is no future time to tell
+//     the patient about), and a completed / noShow visit is over. The cancel
+//     gap carries no status-list conjunct beyond `= 'cancelled'` — cancelled
+//     IS terminal, and it is the one terminal value the desk is told about.
+//   - NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= endsAt) —
+//     the visit is OVER, a recorded fact from the sibling pastDueAppointments
+//     target's fired @at on this same appointment anchor (exactly the conjunct
+//     appointmentRemindersSpec reads). A notice for a visit that has ended is
+//     moot (a cancel after the recorded end is a book-keeping correction, not
+//     news), and the closed column retires any GapBudgetExhausted latch the
+//     open window accumulated. While nothing has fired, NOT(false) leaves the
+//     gaps open — the default a not-yet-ended visit needs. A desk cancel
+//     before the visit never arms that timer (nonTerminalAppointment is
+//     false on the sibling lens), so the cancel gap stays open until told.
+//
+// Every operand is stored graph data; the lens reads no clock. `<>` is the
+// engine's two-valued null test (null <> 'x' true, null <> null false), which
+// is what lets the absent-marker case open the gap and the absent-fact case
+// (no at, no movedAt) keep it closed. violating repeats both gap expressions
+// verbatim — the engine has no column references in RETURN.
+//
+// One-row-per-anchor: forPatient is 0..1 (CreateAppointment writes exactly
+// one), so the OPTIONAL walk does not fan out; it is INFORMATIONAL (no
+// Params binds patientKey). entityKey, statusAt and movedAt are load-bearing
+// for dispatch (the target's Params template off them); the rest is
+// observability. Built with fmt.Sprintf so the shared nonTerminalAppointment
+// fragment and the sibling target id come from their constants; the cypher
+// has no negated relationship pattern, only scalar NOT comparisons.
+var appointmentChangeNoticesSpec = fmt.Sprintf(`MATCH (a:appointment {key: $actorKey})
+OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
+RETURN
+  a.key AS actorKey,
+  a.key AS entityKey,
+  p.key AS patientKey,
+  a.status.data.value AS status,
+  a.status.data.at AS statusAt,
+  a.status.data.by AS statusBy,
+  a.schedule.data.startsAt AS startsAt,
+  a.schedule.data.endsAt AS endsAt,
+  a.schedule.data.movedAt AS movedAt,
+  a.schedule.data.movedBy AS movedBy,
+  a.changeNotice.data.cancelledFor AS cancelledFor,
+  a.changeNotice.data.movedFor AS movedFor,
+  a.changeNotice.data.sentAt AS noticeSentAt,
+  ((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_cancel_notice,
+  ((a.schedule.data.movedAt <> null) AND (a.schedule.data.movedBy = 'staff') AND (a.changeNotice.data.movedFor <> a.schedule.data.movedAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_move_notice,
+  (((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) OR ((a.schedule.data.movedAt <> null) AND (a.schedule.data.movedBy = 'staff') AND (a.changeNotice.data.movedFor <> a.schedule.data.movedAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt))) AS violating`,
+	nonTerminalAppointment, PastDueAppointmentsTarget)

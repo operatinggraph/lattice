@@ -89,6 +89,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	// never bind the identity actor type; the identity anchor type binds only
 	// at the anchor across the whole pattern.
 	"applicantOnboarding":            oneKey,
+	"appointmentChangeNotices":       oneKey,
 	"appointmentReminders":           oneKey,
 	"augurDispatchPending":           oneKey,
 	"backgroundCheckFreshness":       oneKey,

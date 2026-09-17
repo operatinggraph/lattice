@@ -1,5 +1,5 @@
 name: clinic-reminders
-version: 0.12.2
+version: 0.13.0
 description: |
   Clinic appointment & follow-up reminders + recurring visit series + the auto
   no-show closer — the clinic vertical's orchestration. Four one-shot/rolling @at
@@ -22,10 +22,14 @@ description: |
   the §10.8 playbook; the reminder + past-due lenses invert lease-signing's
   freshness re-open (open-at-deadline instead of reopen-at-expiry), while
   visitSeriesDue is level-triggered on a recorded visit instead of a clock lapse.
-  Both reminder ops also fire
-  external.notification off their own outbox to the bridge's "notification" adapter;
-  RecordAppointmentReminderNotification / RecordFollowUpReminderNotification record
-  the outcome as an audit-only aspect (neither gates the convergence lenses above).
+  The appointmentChangeNotices weaver-target lens tells a patient once about each
+  change the desk makes to their visit — a staff cancel (keyed on .status.at) or a
+  staff move (keyed on .schedule.movedAt) — level-triggered on the recorded fact and
+  closed by the .changeNotice marker RecordAppointmentChangeNotice writes. Both
+  reminder ops and the notice op also fire external.notification off their own
+  outbox to the bridge's "notification" adapter; RecordAppointmentReminderNotification /
+  RecordFollowUpReminderNotification / RecordAppointmentChangeNotification record
+  the outcome as an audit-only aspect (none gates the convergence lenses above).
   Depends on clinic-domain (the appointment/patient/provider vertex types +
   .schedule.remindAt / .schedule.endsAt / .documentation.followUpDate / the
   MarkPastDueNoShow op) and orchestration-base (MarkExpired re-touch at the @at
@@ -43,6 +47,10 @@ declares:
       class: meta.ddl.vertexType
     - canonicalName: followUpReminder
       class: meta.ddl.aspectType
+    - canonicalName: appointmentChangeNoticeOp
+      class: meta.ddl.vertexType
+    - canonicalName: appointmentChangeNotice
+      class: meta.ddl.aspectType
     - canonicalName: appointmentReminderNotificationOp
       class: meta.ddl.vertexType
     - canonicalName: appointmentReminderNotification
@@ -50,6 +58,10 @@ declares:
     - canonicalName: followUpReminderNotificationOp
       class: meta.ddl.vertexType
     - canonicalName: followUpReminderNotification
+      class: meta.ddl.aspectType
+    - canonicalName: appointmentChangeNotificationOp
+      class: meta.ddl.vertexType
+    - canonicalName: appointmentChangeNotification
       class: meta.ddl.aspectType
     - canonicalName: visitseries
       class: meta.ddl.vertexType
@@ -65,6 +77,10 @@ declares:
       class: meta.ddl.aspectType
   lenses:
     - canonicalName: appointmentReminders
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: appointmentChangeNotices
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
@@ -94,10 +110,16 @@ declares:
     - operationType: RecordFollowUpReminder
       scope: any
       grantsTo: [operator]
+    - operationType: RecordAppointmentChangeNotice
+      scope: any
+      grantsTo: [operator]
     - operationType: RecordAppointmentReminderNotification
       scope: any
       grantsTo: [operator]
     - operationType: RecordFollowUpReminderNotification
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordAppointmentChangeNotification
       scope: any
       grantsTo: [operator]
     - operationType: StartVisitSeries
@@ -124,6 +146,8 @@ declares:
   weaverTargets:
     - targetId: appointmentReminders
       lensRef: appointmentReminders
+    - targetId: appointmentChangeNotices
+      lensRef: appointmentChangeNotices
     - targetId: followUpReminders
       lensRef: followUpReminders
     - targetId: visitSeriesDue
@@ -135,8 +159,10 @@ declares:
   opMetas:
     - operationType: RecordAppointmentReminder
     - operationType: RecordFollowUpReminder
+    - operationType: RecordAppointmentChangeNotice
     - operationType: RecordAppointmentReminderNotification
     - operationType: RecordFollowUpReminderNotification
+    - operationType: RecordAppointmentChangeNotification
     - operationType: StartVisitSeries
     - operationType: PauseVisitSeries
     - operationType: ResumeVisitSeries
