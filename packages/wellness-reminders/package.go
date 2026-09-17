@@ -59,7 +59,7 @@
 // (RecordBookingChangeNotification) both emitters name.
 //
 //	vtx.booking.<id>.changeNotice = {promotedFor?, movedFor?, sentAt}  (class bookingChangeNotice — this package)
-//	op RecordBookingChangeNotice{bookingKey, sessionKey, kind: promoted|moved, changeRef}  (OCC upsert on a live booked booking; refuses StaleChange)
+//	op RecordBookingChangeNotice{bookingKey, sessionKey, kind: promoted|moved, changeRef}  (create-or-update on a live booked booking, a live session; refuses StaleChange)
 //	lens wellnessBookingChangeNotices (weaver-target, full)  (promotedFor <> promotedAt / startsAt <> coalesce(movedFor, classStartsAt) gates)
 //	playbook missing_promotion_notice / missing_move_notice → directOp(RecordBookingChangeNotice)
 //

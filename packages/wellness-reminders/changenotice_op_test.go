@@ -69,8 +69,8 @@ func cnSeedPromotedSeat(t *testing.T, ctx context.Context, conn *substrate.Conn,
 
 // cnSubmit drives one RecordBookingChangeNotice as `actor` with the exact
 // declared-read posture the wellnessBookingChangeNotices target dispatches
-// under (Reads: booking root, .status, session .schedule; OptionalReads: the
-// booking's .changeNotice). Class is LEFT EMPTY so the Processor's
+// under (Reads: booking root, .status, session root, session .schedule;
+// OptionalReads: the booking's .changeNotice). Class is LEFT EMPTY so the Processor's
 // operationType→class reverse index is what resolves the handler (the
 // target's Class pin names the same bookingChangeNoticeOp DDL; the unpinned
 // path is the stricter one to prove, since it is the one an ambiguous
@@ -87,7 +87,7 @@ func cnSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 		Payload: json.RawMessage(`{"bookingKey":"` + bookingKey + `","sessionKey":"` + sessionKey +
 			`","kind":"` + kind + `","changeRef":"` + changeRef + `"}`),
 		ContextHint: &processor.ContextHint{
-			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule"},
+			Reads:         []string{bookingKey, bookingKey + ".status", sessionKey, sessionKey + ".schedule"},
 			OptionalReads: []string{bookingKey + ".changeNotice"},
 		},
 	}
@@ -196,10 +196,10 @@ func TestRecordBookingChangeNotice_PromotedWritesMarkerAndEmits(t *testing.T) {
 // TestRecordBookingChangeNotice_MovedCarriesPromotedFor — a promotion notice
 // already recorded promotedFor; a move notice on the same booking must set
 // movedFor AND carry promotedFor forward, or the promotion gap would reopen
-// and the member would be told twice. The write lands as an update on the
-// seeded marker (revision advances from the seed's 1), pinned on the
-// revision the declared optionalRead observed
-// (TestRecordBookingChangeNotice_MarkerUpdateIsOCCPinned pins the shape).
+// and the member would be told twice. The write lands as a bare update on
+// the seeded marker (revision advances from the seed's 1), conditioned by the
+// Processor on the revision the declared optionalRead observed
+// (TestRecordBookingChangeNotice_MarkerUpdateIsBare pins the shape).
 func TestRecordBookingChangeNotice_MovedCarriesPromotedFor(t *testing.T) {
 	ctx, conn := setupWellRemEnv(t)
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
@@ -316,6 +316,52 @@ func TestRecordBookingChangeNotice_NotBookedRefused(t *testing.T) {
 	_, reply := cnSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "wrcnwait0001", bookingKey, sessionKey, "promoted", cnPromotedAt, processor.OutcomeRejected)
 	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidState") {
 		t.Fatalf("want an InvalidState rejection, got %+v", reply.Error)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, bookingKey+".changeNotice"); err == nil {
+		t.Fatalf("a refused notice must write NO .changeNotice marker")
+	}
+}
+
+// wrTombstoneSession flips a seeded session root to isDeleted — the state
+// TombstoneSession leaves behind for a called-off class, while the booking
+// (and the row projected off it) still exist until the release drains them.
+func wrTombstoneSession(t *testing.T, ctx context.Context, conn *substrate.Conn, sessionKey string) {
+	t.Helper()
+	doc := map[string]any{"class": "session", "isDeleted": true, "data": map[string]any{}}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, sessionKey, b); err != nil {
+		t.Fatalf("tombstone session %s: %v", sessionKey, err)
+	}
+}
+
+// TestRecordBookingChangeNotice_TombstonedSessionRefused — a row projected
+// before TombstoneSession and dispatched after it: the session root is
+// logically deleted, its .schedule still carries the startsAt the row named.
+// The op refuses UnknownSession before any change is re-checked, writes no
+// marker and sends nothing — a called-off class is told by
+// ReleaseOrphanedBooking's own notice, never a "you're in" or "moved" from
+// here. Both kinds.
+func TestRecordBookingChangeNotice_TombstonedSessionRefused(t *testing.T) {
+	ctx, conn := setupWellRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{
+		Durable: "wrcntomb", Instance: "wr-cntomb",
+	})
+	bookingKey, sessionKey := cnSeedPromotedSeat(t, ctx, conn, "WRbookCTHJKMNPQRSTVW", "WRsessCTHJKMNPQRSTVW")
+	wrTombstoneSession(t, ctx, conn, sessionKey)
+
+	for _, tc := range []struct{ kind, changeRef, label string }{
+		{"promoted", cnPromotedAt, "wrcntomb0001"},
+		{"moved", cnStartsAt, "wrcntomb0002"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			env, reply := cnSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, tc.label, bookingKey, sessionKey, tc.kind, tc.changeRef, processor.OutcomeRejected)
+			if reply.Error == nil || !strings.Contains(reply.Error.Message, "UnknownSession") {
+				t.Fatalf("want an UnknownSession rejection, got %+v", reply.Error)
+			}
+			if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(env.RequestID)); err == nil {
+				t.Fatalf("a refused notice must leave NO outbox aspect (no external.notification)")
+			}
+		})
 	}
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, bookingKey+".changeNotice"); err == nil {
 		t.Fatalf("a refused notice must write NO .changeNotice marker")

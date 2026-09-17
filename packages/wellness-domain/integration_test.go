@@ -103,10 +103,10 @@ func domainCapDoc() *processor.CapabilityDoc {
 
 // domainWeaverCapDoc grants Weaver's primordial dispatch actor
 // ReleaseOrphanedBooking — the op's Starlark pins op.actor to
-// primordialActor["weaver"] (ddls.go), since it now forwards a call-off
-// notice into an external.notification body. domainCapDoc keeps its own
-// grant on the op too — an operator-role holder that is NOT Weaver is
-// exactly the forged-submitter vector the guard rejects.
+// primordialActor["weaver"] (ddls.go): it forwards a call-off notice into an
+// external.notification body, so any wider submitter set is a forged send.
+// domainCapDoc holds the same grant on the op — an operator-role holder that
+// is NOT Weaver is exactly the forged-submitter vector the guard rejects.
 func domainWeaverCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
 	return &processor.CapabilityDoc{

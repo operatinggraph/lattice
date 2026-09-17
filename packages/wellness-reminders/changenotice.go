@@ -46,10 +46,12 @@ func changeNoticeDDLs() []pkgmgr.DDLSpec {
 // changeRef for a move — and refuses StaleChange when the row it was
 // dispatched from has been outrun (a class moved twice between projection
 // and dispatch is told about the CURRENT time on the next dispatch, never the
-// intermediate one). The .changeNotice write is an OCC upsert: the op reads
-// the marker (declared optionalRead) and pins its update on the observed
-// revision when it exists, so two kinds converging on one booking never lose
-// each other's field; when absent it creates.
+// intermediate one). The .changeNotice write is a create when the marker is
+// absent and a BARE update when it exists: the marker is a declared
+// optionalRead, so the Processor conditions the update on the step-4
+// revision (§3.2) as a defaulted, retry-eligible condition — two kinds
+// converging on one booking re-execute on conflict and carry each other's
+// field, rather than one being rejected outright by an explicit CAS.
 func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     changeNoticeOpDDL,
@@ -65,17 +67,20 @@ func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 			"RecordBookingChangeNotification records the outcome. It is the directOp the wellnessBookingChangeNotices " +
 			"§10.8 playbook dispatches for both of that lens's gaps (missing_promotion_notice with changeRef = " +
 			"row.promotedAt; missing_move_notice with changeRef = row.startsAt). Reads [bookingKey, bookingKey.status, " +
-			"sessionKey.schedule] and optionally [bookingKey.changeNotice]: it liveness-guards the booking " +
-			"(UnknownBooking), requires .status.value = booked (InvalidState), and re-checks the change against the " +
+			"sessionKey, sessionKey.schedule] and optionally [bookingKey.changeNotice]: it liveness-guards the booking " +
+			"(UnknownBooking) and the session (UnknownSession — a class being called off is told by " +
+			"ReleaseOrphanedBooking's own notice, never here), requires .status.value = booked (InvalidState), and " +
+			"re-checks the change against the " +
 			"live aspect — .status.promotedAt = changeRef for a promotion, .schedule.startsAt = changeRef for a move — " +
 			"refusing StaleChange when the dispatched row has been outrun, so a stale row is refused, not trusted. The " +
-			"marker write is an OCC upsert pinned on the read revision when the aspect exists (create when absent), " +
-			"so a promotion notice and a move notice converging on one booking never drop each other's field. " +
+			"marker write is a create when the aspect is absent and a bare update on the hydrated key when it exists " +
+			"(§3.2-conditioned on the step-4 revision, retry-eligible in-process), so a promotion notice and a move " +
+			"notice converging on one booking re-execute on conflict and never drop each other's field. " +
 			"Submitted under Weaver's service-actor authority only. Mints NO vertex of its own type.",
 		Script: recordChangeNoticeScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> whose seat changed (required; validated alive and booked). The caller MUST list it and bookingKey.status in ContextHint.Reads."},` +
-			`"sessionKey":{"type":"string","description":"vtx.session.<NanoID> the booking is for (required; its .schedule aspect carries the startsAt the move check and the notice params read). The caller MUST list sessionKey.schedule in ContextHint.Reads."},` +
+			`"sessionKey":{"type":"string","description":"vtx.session.<NanoID> the booking is for (required; validated alive — a called-off class sends nothing from here; its .schedule aspect carries the startsAt the move check and the notice params read). The caller MUST list sessionKey and sessionKey.schedule in ContextHint.Reads."},` +
 			`"kind":{"type":"string","enum":["promoted","moved"],"description":"Which change this notice is for: promoted (the seat was handed over from the waitlist) or moved (the class time changed). Required."},` +
 			`"changeRef":{"type":"string","description":"The value that identifies WHICH change: the .status.promotedAt instant for kind=promoted, the session's current .schedule.startsAt for kind=moved (RFC3339, canonical UTC). Required; refused StaleChange when it no longer matches the live aspect."}},` +
 			`"required":["bookingKey","sessionKey","kind","changeRef"]}`,
@@ -83,7 +88,7 @@ func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the change-notice marker was written on."}}}`,
 		FieldDescription: map[string]string{
 			"bookingKey": "Full vtx.booking.<NanoID> key whose seat changed. RecordBookingChangeNotice validates it is alive and booked, then writes the .changeNotice aspect on it. The caller MUST list this key and bookingKey.status in ContextHint.Reads.",
-			"sessionKey": "Full vtx.session.<NanoID> key of the class this booking is for. RecordBookingChangeNotice reads its .schedule aspect for the startsAt the move check compares and the notice carries. The caller MUST list sessionKey.schedule in ContextHint.Reads.",
+			"sessionKey": "Full vtx.session.<NanoID> key of the class this booking is for. RecordBookingChangeNotice validates it is alive (a called-off class is told by the release's own notice, never here) and reads its .schedule aspect for the startsAt the move check compares and the notice carries. The caller MUST list sessionKey and sessionKey.schedule in ContextHint.Reads.",
 			"kind":       "promoted or moved — which change this notice tells the member about, and which .changeNotice field (promotedFor / movedFor) records it.",
 			"changeRef":  "The change's own identifier, re-checked against the live aspect before anything is sent: .status.promotedAt for promoted, the session's .schedule.startsAt for moved. Recorded verbatim so the lens's equality closes the gap, and a later move (a new startsAt) reopens it.",
 		},
@@ -120,7 +125,8 @@ func changeNoticeAspectTypeDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{changeNoticeOp},
 		Description: "Booking change-notice marker aspect (wellness-reminders). Stored as vtx.booking.<NanoID>.changeNotice " +
 			"(class bookingChangeNotice) = {promotedFor?, movedFor?, sentAt}. Non-sensitive. Written ONLY by " +
-			"RecordBookingChangeNotice (whose bookingChangeNoticeOp vertexType DDL owns the script) as an OCC upsert; " +
+			"RecordBookingChangeNotice (whose bookingChangeNoticeOp vertexType DDL owns the script) as a create-or-update " +
+			"carrying the other kind's field forward; " +
 			"this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler. promotedFor = the " +
 			".status.promotedAt the promotion notice was for (equality closes missing_promotion_notice, once — " +
 			"promotedAt never changes); movedFor = the session startsAt the last move notice was for (equality closes " +
@@ -149,10 +155,11 @@ func changeNoticeAspectTypeDDL() pkgmgr.DDLSpec {
 
 // recordChangeNoticeScript handles RecordBookingChangeNotice. It reads the
 // booking ROOT and its .status aspect (declared reads) to assert the seat is
-// alive and `booked`, the session's .schedule (declared read) for the startsAt
-// the move check compares and every notice carries, and the booking's own
-// .changeNotice (declared optionalRead) so the write can carry the other
-// kind's field and pin on the observed revision. The change is re-checked
+// alive and `booked`, the session ROOT (declared read) to assert the class
+// is not being called off, the session's .schedule (declared read) for the
+// startsAt the move check compares and every notice carries, and the
+// booking's own .changeNotice (declared optionalRead) so the write can carry
+// the other kind's field. The change is re-checked
 // against the live aspect before anything is emitted: a row Weaver
 // dispatched from is a snapshot, and a promotion or move it names that the
 // graph has since outrun is refused StaleChange rather than told.
@@ -226,6 +233,14 @@ def execute(state, op):
         if not vertex_alive(state, booking_key):
             fail("UnknownBooking: " + booking_key + " is absent or tombstoned; no notice sent")
 
+        # Session liveness guard: a row projected before TombstoneSession and
+        # dispatched after it must not tell the member "you're in" or "your
+        # class moved" about a class being called off — ReleaseOrphanedBooking's
+        # own notice (wellness-domain) covers that seat. The op hydrates
+        # [sessionKey] (ContextHint.Reads), so the root is in state.
+        if not vertex_alive(state, session_key):
+            fail("UnknownSession: " + session_key + " is absent or tombstoned; the call-off notice is the release's own")
+
         # Only a confirmed seat is told: a waitlisted booker has no seat that
         # was moved, and attended / noShow means the class already happened.
         # read-posture: (a) declared in contextHint.reads — the
@@ -237,6 +252,14 @@ def execute(state, op):
         if status.data.get("value") != "booked":
             fail("InvalidState: " + booking_key + " is " + str(status.data.get("value")) + ", not booked; no notice sent")
 
+        # No ClassAlreadyStarted guard here, where recordReminderScript's sits:
+        # a promotion after the class has started is refused upstream
+        # (PromoteWaitlistedBookings and CancelBooking both refuse
+        # SessionInPast), so a promotion notice never reaches a started class;
+        # and a move notice for a class the desk moves mid-session is still a
+        # true fact the member should hear. The class-over conjunct on the lens
+        # is what bounds both.
+        #
         # The session's current time, for the move check and for every notice's
         # params (a promotion notice tells the member WHEN the class is too).
         # read-posture: (a) declared in contextHint.reads — the
@@ -270,7 +293,7 @@ def execute(state, op):
         # notice converging on one booking each set their own field and carry
         # the other's forward, so neither write erases the other's evidence.
         # read-posture: (d) declared optionalReads at wellnessBookingChangeNotices
-        # dispatch (the create-or-OCC-update branch below).
+        # dispatch (the create-or-update branch below).
         existing = kv.Read(booking_key + ".changeNotice")
         marker = {}
         if existing != None and not existing.isDeleted:
@@ -288,13 +311,16 @@ def execute(state, op):
         marker_doc = {"class": "bookingChangeNotice", "vertexKey": booking_key,
                       "localName": "changeNotice", "isDeleted": False, "data": marker}
         if existing != None:
-            # OCC-pinned on the revision the read observed (a logically-deleted
-            # marker is still a live KV envelope with a revision, so it is
-            # revived through the same pin): a concurrent notice of the other
-            # kind that landed in between conflicts here and re-runs, rather
-            # than being overwritten with a document that never saw its field.
-            marker_mut = {"op": "update", "key": marker_key, "expectedRevision": existing.revision,
-                          "document": marker_doc}
+            # A BARE update on the hydrated key (a logically-deleted marker is
+            # still a live KV envelope, revived through the same path): the
+            # Processor conditions it on the step-4 revision the optionalRead
+            # observed (Contract #3 §3.2) and records the condition as
+            # defaulted, which is what makes a conflict retry-eligible
+            # in-process — re-hydrate, re-execute, carry the winner's field.
+            # That is how two concurrent kinds converge on one marker. An
+            # explicit expectedRevision would be an unretried CAS: the loser
+            # is rejected outright and waits out the mark lease instead.
+            marker_mut = {"op": "update", "key": marker_key, "document": marker_doc}
         else:
             marker_mut = {"op": "create", "key": marker_key, "document": marker_doc}
 

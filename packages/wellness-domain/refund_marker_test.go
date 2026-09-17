@@ -35,9 +35,9 @@ import (
 // its hubs as literals — is what lets deleting a declaration from targets.go
 // red these tests instead of leaving them agreeing with a spec they never
 // actually read (docs/components/pkgmgr.md's "agrees by coincidence" entry).
-// Hubbed on Weaver's own identity — the actor ReleaseOrphanedBooking's
-// in-script primordial-actor guard now requires (ddls.go) — not
-// domainActorKey.
+// Hubbed on Weaver's own identity: ReleaseOrphanedBooking's script pins
+// op.actor to primordialActor["weaver"] (ddls.go), so the actor whose
+// operator-role walk the release runs is Weaver's, not domainActorKey.
 func wdReleaseEnumerations(bookingKey string) []processor.EnumerationHint {
 	return testutil.DeclaredGapEnumerations(
 		wellnessdomain.OrphanedBookingSettlementTarget, "missing_release", bootstrap.WeaverIdentityKey,

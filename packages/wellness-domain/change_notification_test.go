@@ -8,6 +8,7 @@ package wellnessdomain_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -151,6 +152,102 @@ func TestRecordBookingChangeNotification_RejectsUnknownKind(t *testing.T) {
 	}
 	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, bookingKey+".changeNotification"); err == nil {
 		t.Fatalf("a rejected kind must write NO .changeNotification marker")
+	}
+}
+
+// TestRecordBookingChangeNotification_RejectsNonBookingKey proves the
+// recovered key is shape-checked before the write: an externalRef whose first
+// segment is a session key (or any non-booking vertex key) is refused
+// InvalidArgument and writes nothing — the bridge echoes the token verbatim,
+// so this is the only place a foreign-type aspect write is stopped.
+func TestRecordBookingChangeNotification_RejectsNonBookingKey(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "changenotifybadkey")
+
+	for i, badKey := range []string{
+		"vtx.session.BBCNBADKAJHKMNPQRST1",
+		"vtx.booking.BBCNBADKAJHKMNPQRST1.status",
+		"booking.BBCNBADKAJHKMNPQRST1",
+	} {
+		extRef := badKey + ":moved:2026-10-01T15:00:00Z"
+		_, _, reply := cnSubmit(t, ctx, conn, cp, cons, fmt.Sprintf("wdcnbadkey%07d", i),
+			`{"externalRef":"`+extRef+`","status":"completed"}`, processor.OutcomeRejected)
+		if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: externalRef") {
+			t.Fatalf("%s: want an InvalidArgument rejection on externalRef, got %+v", badKey, reply.Error)
+		}
+		if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, badKey+".changeNotification"); err == nil {
+			t.Fatalf("%s: a rejected key must write NO .changeNotification aspect", badKey)
+		}
+	}
+}
+
+// TestReleaseOrphanedBooking_NonWeaverOperatorDenied is the DENY half of
+// ReleaseOrphanedBooking's primordial-actor guard: domainActorKey holds the
+// operator role AND the identical Scope:"any" grant (domainCapDoc), so step 3
+// authorizes it; only the script's `op.actor != primordialActor["weaver"]`
+// check stops it from tombstoning a booking and having the platform notify
+// its member of a call-off. Same fixture as
+// TestReleaseOrphanedBooking_EmitsCallOffNotice; only the actor differs. The
+// booking stays live and no external.notification is emitted.
+func TestReleaseOrphanedBooking_NonWeaverOperatorDenied(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "orphanforged")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdorphanforg0001", "Flow Room")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdorphanforg0002", studioKey, "Vinyasa Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+	bookerKey := seedIdentity(t, ctx, conn, "BBWELLFGBKRAHJKMNPQR")
+	bookingKey, bookingOutcome := createBooking(t, ctx, conn, cp, cons, "wdorphanforg0003", sessionKey, bookerKey, "")
+	if bookingOutcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateBooking outcome = %v, want Accepted", bookingOutcome)
+	}
+
+	tombstoneEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("wdorphanforg0004"),
+		Lane:          processor.LaneDefault,
+		OperationType: "TombstoneSession",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:10:00Z",
+		Class:         "session",
+		Payload:       json.RawMessage(`{"sessionKey":"` + sessionKey + `","studio":"` + studioKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("TombstoneSession", domainActorKey, wellnessdomain.OpMetas()), Reads: []string{
+			sessionKey, sessionKey + ".schedule",
+			atStudioLnkKey(t, sessionKey, studioKey),
+		}},
+	}
+	testutil.PublishOp(t, conn, tombstoneEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	releaseReqID := testutil.GenReqID("wdorphanforg0005")
+	releaseEnv := &processor.OperationEnvelope{
+		RequestID:     releaseReqID,
+		Lane:          processor.LaneDefault,
+		OperationType: "ReleaseOrphanedBooking",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-07T12:15:00Z",
+		Class:         "booking",
+		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:        []string{bookingKey, bookingKey + ".status", sessionKey},
+			Enumerations: wdReleaseEnumerations(bookingKey),
+		},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, releaseEnv)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("non-Weaver release: outcome = %v, want Rejected (reply: %+v)", outcome, reply.Error)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("want an AuthDenied rejection, got %+v", reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "Weaver's dispatch actor") {
+		t.Fatalf("the denial must name the actor guard, got %q", reply.Error.Message)
+	}
+
+	booking := readDoc(t, ctx, conn, bookingKey)
+	if deleted, _ := booking["isDeleted"].(bool); deleted {
+		t.Fatalf("a denied release must NOT tombstone the booking")
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(releaseReqID)); err == nil {
+		t.Fatalf("a denied release must leave NO outbox aspect (no external.notification)")
 	}
 }
 

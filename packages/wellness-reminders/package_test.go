@@ -123,19 +123,23 @@ func TestPastDueBookings_NoShowFeeIsATypedZero(t *testing.T) {
 	}
 }
 
-// TestRecordBookingChangeNotice_MarkerUpdateIsOCCPinned pins the shape of the
+// TestRecordBookingChangeNotice_MarkerUpdateIsBare pins the shape of the
 // .changeNotice write in recordChangeNoticeScript: the op READS the marker
-// (a declared optionalRead) and writes it, so the update must carry
-// `expectedRevision: existing.revision` — a promotion notice and a move
-// notice converging on one booking each carry the other's field forward, and
-// only the pin turns a concurrent write in between into a conflict that
-// re-runs rather than an overwrite that drops a field. The create branch is
-// the absent case and needs no pin.
-func TestRecordBookingChangeNotice_MarkerUpdateIsOCCPinned(t *testing.T) {
+// (a declared optionalRead, hydrated at step 4) and writes it as a BARE
+// update — no expectedRevision. That is deliberate, not an omission: the
+// Processor conditions a bare update on the hydrated revision (Contract #3
+// §3.2, commit_path.go's applyHydratedRevisions) and records the condition as
+// defaulted, which licenses the in-process re-hydrate + re-execute on a
+// conflict. An explicit CAS is skipped by that retry path, so when both gaps
+// open on one booking and Weaver dispatches both, the loser would be rejected
+// outright and wait out the mark lease instead of re-executing carrying the
+// winner's field. The update still carries the other kind's field forward;
+// the create branch is the absent case.
+func TestRecordBookingChangeNotice_MarkerUpdateIsBare(t *testing.T) {
 	for _, want := range []string{
 		`existing = kv.Read(booking_key + ".changeNotice")`,
-		`"op": "update", "key": marker_key, "expectedRevision": existing.revision`,
-		`"op": "create", "key": marker_key`,
+		`marker_mut = {"op": "update", "key": marker_key, "document": marker_doc}`,
+		`marker_mut = {"op": "create", "key": marker_key, "document": marker_doc}`,
 		`marker["promotedFor"] = change_ref`,
 		`marker["movedFor"] = change_ref`,
 		`for field in ["promotedFor", "movedFor"]:`,
@@ -143,5 +147,9 @@ func TestRecordBookingChangeNotice_MarkerUpdateIsOCCPinned(t *testing.T) {
 		if !strings.Contains(recordChangeNoticeScript, want) {
 			t.Errorf("recordChangeNoticeScript must contain %q", want)
 		}
+	}
+	if strings.Contains(recordChangeNoticeScript, `"expectedRevision"`) {
+		t.Errorf("recordChangeNoticeScript must carry NO expectedRevision: an explicit CAS on the hydrated .changeNotice " +
+			"key turns a benign two-kinds race into an unretried rejection (commit_path.go retries only §3.2-defaulted conditions)")
 	}
 }

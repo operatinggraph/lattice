@@ -43,11 +43,14 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // "noShow"); changeRef is templated off the row column that IS the change,
 // so the op can re-check it against the live aspect and refuse a stale row.
 // Reads declares what the script hard-requires: the booking root
-// (vertex_alive), its .status (the booked check + promotedAt) and the
-// session's .schedule (startsAt — the move check and every notice's
+// (vertex_alive), its .status (the booked check + promotedAt), the session
+// root (vertex_alive — a row projected before TombstoneSession and dispatched
+// after it sends nothing; the release's own notice covers a called-off class)
+// and the session's .schedule (startsAt — the move check and every notice's
 // params). The booking's .changeNotice is an OptionalRead: absent for the
-// first notice of either kind (the create branch), present after (the
-// OCC-pinned update carrying the other kind's field). Class pins the
+// first notice of either kind (the create branch), present after (a bare
+// update the Processor conditions on the hydrated revision, carrying the
+// other kind's field). Class pins the
 // bookingChangeNoticeOp DDL: RecordBookingChangeNotice is unique to this
 // package today, but an unpinned directOp fails closed (MissingClass)
 // forever the moment any other installed package claims the same
@@ -82,7 +85,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Operation:     changeNoticeOp,
 					Class:         changeNoticeOpDDL,
 					Params:        map[string]string{"bookingKey": "row.entityKey", "sessionKey": "row.sessionKey", "kind": "promoted", "changeRef": "row.promotedAt"},
-					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.sessionKey.schedule"},
+					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.sessionKey", "row.sessionKey.schedule"},
 					OptionalReads: []string{"row.entityKey.changeNotice"},
 				},
 				"missing_move_notice": {
@@ -90,7 +93,7 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Operation:     changeNoticeOp,
 					Class:         changeNoticeOpDDL,
 					Params:        map[string]string{"bookingKey": "row.entityKey", "sessionKey": "row.sessionKey", "kind": "moved", "changeRef": "row.startsAt"},
-					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.sessionKey.schedule"},
+					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.sessionKey", "row.sessionKey.schedule"},
 					OptionalReads: []string{"row.entityKey.changeNotice"},
 				},
 			},

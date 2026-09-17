@@ -134,8 +134,10 @@ func changeNotificationAspectTypeDDL() pkgmgr.DDLSpec {
 
 // recordChangeNotificationScript handles RecordBookingChangeNotification. It
 // reads NOTHING from state (the bridge submits no ContextHint.Reads):
-// externalRef is split into the booking key, the change kind, and the change
-// reference, and the .changeNotification aspect is written as an
+// externalRef is split into the booking key (refused unless it is a
+// vtx.booking.<NanoID> — the token is minted by the emitter and echoed by
+// the bridge, so the shape is validated here, at the write), the change kind,
+// and the change reference, and the .changeNotification aspect is written as an
 // UNCONDITIONED update — create-if-absent, overwrite-if-present — so a
 // redelivered reply or a later, different change both land cleanly with no
 // OCC pin needed.
@@ -147,6 +149,18 @@ def required_string(p, name):
     if v == None or type(v) != type("") or len(v.strip()) == 0:
         fail("InvalidArgument: " + name + ": required non-empty string")
     return v.strip()
+
+def parts_of(key, name, want_type):
+    parts = key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx":
+        fail("InvalidArgument: " + name + ": required vtx.<type>.<NanoID> (exactly 3 segments); got " + key)
+    if parts[1] == "":
+        fail("InvalidArgument: " + name + ": empty type segment; required vtx.<type>.<NanoID>; got " + key)
+    if parts[2] == "":
+        fail("InvalidArgument: " + name + ": empty id segment; required vtx.<type>.<NanoID>; got " + key)
+    if want_type != "" and parts[1] != want_type:
+        fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
+    return parts[1], parts[2]
 
 OUTCOME_STATUSES = ["completed", "failed"]
 
@@ -163,6 +177,11 @@ def split_external_ref(ref):
     if idx1 <= 0:
         fail("InvalidArgument: externalRef: required <bookingKey>:<kind>:<changeRef>; got " + ref)
     booking_key = ref[:idx1]
+    # Only a vtx.booking.<NanoID> is a place this op may write: the bridge
+    # echoes externalRef verbatim, so the key it recovers is shaped by
+    # whoever minted the token, and an aspect on any other vertex type would
+    # be an unguarded cross-type write under the operator grant.
+    parts_of(booking_key, "externalRef", "booking")
     rest = ref[idx1 + 1:]
     idx2 = rest.find(":")
     if idx2 <= 0:
