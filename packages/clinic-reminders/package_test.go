@@ -23,12 +23,15 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 	}
 }
 
-// TestPackage_DDLs pins the fourteen DDLs — the appointment-reminder pair
+// TestPackage_DDLs pins the eighteen DDLs — the appointment-reminder pair
 // (appointmentReminderOp vertexType + appointmentReminder aspectType), the
-// follow-up-reminder pair (followUpReminderOp + followUpReminder), the two
+// follow-up-reminder pair (followUpReminderOp + followUpReminder), the
+// appointment-change notice pair (appointmentChangeNoticeOp +
+// appointmentChangeNotice), the three
 // notification-outcome replyOp pairs (appointmentReminderNotificationOp +
 // appointmentReminderNotification, followUpReminderNotificationOp +
-// followUpReminderNotification), and the visit-series group (visitseries
+// followUpReminderNotification, appointmentChangeNotificationOp +
+// appointmentChangeNotification), and the visit-series group (visitseries
 // vertexType + its five aspectType gates: definition, progress, paused, the
 // per-patient+provider active-series guard, and the site-assignment guard that
 // serializes concurrent SetVisitSeriesSite callers). Each op vertexType owns its
@@ -36,15 +39,15 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // MUST be NON-sensitive (a timestamp / cadence / guard pointer on an
 // appointment/visitseries/patient, not an identity).
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 14 {
-		t.Fatalf("expected 14 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 18 {
+		t.Fatalf("expected 18 DDLs, got %d", got)
 	}
-	// Eleven op-metas: the five visit-series ops a human triggers carry a full
+	// Thirteen op-metas: the five visit-series ops a human triggers carry a full
 	// descriptor, the rest stay bare for forOperation resolution alone. A
 	// dropped meta would surface only as an op that quietly stops being
 	// offerable, so the count is what catches it.
-	if got := len(Package.OpMetas); got != 11 {
-		t.Fatalf("expected 11 opMetas, got %d", got)
+	if got := len(Package.OpMetas); got != 13 {
+		t.Fatalf("expected 13 opMetas, got %d", got)
 	}
 	byName := map[string]pkgmgr.DDLSpec{}
 	for _, d := range Package.DDLs {
@@ -56,6 +59,8 @@ func TestPackage_DDLs(t *testing.T) {
 		{"followUpReminderOp", "followUpReminder", "RecordFollowUpReminder"},
 		{"appointmentReminderNotificationOp", "appointmentReminderNotification", "RecordAppointmentReminderNotification"},
 		{"followUpReminderNotificationOp", "followUpReminderNotification", "RecordFollowUpReminderNotification"},
+		{"appointmentChangeNoticeOp", "appointmentChangeNotice", "RecordAppointmentChangeNotice"},
+		{"appointmentChangeNotificationOp", "appointmentChangeNotification", "RecordAppointmentChangeNotification"},
 	}
 	for _, pr := range pairs {
 		op, ok := byName[pr.opName]
@@ -162,11 +167,12 @@ func TestPackage_Depends(t *testing.T) {
 	}
 }
 
-// TestPackage_Permissions pins the eleven ops at scope=any. Six are operator-only;
+// TestPackage_Permissions pins the thirteen ops at scope=any. Eight are operator-only;
 // the four front-desk Follow-ups-tab ops (Start/Pause/Resume/EndVisitSeries) plus
 // SetVisitSeriesSite grant {operator, frontOfHouse} — the script's workplace guard
 // confines the front-desk leg. AdvanceVisitSeries and BackfillVisitSeriesSite stay
-// operator-only (both are Weaver's directOps).
+// operator-only (both are Weaver's directOps), as do RecordAppointmentChangeNotice
+// (Weaver's directOp) and RecordAppointmentChangeNotification (the bridge's replyOp).
 func TestPackage_Permissions(t *testing.T) {
 	// operationType -> the exact GrantsTo set expected.
 	want := map[string][]string{
@@ -174,6 +180,8 @@ func TestPackage_Permissions(t *testing.T) {
 		"RecordFollowUpReminder":                {"operator"},
 		"RecordAppointmentReminderNotification": {"operator"},
 		"RecordFollowUpReminderNotification":    {"operator"},
+		"RecordAppointmentChangeNotice":         {"operator"},
+		"RecordAppointmentChangeNotification":   {"operator"},
 		"StartVisitSeries":                      {"operator", "frontOfHouse"},
 		"PauseVisitSeries":                      {"operator", "frontOfHouse"},
 		"ResumeVisitSeries":                     {"operator", "frontOfHouse"},
@@ -219,6 +227,8 @@ func TestPackage_NoScans(t *testing.T) {
 		"recordFollowUpReminderScript":             recordFollowUpReminderScript,
 		"recordReminderNotificationScript":         recordReminderNotificationScript,
 		"recordFollowUpReminderNotificationScript": recordFollowUpReminderNotificationScript,
+		"recordChangeNoticeScript":                 recordChangeNoticeScript,
+		"recordChangeNotificationScript":           recordChangeNotificationScript,
 		"visitSeriesScript":                        visitSeriesScript,
 	}
 	for name, script := range scripts {
@@ -241,8 +251,8 @@ func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
 	for _, l := range Package.Lenses {
 		lensByName[l.CanonicalName] = l
 	}
-	if len(Package.WeaverTargets) != 5 {
-		t.Fatalf("expected 5 weaverTargets, got %d", len(Package.WeaverTargets))
+	if len(Package.WeaverTargets) != 6 {
+		t.Fatalf("expected 6 weaverTargets, got %d", len(Package.WeaverTargets))
 	}
 	for _, wt := range Package.WeaverTargets {
 		lens, ok := lensByName[wt.LensRef]
@@ -284,5 +294,53 @@ func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
 				checkRowRef("target "+wt.TargetID+" gap "+gapKey+" read", r)
 			}
 		}
+	}
+}
+
+// TestRecordAppointmentChangeNotice_MarkerUpdateIsBare pins the shape of the
+// .changeNotice write in recordChangeNoticeScript: the op READS the marker
+// (a declared optionalRead, hydrated at step 4) and writes it as a BARE
+// update — no expectedRevision. That is deliberate, not an omission: the
+// Processor conditions a bare update on the hydrated revision (Contract #3
+// §3.2, commit_path.go's applyHydratedRevisions) and records the condition as
+// defaulted, which licenses the in-process re-hydrate + re-execute on a
+// conflict. An explicit CAS is skipped by that retry path, so when both gaps
+// open on one appointment and Weaver dispatches both, the loser would be
+// rejected outright and wait out the mark lease instead of re-executing
+// carrying the winner's field. The update still carries the other kind's
+// field forward; the create branch is the absent case.
+func TestRecordAppointmentChangeNotice_MarkerUpdateIsBare(t *testing.T) {
+	for _, want := range []string{
+		`existing = kv.Read(appt_key + ".changeNotice")`,
+		`marker_mut = {"op": "update", "key": marker_key, "document": marker_doc}`,
+		`marker_mut = {"op": "create", "key": marker_key, "document": marker_doc}`,
+		`marker["cancelledFor"] = change_ref`,
+		`marker["movedFor"] = change_ref`,
+		`for field in ["cancelledFor", "movedFor"]:`,
+	} {
+		if !strings.Contains(recordChangeNoticeScript, want) {
+			t.Errorf("recordChangeNoticeScript must contain %q", want)
+		}
+	}
+	if strings.Contains(recordChangeNoticeScript, `"expectedRevision"`) {
+		t.Errorf("recordChangeNoticeScript must carry NO expectedRevision: an explicit CAS on the hydrated .changeNotice " +
+			"key turns a benign two-kinds race into an unretried rejection (commit_path.go retries only §3.2-defaulted conditions)")
+	}
+}
+
+// TestRecordAppointmentChangeNotice_ActorGuardIsFirst pins the guard ORDER
+// the design requires: the primordial actor check is the first statement in
+// the RecordAppointmentChangeNotice branch, before every payload-shape,
+// liveness and re-check oracle, so a non-Weaver submitter learns nothing
+// about the appointment it named.
+func TestRecordAppointmentChangeNotice_ActorGuardIsFirst(t *testing.T) {
+	branch := strings.Index(recordChangeNoticeScript, `if ot == "RecordAppointmentChangeNotice":`)
+	guard := strings.Index(recordChangeNoticeScript, `if op.actor != primordialActor["weaver"]:`)
+	firstRead := strings.Index(recordChangeNoticeScript, `required_string(p, "appointmentKey")`)
+	if branch < 0 || guard < 0 || firstRead < 0 {
+		t.Fatalf("branch=%d guard=%d firstRead=%d: one of the anchors is missing from recordChangeNoticeScript", branch, guard, firstRead)
+	}
+	if !(branch < guard && guard < firstRead) {
+		t.Fatalf("the Weaver-actor guard must be the FIRST statement of the branch (branch=%d guard=%d firstRead=%d)", branch, guard, firstRead)
 	}
 }

@@ -81,6 +81,7 @@ const (
 // general are held by ruleengine/full's TestAnchorHopIndex_WithScope, which
 // does not need a lens to be written badly in order to cover them.
 var corpusAnchorIndexVerdicts = map[string]string{
+	"appointmentChangeNotices": hopIndexed,
 	"appointmentReminders":     hopIndexed,
 	"augurDispatchPending":     hopIndexed,
 	"backgroundCheckFreshness": hopIndexed,

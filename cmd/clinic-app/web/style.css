@@ -152,6 +152,8 @@ button.ghost:hover { background: var(--bg-input); color: var(--text); }
 .card .when span { font-size: 13px; font-weight: 400; color: var(--text-dim); }
 .card .meta { color: var(--text-dim); font-size: 12px; }
 .card .meta.reminder-sent { color: var(--green); }
+.card .meta.status-clock { color: var(--green); }
+.card .meta.change-notice { color: var(--green); }
 .card .meta.status-note { color: var(--text-dim); font-style: italic; }
 .card .meta.documented, .sched-detail .sd-meta.documented { color: var(--green); }
 .card .encounter-note {

@@ -383,10 +383,15 @@ func TestClinic_RescheduleResetsConfirmedAndCheckedIn(t *testing.T) {
 		}
 		clSubmitOpt(t, ctx, conn, cp, cons, label, "SetAppointmentStatus", "appointment", payload+`}`, reads, optionalReads, processor.OutcomeAccepted)
 	}
+	// Every move is submitted at rrMovedAt, a DISTINCT instant from the
+	// clSubmittedAnchor the booking and the status set carry, so a fresh
+	// stamp (at = rrMovedAt) and a carried one (at = clSubmittedAnchor) are
+	// told apart by the pins below.
+	const rrMovedAt = "2026-01-02T00:00:00Z"
 	move := func(label, apptKey, newStart, newEnd string) {
-		clSubmitOpt(t, ctx, conn, cp, cons, label, "RescheduleAppointment", "appointment",
+		clSubmitAt(t, ctx, conn, cp, cons, label, "RescheduleAppointment", "appointment",
 			`{"appointmentKey":"`+apptKey+`","provider":"`+providerKey+`","patient":"`+patientKey+`","startsAt":"`+newStart+`","endsAt":"`+newEnd+`"}`,
-			clRescheduleReads(apptKey, providerKey, patientKey), clRescheduleOptionalReads(apptKey), processor.OutcomeAccepted)
+			rrMovedAt, clRescheduleReads(apptKey, providerKey, patientKey), clRescheduleOptionalReads(apptKey), processor.OutcomeAccepted)
 	}
 	// rescheduledEvent reads the committed clinic.appointmentRescheduled
 	// event off the op's own outbox aspect (the step-8 batch persists the
@@ -420,6 +425,11 @@ func TestClinic_RescheduleResetsConfirmedAndCheckedIn(t *testing.T) {
 	if ev := rescheduledEvent("rrmove0001"); ev["statusReset"] != true {
 		t.Fatalf("checkedIn move event statusReset = %v, want true (payload %v)", ev["statusReset"], ev)
 	}
+	// The reset IS a value change (checkedIn→scheduled), so it stamps fresh
+	// rather than carrying the arrival's own at/by forward.
+	if st["at"] != rrMovedAt || st["by"] != "staff" {
+		t.Fatalf("checkedIn→scheduled reset at/by = %v/%v, want %s/staff (a fresh stamp at the move's own instant)", st["at"], st["by"], rrMovedAt)
+	}
 	// The move itself landed: old cells released, new cells held.
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-27T09:00:00Z")
@@ -428,28 +438,38 @@ func TestClinic_RescheduleResetsConfirmedAndCheckedIn(t *testing.T) {
 	confirmed := book("rrappt0002", "2026-07-21T09:00:00Z", "2026-07-21T09:30:00Z")
 	setStatus("rrconf0001", confirmed, "confirmed", "")
 	move("rrmove0002", confirmed, "2026-07-28T09:00:00Z", "2026-07-28T09:30:00Z")
-	if st := clStatusData(t, ctx, conn, confirmed); st["value"] != "scheduled" {
-		t.Fatalf("confirmed visit after the move: status = %v, want scheduled", st["value"])
+	st2 := clStatusData(t, ctx, conn, confirmed)
+	if st2["value"] != "scheduled" {
+		t.Fatalf("confirmed visit after the move: status = %v, want scheduled", st2["value"])
 	}
 	if ev := rescheduledEvent("rrmove0002"); ev["statusReset"] != true {
 		t.Fatalf("confirmed move event statusReset = %v, want true", ev["statusReset"])
+	}
+	if st2["at"] != rrMovedAt || st2["by"] != "staff" {
+		t.Fatalf("confirmed→scheduled reset at/by = %v/%v, want %s/staff (a fresh stamp at the move's own instant)", st2["at"], st2["by"], rrMovedAt)
 	}
 
 	// scheduled → moved: .status is re-stamped unchanged — the write is what
 	// makes a concurrent self confirm hydrated on the old schedule conflict
 	// under OCC — so its revision MOVES while its value does not, and the
-	// event carries no statusReset (nothing was reset).
+	// event carries no statusReset (nothing was reset). It is a same-value
+	// re-write, so at/by carry forward from CreateAppointment's own stamp
+	// (staff, clSubmittedAnchor) rather than re-stamping fresh.
 	scheduled := book("rrappt0003", "2026-07-22T09:00:00Z", "2026-07-22T09:30:00Z")
-	if st := clStatusData(t, ctx, conn, scheduled); st["value"] != "scheduled" {
-		t.Fatalf("precondition: CreateAppointment writes scheduled, got %v", st["value"])
+	preSt := clStatusData(t, ctx, conn, scheduled)
+	if preSt["value"] != "scheduled" {
+		t.Fatalf("precondition: CreateAppointment writes scheduled, got %v", preSt["value"])
+	}
+	if preSt["at"] != clSubmittedAnchor || preSt["by"] != "staff" {
+		t.Fatalf("precondition: CreateAppointment status = %v, want at=%s by=staff", preSt, clSubmittedAnchor)
 	}
 	rev := clRevision(t, ctx, conn, scheduled+".status")
 	move("rrmove0003", scheduled, "2026-07-29T09:00:00Z", "2026-07-29T09:30:00Z")
 	if got := clRevision(t, ctx, conn, scheduled+".status"); got == rev {
 		t.Fatalf("moving a scheduled visit must re-stamp .status (revision stayed %d)", rev)
 	}
-	if st := clStatusData(t, ctx, conn, scheduled); st["value"] != "scheduled" || len(st) != 1 {
-		t.Fatalf("re-stamped status = %v, want exactly {value: scheduled}", st)
+	if st := clStatusData(t, ctx, conn, scheduled); st["value"] != "scheduled" || len(st) != 3 || st["at"] != clSubmittedAnchor || st["by"] != "staff" {
+		t.Fatalf("re-stamped status = %v, want exactly {value: scheduled, at: %s, by: staff} (carried from the booking, not re-stamped at the move's %s)", st, clSubmittedAnchor, rrMovedAt)
 	}
 	if ev := rescheduledEvent("rrmove0003"); ev["statusReset"] != nil {
 		t.Fatalf("scheduled move event carries statusReset = %v, want absent", ev["statusReset"])

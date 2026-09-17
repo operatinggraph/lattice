@@ -279,6 +279,11 @@ func TestClinic_SelfCancel_LateWindow_OwesFee(t *testing.T) {
 	if _, present := st["note"]; present {
 		t.Fatalf("noteless late cancel carries a note: %v", st["note"])
 	}
+	// The FIRST cancel is a real transition: it stamps at = its own
+	// submittedAt, by = patient (the self path).
+	if st["at"] != "2026-07-19T09:00:00Z" || st["by"] != "patient" {
+		t.Fatalf("first cancel status = %v, want at 2026-07-19T09:00:00Z by patient", st)
+	}
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
 	clAssertSlotClaimReleased(t, ctx, conn, patientKey, "2026-07-20T09:00:00Z")
 
@@ -294,6 +299,11 @@ func TestClinic_SelfCancel_LateWindow_OwesFee(t *testing.T) {
 	if st["note"] != "changed my mind twice" {
 		t.Fatalf("self re-cancel note = %v, want the submitted note", st["note"])
 	}
+	// A same-value re-write carries at/by forward from the FIRST cancel,
+	// unchanged by this later submittedAt (2026-07-20T12:00:00Z).
+	if st["at"] != "2026-07-19T09:00:00Z" || st["by"] != "patient" {
+		t.Fatalf("self re-cancel must carry at/by forward from the first cancel, got %v", st)
+	}
 
 	// A same-value re-cancel by staff (noteless) carries both forward and
 	// clears the note — the note keeps its clear-on-omit semantics.
@@ -306,8 +316,16 @@ func TestClinic_SelfCancel_LateWindow_OwesFee(t *testing.T) {
 	if _, present := st["note"]; present {
 		t.Fatalf("noteless staff re-cancel must clear the note, got %v", st["note"])
 	}
+	// The at/by carry ignores WHO re-submits and WHEN — it is always the
+	// FIRST cancel's own moment/author, patient included, even on a staff
+	// same-value re-set.
+	if st["at"] != "2026-07-19T09:00:00Z" || st["by"] != "patient" {
+		t.Fatalf("staff re-cancel must carry the patient's original at/by forward, got %v", st)
+	}
 
-	// The waiver is the correction's own fee-less write.
+	// The waiver is the correction's own fee-less write; same value
+	// (cancelled), so it too carries at/by forward rather than re-stamping
+	// staff at the correction's own submittedAt.
 	submitCorrectStatusAt(t, ctx, conn, cp, cons, "lclate00004", apptKey, "cancelled", "Clinic called it off; fee waived.", clStaffActorKey,
 		"2026-07-20T12:00:00Z", processor.OutcomeAccepted)
 	st = clStatusData(t, ctx, conn, apptKey)
@@ -315,6 +333,9 @@ func TestClinic_SelfCancel_LateWindow_OwesFee(t *testing.T) {
 		t.Fatalf("waiver correction: value = %v correctedFrom = %v, want cancelled / cancelled", st["value"], st["correctedFrom"])
 	}
 	lcAssertNoFee(t, st, "waiver correction")
+	if st["at"] != "2026-07-19T09:00:00Z" || st["by"] != "patient" {
+		t.Fatalf("same-value correction must carry at/by forward, got %v", st)
+	}
 }
 
 func TestClinic_SelfCancel_Open_NoFee(t *testing.T) {
@@ -500,8 +521,8 @@ func TestClinic_SelfConfirm_BeforeStart(t *testing.T) {
 		t.Fatalf("self confirm with the clock open: outcome = %v reason = %q, want Accepted", outcome, reason)
 	}
 	st := clStatusData(t, ctx, conn, apptKey)
-	if st["value"] != "confirmed" || len(st) != 1 {
-		t.Fatalf("status after self confirm = %v, want exactly {value: confirmed}", st)
+	if st["value"] != "confirmed" || len(st) != 3 || st["at"] != "2026-07-19T08:59:59Z" || st["by"] != "patient" {
+		t.Fatalf("status after self confirm = %v, want exactly {value: confirmed, at: 2026-07-19T08:59:59Z, by: patient}", st)
 	}
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
 
@@ -649,8 +670,8 @@ func TestClinic_SelfConfirm_NeverCarriesANote(t *testing.T) {
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("self confirm with a note: outcome = %v reason = %q, want Accepted", outcome, reason)
 	}
-	if st := clStatusData(t, ctx, conn, apptKey); st["value"] != "confirmed" || len(st) != 1 {
-		t.Fatalf("status after a self confirm with a note = %v, want exactly {value: confirmed} (the note is ignored)", st)
+	if st := clStatusData(t, ctx, conn, apptKey); st["value"] != "confirmed" || len(st) != 3 || st["at"] != "2026-07-18T09:00:00Z" || st["by"] != "patient" {
+		t.Fatalf("status after a self confirm with a note = %v, want exactly {value: confirmed, at: 2026-07-18T09:00:00Z, by: patient} (the note is ignored)", st)
 	}
 
 	// The desk confirms with a note; the patient's re-confirm — with and
@@ -673,5 +694,55 @@ func TestClinic_SelfConfirm_NeverCarriesANote(t *testing.T) {
 		if st := clStatusData(t, ctx, conn, appt2Key); st["value"] != "confirmed" || st["note"] != "confirmed by phone" {
 			t.Fatalf("status after self re-confirm (note %q) = %v, want the desk's confirmed + note untouched", note, st)
 		}
+	}
+}
+
+// TestClinic_StaffCancel_ForgedTargetStampsStaff — the author label cannot be
+// forged through the authContext hint. authContext.target is a client-supplied
+// value any scope=any holder can set; step 3 authorizes the desk's cancel
+// through its operator grant and leaves authTargetValidated FALSE whatever the
+// hint names. A staff actor naming the patient's own linked identity passes
+// the op's ownership binding (the identifiedBy link is real and the patient is
+// this appointment's), so the write LANDS — and stamps by: staff, because
+// status_author keys on authTargetValidated, never on the hint's presence. A
+// by: patient here would tell clinic-reminders' appointmentChangeNotices lens
+// the patient made the change themselves, and the desk's cancel would go
+// untold. The self clocks that key on the hint's presence still bind, so the
+// probe cancels well before the 24 h window.
+func TestClinic_StaffCancel_ForgedTargetStampsStaff(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "staffcancel-forged")
+
+	patientKey := lcLinkedPatient(t, ctx, conn, cp, cons, "lcpat0007", "Forged Author")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "lcprv0007", "Dr. Forge", "Cardiology")
+	apptKey := lcBook(t, ctx, conn, cp, cons, "lcappt0007", patientKey, providerKey, "2026-07-20T09:00:00Z", "2026-07-20T09:30:00Z")
+	patientID := patientKey[len("vtx.patient."):]
+
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("lcforge0001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SetAppointmentStatus",
+		Actor:         clStaffActorKey,
+		SubmittedAt:   "2026-07-18T09:00:00Z",
+		Class:         "appointment",
+		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","status":"cancelled","provider":"` + providerKey + `","patient":"` + patientKey + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads:         clRescheduleReads(apptKey, providerKey, patientKey),
+			OptionalReads: []string{apptKey + ".status", "lnk.patient." + patientID + ".identifiedBy.identity." + clConsumerID},
+			Enumerations:  testutil.DeclaredEnumerations("SetAppointmentStatus", clStaffActorKey, clinicdomain.OpMetas()),
+		},
+		AuthContext: &processor.AuthContext{Target: clConsumerKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("staff cancel with a forged authContext.target: outcome = %v (reply %+v), want Accepted — the ownership binding holds for the real patient identity, so the forge reaches the .status write", outcome, reply.Error)
+	}
+	st := clStatusData(t, ctx, conn, apptKey)
+	if st["value"] != "cancelled" {
+		t.Fatalf("status = %v, want cancelled", st["value"])
+	}
+	if st["by"] != "staff" || st["at"] != "2026-07-18T09:00:00Z" {
+		t.Fatalf("forged-target staff cancel stamped at/by = %v/%v, want 2026-07-18T09:00:00Z/staff — the hint is not a proven target (authTargetValidated is false on the scope=any grant)", st["at"], st["by"])
 	}
 }

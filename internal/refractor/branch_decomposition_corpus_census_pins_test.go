@@ -5,7 +5,10 @@ package refractor_test
 // row records a cypher this mechanism leaves on the product path, which is
 // the half of the census an eye-reading gets wrong.
 var corpusBranchVerdicts = map[string]branchVerdict{
-	"applicantRosterRead":            {"g0/o0!no-aggregating-item", 0, 0},
+	"applicantRosterRead": {"g0/o0!no-aggregating-item", 0, 0},
+	// One OPTIONAL MATCH off the appointment anchor (forPatient), 0..1, flat,
+	// no aggregation — the informational patient hop and nothing else.
+	"appointmentChangeNotices":       {"g1/o1!no-aggregating-item", 0, 1},
 	"appointmentReminders":           {"g2/o2!no-aggregating-item", 0, 2},
 	"augurDispatchPending":           {"g0/o0!no-aggregating-item", 0, 0},
 	"augurProposals":                 {"g0/o0!no-aggregating-item", 0, 0},
@@ -301,6 +304,7 @@ var multiGroupDecomposingLenses = []string{
 // leave every one of them exactly where it found it.
 var footprintValidationVerdicts = map[string]bool{
 	"applicantOnboarding":               true,
+	"appointmentChangeNotices":          true,
 	"appointmentReminders":              true,
 	"augurDispatchPending":              false,
 	"backgroundCheckFreshness":          false,

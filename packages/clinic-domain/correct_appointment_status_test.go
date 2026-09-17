@@ -146,6 +146,46 @@ func TestClinic_CorrectAppointmentStatus_Corrects(t *testing.T) {
 	// The cells stay released: nothing in this op re-claims them.
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
 	clAssertSlotClaimReleased(t, ctx, conn, patientKey, "2026-07-20T09:00:00Z")
+	// A correction onto a DIFFERENT terminal value (noShow→completed) is a
+	// real transition: it stamps fresh, by staff (this op is staff-only).
+	if st["at"] != clCorrectedAfterVisits || st["by"] != "staff" {
+		t.Fatalf("correction at/by = %v/%v, want %s/staff", st["at"], st["by"], clCorrectedAfterVisits)
+	}
+}
+
+// TestClinic_CorrectAppointmentStatus_SameValueCarriesAtBy proves the other
+// half: a same-value correction (accepted — TestClinic_CorrectAppointmentStatus_Corrects'
+// doc-comment package note) carries the CURRENT at/by forward rather than
+// re-stamping staff at the correction's own (later) submittedAt.
+func TestClinic_CorrectAppointmentStatus_SameValueCarriesAtBy(t *testing.T) {
+	t.Parallel()
+	ctx, conn := setupClinicEnv(t)
+	cp, cons := newClinicPipeline(t, ctx, conn, "correct-samevalue-atby")
+
+	patientKey := createPatient(t, ctx, conn, cp, cons, "cssvpat0001", "Sam Value")
+	providerKey := createProvider(t, ctx, conn, cp, cons, "cssvprv0001", "Dr. Value", "Cardiology")
+	apptID := clSubmit(t, ctx, conn, cp, cons, "cssvappt0001", "CreateAppointment", "appointment",
+		`{"patient":"`+patientKey+`","provider":"`+providerKey+`","startsAt":"2026-07-20T09:00:00Z","endsAt":"2026-07-20T09:30:00Z"}`,
+		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
+	apptKey := "vtx.appointment." + apptID
+
+	clCompleteFirstTerminal(t, ctx, conn, cp, cons, "cssvnoshow001", apptKey, "noShow", providerKey, patientKey)
+	first := clStatusData(t, ctx, conn, apptKey)
+	if first["at"] != clCorrectedAfterVisits || first["by"] != "staff" {
+		t.Fatalf("precondition: first noShow at/by = %v/%v, want %s/staff", first["at"], first["by"], clCorrectedAfterVisits)
+	}
+
+	// A SAME-VALUE correction (noShow→noShow, changing only the note), well
+	// after the first transition.
+	submitCorrectStatusAt(t, ctx, conn, cp, cons, "cssvcorrect001", apptKey, "noShow",
+		"Confirmed the auto no-show was correct after all.", clStaffActorKey, "2026-08-01T00:00:00Z", processor.OutcomeAccepted)
+	st := clStatusData(t, ctx, conn, apptKey)
+	if st["value"] != "noShow" || st["correctedFrom"] != "noShow" {
+		t.Fatalf("same-value correction: value = %v correctedFrom = %v, want noShow/noShow", st["value"], st["correctedFrom"])
+	}
+	if st["at"] != clCorrectedAfterVisits || st["by"] != "staff" {
+		t.Fatalf("same-value correction must carry at/by forward from the first transition, got %v/%v (want %s/staff)", st["at"], st["by"], clCorrectedAfterVisits)
+	}
 }
 
 // TestClinic_CorrectAppointmentStatus_RejectsNonTerminalTarget pins the op's
