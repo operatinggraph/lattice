@@ -132,8 +132,45 @@ func TestValidateWeaverTargets_AssignTaskMissingAssignee(t *testing.T) {
 		Gaps:     map[string]GapActionSpec{"missing_signature": {Action: "assignTask", Operation: "SignLease", Target: "row.lease"}},
 	}}}
 	err := def.validateWeaverTargets()
-	if err == nil || !strings.Contains(err.Error(), "Assignee") {
-		t.Fatalf("expected assignTask missing-Assignee error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "Assignee or Queue") {
+		t.Fatalf("expected assignTask missing-endpoint error naming Assignee or Queue, got %v", err)
+	}
+}
+
+// TestValidateWeaverTargets_AssignTaskQueueArm pins install's exactly-one
+// rule on assignTask's two CreateTask endpoints: a Queue alone installs (the
+// role-queue arm), Assignee and Queue together are refused (the dispatched
+// routing would fall to the script's own precedence, with two dispatch
+// identities on the envelope and one bound), and the queue-arm gap still
+// needs its Target.
+func TestValidateWeaverTargets_AssignTaskQueueArm(t *testing.T) {
+	gap := func(ga GapActionSpec) Definition {
+		return Definition{WeaverTargets: []WeaverTargetSpec{{
+			TargetID: "workOrderQueue",
+			Gaps:     map[string]GapActionSpec{"missing_task": ga},
+		}}}
+	}
+	if err := gap(GapActionSpec{Action: "assignTask", Operation: "ResolveWorkOrder",
+		Queue: "vtx.role.AAroHeHJKMNPQRSTUVWX", Target: "row.entityKey"}).validateWeaverTargets(); err != nil {
+		t.Fatalf("a queue-only assignTask must install: %v", err)
+	}
+	if err := gap(GapActionSpec{Action: "assignTask", Operation: "ResolveWorkOrder",
+		Queue: "row.queue", Target: "row.entityKey"}).validateWeaverTargets(); err != nil {
+		t.Fatalf("a row-templated queue must install: %v", err)
+	}
+
+	err := gap(GapActionSpec{Action: "assignTask", Operation: "ResolveWorkOrder",
+		Assignee: "row.assignee", Queue: "row.queue", Target: "row.entityKey"}).validateWeaverTargets()
+	if err == nil || !strings.Contains(err.Error(), "Assignee or Queue, not both") {
+		t.Fatalf("expected the both-set refusal, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `gaps key "missing_task"`) {
+		t.Fatalf("the both-set refusal must name the gap: %v", err)
+	}
+
+	err = gap(GapActionSpec{Action: "assignTask", Operation: "ResolveWorkOrder", Queue: "row.queue"}).validateWeaverTargets()
+	if err == nil || !strings.Contains(err.Error(), "Target") {
+		t.Fatalf("expected the queue arm's missing-Target error, got %v", err)
 	}
 }
 

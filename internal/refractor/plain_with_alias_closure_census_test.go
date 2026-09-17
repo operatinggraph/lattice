@@ -108,6 +108,7 @@ var withAliasClosureBuckets = map[string]string{
 	"identityIndexHint":              closureA,
 	"landlordLeaseApplicationsRead":  closureG,
 	"landlordUnitsRead":              closureB,
+	"landlordWorkOrdersRead":         closureG,
 	"leaseAccounts":                  closureA,
 	"leaseApplicationsRead":          closureF,
 	"ledgerHistory":                  closureA,
@@ -254,7 +255,7 @@ func TestPlainWithAliasClosureCensus(t *testing.T) {
 	require.Equal(t, []string{"clinicPatientsRead", "leaseApplicationsRead", "renewalsRead", "wellnessMemberAccounts"}, byBucket[closureF],
 		"F is the set the alias resolution is responsible for — a lens arriving here gains a retraction, a "+
 			"narrowing licence and an audit direction at once, and a lens leaving it loses all three")
-	require.Equal(t, []string{"landlordLeaseApplicationsRead"}, byBucket[closureG],
+	require.Equal(t, []string{"landlordLeaseApplicationsRead", "landlordWorkOrdersRead"}, byBucket[closureG],
 		"G is the set the resolution must NOT admit: it keys on a variable that is not its anchor, so a "+
 			"per-anchor evaluation would compute a truncated row")
 

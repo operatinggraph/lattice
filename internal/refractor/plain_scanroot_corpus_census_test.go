@@ -153,9 +153,14 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"identityIndexHint":              {hasNeighbour: false, reason: rootIndexed, closure: closureNA},
 	"landlordLeaseApplicationsRead":  {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"landlordUnitsRead":              {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
-	"leaseAccounts":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"leaseApplicationsRead":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
-	"ledgerHistory":                  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	// Its OPTIONAL MATCH is written anchor-first, `(wo)<-[:scopedTo]-(t:task)`
+	// — the same shape landlordLeaseApplicationsRead's own docInst/leaseDocObj
+	// OPTIONAL MATCHes use — so the pattern HEAD is `wo`, the already-grounded
+	// anchor, and ground() (hopindex.go) reads it as grounded like its siblings.
+	"landlordWorkOrdersRead": {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
+	"leaseAccounts":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"leaseApplicationsRead":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	"ledgerHistory":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	// Acted on — see cafeLeaseWorkplaces.
 	"menuCatalog": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	// The corpus's one untyped-hop plain lens. Its `-[r]->` is a wildcard hop —

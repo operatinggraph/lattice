@@ -91,14 +91,19 @@ type weaverBinding struct {
 // its candidates, or one entry of a goal gap's catalog. The three share the
 // §10.8 action-contract shape, so they share this view.
 type weaverAction struct {
-	Ref           string            `json:"ref,omitempty"`
-	Action        string            `json:"action"`
-	Pattern       string            `json:"pattern,omitempty"`
-	PatternRef    string            `json:"patternRef,omitempty"`
-	PatternKnown  bool              `json:"patternKnown"`
-	Subject       string            `json:"subject,omitempty"`
-	Operation     string            `json:"operation,omitempty"`
-	Assignee      string            `json:"assignee,omitempty"`
+	Ref          string `json:"ref,omitempty"`
+	Action       string `json:"action"`
+	Pattern      string `json:"pattern,omitempty"`
+	PatternRef   string `json:"patternRef,omitempty"`
+	PatternKnown bool   `json:"patternKnown"`
+	Subject      string `json:"subject,omitempty"`
+	Operation    string `json:"operation,omitempty"`
+	Assignee     string `json:"assignee,omitempty"`
+	// Queue is an assignTask's role-queue endpoint (a vtx.role.<NanoID>
+	// literal or a row.<column> template) — the installed target's
+	// alternative to a concrete Assignee. Exactly one of Assignee / Queue is
+	// set on an assignTask, enforced at install by pkgmgr's validateGapAction.
+	Queue         string            `json:"queue,omitempty"`
 	Target        string            `json:"target,omitempty"`
 	Adapter       string            `json:"adapter,omitempty"`
 	IssueCode     string            `json:"issueCode,omitempty"`
@@ -490,6 +495,7 @@ type weaverActionContract struct {
 	Adapter       string            `json:"adapter,omitempty"`
 	Operation     string            `json:"operation,omitempty"`
 	Assignee      string            `json:"assignee,omitempty"`
+	Queue         string            `json:"queue,omitempty"`
 	Target        string            `json:"target,omitempty"`
 	IssueCode     string            `json:"issueCode,omitempty"`
 	IssueSeverity string            `json:"issueSeverity,omitempty"`
@@ -530,6 +536,7 @@ func renderAction(a weaverActionContract, observed map[string]bool, patterns map
 		Subject:       a.Subject,
 		Operation:     a.Operation,
 		Assignee:      a.Assignee,
+		Queue:         a.Queue,
 		Target:        a.Target,
 		Adapter:       a.Adapter,
 		IssueCode:     a.IssueCode,
@@ -556,6 +563,9 @@ func renderAction(a weaverActionContract, observed map[string]bool, patterns map
 	}
 	if a.Assignee != "" {
 		exact["assignee"] = a.Assignee
+	}
+	if a.Queue != "" {
+		exact["queue"] = a.Queue
 	}
 	if a.Target != "" {
 		exact["target"] = a.Target

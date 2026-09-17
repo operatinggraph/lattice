@@ -1,5 +1,5 @@
 name: loftspace-domain
-version: 0.13.2
+version: 0.14.0
 description: |
   LoftSpace listing economics. Adds the leasable facets of a unit — the
   .listing aspect (rent / term / availability) and the .address aspect — on
@@ -25,7 +25,11 @@ description: |
   occupancy), independent of any lease application, anchored on the managing
   landlord plus every covering building (mirroring
   landlordLeaseApplicationsRead) so a front-desk staffer's building grant
-  resolves it too; and objectIdentityAttachmentsRead — a PROTECTED Postgres
+  resolves it too; landlordWorkOrdersRead — a PROTECTED Postgres model of the
+  maintenance-domain work orders raised at a landlord's managed units (locatedAt
+  a unit, manages to the landlord, an OPTIONAL scopedTo task fan for the
+  open-task count), the same anchor shape as landlordUnitsRead, units only; and
+  objectIdentityAttachmentsRead — a PROTECTED Postgres
   owner-anchored read model of objects-base's generic object/AttachObject
   vertices, self-scoped to an identity's own attached documents (one row per
   object/owner/slot triple, authz_anchors = the owner's own NanoID), the
@@ -52,6 +56,9 @@ declares:
       adapter: postgres
       engine: full
     - canonicalName: landlordUnitsRead
+      adapter: postgres
+      engine: full
+    - canonicalName: landlordWorkOrdersRead
       adapter: postgres
       engine: full
     - canonicalName: objectIdentityAttachmentsRead

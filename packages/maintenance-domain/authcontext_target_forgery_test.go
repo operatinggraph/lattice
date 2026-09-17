@@ -12,6 +12,7 @@ package maintenancedomain_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -171,9 +172,12 @@ func TestResolveWorkOrder_TaskGrantCannotSubstituteAnotherWorkOrder(t *testing.T
 	}
 }
 
-// TestReportIssue_ForgedTargetStaysConfined: ReportIssue has no self or task
-// path at all, so a validated target is never legitimately true there and a
-// fabricated one must not exempt a tech from reporting only where they work.
+// TestReportIssue_ForgedTargetStaysConfined: ReportIssue's validated-target
+// leg is the consumer's scope=self grant (report_issue_self_leg_test.go); a
+// staff holder is authorized on scope=any, which step 3 grants WITHOUT
+// inspecting the target, so a fabricated one — a building, or the tech's own
+// key in the self leg's shape — is validated by nothing and must not exempt a
+// tech from reporting only where they work.
 func TestReportIssue_ForgedTargetStaysConfined(t *testing.T) {
 	ctx, conn := setupMaintenanceEnv(t)
 	cp, cons := mdPipeline(t, ctx, conn, "mdrptforge")
@@ -210,5 +214,38 @@ func TestReportIssue_ForgedTargetStaysConfined(t *testing.T) {
 	}
 	if mdKeyLive(ctx, conn, "vtx.workorder."+badID) {
 		t.Error("the forged-target report created a work order; it must be denied before any mutation")
+	}
+
+	// THE SELF-SHAPED FORGERY: the tech's OWN key as the target — exactly what
+	// the resident's dispatcher sends. A self-named target selects the
+	// RESIDENCE bind whichever grant authorized the call, and that bind is
+	// stricter than the staff walk, not an escape from it: the tech resides
+	// nowhere, so the report at building B is refused NotResident — no mint at
+	// a place the caller neither works at nor lives in.
+	const selfID = "BBMANTWQRKQHJKMNPQRS"
+	b, _ = json.Marshal(map[string]any{
+		"summary": "Not my building", "location": mdBuildingBKey, "workOrderId": selfID,
+	})
+	env = &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("mdrpf00000000000003"),
+		Lane:          processor.LaneDefault,
+		OperationType: "ReportIssue",
+		Actor:         mdTechKey,
+		SubmittedAt:   "2026-07-21T09:00:00Z",
+		Class:         "workOrder",
+		Payload:       json.RawMessage(b),
+		ContextHint:   &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("ReportIssue", mdTechKey, maintenancedomain.OpMetas()), Reads: []string{mdBuildingBKey}},
+		AuthContext:   &processor.AuthContext{Target: mdTechKey},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("tech ReportIssue at ANOTHER building with a self-shaped target = %v, want Rejected — "+
+			"a self-named target opts into the residence bind, and the tech resides nowhere", outcome)
+	}
+	if reply == nil || reply.Error == nil || !strings.Contains(reply.Error.Message, "NotResident") {
+		t.Fatalf("self-shaped forgery refused with %+v, want the residence bind's own NotResident", reply)
+	}
+	if mdKeyLive(ctx, conn, "vtx.workorder."+selfID) {
+		t.Error("the self-shaped forgery created a work order; it must be denied before any mutation")
 	}
 }

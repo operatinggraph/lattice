@@ -1284,6 +1284,8 @@ install-loftspace:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/orchestration-base
 	@echo "==> Installing location-domain..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/location-domain
+	@echo "==> Installing maintenance-domain..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/maintenance-domain
 	@echo "==> Installing loftspace-domain..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/loftspace-domain
 	@echo "==> Installing service-domain..."
@@ -1383,8 +1385,11 @@ install-showcase-domains:
 ## orders) onto a running up-full stack, in dependency order: orchestration-base
 ## (the FR28 role-queue that carries a work order to a tech) → location-domain
 ## (the places a work order is raised at) → maintenance-domain. Not tied to any
-## one vertical — every building has maintenance — which is why it joins
-## install-showcase-domains rather than an install-<vertical>. Idempotent.
+## one vertical — every building has maintenance. install-showcase-domains
+## invokes this target; install-loftspace / refresh-loftspace do not — they
+## install packages/maintenance-domain inline, in their own dependency-ordered
+## chain, since LoftSpace's tenant-report / landlord-Maintenance-panel path
+## needs it on its own, not only via the showcase-wide chain. Idempotent.
 install-maintenance:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
@@ -1755,6 +1760,7 @@ refresh-loftspace:
 	@echo "==> Diff-applying loftspace packages in place..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/orchestration-base
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/location-domain
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/maintenance-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/loftspace-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-location

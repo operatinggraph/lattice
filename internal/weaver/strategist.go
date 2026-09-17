@@ -258,6 +258,9 @@ func buildPlan(source *targetSource, actorKey, targetID, entityID, gapColumn str
 		}, nil
 
 	case actionAssignTask:
+		if ga.Queue != "" {
+			return buildQueuedTaskPlan(source, targetID, entityID, gapColumn, ga, row, expectedRevision)
+		}
 		operation, perr := resolveStringParam("operation", ga.Operation, row)
 		if perr != nil {
 			return nil, perr
@@ -577,6 +580,59 @@ func (e *Engine) resolvedLegAction(ctx context.Context, target *Target, targetID
 	return resolved, actionRef, nil
 }
 
+// buildQueuedTaskPlan is buildPlan's assignTask arm for a gap that names a
+// Queue instead of an Assignee: CreateTask's role-queue endpoint
+// (orchestration-base/ddls.go — `queue: vtx.role.<NanoID>`, the task
+// queuedFor the role, any holder may later ClaimTask it). The plan is the
+// Assignee arm's byte-for-byte counterpart — same authTarget, same stable
+// claimId-seeded taskId, same expiresAt horizon, same expectedRevision — with
+// the queue key in the assignee's place on the reads and the payload. The
+// CreateTask script vertex_alive-checks the queue exactly as it checks an
+// assignee, so the queue is a REQUIRED read; the `.availability` routing
+// aspect is read on the script's assignee branch alone (it decides whether an
+// assignee's task falls back to a queue), so this arm's optionalReads carry
+// the stable task dedup key and nothing else. Cross-checked against the
+// script by TestCreateTaskReads_MatchDDLScript.
+func buildQueuedTaskPlan(source *targetSource, targetID, entityID, gapColumn string, ga GapAction, row map[string]any, expectedRevision uint64) (*plan, *planError) {
+	operation, perr := resolveStringParam("operation", ga.Operation, row)
+	if perr != nil {
+		return nil, perr
+	}
+	queue, perr := resolveStringParam("queue", ga.Queue, row)
+	if perr != nil {
+		return nil, perr
+	}
+	taskTarget, perr := resolveStringParam("target", ga.Target, row)
+	if perr != nil {
+		return nil, perr
+	}
+	forOperation, ok := source.opMetaKey(operation)
+	if !ok {
+		return nil, &planError{kind: errTransient,
+			msg: fmt.Sprintf("operation %q has no loaded op meta-vertex (forOperation unresolved)", operation)}
+	}
+	return &plan{
+		operationType: opCreateTask,
+		authTarget:    taskTarget,
+		reads:         []string{queue, forOperation, taskTarget},
+		optionalReads: func(claimID string) []string {
+			return []string{
+				"vtx.task." + deriveStableTaskID(targetID, entityID, gapColumn, claimID),
+			}
+		},
+		payload: func(claimID string) map[string]any {
+			return map[string]any{
+				"queue":            queue,
+				"forOperation":     forOperation,
+				"scopedTo":         taskTarget,
+				"expiresAt":        substrate.FormatTimestamp(time.Now().Add(assignTaskGrantTTL)),
+				"taskId":           deriveStableTaskID(targetID, entityID, gapColumn, claimID),
+				"expectedRevision": expectedRevision,
+			}
+		},
+	}, nil
+}
+
 // candidateGapAction materializes a chosen GapCandidate into the GapAction
 // shape buildPlan consumes (registry.go's GapCandidate doc: "the same
 // action-contract shape as GapAction ... dispatches exactly like an explicit
@@ -589,6 +645,7 @@ func candidateGapAction(c GapCandidate) GapAction {
 		Adapter:       c.Adapter,
 		Operation:     c.Operation,
 		Assignee:      c.Assignee,
+		Queue:         c.Queue,
 		Target:        c.Target,
 		Params:        c.Params,
 		Reads:         c.Reads,
@@ -609,6 +666,7 @@ func catalogEntryGapAction(entry ActionCatalogEntry) GapAction {
 		Adapter:       entry.Adapter,
 		Operation:     entry.Operation,
 		Assignee:      entry.Assignee,
+		Queue:         entry.Queue,
 		Target:        entry.Target,
 		Params:        entry.Params,
 		Reads:         entry.Reads,

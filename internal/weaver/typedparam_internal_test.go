@@ -14,6 +14,7 @@ const (
 	tpEntityID = "AAentHJKMNPQRSTUVWXY"
 	tpUnitKey  = "vtx.unit.AAunitHJKMNPQRSTUVWX"
 	tpIdentity = "vtx.identity.AAidHJKMNPQRSTUVWXYZ"
+	tpRoleKey  = "vtx.role.AAroHeHJKMNPQRSTUVWX"
 )
 
 // directOpPlan builds a directOp plan for one params bag against one row and
@@ -279,6 +280,7 @@ func TestResolveStringParam_TypedLiteralRefusedOutright(t *testing.T) {
 		{"target", GapAction{Action: actionDirectOp, Operation: "Fix", Target: `json:"` + tpUnitKey + `"`}},
 		{"operation", GapAction{Action: actionAssignTask, Operation: `json:"AssignRole"`, Assignee: tpIdentity, Target: tpUnitKey}},
 		{"assignee", GapAction{Action: actionAssignTask, Operation: "ApproveX", Assignee: `json:"` + tpIdentity + `"`, Target: tpUnitKey}},
+		{"queue", GapAction{Action: actionAssignTask, Operation: "ApproveX", Queue: `json:"` + tpRoleKey + `"`, Target: tpUnitKey}},
 		{"target", GapAction{Action: actionAssignTask, Operation: "ApproveX", Assignee: tpIdentity, Target: `json:"` + tpUnitKey + `"`}},
 		{"pattern", GapAction{Action: actionTriggerLoom, Pattern: `json:"onboarding"`, Subject: tpUnitKey}},
 		{"subject", GapAction{Action: actionTriggerLoom, Pattern: "onboarding", Subject: `json:"` + tpUnitKey + `"`}},
@@ -595,6 +597,7 @@ func TestValidateTarget_RejectsTypedLiteralInStringField(t *testing.T) {
 		{"pattern", GapAction{Action: actionTriggerLoom, Pattern: `json:"onboarding"`, Subject: tpUnitKey}},
 		{"subject", GapAction{Action: actionTriggerLoom, Pattern: "onboarding", Subject: `json:"` + tpUnitKey + `"`}},
 		{"assignee", GapAction{Action: actionAssignTask, Operation: "ApproveX", Assignee: `json:"` + tpIdentity + `"`, Target: tpUnitKey}},
+		{"queue", GapAction{Action: actionAssignTask, Operation: "ApproveX", Queue: `json:"` + tpRoleKey + `"`, Target: tpUnitKey}},
 		{"target", GapAction{Action: actionDirectOp, Operation: "Fix", Target: `json:"` + tpUnitKey + `"`}},
 		{"reads[0]", GapAction{Action: actionDirectOp, Operation: "Fix", Reads: []string{`json:"` + tpUnitKey + `"`}}},
 		{"optionalReads[0]", GapAction{Action: actionDirectOp, Operation: "Fix", OptionalReads: []string{`json:"` + tpUnitKey + `"`}}},

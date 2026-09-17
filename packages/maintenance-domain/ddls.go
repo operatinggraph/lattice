@@ -50,7 +50,12 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 			"resolution never silently flips). Both ops carry F4's canonical workplace write-confinement guard: " +
 			"a standing-path caller must worksAt a location covering the work order's place, root (the " +
 			"primordial operator role, resolved from the graph) is exempt, and a task-path caller is bound " +
-			"instead by the task's own scopedTo grant.",
+			"instead by the task's own scopedTo grant. ReportIssue additionally admits a consumer on a " +
+			"scope=self grant: an authContext.target naming the caller selects the residence bind (whichever " +
+			"grant authorized the call), under which the caller must residesIn the " +
+			"reported UNIT (the deterministic lnk.identity.<actor>.residesIn.unit.<id>, declared as an " +
+			"OptionalRead by the tenant dispatcher), else NotResident; any validated target that is not " +
+			"the caller is refused AuthDenied.",
 		Script: workOrderDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"summary":{"type":"string","description":"What is wrong (ReportIssue; required)."},` +
@@ -65,7 +70,7 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"summary":      "One line describing the issue, e.g. \"Boiler in the basement is cycling\" (ReportIssue; required). Shown as the work order's label everywhere — keep it free of resident PII, since it rides the SYNC plane to staff devices (D3).",
 			"priority":     "low | normal | urgent (ReportIssue; optional, default normal).",
-			"location":     "Full vtx.<locType>.<NanoID> key of the location-domain place the issue is at (a unit, a building). Validated alive + an admitted location type segment; written as the workorder locatedAt location link. MUST be listed in ContextHint.Reads.",
+			"location":     "Full vtx.<locType>.<NanoID> key of the location-domain place the issue is at (a unit, a building). Validated alive + an admitted location type segment; written as the workorder locatedAt location link. MUST be listed in ContextHint.Reads. On the consumer self leg it must be a UNIT the caller residesIn, and the caller's lnk.identity.<actor>.residesIn.unit.<id> MUST be listed in ContextHint.OptionalReads — undeclared, the link reads as absent and the report is refused NotResident.",
 			"workOrderId":  "Optional bare NanoID (no dots / key segments) for the new work-order vertex. Absent → minted with nanoid.new().",
 			"workOrderKey": "Full vtx.workorder.<NanoID> key of the work order being resolved (ResolveWorkOrder). Auto-filled by a task-driven client from the task's scopedTo target, not typed.",
 			"notes":        "What was actually done (ResolveWorkOrder; required). TERMINAL: the same notes re-submit harmlessly — which is what makes an offline drain retry safe — but different notes are rejected, so a resolution can never silently flip.",
@@ -75,8 +80,8 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 				Name:    "ReportIssue — raise a work order at a unit",
 				Payload: map[string]any{"summary": "Kitchen tap is dripping", "priority": "normal", "location": "vtx.unit.<NanoID>"},
 				ExpectedOutcome: "Validates the location is alive + an admitted location type segment and that the caller worksAt a location covering it " +
-					"(root exempt). Mints vtx.workorder.<NanoID> (class=workorder, root {}) + the .report aspect + " +
-					"lnk.workorder.<id>.locatedAt.unit.<NanoID>. Returns primaryKey (the work-order key).",
+					"(root exempt), or — on the consumer self leg — that the caller residesIn the unit. Mints vtx.workorder.<NanoID> " +
+					"(class=workorder, root {}) + the .report aspect + lnk.workorder.<id>.locatedAt.unit.<NanoID>. Returns primaryKey (the work-order key).",
 			},
 			{
 				Name:    "ResolveWorkOrder — close it out",
@@ -485,6 +490,37 @@ def workorder_location(work_order_key):
             loc = lk.targetVertex
     return loc
 
+def require_residence(location_key, location_type, location_id):
+    # The consumer's ownership probe on ReportIssue's self leg -- the residence
+    # counterpart to lease-signing's require_manages: a resident holds no
+    # worksAt link and authorizes via a scope=self grant, so what confines
+    # them is their own residesIn link to the unit under the write. The link
+    # is the residence spine lease-signing wires at lease approval and
+    # releases at the term's end (WireResidesIn / UnwireResidesIn), so "lives
+    # there" is a fact the platform recorded, never one the caller asserts.
+    #
+    # A unit and only a unit: the spine binds an identity to a unit, so a
+    # building or property can never carry the link, and a resident naming
+    # one is refused by the same code rather than falling to the staff walk.
+    #
+    # Read from hydration only. The key is payload-direct (the actor plus the
+    # submitted location), so the tenant dispatcher declares it, and a
+    # submitter that never declared it reads the link as absent and is refused
+    # NotResident -- never served by a lazy GET that would admit a write on a
+    # fact the envelope never named (the EndTenancy .notice posture). A
+    # tombstoned link is ABSENT (property 2 above: UnwireResidesIn tombstones
+    # rather than deletes).
+    if location_type != "unit":
+        fail("NotResident: " + op.actor + " does not reside at " + location_key + "; a resident reports an issue at their own unit")
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    # read-posture: (d) declared optionalReads at the tenant dispatch
+    # (loftspace-app's Report an issue) -- absent means the caller is not
+    # this unit's resident.
+    link_key = "lnk.identity." + actor_id + ".residesIn." + location_type + "." + location_id
+    lnk = state[link_key] if link_key in state else None
+    if lnk == None or lnk.isDeleted:
+        fail("NotResident: " + op.actor + " does not reside at " + location_key)
+
 PRIORITIES = ["low", "normal", "urgent"]
 
 def priority_of(p):
@@ -522,13 +558,49 @@ def execute(state, op):
         # is written as the locatedAt link in this same batch), so naming a
         # place the caller does not worksAt-cover only DENIES the write; it
         # cannot reach anything the caller was not already entitled to.
-        # workplace-exempt: (no-validated-path) ReportIssue is granted scope=any
-        # to operator + both staff roles only (permissions.go) and no task mints
-        # it today. It DOES carry an op-meta, so a CreateTask forOperation it
-        # would make a validated target reachable -- add a resource bind here
-        # before minting any such task.
-        if not workplace_exempt():
-            require_workplace([loc], "ReportIssue at " + loc)
+        #
+        # Three legs, tested in THIS order, each bound by the guard the
+        # others cannot see:
+        #   1. A target naming the CALLER selects the residence bind: the
+        #      caller must residesIn the reported unit (require_residence).
+        #      This keys on the raw authContext.target, which step 3 never
+        #      inspects on a scope=any grant -- and that is safe HERE, where
+        #      it is the opposite of an exemption: a self-named target opts
+        #      the caller IN to the stricter unit-level bind, so a scope=any
+        #      holder naming themselves is confined to their own home, never
+        #      exempted from anything (contrast require_workplace, which
+        #      refuses to key an EXEMPTION on the same hint). It runs before
+        #      the validated-bit test because a dual-hat actor -- a staff
+        #      member who is also a resident, holding ReportIssue on both
+        #      scope=any and scope=self -- is authorized by whichever grant
+        #      row step 3 meets first, and the bind the caller asked for must
+        #      not depend on that order: the tenant card's shape means "at my
+        #      home", whichever hat the platform happened to admit it on.
+        #   2. Any OTHER validated target is refused outright. ReportIssue
+        #      carries an op-meta, so a CreateTask naming it as forOperation
+        #      would hand a claimant a validated target that is NOT the
+        #      caller, and without this refusal that grant would exempt the
+        #      claimant from every location check.
+        #   3. The STANDING leg (operator + both staff roles, scope=any, no
+        #      target) is the worksAt walk, root exempt. It runs
+        #      enforce_workplace directly: require_workplace's own
+        #      validated-target exemption is leg 1, already answered.
+        # workplace-exempt: (ownership-bound) the validated path never reaches
+        # the write unconfined -- require_residence requires the acting
+        # identity to residesIn the reported unit.
+        # authcontext-target: (ownership) the target is used only as
+        # op.actor's own key, and the authority it buys is then proven by the
+        # residesIn link require_residence reads, so a forged one only
+        # forces the stricter proof.
+        if op.authContextTarget == op.actor:
+            require_residence(loc, ltype, lid)
+        # authcontext-target: (selector) the branch is selected by the
+        # platform bit op.authTargetValidated; the target is only echoed in
+        # the refusal.
+        elif op.authTargetValidated:
+            fail("AuthDenied: validated target " + str(op.authContextTarget) + " is not the caller")
+        elif not actor_holds_operator(op.actor):
+            enforce_workplace([loc], "ReportIssue at " + loc)
 
         wid = bare_nanoid_or_mint(p, "workOrderId")
         wkey = "vtx.workorder." + wid

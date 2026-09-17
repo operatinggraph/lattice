@@ -850,6 +850,9 @@ func gapActionBody(ga GapActionSpec) map[string]any {
 	if ga.Assignee != "" {
 		body["assignee"] = ga.Assignee
 	}
+	if ga.Queue != "" {
+		body["queue"] = ga.Queue
+	}
 	if ga.Target != "" {
 		body["target"] = ga.Target
 	}
@@ -940,6 +943,9 @@ func actionCatalogEntryBody(e ActionCatalogEntrySpec) map[string]any {
 	}
 	if e.Assignee != "" {
 		body["assignee"] = e.Assignee
+	}
+	if e.Queue != "" {
+		body["queue"] = e.Queue
 	}
 	if e.Target != "" {
 		body["target"] = e.Target

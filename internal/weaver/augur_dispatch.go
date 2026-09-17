@@ -276,7 +276,10 @@ func recordDispatchOutcomePlan(handle, outcome, reason string, leg int) *plan {
 //	assignTask  {operation, assignee, target}
 //
 // — every field of which is a plain string, so GapAction's map[string]string-
-// shaped fields round-trip losslessly. directOp is NOT handled here: its
+// shaped fields round-trip losslessly. The playbook's assignTask `queue` arm
+// (GapAction.Queue) is deliberately NOT accepted on a proposal: a proposal is
+// not a playbook, and widening the proposal vocabulary to a role queue is a
+// separate decision from the arm itself. directOp is NOT handled here: its
 // `params` sub-object can carry any JSON type (bool, number, nested object),
 // which GapAction.Params (map[string]string) cannot hold without lossy
 // stringification — see buildProposedDirectOpPlan instead.

@@ -333,7 +333,8 @@ function gapCard(col) {
   strField("subject", "subject", "row.<column>");
   strField("adapter", "adapter", "");
   strField("operation", "operation", "(directOp's operationType)");
-  strField("assignee", "assignee", "(assignTask)");
+  strField("assignee", "assignee", "(assignTask: a concrete identity)");
+  strField("queue", "queue", "(assignTask: vtx.role.<NanoID> or row.<column> — exactly one of assignee/queue)");
   strField("target", "target", "");
   strField("issueCode", "issueCode", "(surface)");
   strField("issueSeverity", "issueSeverity", "(surface)");

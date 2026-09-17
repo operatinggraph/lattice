@@ -124,6 +124,64 @@ func TestEmit_WeaverTarget_RoundTripsThroughEngineParse(t *testing.T) {
 	}
 }
 
+// TestEmit_WeaverTarget_QueueArmRoundTripsThroughEngineParse proves the
+// emitted body of a queue-arm assignTask carries `queue` and no `assignee`,
+// and deserializes into weaver.Target with Queue set — the install→engine
+// seam for the role-queue endpoint, so a package declaring one cannot
+// materialize as an assignee-less gap the engine refuses at dispatch.
+func TestEmit_WeaverTarget_QueueArmRoundTripsThroughEngineParse(t *testing.T) {
+	def := orchestrationDef()
+	def.Name = "maintenance-domain"
+	def.OpMetas = []pkgmgr.OpMetaSpec{{OperationType: "ResolveWorkOrder"}}
+	def.LoomPatterns = nil
+	def.WeaverTargets = []pkgmgr.WeaverTargetSpec{{
+		TargetID: "workOrderQueue",
+		LensRef:  "leaseSigningCandidates",
+		Gaps: map[string]pkgmgr.GapActionSpec{
+			"missing_task": {
+				Action:    "assignTask",
+				Operation: "ResolveWorkOrder",
+				Queue:     "vtx.role.AAroHeHJKMNPQRSTUVWX",
+				Target:    "row.entityKey",
+			},
+		},
+	}}
+	ops, _, err := pkgmgr.BuildInstallBatchForTest(def)
+	if err != nil {
+		t.Fatalf("BuildInstallBatchForTest: %v", err)
+	}
+	vtxKey := "vtx.meta." + pkgmgr.EntityNanoIDForTest(def.Name, "weaverTarget:workOrderQueue")
+	specDoc := findDoc(ops, vtxKey+".spec")
+	if specDoc == nil {
+		t.Fatalf("no weaver-target spec aspect emitted at %s.spec", vtxKey)
+	}
+	body, ok := specDoc["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("spec aspect data not a map: %T", specDoc["data"])
+	}
+	gaps, _ := body["gaps"].(map[string]any)
+	gapBody, _ := gaps["missing_task"].(map[string]any)
+	if gapBody["queue"] != "vtx.role.AAroHeHJKMNPQRSTUVWX" {
+		t.Fatalf("emitted gap body queue = %v, want the role key: %v", gapBody["queue"], gapBody)
+	}
+	if _, present := gapBody["assignee"]; present {
+		t.Fatalf("a queue-arm gap body must omit assignee: %v", gapBody)
+	}
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal target body: %v", err)
+	}
+	var target weaver.Target
+	if err := json.Unmarshal(raw, &target); err != nil {
+		t.Fatalf("emitted target body does not deserialize into weaver.Target: %v", err)
+	}
+	ga := target.Gaps["missing_task"]
+	if ga.Action != "assignTask" || ga.Operation != "ResolveWorkOrder" || ga.Queue != "vtx.role.AAroHeHJKMNPQRSTUVWX" || ga.Assignee != "" || ga.Target != "row.entityKey" {
+		t.Fatalf("missing_task gap action wrong after the engine parse: %+v", ga)
+	}
+}
+
 // TestEmit_WeaverTarget_DescriptionEmitsSiblingAspect asserts an authored
 // Description installs as its own `.description` aspect — the role/DDL
 // description shape (class `description`, body `{"text": …}`) — and that the

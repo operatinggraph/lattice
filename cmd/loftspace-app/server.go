@@ -83,6 +83,7 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	inner.HandleFunc("/api/unit-applications", s.handleUnitApplications)
 	inner.HandleFunc("/api/landlord/applications", s.handleLandlordApplications)
 	inner.HandleFunc("/api/portfolio-pulse", s.handlePortfolioPulse)
+	inner.HandleFunc("/api/landlord/work-orders", s.handleLandlordWorkOrders)
 	inner.HandleFunc("/api/renewals", s.handleRenewals)
 	inner.HandleFunc("/api/search", s.handleSearch)
 	inner.HandleFunc("/api/tasks", s.handleTasks)

@@ -186,6 +186,7 @@ type GapActionArtifact struct {
 	Adapter       string            `json:"adapter,omitempty"`
 	Operation     string            `json:"operation,omitempty"`
 	Assignee      string            `json:"assignee,omitempty"`
+	Queue         string            `json:"queue,omitempty"`
 	Target        string            `json:"target,omitempty"`
 	Params        map[string]string `json:"params,omitempty"`
 	Reads         []string          `json:"reads,omitempty"`
@@ -518,6 +519,7 @@ var knownGapActionFields = map[string]bool{
 	"adapter":       true,
 	"operation":     true,
 	"assignee":      true,
+	"queue":         true,
 	"target":        true,
 	"params":        true,
 	"reads":         true,
@@ -743,6 +745,7 @@ func weaverTargetArtifactDefinition(wc WeaverTargetArtifactContent, name, versio
 			Adapter:       ga.Adapter,
 			Operation:     ga.Operation,
 			Assignee:      ga.Assignee,
+			Queue:         ga.Queue,
 			Target:        ga.Target,
 			Params:        ga.Params,
 			Reads:         ga.Reads,

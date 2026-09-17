@@ -432,6 +432,151 @@ func TestEdgeCatalog_TaskBranchProjectsAnUngrantedOp(t *testing.T) {
 	require.Empty(t, row["viaRole"], "no role granted this op — viaRole must null out, not error")
 }
 
+// emSelfOnStandingWorld seeds the self-on-standing shape edgeCatalogTail's
+// WHERE excludes: one op meta whose descriptor dispatches `standing` (the
+// staff authoring shape — maintenance-domain's ReportIssue), granted to the
+// `consumer` role at scope=self, held by `tenant`. The op is reachable no
+// other way for that actor, so a row for it can only come through the
+// self grant. Callers layer the positive shapes on top.
+func emSelfOnStandingWorld(t *testing.T) *emFixture {
+	t.Helper()
+	f := newEmFixture(t)
+	f.vtx(t, "tenant", "identity")
+	f.vtx(t, "roleConsumer", "role")
+	f.aspect(t, "roleConsumer", "canonicalName", "canonicalName", map[string]any{"value": "consumer"})
+	f.edge(t, "holdsRole", "tenant", "roleConsumer")
+	f.vtx(t, "standingOp", "meta")
+	f.aspect(t, "standingOp", "dispatch", "dispatch", map[string]any{
+		"class": "capability", "authContext": "standing", "contextParams": map[string]any{"location": "{me.workplace}"}})
+	f.vtxData(t, "permSelfStanding", "permission", map[string]any{"operationType": "ReportIssue", "scope": "self"})
+	f.edge(t, "grantedBy", "permSelfStanding", "roleConsumer")
+	f.edge(t, "forOperation", "permSelfStanding", "standingOp")
+	return f
+}
+
+// emCatalogRowsFor returns every row the role branch projects for one op meta
+// — NOT collapsed by entityId, because the thing under test is how many
+// (role, permission) pairs survive the WHERE for the same anchor.
+func emCatalogRowsFor(t *testing.T, f *emFixture, actor, opName string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, r := range f.project(t, emComposedSpecBranch(t, "edgeCatalog", 1), f.key(actor)) {
+		if r.Values["entityId"] == f.ids[opName] {
+			out = append(out, r.Values)
+		}
+	}
+	return out
+}
+
+// TestEdgeCatalog_SelfGrantOnStandingOpIsNotOffered is the NEGATIVE vector for
+// the self-on-standing exclusion: a consumer holding only a scope=self
+// permission on a standing-descriptor op gets no manifest.op row for it. A
+// self grant authorizes only an envelope carrying authContext.target == the
+// caller, and a standing descriptor sends no authContext at all, so the row
+// could only ever render Facet's dead "needs your own workplace" card (or,
+// with a workplace, a form the Processor refuses). Mutation that fails it:
+// drop the WHERE's second conjunct.
+func TestEdgeCatalog_SelfGrantOnStandingOpIsNotOffered(t *testing.T) {
+	f := emSelfOnStandingWorld(t)
+	require.Empty(t, emCatalogRowsFor(t, f, "tenant", "standingOp"),
+		"a scope=self grant on a standing-descriptor op must not surface a manifest.op row")
+}
+
+// TestEdgeCatalog_SelfGrantOnSelfOpStillProjects is the first positive half:
+// the exclusion is on the PAIR, not on scope=self alone. A scope=self grant on
+// an op whose descriptor dispatches `self` (café OpenTab / Charge,
+// lease-signing GiveNotice) is the shape a self grant exists for and keeps
+// projecting. Mutation that fails it: change the conjunct's `"standing"` to
+// `<> null` (excluding every self grant with any descriptor).
+func TestEdgeCatalog_SelfGrantOnSelfOpStillProjects(t *testing.T) {
+	f := emSelfOnStandingWorld(t)
+	f.vtx(t, "selfOp", "meta")
+	f.aspect(t, "selfOp", "dispatch", "dispatch", map[string]any{"class": "capability", "authContext": "self"})
+	f.vtxData(t, "permSelfSelf", "permission", map[string]any{"operationType": "OpenTab", "scope": "self"})
+	f.edge(t, "grantedBy", "permSelfSelf", "roleConsumer")
+	f.edge(t, "forOperation", "permSelfSelf", "selfOp")
+
+	rows := emCatalogRowsFor(t, f, "tenant", "selfOp")
+	require.Len(t, rows, 1, "a scope=self grant on a self-descriptor op must project exactly as before")
+	require.Equal(t, "self", rows[0]["dispatchAuthContext"])
+	require.Equal(t, "consumer", rows[0]["viaRoleName"])
+	require.Empty(t, emCatalogRowsFor(t, f, "tenant", "standingOp"),
+		"the sibling standing op stays excluded in the same projection")
+}
+
+// TestEdgeCatalog_AnyGrantOnStandingOpStillProjects is the second positive
+// half: the same standing op reached through a scope=any grant on a staff
+// role projects, with viaRoleName naming that role. Mutation that fails it:
+// change the conjunct's `"self"` to `<> null` (excluding every grant on a
+// standing op regardless of scope).
+func TestEdgeCatalog_AnyGrantOnStandingOpStillProjects(t *testing.T) {
+	f := emSelfOnStandingWorld(t)
+	f.vtx(t, "staff", "identity")
+	f.vtx(t, "roleBackOfHouse", "role")
+	f.aspect(t, "roleBackOfHouse", "canonicalName", "canonicalName", map[string]any{"value": "backOfHouse"})
+	f.edge(t, "holdsRole", "staff", "roleBackOfHouse")
+	f.vtxData(t, "permAnyStanding", "permission", map[string]any{"operationType": "ReportIssue", "scope": "any"})
+	f.edge(t, "grantedBy", "permAnyStanding", "roleBackOfHouse")
+	f.edge(t, "forOperation", "permAnyStanding", "standingOp")
+
+	rows := emCatalogRowsFor(t, f, "staff", "standingOp")
+	require.Len(t, rows, 1, "a scope=any grant on a standing op is the staff authoring shape and must project")
+	require.Equal(t, "backOfHouse", rows[0]["viaRoleName"])
+	require.Equal(t, "standing", rows[0]["dispatchAuthContext"])
+}
+
+// TestEdgeCatalog_DualHatKeepsOnlyTheStaffGrantRow pins the multi-hat case: an
+// identity holding BOTH consumer (scope=self) and backOfHouse (scope=any) on
+// the standing op. The role branch fans one row per (role, permission) pair,
+// and Refractor keys them all under `__actor, ns, entityId`, so without the
+// exclusion two rows race for one key and whichever re-derived last decides
+// whether Facet groups the op under "consumer" (dead card) or "backOfHouse"
+// (live form). With it, exactly one row survives and it is the staff one —
+// asserted on the raw row set, before any keyed collapse, which is the only
+// place the count is observable. Mutation that fails it: drop the WHERE's
+// second conjunct (two rows come back).
+func TestEdgeCatalog_DualHatKeepsOnlyTheStaffGrantRow(t *testing.T) {
+	f := emSelfOnStandingWorld(t)
+	f.vtx(t, "roleBackOfHouse", "role")
+	f.aspect(t, "roleBackOfHouse", "canonicalName", "canonicalName", map[string]any{"value": "backOfHouse"})
+	f.edge(t, "holdsRole", "tenant", "roleBackOfHouse")
+	f.vtxData(t, "permAnyStanding", "permission", map[string]any{"operationType": "ReportIssue", "scope": "any"})
+	f.edge(t, "grantedBy", "permAnyStanding", "roleBackOfHouse")
+	f.edge(t, "forOperation", "permAnyStanding", "standingOp")
+
+	rows := emCatalogRowsFor(t, f, "tenant", "standingOp")
+	require.Len(t, rows, 1, "exactly one (role, permission) row must survive for the dual-hat actor")
+	require.Equal(t, "backOfHouse", rows[0]["viaRoleName"], "the surviving row is the scope=any staff grant")
+	require.Equal(t, f.key("roleBackOfHouse"), rows[0]["viaRole"])
+}
+
+// TestEdgeCatalog_ResidenceBranchIsUntouchedByTheExclusion proves the
+// null-keeps-the-row half of the predicate: on the residence branch `perm` is
+// bound by no clause at all, so `perm.data.scope` is null, `null = "self"` is
+// false, and the exclusion cannot fire — even against a standing-descriptor
+// op. A service-offered standing op therefore projects exactly as before.
+// Mutation that fails it: rewrite the conjunct so an unbound perm excludes,
+// e.g. `NOT (perm.data.scope <> "any" AND ...)` (null <> "any" is true here).
+func TestEdgeCatalog_ResidenceBranchIsUntouchedByTheExclusion(t *testing.T) {
+	f := emSelfOnStandingWorld(t)
+	f.vtx(t, "unit", "unit")
+	f.vtx(t, "bldg", "building")
+	f.vtx(t, "tpl", "service")
+	f.edge(t, "residesIn", "tenant", "unit")
+	f.edge(t, "containedIn", "unit", "bldg")
+	f.edge(t, "availableAt", "tpl", "bldg")
+	f.edge(t, "permitsOperation", "tpl", "standingOp")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpecBranch(t, "edgeCatalog", 0), f.key("tenant")))
+	row, ok := rows[f.ids["standingOp"]]
+	require.True(t, ok, "a service-offered standing op must project on the residence branch, where perm is unbound")
+	require.Nil(t, row["viaRole"], "no role reached it on this branch")
+	require.Equal(t, "standing", row["dispatchAuthContext"])
+	via, _ := row["viaServices"].([]any)
+	require.Len(t, via, 1)
+	require.Equal(t, f.key("tpl"), via[0])
+}
+
 // TestEdgeEntitySessions_ProjectsTheLeadingInstructorKey proves the shared
 // tail's bridging OPTIONAL MATCH: a resident's residence-anchored session row
 // (emResidentWorld, coverage_proof_test.go), reached via the domainBase

@@ -12,10 +12,15 @@
 //   - ReportIssue mints the work order at a location. It does NOT mint the
 //     task — tasks are orchestration-base's, and Contract #10 §10.1 owns the
 //     exactly-one-of assignedTo/queuedFor invariant. A work order becomes
-//     WORK when someone submits CreateTask(queue: <role>, forOperation:
-//     <ResolveWorkOrder's op-meta>, scopedTo: <the work order>); that
-//     separation is what lets the same work order be queued to a different
-//     role, or reassigned, without this package knowing anything about it.
+//     WORK when CreateTask(queue: <role>, forOperation: <ResolveWorkOrder's
+//     op-meta>, scopedTo: <the work order>) is submitted — and the package
+//     carries WHO submits it as a declarative convergence target rather than
+//     a step in the op: the workOrderQueue lens (lenses.go) projects
+//     missing_task on every unresolved work order with no open task, and its
+//     weaverTarget (targets.go) queues ResolveWorkOrder to backOfHouse through
+//     Weaver's assignTask queue arm. That separation is what lets the same
+//     work order be queued to a different role, or reassigned, without the
+//     op knowing anything about it.
 //   - ResolveWorkOrder writes the .resolution aspect. It is the op the queued
 //     task GRANTS: the claimant performs it under authContext.task and the
 //     Processor's §10.6 auto-complete closes the task on the same commit, so
@@ -32,10 +37,21 @@
 //
 // Write confinement is F4's canonical workplace guard, byte-identical to the
 // four packages that already carry it (facet-staff-worlds-design.md §6 F4),
-// with one documented difference at ReportIssue — see require_workplace's call
-// site in ddls.go: a create op has no target topology to resolve, so the
-// reported location IS the subject, and naming a location the caller does not
-// worksAt-cover DENIES rather than escalates.
+// with one documented difference at ReportIssue — see the guard's call site in
+// ddls.go: a create op has no target topology to resolve, so the reported
+// location IS the subject, and naming a location the caller does not
+// worksAt-cover DENIES rather than escalates. ReportIssue also carries a
+// consumer scope=self leg the staff guard cannot see: a resident reports an
+// issue at the unit they reside in. An authContext.target naming the caller
+// selects that bind — whichever grant row authorized the call, so a
+// staff-resident dual hat lands on the bind the tenant card asked for — and
+// the caller's own residesIn link to the unit is what admits the write
+// (require_residence), the GiveNotice tenant-hat posture.
+//
+// The queued task carries the role and the work order, not a location: any
+// backOfHouse holder anywhere may claim and resolve it (ClaimTask checks
+// holdsRole only; ResolveWorkOrder's task path skips the worksAt walk). A
+// location-scoped queue is a filed platform primitive.
 //
 // Depends location-domain (the location vertices ReportIssue validates its
 // `location` against, read by known key) and orchestration-base (documentation
@@ -50,11 +66,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
-	Name:        "maintenance-domain",
-	Version:     "0.2.12",
-	Description: "Cross-vertical maintenance work orders: vtx.workorder.<NanoID> raised at a location by ReportIssue and closed by ResolveWorkOrder, the op an FR28 role-queued task grants its claimant (the §10.6 auto-complete closes the task, so no separate completion op exists). `.resolution` is the read-before-write terminal marker — an identical re-submit is an idempotent no-op so an offline device's drain retry cannot fail the work, a differing one is rejected so a resolution never silently flips. Both ops carry F4's canonical workplace write-confinement guard. ResolveWorkOrder carries an op-meta with the full edge-manifest descriptor vocabulary (presentation/inputSchema/dispatch authContext=task) so a Facet client can render and submit it from the task row alone.",
-	Depends:     []string{"location-domain"},
-	DDLs:        DDLs(),
-	Permissions: Permissions(),
-	OpMetas:     OpMetas(),
+	Name:          "maintenance-domain",
+	Version:       "0.3.0",
+	Description:   "Cross-vertical maintenance work orders: vtx.workorder.<NanoID> raised at a location by ReportIssue and closed by ResolveWorkOrder, the op an FR28 role-queued task grants its claimant (the §10.6 auto-complete closes the task, so no separate completion op exists). `.resolution` is the read-before-write terminal marker — an identical re-submit is an idempotent no-op so an offline device's drain retry cannot fail the work, a differing one is rejected so a resolution never silently flips. Both ops carry F4's canonical workplace write-confinement guard on the standing path; ReportIssue additionally admits a consumer on a scope=self grant bound to the unit they residesIn. The workOrderQueue lens + weaverTarget queue every unresolved, untasked work order as a ResolveWorkOrder task to backOfHouse, so a reported issue becomes work without the reporter minting the task. ResolveWorkOrder carries an op-meta with the full edge-manifest descriptor vocabulary (presentation/inputSchema/dispatch authContext=task) so a Facet client can render and submit it from the task row alone.",
+	Depends:       []string{"location-domain"},
+	DDLs:          DDLs(),
+	Lenses:        Lenses(),
+	Permissions:   Permissions(),
+	OpMetas:       OpMetas(),
+	WeaverTargets: WeaverTargets(),
 }

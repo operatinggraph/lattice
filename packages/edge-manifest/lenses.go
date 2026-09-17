@@ -78,7 +78,13 @@ const OpCatalogBucket = "op-catalog"
 // label instead of a bare NanoID; the location TYPE segment is still not
 // synthesized into the row (the engine has no vertex-type-from-key function
 // outside nanoIdFromKey, and no string concatenation to build one), so the
-// renderer derives type from the key client-side.
+// renderer derives type from the key client-side. edgeCatalog's held-role
+// walk declines to offer an op through a `scope=self` permission when the
+// op's descriptor dispatches `standing` (edgeCatalogTail's WHERE): a self
+// grant needs an authContext target and a standing descriptor sends none, so
+// the only thing such a row could render is a form the Processor refuses —
+// the op still projects through any other grant, service or task that
+// reaches it.
 //
 // One lens in the slice is NOT a Personal Lens: `opCatalog`, the plain
 // (`nats-kv`) descriptor read model a staff application renders op forms from
@@ -643,9 +649,37 @@ RETURN
 // the manifest affects visibility, never permission), so a global
 // (not actor-scoped) permitsOperation fan-in is an acceptable v1 narrowing,
 // same class as the other named scope-downs above.
+//
+// The WHERE's second conjunct is the self-on-standing exclusion: a
+// `scope=self` permission on an op whose descriptor dispatches `standing`
+// has no client-authorable shape here. A self grant authorizes only an
+// envelope whose authContext.target IS the caller (step 3's scope=self
+// check, internal/processor/step3_auth_capability.go), and a standing
+// descriptor tells the client to send NO authContext at all — so a row
+// reached through such a grant would render a form the Processor can never
+// authorize from it (maintenance-domain's ReportIssue consumer leg is the
+// case: its real dispatcher is a hand-built self submit, not this catalog).
+// The catalog therefore declines to offer the op THROUGH THAT GRANT; the
+// same op reached through a scope=any grant on another held role, through
+// a service's permitsOperation, or through an own task still projects. This
+// is presentation only (design §4.5) — the grant itself is untouched.
+//
+// `perm` is bound only by the role Walk's chain; on the residence and task
+// branches it is unbound and every read off it is null (executor.go's
+// unbound-VariableRef case). The exclusion is written as a positive
+// conjunction so that null KEEPS the row: `null = "self"` is false
+// (full/values.go equalsAny — a nil operand equals only nil), AND is
+// two-valued over truthy (full/expr_eval.go, truthy(nil) is false), and
+// NOT of that false is true. Do not rewrite it as `perm.data.scope <> "self"`
+// — that form is ALSO true for null under this engine, but only by the
+// accident that `<>` is the bare negation of `=`, and it would read as a
+// three-valued Cypher predicate to anyone who expects one. `perm` rides the
+// WITH because a WITH rebuilds the row from its projection list alone
+// (full/withscope.go); a name it drops is unbound in the WHERE that follows.
 const edgeCatalogTail = `
-WITH op, role
+WITH op, role, perm
 WHERE op.key <> null
+  AND NOT (perm.data.scope = "self" AND op.dispatch.data.authContext = "standing")
 RETURN
   op.key AS anchor,
   "manifest.op" AS ns,
@@ -722,6 +756,17 @@ RETURN
 // treats "no inputSchema" as NOT RENDERABLE and declines to offer the op, which
 // is the fail-closed answer. A missing row would be indistinguishable from a
 // lagging projection.
+//
+// edgeCatalogTail's self-on-standing exclusion is deliberately NOT applied
+// here. That exclusion is a per-actor offer decision (which grant reached
+// THIS viewer); this is a per-op catalog whose row must exist for every op
+// meta regardless of who is granted what. A WHERE dropping the self-scoped
+// (perm, role) pairs after the OPTIONAL MATCH would delete the row of an op
+// granted ONLY that way (the filter removes every row the join produced, and
+// there is no unmatched row left to keep), making the op vanish from the
+// catalog outright — the exact failure the OPTIONAL MATCH exists to prevent.
+// grantedToRoles is therefore the graph's full grant list, and a staff client
+// curating by it applies the descriptor's authContext itself.
 const opCatalogSpec = `
 MATCH (op:meta)
 WHERE op.data.operationType <> null

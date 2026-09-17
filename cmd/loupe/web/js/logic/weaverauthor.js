@@ -5,11 +5,17 @@
 //
 // A draft is a plain object the view owns: { targetId, description, lensRef,
 // gaps: { <col>: { action, pattern, subject, adapter, operation, assignee,
-// target, issueCode, issueSeverity, paramsText, readsText } }, lens: {
+// queue, target, issueCode, issueSeverity, paramsText, readsText } }, lens: {
 // canonicalName, adapter, bucket, table, spec } }. paramsText/readsText are the
 // textarea/ input strings the operator types; buildTargetContent parses them
 // into the artifact's params/reads shape at build time, so the draft's OWN
 // shape can stay simple strings throughout editing.
+//
+// assignee/queue are an assignTask's two endpoints (pkgmgr.GapActionSpec: a
+// concrete identity or a role queue) — exactly one is set on a real gap, but
+// the draft carries both slots blank-tolerant like every other field, and it
+// is the Check endpoint's pkgmgr validation (not this form) that enforces the
+// exactly-one rule.
 //
 // A draft that re-describes an INSTALLED target also carries `edit:
 // {packageName, baseVersion, newVersion?, targetId}` — the coordinates that make
@@ -25,7 +31,7 @@ function emptyDraft() {
 function emptyGap() {
   return {
     action: "", pattern: "", subject: "", adapter: "", operation: "",
-    assignee: "", target: "", issueCode: "", issueSeverity: "",
+    assignee: "", queue: "", target: "", issueCode: "", issueSeverity: "",
     paramsText: "", readsText: "",
   };
 }
@@ -75,7 +81,7 @@ function readsToText(reads) {
 // artifact is also just easier to read on export).
 function gapActionArtifact(g) {
   const out = { action: g.action || "" };
-  const strFields = ["pattern", "subject", "adapter", "operation", "assignee", "target", "issueCode", "issueSeverity"];
+  const strFields = ["pattern", "subject", "adapter", "operation", "assignee", "queue", "target", "issueCode", "issueSeverity"];
   strFields.forEach((f) => { if (g[f]) out[f] = g[f]; });
   const params = parseParamsText(g.paramsText);
   if (Object.keys(params).length) out.params = params;
@@ -126,6 +132,7 @@ function hydrateFromProposal(row) {
     gaps[col] = {
       action: g.action || "", pattern: g.pattern || "", subject: g.subject || "",
       adapter: g.adapter || "", operation: g.operation || "", assignee: g.assignee || "",
+      queue: g.queue || "",
       target: g.target || "", issueCode: g.issueCode || "", issueSeverity: g.issueSeverity || "",
       paramsText: paramsToText(g.params || {}), readsText: readsToText(g.reads || []),
     };

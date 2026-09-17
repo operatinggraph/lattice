@@ -28,6 +28,10 @@ func TestDraftTargetBodyFieldMapping(t *testing.T) {
 				Params: map[string]string{"k": "v"}, Reads: []string{"row.a"},
 				IssueCode: "X", IssueSeverity: "warn",
 			},
+			"missing_task": {
+				Action: "assignTask", Operation: "CreateTask",
+				Queue: "vtx.role.rAAAAAAAAAAAAAAAAAAA", Target: "row.entityKey",
+			},
 		},
 	}
 	body := draftTargetBody(in)
@@ -52,6 +56,20 @@ func TestDraftTargetBodyFieldMapping(t *testing.T) {
 	// dispatchKind must still resolve via the explicit action alone.
 	if g.dispatchKind() != "action" {
 		t.Errorf("dispatchKind = %q, want action", g.dispatchKind())
+	}
+	// A queue-arm gap's role-queue endpoint must carry through the Check
+	// endpoint's rendering exactly as an assignee-arm gap's does — the cold
+	// review found this path dropped it, so the Check panel would show a
+	// blank assignee for a gap that installs fine.
+	qg, ok := body.Gaps["missing_task"]
+	if !ok {
+		t.Fatalf("body.Gaps = %+v, missing missing_task", body.Gaps)
+	}
+	if qg.Queue != "vtx.role.rAAAAAAAAAAAAAAAAAAA" {
+		t.Errorf("Queue = %q, want the artifact's role-queue literal carried through", qg.Queue)
+	}
+	if qg.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty on a queue-arm gap", qg.Assignee)
 	}
 }
 

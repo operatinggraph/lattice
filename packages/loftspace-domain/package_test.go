@@ -171,16 +171,18 @@ func TestPackage_Permissions(t *testing.T) {
 		t.Fatalf("expected Depends [location-domain], got %v", Package.Depends)
 	}
 
-	// Four projection lenses (availableListings — the P5 read model for listed
+	// Five projection lenses (availableListings — the P5 read model for listed
 	// units; applicantRosterRead — the PROTECTED Postgres identity roster,
 	// D1.5, and a SECURE LENS: the sensitive identity name decrypts at
 	// projection time, so no unprotected roster surface exists; landlordUnitsRead
 	// — the PROTECTED, landlord-anchored occupancy model, portfolio-pulse Inc 2;
-	// objectIdentityAttachmentsRead — the PROTECTED, identity-owner-anchored
-	// read model of objects-base's object/AttachObject vertices); no role,
-	// weaver target, or loom pattern; one op-meta (pinned below).
-	if got := len(Package.Lenses); got != 4 {
-		t.Fatalf("expected 4 lenses, got %d", got)
+	// landlordWorkOrdersRead — the PROTECTED, landlord-anchored maintenance model
+	// (docs/reviews/loftspace-maintenance-loop-2026-09-17.md decision 5); objectIdentityAttachmentsRead
+	// — the PROTECTED, identity-owner-anchored read model of objects-base's
+	// object/AttachObject vertices); no role, weaver target, or loom pattern; one
+	// op-meta (pinned below).
+	if got := len(Package.Lenses); got != 5 {
+		t.Fatalf("expected 5 lenses, got %d", got)
 	}
 	lensByName := map[string]pkgmgr.LensSpec{}
 	for _, l := range Package.Lenses {
@@ -217,6 +219,20 @@ func TestPackage_Permissions(t *testing.T) {
 	}
 	if !strings.Contains(units.Spec, "<-[:manages]-(landlord:identity)") {
 		t.Fatalf("landlordUnitsRead must walk the manages link from unit to landlord, got: %s", units.Spec)
+	}
+	workOrders, ok := lensByName["landlordWorkOrdersRead"]
+	if !ok || workOrders.Adapter != "postgres" || workOrders.Table != "read_landlord_work_orders" ||
+		!workOrders.Protected || !workOrders.DiffRetraction {
+		t.Fatalf("unexpected landlordWorkOrdersRead shape: %+v", workOrders)
+	}
+	if len(workOrders.IntoKey) != 2 || workOrders.IntoKey[0] != "work_order_id" || workOrders.IntoKey[1] != "landlord_id" {
+		t.Fatalf("landlordWorkOrdersRead IntoKey = %v, want [work_order_id landlord_id]", workOrders.IntoKey)
+	}
+	if !strings.Contains(workOrders.Spec, "<-[:manages]-(landlord:identity)") {
+		t.Fatalf("landlordWorkOrdersRead must walk the manages link from unit to landlord, got: %s", workOrders.Spec)
+	}
+	if !strings.Contains(workOrders.Spec, "OPTIONAL MATCH (wo)<-[:scopedTo]-(t:task)") {
+		t.Fatalf("landlordWorkOrdersRead must OPTIONAL MATCH the scopedTo task fan anchor-first (off wo, the required-MATCH anchor), got: %s", workOrders.Spec)
 	}
 	attachments, ok := lensByName["objectIdentityAttachmentsRead"]
 	if !ok || attachments.Adapter != "postgres" || attachments.Table != "read_object_identity_attachments" ||

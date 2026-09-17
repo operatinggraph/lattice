@@ -191,6 +191,8 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"wellnessWaitlistPromotion":         hopIndexed,
 	"wellnessSeriesHorizon":             hopIndexed,
 	"wellnessRefundSettlement":          hopIndexed,
+	// Single OPTIONAL MATCH, headed by the anchor: `(wo)<-[:scopedTo]-(t:task)`.
+	"workOrderQueue": hopIndexed,
 }
 
 // noAnchorPosition is the one verdict this census deliberately does not pin: a

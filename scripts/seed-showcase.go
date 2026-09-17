@@ -454,8 +454,13 @@ func main() {
 
 // seedMaintenanceBeat loads the offline maintenance beat
 // (facet-staff-worlds-design.md §6 F5): a back-of-house tech who worksAt the
-// building, and a work order at Unit 1 queued to their role — claimable from
-// the tech's own Facet mirror, resolvable under the task's ephemeral grant.
+// building, and a work order at Unit 1 — claimable from the tech's own Facet
+// mirror once maintenance-domain's missing_task gap queues it, resolvable
+// under the task's ephemeral grant. The seed only reports the issue;
+// queueing ResolveWorkOrder to backOfHouse is the gap's own convergence
+// (docs/reviews/loftspace-maintenance-loop-2026-09-17.md decision 1, Weaver's assignTask
+// Queue arm), the same split the op itself draws (package.go: ReportIssue
+// mints no task).
 //
 // The tech is a SECOND staff persona and is deliberately not the front-desk
 // one: the whole F5 argument is that a maintenance world is nameless (D3 —
@@ -464,11 +469,11 @@ func main() {
 // PII-bearing and server-paned. One binary, two staff worlds, different
 // shapes — that only shows if two personas exist.
 //
-// The work order + its task roll their ids by UTC day, the wellness session's
-// own reason: a reseed against a world the nightly wipe did NOT clear must
-// still offer an UNRESOLVED work order, or the demo's maintenance tab is
-// permanently a list of finished work. Two reseeds on the same day converge on
-// the same ids (per-mutation idempotent, like every seeder here).
+// The work order rolls its id by UTC day, the wellness session's own reason:
+// a reseed against a world the nightly wipe did NOT clear must still offer
+// an UNRESOLVED work order, or the demo's maintenance tab is permanently a
+// list of finished work. Two reseeds on the same day converge on the same id
+// (per-mutation idempotent, like every seeder here).
 //
 // Returns the tech's identity key.
 func seedMaintenanceBeat(ctx context.Context, conn *substrate.Conn, adminKey string) string {
@@ -485,24 +490,7 @@ func seedMaintenanceBeat(ctx context.Context, conn *substrate.Conn, adminKey str
 				"summary": "Basement riser valve is weeping — no phone signal down there"},
 			&processor.ContextHint{Reads: []string{unit1Key}})
 	}
-
-	taskID := substrate.DeriveNanoID("showcase-workorder-task", day)
-	taskKey := "vtx.task." + taskID
-	if !alive(ctx, conn, taskKey) {
-		resolveMeta := findOpMetaByType(ctx, conn, "ResolveWorkOrder")
-		submitOp(ctx, conn, adminKey, "CreateTask", "task",
-			map[string]any{"taskId": taskID, "queue": backOfHouseRoleKey,
-				"forOperation": resolveMeta, "scopedTo": woKey,
-				"expiresAt": time.Now().UTC().AddDate(0, 0, 30).Format(time.RFC3339)},
-			&processor.ContextHint{
-				Reads: []string{backOfHouseRoleKey, resolveMeta, woKey},
-				// CreateTask's own absence-tolerant reads: the dedup key and
-				// the assignee availability aspect, neither of which exists on
-				// a queue-only task (Contract #2 §2.5 class (d)).
-				OptionalReads: []string{taskKey},
-			})
-	}
-	fmt.Println("==> work order:      " + woKey + " at Unit 1, queued to backOfHouse via " + taskKey)
+	fmt.Println("==> work order:      " + woKey + " at Unit 1, queued to backOfHouse by the missing_task gap")
 	return techKey
 }
 

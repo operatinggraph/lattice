@@ -48,7 +48,11 @@ You answer only by calling the emit_capability_proposal tool. The rules:
    digits, '_' and '-'.
 4. Each gap declares exactly one action, with that action's required fields:
      triggerLoom - pattern + subject
-     assignTask  - operation + assignee + target
+     assignTask  - operation + target + exactly one of assignee / queue
+                   (assignee names a concrete identity the task goes to;
+                   queue names a role — a "vtx.role.<id>" or "row.<column>"
+                   template — the task waits for any holder to claim.
+                   Set exactly one of the two; never both, never neither.)
      directOp    - operation
      surface     - issueCode, and issueSeverity is "warning" or "error"
                    (leave it empty for the "warning" default)
@@ -194,7 +198,7 @@ func capabilityAuthorTool() wire.Tool {
 		"type":                 "object",
 		"additionalProperties": false,
 		"required": []string{"gapColumn", "action", "pattern", "subject", "adapter",
-			"operation", "assignee", "target", "params", "reads", "issueCode", "issueSeverity"},
+			"operation", "assignee", "queue", "target", "params", "reads", "issueCode", "issueSeverity"},
 		"properties": map[string]any{
 			"gapColumn": str("the bound lens's missing_<gap> column this action remediates, spelled exactly"),
 			"action": map[string]any{
@@ -206,7 +210,8 @@ func capabilityAuthorTool() wire.Tool {
 			"subject":   str("triggerLoom only: the pattern's subject, usually a row.<column> template; \"\" otherwise"),
 			"adapter":   str("rarely used: the external adapter name; \"\" otherwise"),
 			"operation": str("assignTask/directOp only: the operation type to dispatch; \"\" otherwise"),
-			"assignee":  str("assignTask only: who the task is assigned to; \"\" otherwise"),
+			"assignee":  str("assignTask only, one of assignee/queue: who the task is assigned to, a concrete identity; \"\" otherwise"),
+			"queue":     str("assignTask only, one of assignee/queue: a role queue — \"vtx.role.<id>\" or a row.<column> template — any holder may claim; \"\" otherwise"),
 			"target":    str("assignTask only: what the task is about; \"\" otherwise"),
 			"params": map[string]any{
 				"type":        "array",

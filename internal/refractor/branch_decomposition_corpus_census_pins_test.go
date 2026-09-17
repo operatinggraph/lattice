@@ -86,7 +86,11 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"identityIndexHint":              {"g0/o0!no-aggregating-item", 0, 0},
 	"landlordLeaseApplicationsRead":  {"g3/o3[inst] g0/o0!no-aggregating-item", 1, 3},
 	"landlordUnitsRead":              {"g0/o0!no-aggregating-item", 0, 0},
-	"leaseAccounts":                  {"g1/o1!no-aggregating-item", 0, 1},
+	// Single OPTIONAL MATCH off the anchor (t), aggregated by the WITH's
+	// count(DISTINCT CASE …) into open_task_count — the same fold
+	// workOrderQueue's own single `[t]` clause earns.
+	"landlordWorkOrdersRead": {"g1/o1[t] g0/o0!no-aggregating-item", 1, 1},
+	"leaseAccounts":          {"g1/o1!no-aggregating-item", 0, 1},
 	// The applicant's own residesIn link (WireResidesIn's wire, decision 2 of
 	// loftspace-residence-spine-2026-09-16.md) is walked as ITS OWN closed
 	// subtree rooted at the anchor — OPTIONAL MATCH
@@ -179,6 +183,10 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	// aggregation — the shape wellnessOrphanedBookingSettlement's own
 	// single-hop row already carries.
 	"wellnessSeriesHorizon": {"g1/o1!no-aggregating-item", 0, 1},
+	// Single OPTIONAL MATCH off the anchor (t), aggregated by the WITH's
+	// count(DISTINCT CASE …) into openTaskCount — the same fold
+	// leaseRentSettlement's own single `[c]` clause earns.
+	"workOrderQueue": {"g1/o1[t] g0/o0!no-aggregating-item", 1, 1},
 }
 
 // decomposingCorpusLenses is the population whose sibling branches the executor
@@ -210,6 +218,7 @@ var decomposingCorpusLenses = []string{
 	"identityAnchors",
 	"identityErasureResidue",
 	"landlordLeaseApplicationsRead",
+	"landlordWorkOrdersRead",
 	"leaseApplicationComplete",
 	"leaseApplicationsRead",
 	"leaseExpiry",
@@ -221,6 +230,7 @@ var decomposingCorpusLenses = []string{
 	"tenancyEnd",
 	"visitSeriesDue",
 	"wellnessWaitlistPromotion",
+	"workOrderQueue",
 }
 
 // siblingBranchGroupLenses is the design's §2 claim made executable: the lenses
@@ -341,4 +351,5 @@ var footprintValidationVerdicts = map[string]bool{
 	"wellnessRefundSettlement":          true,
 	"wellnessWaitlistPromotion":         true,
 	"wellnessSeriesHorizon":             true,
+	"workOrderQueue":                    true,
 }

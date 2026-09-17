@@ -7,46 +7,48 @@ import (
 	"testing"
 )
 
-// engineCreateTaskReads is the BARE-key read-set the engines (Weaver
-// strategist.go actionAssignTask; Loom submitUserTask) declare in
-// ContextHint.Reads when they dispatch CreateTask. It is keyed by PAYLOAD FIELD
-// (the engines emit the field's value); the drift guard maps these to the script
-// to prove they match what the DDL hydrates.
+// engineCreateTaskReadsByArm is the BARE-key read-set the engines declare in
+// ContextHint.Reads when they dispatch CreateTask, per routing arm. Weaver's
+// assignTask (internal/weaver/strategist.go) dispatches either arm — the
+// "assignee" arm names a concrete identity, the "queue" arm a role queue
+// (buildQueuedTaskPlan); Loom's submitUserTask dispatches the assignee arm
+// only. Each set is keyed by PAYLOAD FIELD (the engines emit the field's
+// value); the drift guard maps these to the script to prove they match what
+// the DDL hydrates.
 //
 // This is the engine↔DDL read-set contract for CreateTask. If a future task-DDL
 // edit adds or drops a vertex_alive check, this test fails — forcing the engine
 // dispatch read-set to be updated in lock-step rather than silently failing
 // closed (a HydrationMiss) or wastefully over-hydrating (L2).
-var engineCreateTaskReads = []string{"assignee", "forOperation", "scopedTo"}
-
-// optionalCreateTaskFields are CreateTask payload fields the script
-// vertex_alive-checks but that are NOT dispatched by either internal engine
-// today (FR28's `queue`: Weaver's actionAssignTask and Loom's submitUserTask
-// always name a concrete `assignee`, never a role-queue fallback). Exempted
-// from the exact-match below so a genuinely optional, caller-provided
-// alternative endpoint doesn't force a phantom always-declared read onto
-// every engine dispatch. A future engine that DOES dispatch a queue-targeted
-// CreateTask must declare "queue" in its own ContextHint.Reads (the script's
-// vertex_alive(state, queue) check is real — kv.Read's HydrationMiss-if-absent
-// applies exactly as it does for `assignee`); it just isn't proven here until
-// one exists.
-var optionalCreateTaskFields = map[string]struct{}{"queue": {}}
+var engineCreateTaskReadsByArm = map[string][]string{
+	"assignee": {"assignee", "forOperation", "scopedTo"},
+	"queue":    {"queue", "forOperation", "scopedTo"},
+}
 
 // TestCreateTaskReads_MatchDDLScript asserts the engine-dispatched CreateTask
-// read-set equals exactly the set of payload fields the task DDL's CreateTask
-// branch validates with vertex_alive — no more (the engine would over-hydrate),
-// no fewer (the op would HydrationMiss and fail closed) — modulo
-// optionalCreateTaskFields (§ above).
+// read-sets cover exactly the set of payload fields the task DDL's CreateTask
+// branch validates with vertex_alive: the UNION over the arms equals the
+// script's set (no field the script checks goes undeclared by every arm, and
+// no arm declares a field the script never checks), and each arm declares its
+// own endpoint plus the two link endpoints common to every CreateTask — no
+// more (the engine would over-hydrate), no fewer (the op would HydrationMiss
+// and fail closed).
 func TestCreateTaskReads_MatchDDLScript(t *testing.T) {
-	all := vertexAlivePayloadFields(t, taskDDLScript, "CreateTask")
-	got := make([]string, 0, len(all))
-	for _, f := range all {
-		if _, exempt := optionalCreateTaskFields[f]; exempt {
-			continue
+	ddl := vertexAlivePayloadFields(t, taskDDLScript, "CreateTask")
+
+	union := map[string]struct{}{}
+	for arm, reads := range engineCreateTaskReadsByArm {
+		want := []string{arm, "forOperation", "scopedTo"}
+		assertSameStringSet(t, "CreateTask "+arm+" arm", want, reads)
+		for _, r := range reads {
+			union[r] = struct{}{}
 		}
+	}
+	got := make([]string, 0, len(union))
+	for f := range union {
 		got = append(got, f)
 	}
-	assertSameStringSet(t, "CreateTask", engineCreateTaskReads, got)
+	assertSameStringSet(t, "CreateTask (union over arms)", ddl, got)
 }
 
 // engineMarkExpiredReads is the BARE-key read-set Weaver's temporal lane declares
