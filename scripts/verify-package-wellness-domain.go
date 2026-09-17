@@ -8,7 +8,7 @@
 // orchestration-base + service-domain + identity-domain + lease-signing).
 // Asserts:
 //
-//	20 DDLs: studio (CreateStudio + TombstoneStudio + SetStudioProfile), session (CreateSession +
+//	22 DDLs: studio (CreateStudio + TombstoneStudio + SetStudioProfile), session (CreateSession +
 //	  TombstoneSession + ReassignSession + CreateSessionSeries +
 //	  TombstoneSessionSeries + ReassignSessionSeries), sessionseries
 //	  (CreateSessionSeries + TombstoneSessionSeries + ReassignSessionSeries),
@@ -16,15 +16,16 @@
 //	  JoinWaitlist + SetBookingAttendance + ReleaseOrphanedBooking +
 //	  PromoteWaitlistedBookings), instructor (CreateInstructor +
 //	  TombstoneInstructor + SetInstructorProfile + BindInstructorIdentity),
-//	  each vertexType, plus 15 aspectType DDLs (studioProfile, sessionSchedule,
+//	  bookingChangeNotificationOp (RecordBookingChangeNotification), each
+//	  vertexType, plus 16 aspectType DDLs (studioProfile, sessionSchedule,
 //	  studioSlotClaim, instructorSlotClaim, bookerSlotClaim, sessionSeatClaim,
 //	  sessionWaitlistClaim, sessionBookerClaim, bookingStatus,
 //	  instructorProfile, instructorIdentityClaim, identityInstructorClaim,
 //	  sessionSeriesDefinition, wellnessrefund [deliberately Class
 //	  meta.ddl.aspectType — ddls.go's comment explains why a vertex-shaped
-//	  mutation uses the aspectType Kind], wellnessRefundDetail), each with its
-//	  self-description.
-//	22 permission vertices: one per (operationType, scope) pair (Contract #8
+//	  mutation uses the aspectType Kind], wellnessRefundDetail,
+//	  bookingChangeNotification), each with its self-description.
+//	23 permission vertices: one per (operationType, scope) pair (Contract #8
 //	  §8.1). Most ops carry a single scope=any vertex granted to operator;
 //	  CreateStudio/TombstoneStudio/SetStudioProfile/CreateSession/CreateSessionSeries/
 //	  TombstoneSessionSeries/ReassignSessionSeries additionally grant
@@ -38,7 +39,9 @@
 //	  vertex (operator + frontOfHouse) and a scope=self vertex granted to
 //	  consumer (the real-actor-write-auth-e2e idiom, clinic-domain's
 //	  CreateAppointment precedent); SetInstructorProfile's scope=any vertex is
-//	  ALSO granted to provider (a bound instructor's own profile).
+//	  ALSO granted to provider (a bound instructor's own profile);
+//	  RecordBookingChangeNotification carries a single scope=any vertex
+//	  granted to operator (the bridge's service-actor authority).
 //	9 lens canonicalNames: the six flat projections (wellnessStudios,
 //	  wellnessSessions, wellnessBookings, wellnessInstructors, wellnessMembers,
 //	  wellnessBookers), the one Protected Postgres lens (wellnessIdentitiesRead),
@@ -80,7 +83,7 @@ var wellnessExpectedOps = []string{
 	"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries",
 	"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance",
 	"CreateInstructor", "TombstoneInstructor", "SetInstructorProfile", "BindInstructorIdentity",
-	"ReleaseOrphanedBooking", "PromoteWaitlistedBookings",
+	"ReleaseOrphanedBooking", "PromoteWaitlistedBookings", "RecordBookingChangeNotification",
 }
 
 // permGrant is one expected (scope, grantee-role) pair for an operationType's
@@ -94,25 +97,26 @@ type permGrant struct {
 }
 
 var wellnessOpGrants = map[string][]permGrant{
-	"CreateStudio":              {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"TombstoneStudio":           {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"SetStudioProfile":          {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"CreateSession":             {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"CreateSessionSeries":       {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"TombstoneSessionSeries":    {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"ReassignSessionSeries":     {{"any", "operator"}, {"any", "frontOfHouse"}},
-	"TombstoneSession":          {{"any", "operator"}, {"any", "provider"}, {"any", "frontOfHouse"}},
-	"ReassignSession":           {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
-	"CreateBooking":             {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
-	"JoinWaitlist":              {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
-	"CancelBooking":             {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
-	"SetBookingAttendance":      {{"any", "operator"}, {"any", "provider"}, {"any", "frontOfHouse"}},
-	"CreateInstructor":          {{"any", "operator"}},
-	"TombstoneInstructor":       {{"any", "operator"}},
-	"SetInstructorProfile":      {{"any", "operator"}, {"any", "provider"}},
-	"BindInstructorIdentity":    {{"any", "operator"}},
-	"ReleaseOrphanedBooking":    {{"any", "operator"}},
-	"PromoteWaitlistedBookings": {{"any", "operator"}},
+	"CreateStudio":                    {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"TombstoneStudio":                 {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"SetStudioProfile":                {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"CreateSession":                   {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"CreateSessionSeries":             {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"TombstoneSessionSeries":          {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"ReassignSessionSeries":           {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"TombstoneSession":                {{"any", "operator"}, {"any", "provider"}, {"any", "frontOfHouse"}},
+	"ReassignSession":                 {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
+	"CreateBooking":                   {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
+	"JoinWaitlist":                    {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
+	"CancelBooking":                   {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
+	"SetBookingAttendance":            {{"any", "operator"}, {"any", "provider"}, {"any", "frontOfHouse"}},
+	"CreateInstructor":                {{"any", "operator"}},
+	"TombstoneInstructor":             {{"any", "operator"}},
+	"SetInstructorProfile":            {{"any", "operator"}, {"any", "provider"}},
+	"BindInstructorIdentity":          {{"any", "operator"}},
+	"ReleaseOrphanedBooking":          {{"any", "operator"}},
+	"PromoteWaitlistedBookings":       {{"any", "operator"}},
+	"RecordBookingChangeNotification": {{"any", "operator"}},
 }
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
@@ -223,6 +227,8 @@ func main() {
 		{canonical: "identityInstructorClaim", class: "meta.ddl.aspectType", ops: []string{"BindInstructorIdentity"}},
 		{canonical: "wellnessrefund", class: "meta.ddl.aspectType", ops: []string{"CancelBooking", "ReleaseOrphanedBooking", "SetBookingAttendance"}},
 		{canonical: "wellnessRefundDetail", class: "meta.ddl.aspectType", ops: []string{"CancelBooking", "ReleaseOrphanedBooking", "SetBookingAttendance"}},
+		{canonical: "bookingChangeNotificationOp", class: "meta.ddl.vertexType", ops: []string{"RecordBookingChangeNotification"}},
+		{canonical: "bookingChangeNotification", class: "meta.ddl.aspectType", ops: []string{"RecordBookingChangeNotification"}},
 	}
 
 	for _, dc := range ddlChecks {

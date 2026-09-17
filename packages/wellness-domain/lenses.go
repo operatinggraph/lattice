@@ -504,6 +504,14 @@ RETURN
 // Classes and the desk roster badge the seating with it, and the member's app
 // mirrors CancelBooking's late-cancel exemption off it (a seat promoted at or
 // after the two-hour cutoff cancels free until the class begins).
+//
+// changeNoticeSentAt / movedFor read the booking's own .changeNotice aspect —
+// the same cross-package aspect-read pattern reminderSentAt above uses,
+// against a marker written by wellness-reminders' own booking-change-notice
+// op, not by anything in this package. Both project null until that op
+// writes the aspect (a promotion or a time move never told). movedFor is the
+// startsAt the member was last told, the column a client compares against
+// this row's own startsAt to badge a class moved SINCE that notice.
 const wellnessBookingsSpec = `MATCH (b:booking)
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
@@ -525,7 +533,9 @@ RETURN
   ((se.key <> null) AND (s.key = null)) AS missingStudio,
   id.key AS bookerKey,
   b.reminder.data.sentAt AS reminderSentAt,
-  b.status.data.promotedAt AS promotedAt`
+  b.status.data.promotedAt AS promotedAt,
+  b.changeNotice.data.sentAt AS changeNoticeSentAt,
+  b.changeNotice.data.movedFor AS movedFor`
 
 // orphanedBookingSettlementSpec is the one-row-per-booking convergence
 // cypher: TombstoneSession deliberately does not cascade (package.go), so a

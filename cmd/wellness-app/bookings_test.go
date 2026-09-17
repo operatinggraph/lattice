@@ -171,3 +171,47 @@ func TestComputeBookings_PromotedAtThreadsThroughUnchanged(t *testing.T) {
 	require.Equal(t, "2026-09-05T07:57:00Z", *byKey["vtx.booking.b6"].PromotedAt)
 	require.Nil(t, byKey["vtx.booking.b7"].PromotedAt)
 }
+
+// TestComputeBookings_ChangeNoticeThreadsThroughUnchanged proves the row's
+// ChangeNoticeSentAt and MovedFor are exactly the wellnessBookings
+// projection's own changeNoticeSentAt / movedFor columns, and nil (omitted
+// from JSON) on a booking never told of a move — the FE's movedBadge keys on
+// both.
+func TestComputeBookings_ChangeNoticeThreadsThroughUnchanged(t *testing.T) {
+	get := mapGetter(map[string]any{
+		"vtx.booking.b8": map[string]any{
+			"bookingKey":         "vtx.booking.b8",
+			"status":             "booked",
+			"rate":               "standard",
+			"sessionKey":         "vtx.session.s1",
+			"sessionName":        "Vinyasa Flow",
+			"startsAt":           "2026-09-10T09:00:00Z",
+			"priceCents":         1500.0,
+			"bookerKey":          "vtx.identity.hana",
+			"changeNoticeSentAt": "2026-09-05T07:57:00Z",
+			"movedFor":           "2026-09-10T09:00:00Z",
+		},
+		"vtx.booking.b9": map[string]any{
+			"bookingKey":  "vtx.booking.b9",
+			"status":      "booked",
+			"rate":        "standard",
+			"sessionKey":  "vtx.session.s1",
+			"sessionName": "Vinyasa Flow",
+			"startsAt":    "2026-09-10T09:00:00Z",
+			"priceCents":  1500.0,
+			"bookerKey":   "vtx.identity.ivo",
+		},
+	})
+	rows := computeBookings([]string{"vtx.booking.b8", "vtx.booking.b9"}, get, "", "")
+	require.Len(t, rows, 2)
+	byKey := map[string]bookingRow{}
+	for _, r := range rows {
+		byKey[r.BookingKey] = r
+	}
+	require.NotNil(t, byKey["vtx.booking.b8"].ChangeNoticeSentAt)
+	require.Equal(t, "2026-09-05T07:57:00Z", *byKey["vtx.booking.b8"].ChangeNoticeSentAt)
+	require.NotNil(t, byKey["vtx.booking.b8"].MovedFor)
+	require.Equal(t, "2026-09-10T09:00:00Z", *byKey["vtx.booking.b8"].MovedFor)
+	require.Nil(t, byKey["vtx.booking.b9"].ChangeNoticeSentAt)
+	require.Nil(t, byKey["vtx.booking.b9"].MovedFor)
+}

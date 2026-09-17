@@ -2,9 +2,10 @@ package wellnessreminders
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Permissions grants RecordBookingReminder to the `operator` role (scope any)
-// — Weaver's service actor dispatches the directOp under operator authority,
-// mirroring clinic-reminders' identical operator-grant idiom for
+// Permissions grants RecordBookingReminder, RecordBookingReminderNotification
+// and RecordBookingChangeNotice to the `operator` role (scope any) — Weaver's
+// service actor dispatches the directOps under operator authority, mirroring
+// clinic-reminders' identical operator-grant idiom for
 // RecordAppointmentReminder. No new capability surface: the trusted-tool
 // operator already holds standing permission.
 func Permissions() []pkgmgr.PermissionSpec {
@@ -16,17 +17,20 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 	}
-	return append(perms, notificationPermissions()...)
+	perms = append(perms, notificationPermissions()...)
+	return append(perms, changeNoticePermissions()...)
 }
 
-// OpMetas makes RecordBookingReminder / RecordBookingReminderNotification
-// forOperation-resolvable for discoverability (Loupe's op-submit forms, a
-// future Loom binding). Both are orchestration-internal (their playbooks /
-// the bridge dispatch them directly), so this meta is not load-bearing for
-// dispatch — declared for parity with clinic-reminders.
+// OpMetas makes RecordBookingReminder / RecordBookingReminderNotification /
+// RecordBookingChangeNotice forOperation-resolvable for discoverability
+// (Loupe's op-submit forms, a future Loom binding). All three are
+// orchestration-internal (their playbooks / the bridge dispatch them
+// directly), so this meta is not load-bearing for dispatch — declared for
+// parity with clinic-reminders.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	metas := []pkgmgr.OpMetaSpec{
 		{OperationType: reminderOp},
 	}
-	return append(metas, notificationOpMetas()...)
+	metas = append(metas, notificationOpMetas()...)
+	return append(metas, changeNoticeOpMetas()...)
 }

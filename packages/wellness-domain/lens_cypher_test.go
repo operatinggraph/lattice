@@ -487,6 +487,34 @@ func TestWellnessBookings_ProjectsPromotedAt(t *testing.T) {
 	require.Nil(t, byKey[directKey].Values["promotedAt"])
 }
 
+// TestWellnessBookings_ProjectsChangeNotice proves changeNoticeSentAt and
+// movedFor read the booking's own .changeNotice aspect — written by the
+// separate wellness-reminders package's booking-change-notice op, not by
+// anything in this package — and are null when that aspect is absent.
+func TestWellnessBookings_ProjectsChangeNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	notifiedKey := f.vtx(t, "notified1", "booking")
+	f.aspect(t, "notified1", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "resident", "seat": 1.0})
+	f.aspect(t, "notified1", "changeNotice", "bookingChangeNotice", map[string]any{"sentAt": "2026-09-30T15:00:00Z", "movedFor": "2026-10-01T15:00:00Z"})
+
+	unnotifiedKey := f.vtx(t, "unnotified1", "booking")
+	f.aspect(t, "unnotified1", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "resident", "seat": 1.0})
+
+	rows := f.project(t, wellnessBookingsSpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]ruleengine.ProjectionResult{}
+	for _, r := range rows {
+		byKey[r.Values["key"].(string)] = r
+	}
+	require.Equal(t, "2026-09-30T15:00:00Z", byKey[notifiedKey].Values["changeNoticeSentAt"])
+	require.Equal(t, "2026-10-01T15:00:00Z", byKey[notifiedKey].Values["movedFor"])
+	require.Nil(t, byKey[unnotifiedKey].Values["changeNoticeSentAt"])
+	require.Nil(t, byKey[unnotifiedKey].Values["movedFor"])
+}
+
 // TestWellnessSessions_JoinsInstructor proves the ledBy hop the instructor
 // hat rests on: a session led by a bound instructor projects that
 // instructor's key (which scopes their own-roster read) and display name

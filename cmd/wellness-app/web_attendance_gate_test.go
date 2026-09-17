@@ -18,7 +18,7 @@ import (
 // (seatCancelAction) is unaffected: releasing a waitlist slot is exactly
 // what CancelBooking does for one.
 func TestRosterCard_WaitlistedBookingNeverOffersAttendance(t *testing.T) {
-	vm := webHelperVM(t, "esc", "shortKey", "idOf", "nameForIdentity", "arrearsBadgeText", "fmtTime", "fmtDay", "promotedBadge", "reminderBadge", "money", "resolveNoShowFeeCents", "noShowLabel", "attendanceActions", "seatCancelAction", "rosterCard")
+	vm := webHelperVM(t, "esc", "shortKey", "idOf", "nameForIdentity", "arrearsBadgeText", "fmtTime", "fmtDay", "promotedBadge", "movedBadge", "reminderBadge", "money", "resolveNoShowFeeCents", "noShowLabel", "attendanceActions", "seatCancelAction", "rosterCard")
 	if _, err := vm.RunString(`var rosterArrears = new Map(); var state = { identities: [] };`); err != nil {
 		t.Fatalf("goja eval of the rosterArrears/state stub: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestRosterCard_WaitlistedBookingNeverOffersAttendance(t *testing.T) {
 // front desk otherwise sees a Booked row with no trace of how the member got
 // there.
 func TestRosterCard_BadgesASeatFromTheWaitlist(t *testing.T) {
-	vm := webHelperVM(t, "esc", "shortKey", "idOf", "nameForIdentity", "arrearsBadgeText", "fmtTime", "fmtDay", "promotedBadge", "reminderBadge", "money", "resolveNoShowFeeCents", "noShowLabel", "attendanceActions", "seatCancelAction", "rosterCard")
+	vm := webHelperVM(t, "esc", "shortKey", "idOf", "nameForIdentity", "arrearsBadgeText", "fmtTime", "fmtDay", "promotedBadge", "movedBadge", "reminderBadge", "money", "resolveNoShowFeeCents", "noShowLabel", "attendanceActions", "seatCancelAction", "rosterCard")
 	if _, err := vm.RunString(`var rosterArrears = new Map(); var state = { identities: [] }; const ATTENDANCE_MARKS = {};`); err != nil {
 		t.Fatalf("goja eval of the rosterArrears/state stub: %v", err)
 	}

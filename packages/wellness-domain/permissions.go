@@ -107,7 +107,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		}
 	}
-	return []pkgmgr.PermissionSpec{
+	perms := []pkgmgr.PermissionSpec{
 		{
 			OperationType: "CreateStudio",
 			Scope:         "any",
@@ -221,7 +221,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: "ReleaseOrphanedBooking",
 			Scope:         "any",
-			Note:          "Grants the operator alone the right to release a booking orphaned by a called-off class. The Weaver service actor holds the operator role (bootstrap primordial grant) — this is the ONLY grant its wellnessOrphanedBookingSettlement directOp dispatch (targets.go) needs; no consumer/front-of-house path exists because the op carries no caller-supplied session to bind a self- or workplace-scope guard to.",
+			Note:          "Grants the operator alone the right to release a booking orphaned by a called-off class. The Weaver service actor holds the operator role (bootstrap primordial grant) — this is the ONLY grant its wellnessOrphanedBookingSettlement directOp dispatch (targets.go) needs; no consumer/front-of-house path exists because the op carries no caller-supplied session to bind a self- or workplace-scope guard to. The script itself narrows further still, to Weaver's own dispatch actor (an in-script primordial-actor guard) — the op forwards a call-off notice into an external.notification body, so the grant alone is wider than the one engine that should ever trigger a vendor send.",
 			GrantsTo:      []string{"operator"},
 		},
 		{
@@ -231,4 +231,5 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 	}
+	return append(perms, notificationPermissions()...)
 }

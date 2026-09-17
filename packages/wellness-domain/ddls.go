@@ -45,7 +45,11 @@ const (
 	identityInstructorClaimAspectDDL = "identityInstructorClaim"
 )
 
-// DDLs returns the package's seventeen DDL meta-vertex declarations:
+// DDLs returns the package's DDL meta-vertex declarations, plus the
+// booking-change notification-outcome replyOp pair (notifications.go) — the
+// audit half of the mechanism a promotion/move notice (wellness-reminders)
+// or a call-off notice (this package's own ReleaseOrphanedBooking) reports
+// its outcome through:
 //
 //   - studio (vertexType) — owns CreateStudio + TombstoneStudio.
 //   - session (vertexType) — owns CreateSession + TombstoneSession +
@@ -65,6 +69,9 @@ const (
 //     sessionBookerClaim / bookingStatus / instructorProfile /
 //     instructorIdentityClaim / identityInstructorClaim /
 //     sessionSeriesDefinition (aspectType) — step-6 write gates.
+//   - bookingChangeNotificationOp (vertexType) — owns
+//     RecordBookingChangeNotification; bookingChangeNotification
+//     (aspectType) — its step-6 write gate (notifications.go).
 //
 // Architectural rules (binding — the known-key discipline of clinic-domain /
 // loftspace-domain): the scripts read ONLY by known key or by the bounded,
@@ -73,7 +80,7 @@ const (
 // find_promotion_candidate below all use it). No prefix scans, no raw
 // adjacency lookups, no unbounded scan.
 func DDLs() []pkgmgr.DDLSpec {
-	return []pkgmgr.DDLSpec{
+	ddls := []pkgmgr.DDLSpec{
 		studioVertexTypeDDL(),
 		sessionVertexTypeDDL(),
 		sessionSeriesVertexTypeDDL(),
@@ -95,6 +102,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		refundVertexTypeDDL(),
 		refundDetailAspectTypeDDL(),
 	}
+	return append(ddls, notificationDDLs()...)
 }
 
 func studioVertexTypeDDL() pkgmgr.DDLSpec {
@@ -1005,8 +1013,9 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"front-of-house staff hold no SetBookingAttendance grant. ReleaseOrphanedBooking is the Weaver-only " +
 			"counterpart to TombstoneSession's deliberate no-cascade (package.go): TombstoneSession soft-deletes " +
 			"only the session root, so a called-off class otherwise leaves its live bookings, claimed seat/waitlist " +
-			"cells and double-book guards stranded forever. ReleaseOrphanedBooking{bookingKey} — operator-only, no " +
-			"session param — reads the booking's own .status.session anchor (stored by CreateBooking/JoinWaitlist, " +
+			"cells and double-book guards stranded forever. ReleaseOrphanedBooking{bookingKey} — restricted to " +
+			"Weaver's own dispatch actor (an in-script primordial-actor guard, on top of the standing operator " +
+			"grant), no session param — reads the booking's own .status.session anchor (stored by CreateBooking/JoinWaitlist, " +
 			"carried forward by SetBookingAttendance), confirms that session is genuinely dead (SessionStillLive " +
 			"otherwise — a live session must go through CancelBooking), then releases whichever cell its OWN " +
 			"status.value names — .status.seat's cell when still booked OR already noShow (noShow only ever mints " +
@@ -1019,7 +1028,10 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"BOTH reverse unconditionally, the same posted-charge-always-reverses policy CancelBooking's own " +
 			"late-cancellation carve-out never applies here. Dispatched by the wellnessOrphanedBookingSettlement " +
 			"Weaver target (targets.go) against the missing_release gap its convergence lens computes (now " +
-			"matching status=booked OR status=waitlisted OR status=noShow, lenses.go); never client-invoked. " +
+			"matching status=booked OR status=waitlisted OR status=noShow, lenses.go); never client-invoked. In the " +
+			"same batch it also emits an external.notification event (replyOp RecordBookingChangeNotification, " +
+			"instanceKey/idempotencyKey <bookingKey>:calledOff:<sessionKey>) so the drained member is told the class " +
+			"was called off. " +
 			"PromoteWaitlistedBookings is the other Weaver-only op, and the other half of the promotion story: " +
 			"CancelBooking hands a seat it FREES to the earliest waitlisted booking in its own batch, but a seat " +
 			"that goes free without a cancellation — ReassignSession raising a full class's capacity — has no such " +
@@ -1153,7 +1165,9 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 					"that session is genuinely tombstoned (SessionStillLive otherwise), then releases whichever cell " +
 					"its .status.value names (seat if still booked, waitlist slot if still waitlisted) and the " +
 					"double-book guard and soft-deletes the booking — the same footprint CancelBooking leaves, " +
-					"minus the caller-supplied session cross-check CancelBooking needs and this dispatch doesn't.",
+					"minus the caller-supplied session cross-check CancelBooking needs and this dispatch doesn't. " +
+					"Also emits an external.notification event (replyOp RecordBookingChangeNotification) telling " +
+					"the drained member the class was called off.",
 			},
 		},
 	}
@@ -5660,6 +5674,20 @@ def execute(state, op):
         return {"mutations": mutations, "events": events, "response": {"primaryKey": book_key}}
 
     if ot == "ReleaseOrphanedBooking":
+        # actor-guard: (primordial) restricted to Weaver's dispatch actor, see
+        # declared-read-scope-authorization-design.md §12. The grant behind
+        # this op is operator/Scope:"any", far wider than the one engine
+        # (wellnessOrphanedBookingSettlement, targets.go) that ever dispatches
+        # it -- and this branch forwards bookingKey/session/status into an
+        # external.notification body the bridge turns into a real vendor
+        # send, so a wider submitter set is a forged notification: an
+        # arbitrary operator releasing an unrelated booking and having the
+        # platform notify that booking's member. First statement in the
+        # branch: it also denies every oracle beneath it (liveness, shape,
+        # the refund lookups).
+        if op.actor != primordialActor["weaver"]:
+            fail("AuthDenied: ReleaseOrphanedBooking is restricted to Weaver's dispatch actor; got " + op.actor)
+
         book_key = required_string(p, "bookingKey")
         _, book_id = parts_of(book_key, "bookingKey", "booking")
         if not vertex_alive(state, book_key):
@@ -5668,10 +5696,11 @@ def execute(state, op):
         if cls != "booking":
             fail("WrongClass: bookingKey: " + book_key + " has class " + str(cls) + ", required booking")
 
-        # Weaver-only cleanup: unlike CancelBooking there is no caller-supplied
-        # session to validate a claim against, so this is confined to the
-        # standing operator grant alone -- the wellnessOrphanedBookingSettlement
-        # target is the only submitter (permissions.go).
+        # Unlike CancelBooking there is no caller-supplied session to
+        # validate a claim against, so this is ALSO confined to the standing
+        # operator grant (actor_holds_operator), on top of the primordial
+        # actor check above -- the wellnessOrphanedBookingSettlement target
+        # is the only submitter (permissions.go).
         if not actor_holds_operator(op.actor):
             fail("AuthDenied: " + op.actor + " may not release " + book_key)
 
@@ -5737,6 +5766,30 @@ def execute(state, op):
             mutations.append(make_tombstone(session + ".wl" + str(slot_n)))
 
         events = [{"class": "wellness.bookingCancelled", "data": {"bookingKey": book_key, "session": session}}]
+
+        # The call-off notice fires off THIS op's own transactional outbox,
+        # in the same batch that tombstones the booking -- the only place
+        # the notice is guaranteed: a lens gap anchored on the booking would
+        # race this same release and lose once the row is gone. Keyed on
+        # (bookingKey, "calledOff", session) so a redelivery of the SAME
+        # release dedups at the adapter; no distinct dedup dimension is
+        # needed since a booking is only ever released once. className and
+        # classStartsAt are dropped from params when the status carries
+        # neither, so the event body never carries a null.
+        calloff_ref = book_key + ":calledOff:" + session
+        calloff_params = {"bookingKey": book_key, "changeType": "calledOff", "changeRef": session,
+                           "sessionKey": session, "status": value}
+        calloff_class_name = status.data.get("className")
+        if calloff_class_name != None:
+            calloff_params["className"] = calloff_class_name
+        calloff_class_starts_at = status.data.get("classStartsAt")
+        if calloff_class_starts_at != None:
+            calloff_params["classStartsAt"] = calloff_class_starts_at
+        events.append({"class": "external.notification",
+                        "data": {"instanceKey": calloff_ref, "adapter": "notification",
+                                 "replyOp": "RecordBookingChangeNotification",
+                                 "externalRef": calloff_ref, "idempotencyKey": calloff_ref,
+                                 "params": calloff_params}})
 
         # A class-price charge already posted (settlesClassPrice) before the
         # studio tombstoned this class cannot be found by any post-tombstone

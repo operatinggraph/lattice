@@ -93,6 +93,31 @@ func domainCapDoc() *processor.CapabilityDoc {
 			{OperationType: "SetBookingAttendance", Scope: "any"},
 			{OperationType: "ReleaseOrphanedBooking", Scope: "any"},
 			{OperationType: "PromoteWaitlistedBookings", Scope: "any"},
+			{OperationType: "RecordBookingChangeNotification", Scope: "any"},
+		},
+		ServiceAccess:   []processor.ServiceAccessEntry{},
+		EphemeralGrants: []processor.EphemeralGrant{},
+		Roles:           []string{bootstrap.RoleOperatorKey},
+	}
+}
+
+// domainWeaverCapDoc grants Weaver's primordial dispatch actor
+// ReleaseOrphanedBooking — the op's Starlark pins op.actor to
+// primordialActor["weaver"] (ddls.go): it forwards a call-off notice into an
+// external.notification body, so any wider submitter set is a forged send.
+// domainCapDoc holds the same grant on the op — an operator-role holder that
+// is NOT Weaver is exactly the forged-submitter vector the guard rejects.
+func domainWeaverCapDoc() *processor.CapabilityDoc {
+	now := time.Now().UTC()
+	return &processor.CapabilityDoc{
+		Key:                    "cap.identity." + bootstrap.WeaverIdentityID,
+		Actor:                  bootstrap.WeaverIdentityKey,
+		Version:                "1.0",
+		ProjectedAt:            now.Format(time.RFC3339Nano),
+		ProjectedFromRevisions: map[string]uint64{bootstrap.WeaverIdentityKey: 1},
+		Lanes:                  []string{"default"},
+		PlatformPermissions: []processor.PlatformPermission{
+			{OperationType: "ReleaseOrphanedBooking", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -123,6 +148,8 @@ func setupDomainEnv(t *testing.T) (context.Context, *substrate.Conn) {
 	// The operator grant is only half the claim — the workplace-confinement
 	// guard reads the holdsRole LINK to decide whether its caller is root.
 	testutil.SeedHoldsRole(t, ctx, conn, domainActorKey, bootstrap.RoleOperatorKey)
+	testutil.SeedCapDoc(t, ctx, conn, domainWeaverCapDoc())
+	testutil.SeedHoldsRole(t, ctx, conn, bootstrap.WeaverIdentityKey, bootstrap.RoleOperatorKey)
 	return ctx, conn
 }
 
@@ -2625,7 +2652,7 @@ func TestReleaseOrphanedBooking_ReleasesSeatAndGuardAfterSessionTombstoned(t *te
 		RequestID:     releaseReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "ReleaseOrphanedBooking",
-		Actor:         domainActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-07-07T12:15:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
@@ -2673,7 +2700,7 @@ func TestReleaseOrphanedBooking_RejectsWhenSessionStillLive(t *testing.T) {
 		RequestID:     releaseReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "ReleaseOrphanedBooking",
-		Actor:         domainActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-07-07T12:15:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
@@ -3587,7 +3614,7 @@ func TestReleaseOrphanedBooking_ReleasesWaitlistSlotAfterSessionTombstoned(t *te
 		RequestID:     releaseReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "ReleaseOrphanedBooking",
-		Actor:         domainActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-07-07T12:15:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + waitlistKey + `"}`),

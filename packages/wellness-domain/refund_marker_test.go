@@ -17,6 +17,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/operatinggraph/lattice/internal/bootstrap"
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
@@ -34,9 +35,12 @@ import (
 // its hubs as literals — is what lets deleting a declaration from targets.go
 // red these tests instead of leaving them agreeing with a spec they never
 // actually read (docs/components/pkgmgr.md's "agrees by coincidence" entry).
+// Hubbed on Weaver's own identity: ReleaseOrphanedBooking's script pins
+// op.actor to primordialActor["weaver"] (ddls.go), so the actor whose
+// operator-role walk the release runs is Weaver's, not domainActorKey.
 func wdReleaseEnumerations(bookingKey string) []processor.EnumerationHint {
 	return testutil.DeclaredGapEnumerations(
-		wellnessdomain.OrphanedBookingSettlementTarget, "missing_release", domainActorKey,
+		wellnessdomain.OrphanedBookingSettlementTarget, "missing_release", bootstrap.WeaverIdentityKey,
 		map[string]any{"bookingKey": bookingKey},
 		wellnessdomain.WeaverTargets(),
 	)
@@ -550,7 +554,7 @@ func TestReleaseOrphanedBooking_MintsRefundMarkerWhenAlreadyCharged(t *testing.T
 		RequestID:     releaseReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "ReleaseOrphanedBooking",
-		Actor:         domainActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-07-08T09:05:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
@@ -661,7 +665,7 @@ func TestReleaseOrphanedBooking_ReleasesNoShowAndRefundsBothChargeShapes(t *test
 		RequestID:     releaseReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "ReleaseOrphanedBooking",
-		Actor:         domainActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-07-08T09:40:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
@@ -805,7 +809,7 @@ func TestReleaseOrphanedBooking_NoDoubleRefundWhenNoShowFeeAlreadyReversed(t *te
 		RequestID:     releaseReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "ReleaseOrphanedBooking",
-		Actor:         domainActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-07-08T09:40:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),
@@ -913,7 +917,7 @@ func TestReleaseOrphanedBooking_ResolvesSessionAndBookerFromLinks(t *testing.T) 
 		RequestID:     releaseReqID,
 		Lane:          processor.LaneDefault,
 		OperationType: "ReleaseOrphanedBooking",
-		Actor:         domainActorKey,
+		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-07-08T09:40:00Z",
 		Class:         "booking",
 		Payload:       json.RawMessage(`{"bookingKey":"` + bookingKey + `"}`),

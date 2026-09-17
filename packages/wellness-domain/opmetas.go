@@ -165,7 +165,7 @@ func reassignSessionOpMeta() pkgmgr.OpMetaSpec {
 // client ever submits it, so there is no presentation/inputSchema/dispatch
 // surface to describe.
 func OpMetas() []pkgmgr.OpMetaSpec {
-	return []pkgmgr.OpMetaSpec{
+	metas := []pkgmgr.OpMetaSpec{
 		{
 			OperationType: "CreateBooking",
 			// refusal-courtesy(facet): SessionFull: hide — Dispatch.VisibleWhen{Field:"full",Equals:false} below withholds the op from a session row whose `full` (edgeEntitySessions: seat-holding forSession bookings >= .schedule.capacity) is not false.
@@ -990,4 +990,5 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 		},
 	}
+	return append(metas, notificationOpMetas()...)
 }

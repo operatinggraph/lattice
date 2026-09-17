@@ -34,7 +34,7 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // rather than reaching an install, where the same change is a silent capability
 // or read-model shift.
 //
-// Eight of the eighteen DDLs are CreateOnly claim aspects (S4) — the studio,
+// Eight of the twenty-two DDLs are CreateOnly claim aspects (S4) — the studio,
 // instructor, and booker slot claims, the seat and waitlist claims, the
 // per-session booker guard, and the two instructor-binding claims. Each is
 // the sole thing making its uniqueness constraint hold, and none is
@@ -42,16 +42,16 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // one would not break a read: it would silently re-admit double-booking. That is
 // why they are pinned by name rather than counted.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 20; got != want {
+	if got, want := len(Package.DDLs), 22; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 9; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 22; got != want {
+	if got, want := len(Package.Permissions), 23; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 15; got != want {
+	if got, want := len(Package.OpMetas), 16; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
@@ -91,6 +91,8 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"sessionSeriesDefinition", "meta.ddl.aspectType"},
 		{"wellnessrefund", "meta.ddl.aspectType"},
 		{"wellnessRefundDetail", "meta.ddl.aspectType"},
+		{"bookingChangeNotificationOp", "meta.ddl.vertexType"},
+		{"bookingChangeNotification", "meta.ddl.aspectType"},
 	}
 	for i, want := range wantDDLs {
 		if i >= len(Package.DDLs) {
@@ -139,6 +141,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"BindInstructorIdentity", "any", operatorOnly},
 		{"ReleaseOrphanedBooking", "any", operatorOnly},
 		{"PromoteWaitlistedBookings", "any", operatorOnly},
+		{"RecordBookingChangeNotification", "any", operatorOnly},
 	}
 	if got := len(Package.Permissions); got != len(wantPerms) {
 		t.Errorf("Permissions: got %d, want %d", got, len(wantPerms))

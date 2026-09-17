@@ -46,6 +46,23 @@
 // as an audit-only aspect; it does NOT gate the convergence lens above,
 // which stays keyed on .reminder unchanged).
 //
+// The booking-change notice (changenotice.go) tells a member once about each
+// change to a confirmed seat that is a recorded fact rather than a deadline:
+// a promotion from the waitlist (.status.promotedAt) and a class time move
+// (the session's .schedule.startsAt drifting from the time the member was
+// last told — .changeNotice.movedFor, else the .status.classStartsAt the
+// seat was claimed for). Both gaps are level-triggered — no freshUntil, no
+// timer — and close on the marker's equality with the fact; a second move
+// reopens the move gap and sends again. The call-off notice is NOT here: it
+// is emitted by wellness-domain's ReleaseOrphanedBooking in the batch that
+// tombstones the booking, and wellness-domain owns the shared replyOp
+// (RecordBookingChangeNotification) both emitters name.
+//
+//	vtx.booking.<id>.changeNotice = {promotedFor?, movedFor?, sentAt}  (class bookingChangeNotice — this package)
+//	op RecordBookingChangeNotice{bookingKey, sessionKey, kind: promoted|moved, changeRef}  (create-or-update on a live booked booking, a live session; refuses StaleChange)
+//	lens wellnessBookingChangeNotices (weaver-target, full)  (promotedFor <> promotedAt / startsAt <> coalesce(movedFor, classStartsAt) gates)
+//	playbook missing_promotion_notice / missing_move_notice → directOp(RecordBookingChangeNotice)
+//
 // Depends wellness-domain (the booking/session vertex types + the session's
 // .schedule.remindAt) + orchestration-base (MarkExpired / the
 // freshnessExpiry marker the @at firing writes). Install via
@@ -57,13 +74,17 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "wellness-reminders",
-	Version: "0.3.7",
+	Version: "0.4.0",
 	Description: "Wellness class reminder (the wellness vertical's first orchestration): the .reminder marker aspect " +
 		"+ RecordBookingReminder op, the wellnessBookingReminders weaver-target convergence lens (freshUntil = the " +
 		"booking's session .schedule.remindAt deadline arms the @at timer; the gap opens at the deadline) — the " +
 		"§10.8 playbook dispatches the directOp. Inverts lease-signing's freshness re-open, mirroring " +
 		"clinic-reminders' appointment-reminder half. Also fires external.notification off its own outbox to the " +
 		"bridge's \"notification\" adapter; RecordBookingReminderNotification records the outcome. Also ships the " +
+		"booking-change notice: the .changeNotice marker aspect + RecordBookingChangeNotice op and the " +
+		"wellnessBookingChangeNotices weaver-target lens (level-triggered, no timer) — a seat promoted from the " +
+		"waitlist is told once, a class moved to a new time is told once per move, each notice keyed on the change " +
+		"itself and sent off the op's own outbox. Also ships the " +
 		"pastDueBookings weaver-target convergence lens (freshUntil = the session's .schedule.endsAt; gap opens once " +
 		"a `booked` booking's class ends) — the §10.8 playbook directOps wellness-domain's own SetBookingAttendance " +
 		"(status: noShow), mirroring clinic-reminders' pastDueAppointments. Depends wellness-domain + orchestration-base.",
