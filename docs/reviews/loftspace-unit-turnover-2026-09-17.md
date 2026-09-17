@@ -70,8 +70,11 @@ no contract surface, no fork: a new loftspace-domain op mirrors `SetListingStatu
    load-bearing: the lens compares strings, and a bare `2027-01-31` reads below `2027-01-31T00:00:00Z`, so an
    instant-equal no-op would leave that gap open forever; the rewrite to canonical form closes it in one pass.
    Monotone-max is order-free: every ended tenancy on a unit floors to its own end and the unit converges to the
-   latest, and a landlord's LATER date is never lowered. A landlord whose tenant left before the recorded end records
-   that fact (`GiveNotice`, same-day admitted) rather than editing the date under the floor.
+   latest, and a landlord's LATER date is never lowered; a date set BELOW the recorded end is re-raised on every
+   evaluation (changing a notice date is out of scope, §Non-goals). **`SetListing` validates and normalizes
+   `availableFrom` at the mint** (`required_instant`: an RFC3339 instant or a bare `YYYY-MM-DD`, stored as the
+   canonical UTC instant, else `InvalidArgument`) — the field is load-bearing for a Weaver gap, and a free-text
+   value would wedge it (the dossier's validate-at-the-mint class, third sighting).
 2. **One new level-triggered gap on `tenancyEnd`, `missing_availabilityFloored`:** the lens projects
    `unitAvailableFrom = u.listing.data.availableFrom` and `marketFrom = coalesce(endedAt, CASE WHEN moveOutAt <> null
    THEN termEnd ELSE null END)` — an ended term markets from its recorded end, a live term under notice from the
@@ -84,8 +87,11 @@ no contract surface, no fork: a new loftspace-domain op mirrors `SetListingStatu
 3. **Approval REFUSES a move-in before availability — `MoveInBeforeAvailable` — it does not clamp.** The filing's
    verb ("approval floors it") would silently rewrite the reviewed terms the 2026-09-14 decision made binding; a
    refusal keeps the approval a commitment to what the landlord read. In `DecideLeaseApplication`'s approve arm, after
-   `lease_start` is derived: when `.terms.moveInDate` supplied it AND `instant(lease_start) < instant(availableFrom)`
-   → `fail("MoveInBeforeAvailable: …")`. The bare application (`move_in = availableFrom`) is equal by construction.
+   `lease_start` is derived: when `.terms.moveInDate` supplied it AND `lease_start` falls on an earlier **UTC calendar
+   day** than `availableFrom` (both canonicalized, compared on `[:10]`) → `fail("MoveInBeforeAvailable: …")`. A day,
+   not an instant: seeds and Facet's `datetime-local` landlord form store a time-of-day `availableFrom`, and every
+   surface (the FE `min`, the refusal text) promises the day. The bare application (`move_in = availableFrom`) is equal
+   by construction.
    The same refusal at the terms' WRITER (`CreateLeaseApplication`, when `moveInDate` is supplied and the declared
    `.listing` is present with an `availableFrom`) — the dossier's leg rule; `BackfillLeaseTerms` mints no date. The
    `.listing` read Decide already performs is unchanged in class.
@@ -96,8 +102,12 @@ no contract surface, no fork: a new loftspace-domain op mirrors `SetListingStatu
    `RecordApplicationLoss` on its recording arm (not the idempotent no-op arm), `EndTenancy` on its ending arm (not
    the already-ended no-op arm). A re-apply after any of them revives the tombstone through the existing
    `make_link_revive_occ` path; the terminal leaseapp itself stays alive and its own read-model rows keep their
-   `endedAt` / `decision`. `WithdrawLeaseApplication` after a decline finds the guard absent — its existing absent
-   branch. The ended application's `sameApplicantLiveTenancyCount` / `otherLiveTenancyCount` conjuncts read
+   `endedAt` / `decision`. **The other two writers of the pair follow the same rule:** `WithdrawLeaseApplication`
+   frees the guard only for an UNDECIDED application (a decided one had its pair freed at the terminal decision, so an
+   alive guard belongs to a later application on the same key), and `ReassignLeaseUnit` reads `.decision` + `.tenancy`
+   (declared) and on a terminal application re-points the `appliesToUnit` link only — no vacated-pair tombstone, no
+   new-pair guard (both caught in review: decline → re-apply → withdraw / reassign the OLD one took the NEW
+   application's guard). The ended application's `sameApplicantLiveTenancyCount` / `otherLiveTenancyCount` conjuncts read
    `approved + endedAt = null`, so a re-applicant's fresh approval is the residence design's "re-approval on the same
    unit → revive" case, already pinned.
 5. **FE (`cmd/loftspace-app`).** Apply form: `#moveInDate` `min` = the listing's `availableFrom` day (the `cap`
@@ -173,3 +183,36 @@ no contract surface, no fork: a new loftspace-domain op mirrors `SetListingStatu
 6. **Adjacent finds.** None filed at scoping.
 7. **Non-goals.** Changing a notice date; proration; a landlord-facing "coming available" for a live no-notice term;
    Facet forms for the Weaver-only ops; tombstoning terminal leaseapps.
+
+**Build note (2026-09-17).** Built as briefed with four review-forced amendments, each rewritten into the decisions
+above: the refusal compares the UTC calendar DAY (the instant compare refused every seed-showcase application — a
+wall-clock `availableFrom` beside a bare same-day `moveInDate` — and Facet's `datetime-local` landlord listing);
+`SetListing` normalizes `availableFrom` at the mint; `WithdrawLeaseApplication` frees the pair only for an undecided
+application and `ReassignLeaseUnit` re-points a terminal application's link without touching any guard (decline →
+re-apply → withdraw / reassign the OLD application took the NEW one's revived guard — the deterministic pair key
+records no owner); the Decide test helper binds both declared walks instead of a baseline row. Accepted and stated at
+the site: a `Decide{declined}` hydrated before a concurrent loss + re-apply can tombstone the newer guard
+(milliseconds, `default` lane > 1 worker); `missing_relist` and `missing_availabilityFloored` on one row both upsert
+`.listing` unconditioned — a lost write re-opens its gap. `FloorListingAvailability` carries no `manages`
+OptionalRead: it is scope=any only, and `require_manages` returns before its read on the standing path.
+
+**Shipped `b9e02daa` (merge of `4ceedbdd`), CI green, live 2026-09-17.** `reinstall-package` both (loftspace-domain
+0.14.0 → 0.15.0, lease-signing 0.42.0 → 0.43.0, no restart); `bin/loftspace-app` rebuilt and cycled. The tenancyEnd
+rebuild replays the label-narrowed stream (≈12 s/event on this host), so 50 Riverside Walk's row was reprojected by
+hand (`lattice lens reproject W8rrMyB9ktdwm3pEW8rr --actor-key vtx.leaseapp.MhZY2unHEAhNv61HUpb9`): `marketFrom =
+2027-01-31T00:00:00Z`, `unitAvailableFrom = 2025-09-06T17:01:31Z`, gap TRUE; Weaver dispatched
+`FloorListingAvailability` on the system lane and the listing read `availableFrom = 2027-01-31T00:00:00Z` five
+seconds later. `verify-package-lease-signing` 103 OK; `verify-package-loftspace-domain` 98 OK once its role
+resolution was fixed (this stack carries a superseded second `operator` role vertex whose grants were tombstoned
+2026-08-22; the script pre-resolved `operator` from the bootstrap JSON and then let a `vtx.role.*.canonicalName` scan
+overwrite it by map order — the bootstrap id now wins, in the four scripts that shared the scan).
+
+**Review classification (one lead pass + one cold adversarial pass; 2 blocking, 3 should-fix, 4 nits, all fixed).**
+Design-gap: day-vs-instant — the grounding checked the seeds' DAY and decision 3 chose instant semantics; the
+producers of time-of-day instants (seeds, Facet's date-time control) were asserted safe, not run (sighting appended to
+the "recorded value read as the fact it records" entry). Implementation-bug ×2: the two remaining writers of the pair
+(Withdraw, Reassign) — the brief's leg walk covered the three terminal ops and not the two ops that already freed the
+pair (sighting appended to the "leg of a guard" entry). Convention ×2: `validate at the mint` (fourth sighting →
+the date-format sub-rule mechanized, `lint-date-field-normalized`); a class-1 read-drift baseline row copied from a
+neighbouring row's debt instead of fixing the fixture. Found and fixed in the same run: the verify scripts' role
+resolution (above).

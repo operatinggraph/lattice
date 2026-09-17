@@ -647,6 +647,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   Seventh (maintenance `ReportIssue` self leg, 2026-09-17, caught cold): a widened leg that selects its bind by
   `authTargetValidated` runs the STAFF conjunct for a dual-hat actor when the `any` row was written first — select the
   bind by the caller's stated target (a self-named target opts INTO the stricter bind, never out of one).
+  Eighth (lease-signing guard release, 2026-09-17, caught cold ×2): freeing a deterministic PAIR key from three new
+  terminal ops left the two ops that ALREADY freed it (withdraw, reassign) taking a later application's revived key —
+  the walk covers the value's existing writers, not only the ones the fire adds.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
@@ -686,6 +689,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   Sighting (service-location `WireResidesIn`, 2026-09-17, caught cold ×3): a walk gated on `key not in state` runs for a
   DECLARED-absent key too — the snapshot carries no declared/undeclared distinction — so a design claim "declaring submitters
   skip it" is false; state what a first wire costs and declare the walk at every dispatcher.
+  Sighting (lease-signing `MoveInBeforeAvailable`, 2026-09-17, caught cold): a refusal compared two INSTANTS where
+  every surface — the seeds' wall-clock `availableFrom` beside a bare same-day `moveInDate`, Facet's `datetime-local`,
+  the FE `min` — promises a DAY; a date fact is compared on its UTC calendar day, and the grounding runs the producers.
 - **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from** — `mint_clause` wrote
   `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires; the inbound walk bound fine, a
   clause-anchored `(c)-[:governs]->(l:leaseapp)` never could (`adjacency/store.go` `OtherType: dstType`). Check: a
@@ -702,7 +708,8 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   the three sources now refuse more than two decimals. Third sighting (clinic `.encounter`, 2026-09-16, caught cold):
   a DDL `InputSchema` `maxLength` is declarative — nothing enforces it — and a history cap's byte arithmetic leaned on
   it; the script now refuses past 4,000 bytes. A bound a design counts on is enforced in the script, never read off
-  the schema.
+  the schema. Fourth sighting (loftspace `SetListing.availableFrom`, 2026-09-17, caught cold): free text became a
+  Weaver gap's input — a digit-led non-ISO string wedges the gap on every dispatch; now `required_instant` at the mint.
 - **A mirror that drops one of the precedent's checks or branches drops the INVARIANT it enforced** (café `CreditCafeAccount{tabRef}`
   2026-09-16, caught cold: the `<x>Ref` mirror inherited the precedent's missing tie to the op's target) — clinic-ledger's
   `reversesRef` kept café's liveness check and dropped its ownership check (a desk waiver could disarm another
