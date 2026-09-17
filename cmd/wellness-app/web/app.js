@@ -1462,6 +1462,19 @@ function promotedBadge(b) {
   return '<span class="badge promoted">' + esc(label) + "</span>";
 }
 
+// movedBadge says the member was already told about this seat's current
+// time — wellnessBookings' changeNoticeSentAt / movedFor columns, rendered
+// only when movedFor still matches the row's own startsAt. A booking moved
+// again after the notice went out carries a movedFor that no longer equals
+// startsAt, and renders nothing here: a new notice is pending, and this
+// badge must not claim one was sent for a time that has since changed.
+function movedBadge(b) {
+  if (!b.movedFor || b.movedFor !== b.startsAt) return "";
+  const d = new Date(b.changeNoticeSentAt);
+  const label = "Told of the move" + (isNaN(d.getTime()) ? "" : " · " + fmtDay(b.changeNoticeSentAt) + " " + fmtTime(b.changeNoticeSentAt));
+  return '<span class="badge moved">' + esc(label) + "</span>";
+}
+
 // promotedCancelNote is the member-facing half of CancelBooking's late-cancel
 // exemption: a still-booked seat that was handed over inside the window, on
 // a class that has not begun, cancels free until it does — said on the card
@@ -1493,6 +1506,7 @@ function myClassCard(b) {
     waitlistBadge +
     (mark ? '<span class="badge ' + esc(mark.badge) + '">' + esc(mark.label) + "</span>" : "") +
     promotedBadge(b) +
+    movedBadge(b) +
     reminderBadge(b) +
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(b.missingStudio ? "Studio needs reassignment" : b.studioName || shortKey(b.studioKey)) + "</div>") +
@@ -3103,6 +3117,7 @@ function rosterCard(b, markable, cancellable, studio) {
     (mark ? '<span class="badge ' + esc(mark.badge) + '">' + esc(mark.label) + "</span>" : "") +
     arrearsBadge +
     promotedBadge(b) +
+    movedBadge(b) +
     reminderBadge(b) +
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     // A forfeited booking gets neither action: SetBookingAttendance refuses

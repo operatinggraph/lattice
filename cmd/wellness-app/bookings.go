@@ -45,6 +45,15 @@ type bookingProjection struct {
 	// (.status.promotedAt, written by either promotion path in
 	// wellness-domain) — nil on a seat booked directly.
 	PromotedAt *string `json:"promotedAt,omitempty"`
+	// ChangeNoticeSentAt is the instant wellness-reminders' booking-change-notice
+	// op told the member about a promotion or a time move
+	// (.changeNotice.sentAt) — nil until that op runs.
+	ChangeNoticeSentAt *string `json:"changeNoticeSentAt,omitempty"`
+	// MovedFor is the startsAt the member was told in that same notice
+	// (.changeNotice.movedFor) — a client compares it against this row's own
+	// StartsAt to badge a notice for the CURRENT time, not a stale one a
+	// later move superseded.
+	MovedFor *string `json:"movedFor,omitempty"`
 }
 
 // bookingRow is the roster / my-classes row a view renders. Status carries
@@ -74,6 +83,10 @@ type bookingRow struct {
 	// CancelBooking's late-cancel exemption (a seat promoted inside the
 	// two-hour window cancels free until the class begins).
 	PromotedAt *string `json:"promotedAt,omitempty"`
+	// ChangeNoticeSentAt and MovedFor let My Classes and the roster badge a
+	// seat the member was already told moved — see movedBadge in web/app.js.
+	ChangeNoticeSentAt *string `json:"changeNoticeSentAt,omitempty"`
+	MovedFor           *string `json:"movedFor,omitempty"`
 }
 
 // computeBookings decodes every wellnessBookings row, optionally filtered to
@@ -111,21 +124,23 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 			priceCents = int64(*p.ResidentPriceCents)
 		}
 		rows = append(rows, bookingRow{
-			BookingKey:     p.BookingKey,
-			Status:         p.Status,
-			Rate:           p.Rate,
-			WaitlistSlot:   p.WaitlistSlot,
-			SessionKey:     p.SessionKey,
-			SessionName:    p.SessionName,
-			StartsAt:       p.StartsAt,
-			EndsAt:         p.EndsAt,
-			PriceCents:     priceCents,
-			StudioKey:      p.StudioKey,
-			StudioName:     p.StudioName,
-			MissingStudio:  p.MissingStudio,
-			BookerKey:      p.BookerKey,
-			ReminderSentAt: p.ReminderSentAt,
-			PromotedAt:     p.PromotedAt,
+			BookingKey:         p.BookingKey,
+			Status:             p.Status,
+			Rate:               p.Rate,
+			WaitlistSlot:       p.WaitlistSlot,
+			SessionKey:         p.SessionKey,
+			SessionName:        p.SessionName,
+			StartsAt:           p.StartsAt,
+			EndsAt:             p.EndsAt,
+			PriceCents:         priceCents,
+			StudioKey:          p.StudioKey,
+			StudioName:         p.StudioName,
+			MissingStudio:      p.MissingStudio,
+			BookerKey:          p.BookerKey,
+			ReminderSentAt:     p.ReminderSentAt,
+			PromotedAt:         p.PromotedAt,
+			ChangeNoticeSentAt: p.ChangeNoticeSentAt,
+			MovedFor:           p.MovedFor,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
