@@ -173,7 +173,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-derive-reads-bare-vector lint-opmeta-required-fields lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads lint-refusal-courtesy lint-workplace-staff-vector install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps lint-live-read-pinned-mutation
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-derive-reads-bare-vector lint-opmeta-required-fields lint-date-field-normalized lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads lint-refusal-courtesy lint-workplace-staff-vector install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps lint-live-read-pinned-mutation
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2487,6 +2487,23 @@ lint-live-read-pinned-mutation:
 lint-opmeta-required-fields:
 	@echo "==> Linting op-meta required fields against script refusals..."
 	go run ./scripts/lint-opmeta-required-fields.go
+
+## lint-date-field-normalized — a payload field an op-meta's InputSchema
+## declares date/date-time typed (or describes as RFC3339) must be
+## normalized through time.rfc3339_utc before the dispatch closure stores it
+## — a caller-supplied instant written in whatever shape it arrived in
+## silently breaks every downstream lexical compare against a canonical
+## stamp (`.terms.moveInDate` before lease-signing 0.35.0; loftspace-domain's
+## `availableFrom` before 0.15.0's `required_instant`). Parses every shipped
+## script, derives its readers/requirer-normalizers/wrapper-normalizers from
+## their own bodies, and checks each date-typed field's dispatch closure
+## (top level + one helper hop). A field genuinely not a stored instant is
+## silenced only by a `# date-field-exempt: <field> — <reason>` comment
+## inside its dispatch block. Self-tests on every run (replays this gate's
+## own two minting incidents). Advisory by default; STRICT=1 exits non-zero.
+lint-date-field-normalized:
+	@echo "==> Linting date-typed op-meta fields for time.rfc3339_utc normalization..."
+	go run ./scripts/lint-date-field-normalized.go
 
 ## lint-ceremony-throw-path — the catch beside a secret-minting submit never
 ## asserts the write did not land. The FE transport throws on any non-OK

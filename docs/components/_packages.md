@@ -702,7 +702,7 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   the three sources now refuse more than two decimals. Third sighting (clinic `.encounter`, 2026-09-16, caught cold):
   a DDL `InputSchema` `maxLength` is declarative — nothing enforces it — and a history cap's byte arithmetic leaned on
   it; the script now refuses past 4,000 bytes. A bound a design counts on is enforced in the script, never read off
-  the schema.
+  the schema. The date-format sub-rule is mechanized by `lint-date-field-normalized`.
 - **A mirror that drops one of the precedent's checks or branches drops the INVARIANT it enforced** (café `CreditCafeAccount{tabRef}`
   2026-09-16, caught cold: the `<x>Ref` mirror inherited the precedent's missing tie to the op's target) — clinic-ledger's
   `reversesRef` kept café's liveness check and dropped its ownership check (a desk waiver could disarm another

@@ -2724,6 +2724,11 @@ def execute(state, op):
         # The deterministic Starlark sandbox has no clock, so the date is NOT
         # bounded against "today" (no future-date / age check here). Stored
         # verbatim.
+        # date-field-exempt: dob — a birthdate is a pure calendar date with no
+        # time-of-day or timezone meaning; time.rfc3339_utc would wrongly graft
+        # a UTC midnight instant onto it. It is validated digit-by-digit above
+        # (a stricter check than RFC3339 parsing) and stored as the bare
+        # YYYY-MM-DD it was given.
         dob = p.dob if hasattr(p, "dob") else None
         if dob == None or type(dob) != type("") or len(dob) != 10:
             fail("InvalidArgument: dob: must be ISO YYYY-MM-DD")
