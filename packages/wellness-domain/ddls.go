@@ -303,8 +303,13 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"CapacityBelowSeated when any seat cell in the removed range (new capacity+1 .. current capacity) is " +
 			"claimed — judged by the HIGHEST claimed seat index, not the seated count, because seat indexes are never " +
 			"compacted (seats 1 and 5 claimed on a class of five refuse a shrink to 3 even though two fit), and the " +
-			"refusal names that seat — so a class is never shrunk under a member who holds a seat in it; the shrink " +
-			"walks only the removed range (at most the delta, ≤ 199 cells), a raise reads no seat cell. " +
+			"refusal names that seat. The refusal is judged on the hydrated cells and is advisory against a " +
+			"concurrent claim: the op writes no seat cell, so a shrink to 4 racing a CreateBooking that claims seat5 " +
+			"both commit — that seat sits one above capacity, invisible to claim_free_seats (which walks " +
+			"1..capacity), released by its own cancellation, and the card's seated count reads one above capacity " +
+			"for that seat's life; nothing is orphaned. The shrink reads only the removed range (at most the delta, " +
+			"≤ 199 cells; a dispatcher declaring none of them, such as the lattice CLI, pays that delta as live " +
+			"reads — up to 199 for a 200→1 shrink); a raise reads no seat cell. " +
 			"Standing binder mirrors the union of CreateSession's and TombstoneSession's: the operator passes " +
 			"unconditionally; a non-operator caller supplying its own bound instructor (validated via ledBy + " +
 			"identifiedBy, same as TombstoneSession) may reassign/reschedule only a class THEY currently lead; " +
@@ -4152,7 +4157,7 @@ def execute(state, op):
             for c in new_instr_cells:
                 mutations.append(claim_cell(new_instructor_final, slot_cellcode(c), "instructorSlotClaim", "InstructorConflict", "instructor"))
 
-        # A shrink cannot cut under a claimed seat. Seat cells are
+        # A shrink is refused under a claimed seat. Seat cells are
         # sessionSeatClaim aspects, alive while claimed and tombstoned on
         # release (claim_free_seats), and a seat index is never compacted: a
         # class of five with seats 1 and 5 claimed has TWO seated members and a
@@ -4161,9 +4166,24 @@ def execute(state, op):
         # HIGHEST claimed index in the range the shrink would remove — the
         # cells from new_capacity+1 up to the current capacity, walked from
         # the top so the first live cell found is the one the message names —
-        # not by the seated count. A raise reads nothing (there is nothing
-        # above the current capacity to check), and a shrink reads at most
-        # the delta, bounded by MAX_SESSION_CAPACITY (200) either way.
+        # not by the seated count.
+        #
+        # The refusal is judged on the HYDRATED cells, and it is advisory
+        # against a concurrent claim: this op never writes a seat cell, and
+        # the commit is conditioned only on the keys it mutates (the
+        # schedule's own revision), so a shrink to 4 racing a CreateBooking
+        # that claims seat5 commits alongside it. That claim then sits one
+        # seat above capacity: invisible to claim_free_seats (which walks
+        # 1..capacity, so no later claim lands beside it), released by its
+        # own cancellation like any other seat, and counted by the card's
+        # seated count — which can read one above capacity for that seat's
+        # life. The window is accepted; nothing is orphaned by it.
+        #
+        # A raise reads nothing (there is nothing above the current capacity
+        # to check), and a shrink reads at most the delta, bounded by
+        # MAX_SESSION_CAPACITY (200). A dispatcher that declares none of the
+        # removed cells (the lattice CLI) pays that delta as live reads — up
+        # to 199 for a 200 -> 1 shrink.
         cur_capacity = sched.data.get("capacity")
         if new_capacity != None and cur_capacity != None and new_capacity < cur_capacity:
             for n in range(cur_capacity, new_capacity, -1):

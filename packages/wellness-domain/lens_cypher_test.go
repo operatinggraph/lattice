@@ -442,11 +442,12 @@ func TestWellnessBookings_ProjectsPriceCents(t *testing.T) {
 	}
 }
 
-// TestWellnessBookings_ProjectsResidentPriceCentsNoLonger proves the
-// session's residentPriceCents is no longer a column of a booking row: the
-// resident resolution happens in priceCents above, and nothing reads the raw
-// override off a booking any more.
-func TestWellnessBookings_ProjectsResidentPriceCentsNoLonger(t *testing.T) {
+// TestWellnessBookings_ResidentPriceCentsIsNotAColumn proves the session's
+// residentPriceCents is not a column of a booking row: the resident
+// resolution happens inside priceCents (above), and nothing reads the raw
+// override off a booking — a client that did would be second-guessing the
+// one effective column.
+func TestWellnessBookings_ResidentPriceCentsIsNotAColumn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}

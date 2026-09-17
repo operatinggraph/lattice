@@ -430,3 +430,49 @@ func TestReassignSession_ShrinkWithHighClaimedIndexRefused(t *testing.T) {
 		t.Fatalf("rejection should be CapacityBelowSeated naming seat 5 (the highest claimed index, not the count), got %+v", reply.Error)
 	}
 }
+
+// TestReassignSession_ShrinkOverReleasedSeatsAccepted pins the other half of
+// "claimed": a seat cell released by a cancellation is a TOMBSTONE, not an
+// absent key (claim_free_seats OCC-revives it), and a tombstoned cell in the
+// removed range is not a claim. Seats 1..5 claimed, seats 4 and 5 released with
+// an empty waitlist, shrink to 3 → accepted, capacity 3.
+func TestReassignSession_ShrinkOverReleasedSeatsAccepted(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "capreleased")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdcaprelstudio00001", "Released Studio")
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdcaprelsession0001", studioKey, "Released Flow", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 5)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("createSession outcome = %v, want Accepted", outcome)
+	}
+	var top []string
+	for i, id := range []string{"BBWELLCAPRELSEAT1HJK", "BBWELLCAPRELSEAT2HJK", "BBWELLCAPRELSEAT3HJK", "BBWELLCAPRELSEAT4HJK", "BBWELLCAPRELSEAT5HJK"} {
+		key, got := createBooking(t, ctx, conn, cp, cons, "wdcaprelbook000000"+string(rune('1'+i)), sessionKey, seedIdentity(t, ctx, conn, id), "")
+		if got != processor.OutcomeAccepted {
+			t.Fatalf("createBooking %d outcome = %v, want Accepted", i+1, got)
+		}
+		if i >= 3 {
+			top = append(top, key)
+		}
+	}
+	for i, key := range top {
+		submitCancelBookingAt(t, ctx, conn, cp, cons, testutil.GenReqID("wdcaprelcancel0000"+string(rune('1'+i))), key, sessionKey, "2026-07-07T12:30:00Z")
+	}
+	for _, n := range []string{"4", "5"} {
+		doc := readDoc(t, ctx, conn, sessionKey+".seat"+n)
+		if deleted, _ := doc["isDeleted"].(bool); !deleted {
+			t.Fatalf("fixture: seat %s must be a tombstone (released cell), got %v", n, doc)
+		}
+	}
+
+	shrink, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, reassignSessionEnv(t, ctx, conn, "wdcaprelshrink00001",
+		sessionKey, studioKey, "", domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioKey, "capacity": 3},
+		"2026-07-08T08:00:00Z"))
+	if shrink != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession capacity 3 over two released seats = %v (%+v), want Accepted — a tombstoned cell is not a claim", shrink, reply)
+	}
+	if got, _ := readDoc(t, ctx, conn, sessionKey+".schedule")["data"].(map[string]any)["capacity"].(float64); got != 3 {
+		t.Fatalf("schedule.capacity = %v, want 3", got)
+	}
+}

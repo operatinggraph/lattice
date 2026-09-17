@@ -71,11 +71,16 @@ func computeWellnessBookedCounts(keys []string, get kvGetter) map[string]int {
 // computeWellnessSessions decodes every wellnessSessions row, keeps only the
 // ones still bookable at nowUTC, joins each to its live booking count, and
 // sorts by startsAt so the picker reads soonest-first. A session that has
-// already started is dropped: wellness-domain's CreateBooking refuses it as
-// SessionInPast (`submitted < startsAt` — canonical-UTC RFC3339 compares
-// lexically == chronologically, the same test applied here), so offering it
-// would be a dead end. A row that fails to decode or carries no sessionKey (a
-// tombstoned projection entry) is skipped.
+// already started is dropped. That filter is the referral's own courtesy, and
+// it is tighter than the op's rule for this submission: the clinic refers on
+// a scope=any grant — the desk leg of wellness-domain's CreateBooking, which
+// admits a booking until the class ENDS (`submitted < endsAt`; the member's
+// own scope=self leg is the one refused SessionInPast from startsAt) — but a
+// referral targets a class the patient will attend, never one already under
+// way, so the picker offers only classes still to start (`nowUTC < startsAt`
+// — canonical-UTC RFC3339 compares lexically == chronologically). A row that
+// fails to decode or carries no sessionKey (a tombstoned projection entry) is
+// skipped.
 func computeWellnessSessions(keys []string, get kvGetter, bookedCounts map[string]int, nowUTC string) []wellnessSessionRow {
 	rows := make([]wellnessSessionRow, 0, len(keys))
 	for _, k := range keys {
