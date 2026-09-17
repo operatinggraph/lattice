@@ -687,3 +687,234 @@ func TestTenancyEnd_ResidenceGapClosedWhileNotEnded(t *testing.T) {
 	v := f.projectTenancyEnd(t, "app")
 	require.Equal(t, false, v["missing_residenceUnwired"], "not ended → nothing to release yet")
 }
+
+// --- the unit's marketed availability is floored at the term's recorded end
+// (design docs/reviews/loftspace-unit-turnover-2026-09-17.md decision 2) ---
+
+// seedLeasedTenancyAvailableFrom is seedLeasedTenancy with the listing's
+// availableFrom set — the landlord-authored date the floor gap reads. An
+// empty availableFrom writes a listing carrying no date at all.
+func seedLeasedTenancyAvailableFrom(t *testing.T, f *lensFixture, appName, unitStatus, availableFrom string) {
+	t.Helper()
+	seedSignedTenancy(t, f, appName, "2026-11-02T00:00:00Z")
+	listing := map[string]any{"rentAmount": 2400, "status": unitStatus}
+	if availableFrom != "" {
+		listing["availableFrom"] = availableFrom
+	}
+	f.aspect(t, appName+"_unit", "listing", "listing", listing)
+}
+
+// teStaleAvailableFrom is the stale date every floor vector below seeds: the
+// move-in of the tenancy that is ending, well before any end it could record.
+const teStaleAvailableFrom = "2026-01-01T00:00:00Z"
+
+// TestTenancyEnd_EndedTenancyFloorsStaleAvailability is the filing's first
+// clause: an ended term whose unit still markets from the old move-in projects
+// marketFrom = the RECORDED endedAt and opens missing_availabilityFloored —
+// the params FloorListingAvailability{unit, availableFrom} dispatch with.
+func TestTenancyEnd_EndedTenancyFloorsStaleAvailability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "leased", teStaleAvailableFrom)
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, teLeaseEnd, v["marketFrom"], "an ended term markets from its recorded endedAt")
+	require.Equal(t, teStaleAvailableFrom, v["unitAvailableFrom"], "the listing's date projects verbatim")
+	require.Equal(t, true, v["missing_availabilityFloored"], "ended + listing dated before the end → floor")
+	require.Equal(t, true, v["violating"])
+	require.Equal(t, "vtx.unit."+f.ids["app_unit"], v["unitKey"])
+}
+
+// TestTenancyEnd_AlreadyAvailableUnitIsStillFloored pins the gap's independence
+// from the relist: the live filing instance (an available unit under a
+// 2027-01-31 notice still reading 2025-09-06) has no relist to ride —
+// SetListingStatus no-ops on a matching status — so the floor must open on
+// its own.
+func TestTenancyEnd_AlreadyAvailableUnitIsStillFloored(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "available", teStaleAvailableFrom)
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, false, v["missing_relist"], "already available → nothing to relist")
+	require.Equal(t, true, v["missing_availabilityFloored"], "but the stale date is floored regardless of status")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestTenancyEnd_LandlordLaterDateIsNeverLowered is the monotone-max pin on the
+// lens side: a landlord's availableFrom AFTER the recorded end (a renovation
+// gap) reads false — the gap opens only when the listing sits BEFORE the end.
+func TestTenancyEnd_LandlordLaterDateIsNeverLowered(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "available", "2027-03-01T00:00:00Z")
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, teLeaseEnd, v["marketFrom"])
+	require.Equal(t, false, v["missing_availabilityFloored"], "a later landlord date is never lowered")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestTenancyEnd_NoticeOnLiveTermFloorsToTheMoveOut is the filing's second
+// clause: a LIVE term under notice markets from the notice's effective end —
+// marketFrom = moveOutAt (before leaseEnd) — and a stale listing is floored
+// while the unit is still leased, with no endedAt recorded and no lapse fired.
+func TestTenancyEnd_NoticeOnLiveTermFloorsToTheMoveOut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "leased", teStaleAvailableFrom)
+	giveNotice(t, f, "app", teMoveOut)
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Nil(t, v["endedAt"], "the term is live")
+	require.Equal(t, teMoveOut, v["marketFrom"], "a live term under notice markets from the move-out")
+	require.Equal(t, true, v["missing_availabilityFloored"])
+	require.Equal(t, false, v["missing_tenancyEnded"], "no lapse recorded — the end itself is not open")
+	require.Equal(t, false, v["missing_relist"], "and a live term is not relisted")
+	require.Equal(t, true, v["violating"])
+	require.Equal(t, teMoveOut, v["freshUntil"], "the timer still arms on the move-out")
+}
+
+// TestTenancyEnd_LiveTermWithoutNoticeMarketsFromNothing: a live term with no
+// notice names no availability — a bare leaseEnd is the renewal question's
+// input — so marketFrom is null and nothing floors, however stale the listing.
+func TestTenancyEnd_LiveTermWithoutNoticeMarketsFromNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "leased", teStaleAvailableFrom)
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Nil(t, v["marketFrom"], "no recorded end, no notice → no market-from")
+	require.Equal(t, false, v["missing_availabilityFloored"])
+	require.Equal(t, false, v["violating"])
+}
+
+// TestTenancyEnd_EndedTermMarketsFromEndedAtNotTheNotice pins coalesce's
+// order: once endedAt is recorded it is the market-from, whatever the notice
+// said — the recorded fact wins over the derivation that produced it.
+func TestTenancyEnd_EndedTermMarketsFromEndedAtNotTheNotice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "leased", teStaleAvailableFrom)
+	giveNotice(t, f, "app", teMoveOut)
+	f.aspect(t, "app", "tenancy", "tenancy", map[string]any{
+		"leaseEnd": teLeaseEnd, "renewalOpensAt": "2026-11-02T00:00:00Z", "endedAt": teMoveOut})
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, teMoveOut, v["marketFrom"], "the recorded endedAt is the market-from")
+	require.Equal(t, true, v["missing_availabilityFloored"])
+}
+
+// TestTenancyEnd_NoListingNeverFloors: a unit with no .listing (or one with no
+// availableFrom) projects a null unitAvailableFrom, and the null-side rule
+// answers (null < marketFrom) = false — a unit that is not marketed is not
+// floored, and the gap never dispatches into a NoListing refusal.
+func TestTenancyEnd_NoListingNeverFloors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedSignedTenancy(t, f, "app", "2026-11-02T00:00:00Z")
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, teLeaseEnd, v["marketFrom"])
+	require.Nil(t, v["unitAvailableFrom"])
+	require.Equal(t, false, v["missing_availabilityFloored"], "no listing → nothing to floor")
+	require.Equal(t, false, v["violating"])
+
+	// A listing with no date is the same null.
+	seedLeasedTenancyAvailableFrom(t, f, "app", "available", "")
+	endTenancy(t, f, "app")
+	v = f.projectTenancyEnd(t, "app")
+	require.Nil(t, v["unitAvailableFrom"])
+	require.Equal(t, false, v["missing_availabilityFloored"], "a listing with no date → nothing to floor")
+}
+
+// TestTenancyEnd_TombstonedUnitNeverFloors: the appliesToUnit walk misses, so
+// unitKey projects null and the floor gap — whose params bind row.unitKey —
+// stays closed rather than dispatching a refusal (the relist's own pin).
+func TestTenancyEnd_TombstonedUnitNeverFloors(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "leased", teStaleAvailableFrom)
+	endTenancy(t, f, "app")
+	f.tombstoneEdge(t, "appliesToUnit", "app", "app_unit")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Nil(t, v["unitKey"])
+	require.Equal(t, teLeaseEnd, v["marketFrom"], "the market-from is a term fact and still projects")
+	require.Equal(t, false, v["missing_availabilityFloored"], "a null unitKey must never open the floor gap")
+}
+
+// TestTenancyEnd_FloorWriteClosesTheGap is the arm pin: after
+// FloorListingAvailability commits (availableFrom rewritten to marketFrom in
+// canonical form, the rest verbatim) the gap reads false on the next
+// evaluation — one dispatch per stale date, not one per delivery.
+func TestTenancyEnd_FloorWriteClosesTheGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "available", teStaleAvailableFrom)
+	endTenancy(t, f, "app")
+	require.Equal(t, true, f.projectTenancyEnd(t, "app")["missing_availabilityFloored"])
+
+	f.aspect(t, "app_unit", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available", "availableFrom": teLeaseEnd})
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, teLeaseEnd, v["unitAvailableFrom"])
+	require.Equal(t, false, v["missing_availabilityFloored"], "availableFrom = marketFrom → closed")
+	require.Equal(t, false, v["violating"])
+}
+
+// TestTenancyEnd_BareDateEqualToTheEndReadsStale pins the STRING compare the
+// op's string-inequality write exists for: a bare "2027-01-01" is the same
+// instant as the recorded end but sorts below "2027-01-01T00:00:00Z", so the
+// gap opens — and FloorListingAvailability rewrites it in canonical form,
+// which the arm pin above then reads as closed. An instant-equality no-op in
+// the op would leave this row open forever.
+func TestTenancyEnd_BareDateEqualToTheEndReadsStale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancyAvailableFrom(t, f, "app", "available", teLeaseEnd[:10])
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, true, v["missing_availabilityFloored"], "a bare date equal to the end reads below its canonical instant")
+}
+
+// TestTenancyEnd_FloorGapDeclaresItsParamsAsConjuncts binds the playbook to the
+// lens: every row column the floor gap's Params template names is a conjunct
+// of the gap (a Params template bound to a null column is a dispatch refusal,
+// not a no-op), and marketFrom carries the recorded-end derivation the
+// comment states.
+func TestTenancyEnd_FloorGapDeclaresItsParamsAsConjuncts(t *testing.T) {
+	gap := tenancyEndTarget().Gaps["missing_availabilityFloored"]
+	require.Equal(t, "directOp", gap.Action)
+	require.Equal(t, "FloorListingAvailability", gap.Operation)
+	require.Equal(t, map[string]string{"unit": "row.unitKey", "availableFrom": "row.marketFrom"}, gap.Params)
+	require.Equal(t, []string{"row.unitKey", "row.unitKey.listing"}, gap.Reads)
+	require.Contains(t, tenancyEndSpec, "((marketFrom <> null) AND (unitKey <> null) AND (unitAvailableFrom < marketFrom)) AS missing_availabilityFloored",
+		"both Params columns are conjuncts of the gap")
+	require.Contains(t, tenancyEndSpec, "coalesce(app.tenancy.data.endedAt, CASE WHEN (app.notice.data.moveOutAt <> null) THEN",
+		"marketFrom is the recorded endedAt, else the notice's effective end, else null")
+}

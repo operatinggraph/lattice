@@ -31,14 +31,7 @@ func ralEnvelope(label, actor, appKey, submittedAt string) *processor.OperationE
 		Reads:         []string{appKey},
 		OptionalReads: []string{appKey + ".decision"},
 	}
-	hints, skipped := testutil.DeclaredEnumerationsWithSkips("RecordApplicationLoss", actor, leasesigning.OpMetas())
-	for _, hub := range skipped {
-		if hub != "{payload.leaseAppKey}" {
-			panic("RecordApplicationLoss declares an enumeration hub this fixture cannot bind: " + hub)
-		}
-		hints = append(hints, processor.EnumerationHint{Hub: appKey, Relation: "appliesToUnit", Direction: "out"})
-	}
-	hint.Enumerations = hints
+	hint.Enumerations = declaredEnumerationsBound("RecordApplicationLoss", actor, appKey)
 	return &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -313,7 +306,7 @@ func TestRecordApplicationLoss_LostIsTerminalForDecide_NotForWithdraw(t *testing
 	// refusal reached).
 	setListingAspect(t, ctx, conn, unitKey, "2026-08-01T00:00:00Z", 12, 2400)
 	hint := decideReadsFor(appKey, unitKey)
-	hint.Enumerations = testutil.DeclaredEnumerations("DecideLeaseApplication", lsActorKey, leasesigning.OpMetas())
+	hint.Enumerations = declaredEnumerationsBound("DecideLeaseApplication", lsActorKey, appKey)
 	decideEnv := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("recLossDecl6"),
 		Lane:          processor.LaneDefault,
@@ -354,8 +347,19 @@ type ralLinkLister struct {
 	links []processor.LinkDoc
 }
 
-func (l ralLinkLister) ListLinks(_ context.Context, _, _ string, _ int) ([]processor.LinkDoc, string, error) {
-	return l.links, "", nil
+// ListLinks answers only the links under the walk's own key filter (the
+// `lnk.<type>.<id>.<relation>.>` prefix kv.Links enumerates), so a script that
+// walks two relations off one hub sees each relation's own links, as the real
+// lister does.
+func (l ralLinkLister) ListLinks(_ context.Context, keyFilter, _ string, _ int) ([]processor.LinkDoc, string, error) {
+	prefix := strings.TrimSuffix(keyFilter, ">")
+	var out []processor.LinkDoc
+	for _, lk := range l.links {
+		if strings.HasPrefix(lk.Key, prefix) {
+			out = append(out, lk)
+		}
+	}
+	return out, "", nil
 }
 
 // TestRecordApplicationLossScript_WriteIsCreateOnlyUnderTheDeclaredAbsence

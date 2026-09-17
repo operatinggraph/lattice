@@ -380,13 +380,21 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 				// The operator-role confinement probe: the workplace-exempt
 				// short-circuit walks the actor's own holdsRole links to test
-				// for the operator role (actor_holds_operator).
+				// for the operator role (actor_holds_operator). The unit
+				// resolution (leaseapp_unit — the confinement's own subject,
+				// and the first approve's .listing source) walks the
+				// application's appliesToUnit link; the first decline's guard
+				// release (free_applied_to_unit_guard) walks its applicationFor
+				// link for the applicant.
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
+					{Hub: "{payload.leaseAppKey}", Relation: "applicationFor", Direction: "out"},
 				},
 			},
 			// refusal-courtesy(facet): BadDecision: unreachable — decision is schema.enum ["approved","declined"], rendered by the generic form as a select over the enum (cmd/facet/web/app.js renderField), so no other value can be submitted.
 			// refusal-courtesy(facet): DecisionFinal, NotReadyToApprove, NoListing, InvalidTerms: none — no VisibleWhen or entity lens column carries decision/signature/listing state; Facet offers Decide on every leaseapp row.
+			// refusal-courtesy(facet): MoveInBeforeAvailable: none — the move-in is the applicant's own recorded .terms, not a field of this form, and no entity lens column pairs it with the unit's listing.availableFrom; the refusal names both days.
 		},
 		// The applicant's own three legs. Each is granted to consumer at
 		// scope=self, so each is a form a real person fills in.
@@ -441,6 +449,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			// refusal-courtesy(facet): DuplicateApplication: none — no entity lens column projects the caller's own existing applications against a unit; the guard-link race is invisible to the picker.
 			// refusal-courtesy(facet): InvalidTerms: cap — leaseTermMonths/requestedRent above declare "minimum":1, and the generic form renders min= from it (cmd/facet/web/app.js renderField) with step="1" for the integer.
+			// refusal-courtesy(facet): MoveInBeforeAvailable: none — the InputSchema carries no per-row minimum (the floor is the unit's own listing.availableFrom, a value the generic form cannot bind a date control to); the refusal names the available day.
 		},
 		{
 			OperationType: "WithdrawLeaseApplication",
@@ -526,11 +535,16 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					"{payload.leaseAppKey}",
 					"{payload.newUnitKey}",
 				},
-				// The new pair's duplicate-application guard is absent on the
-				// common case (the applicant has never applied to this unit
-				// before), so it can never be a required read.
+				// The new appliesToUnit link is absent on the common case (the
+				// application has never applied to this unit before), so it can
+				// never be a required read. .decision and .tenancy decide
+				// whether the application is TERMINAL (declined / lost /
+				// tenancy ended — re-pointed only, its guard left alone) and
+				// are absent on the undecided, never-approved application.
 				OptionalReads: []string{
 					"lnk.leaseapp.{payload.leaseAppKey:id}.appliesToUnit.unit.{payload.newUnitKey:id}",
+					"{payload.leaseAppKey}.decision",
+					"{payload.leaseAppKey}.tenancy",
 				},
 				// The script resolves the CURRENT appliesToUnit target and the
 				// applicant's applicationFor endpoint itself (never payload
@@ -564,7 +578,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "End a lease term",
 				ShortLabel:  "End tenancy",
-				Description: "Record that a lease term ended on its end date, or on its recorded move-out when notice was given. Refused before that date; a no-op once recorded.",
+				Description: "Record that a lease term ended on its end date, or on its recorded move-out when notice was given, and free the tenant to apply for the unit again. Refused before that date; a no-op once recorded.",
 				Icon:        "clipboard",
 				Tone:        "primary",
 				SubmitLabel: "Record term end",
@@ -587,6 +601,15 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 				OptionalReads: []string{
 					"{payload.leaseAppKey}.notice",
+				},
+				// Recording the end frees the per-(applicant, unit) guard
+				// link: the script resolves the unit and the applicant off
+				// the application's OWN links (scripts.go leaseapp_unit +
+				// free_applied_to_unit_guard), never a payload field, so a
+				// descriptor-driven client declares both walks.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
+					{Hub: "{payload.leaseAppKey}", Relation: "applicationFor", Direction: "out"},
 				},
 			},
 		},
@@ -671,7 +694,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Record an application's loss",
 				ShortLabel:  "Record loss",
-				Description: "Record that an undecided application lost its unit to another applicant. Refused unless the unit is leased; a no-op once any decision is recorded.",
+				Description: "Record that an undecided application lost its unit to another applicant, freeing them to apply for it again. Refused unless the unit is leased; a no-op once any decision is recorded.",
 				Icon:        "clipboard",
 				Tone:        "primary",
 				SubmitLabel: "Record loss",
@@ -690,8 +713,13 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				TargetType:    "leaseapp",
 				Reads:         []string{"{payload.leaseAppKey}"},
 				OptionalReads: []string{"{payload.leaseAppKey}.decision"},
+				// appliesToUnit resolves the unit whose leased status is the
+				// premise; applicationFor resolves the applicant whose
+				// per-(applicant, unit) guard the recorded loss frees
+				// (scripts.go free_applied_to_unit_guard).
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
+					{Hub: "{payload.leaseAppKey}", Relation: "applicationFor", Direction: "out"},
 				},
 			},
 		},

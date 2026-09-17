@@ -21,7 +21,6 @@ import (
 	"github.com/operatinggraph/lattice/internal/processor"
 	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
-	leasesigning "github.com/operatinggraph/lattice/packages/lease-signing"
 )
 
 const (
@@ -66,7 +65,7 @@ func lfDecideAs(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	label, leaseAppKey, unitKey, actorKey, forgedTarget string) processor.MessageOutcome {
 	t.Helper()
 	hint := decideReadsFor(leaseAppKey, unitKey)
-	hint.Enumerations = testutil.DeclaredEnumerations("DecideLeaseApplication", actorKey, leasesigning.OpMetas())
+	hint.Enumerations = declaredEnumerationsBound("DecideLeaseApplication", actorKey, leaseAppKey)
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,

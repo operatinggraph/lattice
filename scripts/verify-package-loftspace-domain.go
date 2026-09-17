@@ -7,13 +7,15 @@
 // loftspace-domain package has been correctly installed. Asserts:
 //
 //	1 loftspaceListing DDL meta-vertex (class=meta.ddl.vertexType) admitting
-//	  SetListing + SetUnitAddress + SetListingStatus, with its self-description aspects.
-//	1 listing  aspect-type DDL (class=meta.ddl.aspectType) admitting SetListing + SetListingStatus.
+//	  SetListing + SetUnitAddress + SetListingStatus + FloorListingAvailability, with its
+//	  self-description aspects.
+//	1 listing  aspect-type DDL (class=meta.ddl.aspectType) admitting SetListing +
+//	  SetListingStatus + FloorListingAvailability.
 //	1 address  aspect-type DDL (class=meta.ddl.aspectType) admitting SetUnitAddress.
 //	1 loftspaceOwnership DDL meta-vertex (class=meta.ddl.vertexType) admitting
 //	  AssignUnitOwner + RemoveUnitOwner, with its self-description aspects.
-//	8 permission vertices — one per (operationType, scope) pair: scope=any granted
-//	  to operator for all five ops, plus SetListing / SetUnitAddress /
+//	9 permission vertices — one per (operationType, scope) pair: scope=any granted
+//	  to operator for all six ops, plus SetListing / SetUnitAddress /
 //	  SetListingStatus scope=self granted to consumer (the landlord path). See
 //	  loftspaceOpGrants.
 //	1 package vertex + manifest aspect (name=loftspace-domain).
@@ -46,7 +48,7 @@ const (
 // loftspaceOwnershipOps the loftspaceOwnership vertexType DDL's. loftspaceExpectedOps
 // is every op that gets a permission vertex (the union).
 var (
-	loftspaceListingOps   = []string{"SetListing", "SetUnitAddress", "SetListingStatus"}
+	loftspaceListingOps   = []string{"SetListing", "SetUnitAddress", "SetListingStatus", "FloorListingAvailability"}
 	loftspaceOwnershipOps = []string{"AssignUnitOwner", "RemoveUnitOwner"}
 	loftspaceExpectedOps  = append(append([]string{}, loftspaceListingOps...), loftspaceOwnershipOps...)
 )
@@ -59,7 +61,9 @@ var (
 //
 // The three listing ops each carry two: scope=any to operator, and scope=self
 // to consumer — the landlord path, where the script requires the acting
-// identity's `manages` link to the payload unit. The ownership ops deliberately
+// identity's `manages` link to the payload unit. FloorListingAvailability is
+// operator-only: Weaver dispatches it off lease-signing's tenancyEnd target on
+// the standing path. The ownership ops deliberately
 // have no self grant: they are what CONFERS management, so a self-scoped grant
 // would let any signed-in identity make itself the landlord of any unit. These
 // pins assert exactly the declared pairs; no role is added implicitly.
@@ -69,11 +73,12 @@ type permGrant struct {
 }
 
 var loftspaceOpGrants = map[string][]permGrant{
-	"SetListing":       {{"any", "operator"}, {"self", "consumer"}},
-	"SetUnitAddress":   {{"any", "operator"}, {"self", "consumer"}},
-	"SetListingStatus": {{"any", "operator"}, {"self", "consumer"}},
-	"AssignUnitOwner":  {{"any", "operator"}},
-	"RemoveUnitOwner":  {{"any", "operator"}},
+	"SetListing":               {{"any", "operator"}, {"self", "consumer"}},
+	"SetUnitAddress":           {{"any", "operator"}, {"self", "consumer"}},
+	"SetListingStatus":         {{"any", "operator"}, {"self", "consumer"}},
+	"FloorListingAvailability": {{"any", "operator"}},
+	"AssignUnitOwner":          {{"any", "operator"}},
+	"RemoveUnitOwner":          {{"any", "operator"}},
 }
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
@@ -148,7 +153,7 @@ func main() {
 
 	ddlChecks := []ddlCheck{
 		{canonical: loftspaceListingDDL, class: "meta.ddl.vertexType", ops: loftspaceListingOps},
-		{canonical: "listing", class: "meta.ddl.aspectType", ops: []string{"SetListing", "SetListingStatus"}},
+		{canonical: "listing", class: "meta.ddl.aspectType", ops: []string{"SetListing", "SetListingStatus", "FloorListingAvailability"}},
 		{canonical: "address", class: "meta.ddl.aspectType", ops: []string{"SetUnitAddress"}},
 		{canonical: loftspaceOwnershipDDL, class: "meta.ddl.vertexType", ops: loftspaceOwnershipOps},
 	}

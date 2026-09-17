@@ -31,7 +31,9 @@ func appliesToUnitLinkKey(leaseAppKey, unitKey string) string {
 
 // reassignLeaseUnit submits ReassignLeaseUnit{leaseAppKey, newUnitKey} (class
 // leaseapp). Reads carries the two (a) required keys; optionalReads carries
-// the (d) new appliesToUnit link the op-meta declares; Enumerations carries
+// the (d) keys the op-meta declares — the new appliesToUnit link, and the
+// .decision / .tenancy that decide whether the application is terminal;
+// Enumerations carries
 // the two (e) bounded kv.Links walks the script performs (appliesToUnit +
 // applicationFor off the leaseapp) — the same declarations a real op-catalog
 // dispatch resolves off OpMetas().
@@ -48,7 +50,7 @@ func reassignLeaseUnit(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","newUnitKey":"` + newUnitKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseAppKey, newUnitKey},
-			OptionalReads: []string{appliesToUnitLinkKey(leaseAppKey, newUnitKey)},
+			OptionalReads: []string{appliesToUnitLinkKey(leaseAppKey, newUnitKey), leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: leaseAppKey, Relation: "appliesToUnit", Direction: "out"},
 				{Hub: leaseAppKey, Relation: "applicationFor", Direction: "out"},
@@ -76,7 +78,7 @@ func reassignLeaseUnitReason(t *testing.T, ctx context.Context, conn *substrate.
 		Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseAppKey + `","newUnitKey":"` + newUnitKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{leaseAppKey, newUnitKey},
-			OptionalReads: []string{appliesToUnitLinkKey(leaseAppKey, newUnitKey)},
+			OptionalReads: []string{appliesToUnitLinkKey(leaseAppKey, newUnitKey), leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
 			Enumerations: []processor.EnumerationHint{
 				{Hub: leaseAppKey, Relation: "appliesToUnit", Direction: "out"},
 				{Hub: leaseAppKey, Relation: "applicationFor", Direction: "out"},

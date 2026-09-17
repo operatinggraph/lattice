@@ -120,7 +120,10 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"as informational columns. CreateLeaseApplication mints the application + the applicationFor link + the " +
 			"appliesToUnit link, requiring + validating a live applicant identity AND a live unit (no-orphan, FR29; " +
 			"a unit-less application can never exist — there is no missing_unit gap). It optionally writes a .terms " +
-			"aspect {moveInDate, leaseTermMonths, requestedRent?} when moveInDate is supplied. A per-(applicant, unit) " +
+			"aspect {moveInDate, leaseTermMonths, requestedRent?} when moveInDate is supplied; a moveInDate whose UTC " +
+			"calendar day is before the unit's listing.availableFrom's UTC calendar day (both read as instants, a bare " +
+			"date as midnight UTC, then compared by day) is refused (MoveInBeforeAvailable) — the terms are the " +
+			"applicant's reviewed ask and are never clamped. A per-(applicant, unit) " +
 			"DETERMINISTIC guard LINK lnk.identity.<a>.appliedToUnit.unit.<u> enforces the duplicate-application " +
 			"constraint (≤1 live application per applicant+unit; a unit still accepts many DIFFERENT applicants): " +
 			"CreateLeaseApplication creates it (a second concurrent application RevisionConflicts on the key — fail closed), " +
@@ -128,11 +131,12 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"aspect — Contract #1). SignLease writes the .signature aspect {signedAt (canonical-UTC " +
 			"RFC3339)} on the application (the fact that closes the missing_signature gap); it is the assignTask " +
 			"forOperation target the §10.8 playbook binds. WithdrawLeaseApplication{leaseAppKey, unit, applicant} soft-deletes the " +
-			"application (the convergence lens filters isDeleted → the row drops from My Applications) and FREES the " +
-			"per-(applicant, unit) guard link (tombstones it), verifying both the unit (appliesToUnit link) and the applicant " +
-			"(applicationFor link) — the complement to the duplicate-application guard so an applicant can back out + re-apply; " +
-			"an APPROVED application is an executed lease (its account, balance and rent clause hang off it, the unit is leased) " +
-			"and is refused (AlreadyApproved), a declined one stays withdrawable. " +
+			"application (the convergence lens filters isDeleted → the row drops from My Applications) and, on an UNDECIDED " +
+			"application, FREES the per-(applicant, unit) guard link (tombstones it), verifying both the unit (appliesToUnit " +
+			"link) and the applicant (applicationFor link) — the complement to the duplicate-application guard so an applicant " +
+			"can back out + re-apply; an APPROVED application is an executed lease (its account, balance and rent clause hang " +
+			"off it, the unit is leased) and is refused (AlreadyApproved); a declined or lost one stays withdrawable but its " +
+			"guard is left alone — the pair was freed at the terminal decision, so an alive guard is a later application's. " +
 			"DecideLeaseApplication{leaseAppKey, decision, reason?, unit?} records the landlord's leasing decision as a .decision aspect " +
 			"{value (approved|declined), decidedAt (canonical-UTC RFC3339), reason? (optional decline rationale)} — the aspect's value is " +
 			"approved|declined|lost, the third recorded by RecordApplicationLoss (below), never submitted by a landlord. A recorded decision is " +
@@ -140,6 +144,9 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"decision cannot silently flip / oscillate; an approve is rejected (NotReadyToApprove) unless the application has been signed. It is the human gate the " +
 			"listing-flip waits behind: the convergence lens reads .decision.value so an approval opens missing_listingLeased " +
 			"(the unit leases) while a decline is a terminal disposition — nothing auto-leases on applicant-readiness alone. " +
+			"The FIRST decline also frees the per-(applicant, unit) guard link (tombstoned under CAS, the withdraw shape) so " +
+			"the applicant may apply for the unit again; a same-value re-submission leaves the guard alone, and an approve " +
+			"keeps the pair until EndTenancy records the term's end. " +
 			"On the FIRST approve only, it additionally CREATE-ONLY-stamps the .tenancy aspect {leaseStart, leaseEnd, " +
 			"renewalOpensAt, rentAmount?} (the tenancy-term fact the renewal target reads) derived from the " +
 			"application's OWN .terms {moveInDate, leaseTermMonths, requestedRent} first, falling back field-by-field " +
@@ -151,7 +158,9 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"listing.leaseTermMonths); renewalOpensAt = leaseEnd - the package's renewalWindow; rentAmount = " +
 			"terms.requestedRent else listing.rentAmount (numeric > 0), omitted from .tenancy entirely when neither " +
 			"exists. The approval commits to what the applicant actually asked for — never silently clamped to the " +
-			"listing's availableFrom. Idempotent re-approves and declines never touch .tenancy once it exists, so a " +
+			"listing's availableFrom: a terms.moveInDate whose UTC calendar day is before the listing's availableFrom's " +
+			"UTC calendar day is refused (MoveInBeforeAvailable) at the approve, the bare application starting AT " +
+			"availableFrom by construction. Idempotent re-approves and declines never touch .tenancy once it exists, so a " +
 			"landlord who approved, and a tenant who later signs a renewal extending leaseEnd, is never silently " +
 			"truncated back to the original term. (SignRenewal also records termStart on .tenancy and may rewrite " +
 			"rentAmount; this op writes rentAmount only from the sources above.) " +
@@ -209,12 +218,15 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"ordinary move of a live application besides. It resolves the application's CURRENT appliesToUnit link and " +
 			"its applicant's applicationFor link itself (never payload fields), tombstones the old link CAS-guarded on " +
 			"its own revision (two concurrent re-points to different units RevisionConflicts rather than leaving two " +
-			"live links), and creates-or-revives lnk.leaseapp.<id>.appliesToUnit.unit.<newUnitId>. It re-keys the " +
-			"per-(applicant, unit) duplicate-application guard for the NEW pair — CreateLeaseApplication's own three-way " +
-			"alive/absent/tombstoned block — and FREES (tombstones) the VACATED (applicant, oldUnit) guard: the guard's " +
-			"contract is at most one live application per (applicant, unit), so a moved lease no longer justifies holding " +
-			"the pair it left, and a later re-apply or a move back to that unit must not collide with its own stale guard. " +
-			"No-ops cleanly when the application already applies to newUnitKey. Emits " +
+			"live links), and creates-or-revives lnk.leaseapp.<id>.appliesToUnit.unit.<newUnitId>. For a LIVE application it " +
+			"re-keys the per-(applicant, unit) duplicate-application guard for the NEW pair — CreateLeaseApplication's own " +
+			"three-way alive/absent/tombstoned block — and FREES (tombstones) the VACATED (applicant, oldUnit) guard: the " +
+			"guard's contract is at most one live application per (applicant, unit), so a moved lease no longer justifies " +
+			"holding the pair it left, and a later re-apply or a move back to that unit must not collide with its own stale " +
+			"guard. A TERMINAL application — .decision declined or lost, or .tenancy.endedAt set (both declared optionalReads) " +
+			"— is re-pointed only: it holds no pair (its guard was freed when the terminal state was recorded), so an alive " +
+			"guard on its old pair is a later application's and is left alone, no guard is minted on the new pair, and no " +
+			"DuplicateApplication check runs. No-ops cleanly when the application already applies to newUnitKey. Emits " +
 			"leaseapp.unitReassigned{leaseAppKey, oldUnitKey, newUnitKey}. " +
 			"EndTenancy{leaseAppKey} is operator-granted (never person-facing) and records that a lease term ended — " +
 			"the directOp the tenancyEnd target dispatches once a signed, approved tenancy's term has lapsed with " +
@@ -229,7 +241,10 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"and otherwise rewrites .tenancy with every existing field preserved plus endedAt = that end (the term " +
 			"ended on its own recorded date, never the fire instant), pinned to the hydrated .tenancy revision so a " +
 			"SignRenewal extension that lands between hydration and commit conflicts instead of being overwritten. It " +
-			"does not walk renewals — the open-renewal hold is the lens's dispatch gate. Emits " +
+			"does not walk renewals — the open-renewal hold is the lens's dispatch gate. In the same batch it frees the " +
+			"per-(applicant, unit) guard link (the applicant off the application's own applicationFor link, the unit off " +
+			"its appliesToUnit link — both declared enumerations; tombstoned under CAS when alive, nothing when the unit no " +
+			"longer resolves or the guard is already gone) so the former tenant may apply for the unit again. Emits " +
 			"leaseapp.tenancyEnded{leaseAppKey, leaseEnd, endedAt}. Once endedAt is set, SignRenewal refuses TenancyEnded, " +
 			"leaseApplicationComplete's applicant gaps and listing flip close (an ended tenancy is terminal, the decline's " +
 			"shape — a relisted unit is never re-leased to the ended tenant), leaseExpiry opens no cycle, and tenancyEnd's " +
@@ -263,13 +278,16 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"landlord decision racing the dispatch conflicts and the re-dispatch reads it as decided. Emits " +
 			"leaseapp.applicationLost{leaseAppKey, unitKey}. A lost application is terminal and never revived: " +
 			"DecideLeaseApplication refuses DecisionFinal on it, the four applicant gaps and lost_to_rival read the recorded " +
-			"value across the unit's later relist, and WithdrawLeaseApplication still accepts it (freeing the per-(applicant, " +
-			"unit) guard so the applicant may re-apply to the relisted unit afresh).",
+			"value across the unit's later relist. Recording the loss also frees the per-(applicant, unit) guard link in the " +
+			"same batch (the applicant off the application's own applicationFor link — a declared enumeration; tombstoned under " +
+			"CAS when alive) so the applicant may re-apply to the relisted unit afresh; the idempotent no-op arm leaves an " +
+			"already-recorded loss's guard alone, and WithdrawLeaseApplication still accepts a lost application without " +
+			"touching the guard (decided applications never free it).",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
 			`"unit":{"type":"string","description":"vtx.unit.<NanoID> of the location-domain unit this application is to lease (CreateLeaseApplication; required, validated alive). Also required on the FIRST DecideLeaseApplication approve (verified via the appliesToUnit link) so the op can read the unit's .listing as the fallback source for the .tenancy aspect (derived from the application's own .terms first)."},` +
-			`"moveInDate":{"type":"string","description":"Requested move-in date, RFC3339 or a bare YYYY-MM-DD read as midnight UTC (CreateLeaseApplication; optional — present ⇒ writes the .terms aspect and requires leaseTermMonths). Stored normalized to the RFC3339 instant; a value that parses as neither is refused."},` +
+			`"moveInDate":{"type":"string","description":"Requested move-in date, RFC3339 or a bare YYYY-MM-DD read as midnight UTC (CreateLeaseApplication; optional — present ⇒ writes the .terms aspect and requires leaseTermMonths). Stored normalized to the RFC3339 instant; a value that parses as neither is refused, and one whose UTC calendar day is before the unit's listing.availableFrom's day is refused MoveInBeforeAvailable (here and again at the first approve)."},` +
 			`"leaseTermMonths":{"type":"integer","description":"Requested lease term in months — a whole number ≥ 1 (CreateLeaseApplication; required when moveInDate is supplied; a zero, negative or fractional count is refused InvalidTerms, as is one read back at the first approve)."},` +
 			`"requestedRent":{"type":"number","description":"Applicant's offered monthly rent, > 0 with at most two decimals when supplied (CreateLeaseApplication; optional, only with moveInDate; zero or negative is refused InvalidTerms, a third decimal InvalidArgument). Omitted → falls back to the unit's own listed rent (unit.listing.rentAmount) when the unit has one."},` +
 			`"leaseAppId":{"type":"string","description":"Optional bare NanoID for the application vertex (CreateLeaseApplication); absent → minted. The write-ahead seam, mirroring service-domain's instanceId."},` +
@@ -295,7 +313,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 		FieldDescription: map[string]string{
 			"applicant":             "Full vtx.identity.<NanoID> key of the applicant this application is for. CreateLeaseApplication requires it, validates the identity is alive, and writes the applicationFor link (the convergence link the lens walks). WithdrawLeaseApplication also requires it (verified via the applicationFor link) to reconstruct + free the per-(applicant, unit) guard link.",
 			"unit":                  "Full vtx.unit.<NanoID> key of the location-domain unit being applied for. CreateLeaseApplication requires it, validates it is alive, and writes the appliesToUnit link (leaseapp→unit). The convergence lens walks it and projects the unit's address / rent as informational columns. Required (no unit-less application). WithdrawLeaseApplication also requires it (verified via the appliesToUnit link) to reconstruct + free the per-(applicant, unit) guard link. DecideLeaseApplication requires it on the FIRST approve only (verified the same way) as the fallback source for the .tenancy aspect {leaseStart, leaseEnd, renewalOpensAt, rentAmount?} — derived from the application's own .terms first, the unit's .listing.availableFrom/leaseTermMonths/rentAmount only where .terms carries nothing — omitted on a decline or a re-approve (the .tenancy write is create-only).",
-			"moveInDate":            "Optional requested move-in date — RFC3339, or a bare YYYY-MM-DD read as midnight UTC; stored normalized to the RFC3339 instant, and a value that parses as neither is refused. When supplied, CreateLeaseApplication writes the .terms aspect {moveInDate, leaseTermMonths, requestedRent?} and requires leaseTermMonths. The first approve signs the lease on these terms (leaseStart = moveInDate).",
+			"moveInDate":            "Optional requested move-in date — RFC3339, or a bare YYYY-MM-DD read as midnight UTC; stored normalized to the RFC3339 instant, and a value that parses as neither is refused. A date whose UTC calendar day is before the unit's listing.availableFrom's UTC calendar day is refused MoveInBeforeAvailable, at CreateLeaseApplication and again at the first approve (the listing's date may have been floored since); a date ON the available day is admitted whatever the listing's time of day. When supplied, CreateLeaseApplication writes the .terms aspect {moveInDate, leaseTermMonths, requestedRent?} and requires leaseTermMonths. The first approve signs the lease on these terms (leaseStart = moveInDate), never clamped.",
 			"leaseTermMonths":       "Requested lease term in months — a whole number ≥ 1 (a zero, negative or fractional count is refused InvalidTerms at CreateLeaseApplication, and again at the first approve if a stored value fails the test). Required when moveInDate is supplied; written to the .terms aspect and signed on at the first approve (leaseEnd = moveInDate + this many calendar months).",
 			"requestedRent":         "Optional monthly rent the applicant offers, > 0 with at most two decimals when supplied (zero or negative is refused InvalidTerms, a third decimal InvalidArgument — the ledger keeps whole cents). Written to the .terms aspect when supplied (only meaningful alongside moveInDate); the first approve records it as .tenancy.rentAmount, falling back to the unit's listed rent where it is absent or non-positive.",
 			"leaseAppId":            "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
@@ -343,9 +361,11 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "unit": "vtx.unit.<unitNanoID>", "applicant": "vtx.identity.<applicantNanoID>"},
 				ExpectedOutcome: "Validates the application is alive, that unit is its appliesToUnit target and applicant is its " +
 					"applicationFor target (both via their leaseapp-anchored links). Soft-deletes the leaseapp (isDeleted=True, " +
-					"root stays {} — D5) so the convergence row deletes and it drops from My Applications, and FREES (tombstones) " +
-					"the per-(applicant, unit) guard link lnk.identity.<a>.appliedToUnit.unit.<u> so the applicant can re-apply " +
-					"to the same unit (the next CreateLeaseApplication revives it). Emits leaseapp.applicationWithdrawn{leaseAppKey, " +
+					"root stays {} — D5) so the convergence row deletes and it drops from My Applications, and — when the " +
+					"application carries no decision — FREES (tombstones) the per-(applicant, unit) guard link " +
+					"lnk.identity.<a>.appliedToUnit.unit.<u> so the applicant can re-apply to the same unit (the next " +
+					"CreateLeaseApplication revives it); a declined or lost application's guard is left alone (its pair was " +
+					"freed at the terminal decision, so an alive guard belongs to a later application). Emits leaseapp.applicationWithdrawn{leaseAppKey, " +
 					"unit}. Returns primaryKey. Rejects a non-existent application, a unit that is not the application's unit " +
 					"(UnitMismatch), an applicant that is not the application's applicant (ApplicantMismatch), or an approved " +
 					"application (AlreadyApproved — an executed lease is never withdrawn; its .decision is declared as an " +
@@ -426,9 +446,11 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "newUnitKey": "vtx.unit.<liveUnitNanoID>"},
 				ExpectedOutcome: "Resolves the application's CURRENT appliesToUnit link and its applicationFor applicant itself " +
 					"(never payload fields). Tombstones the old link CAS-guarded on its own revision, and creates-or-revives " +
-					"lnk.leaseapp.<id>.appliesToUnit.unit.<newUnitId>. Re-keys the per-(applicant, unit) duplicate-application " +
-					"guard for the NEW pair (alive → DuplicateApplication; absent → create; tombstoned → revive), and FREES " +
-					"(tombstones) the VACATED (applicant, oldUnit) guard. No-ops (zero mutations) if the application already applies to newUnitKey. " +
+					"lnk.leaseapp.<id>.appliesToUnit.unit.<newUnitId>. For a live application, re-keys the per-(applicant, unit) " +
+					"duplicate-application guard for the NEW pair (alive → DuplicateApplication; absent → create; tombstoned → " +
+					"revive), and FREES (tombstones) the VACATED (applicant, oldUnit) guard; a terminal application (declined / " +
+					"lost / tenancy ended — .decision and .tenancy declared as optionalReads) is re-pointed only, its guards " +
+					"untouched. No-ops (zero mutations) if the application already applies to newUnitKey. " +
 					"Emits leaseapp.unitReassigned{leaseAppKey, oldUnitKey, newUnitKey}. Every mutation is relational (no write " +
 					"ever touches the leaseapp vertex or one of its aspects), so primaryKey is the NEW appliesToUnit link " +
 					"itself, not leaseAppKey (the reply-constraint requires primaryKey within the committed write footprint — " +
@@ -448,7 +470,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"at-least-once dispatch; no primaryKey). If op.submittedAt is before that end, rejects " +
 					"NotYetEnded naming the end's UTC calendar date. Otherwise rewrites .tenancy with every existing field " +
 					"preserved (leaseStart, renewalOpensAt, a renewed term's termStart / rentAmount) plus endedAt = that end, " +
-					"pinned to the revision the read hydrated (a concurrent SignRenewal rewrite RevisionConflicts). Emits " +
+					"pinned to the revision the read hydrated (a concurrent SignRenewal rewrite RevisionConflicts), and frees the " +
+					"applicant's per-(applicant, unit) guard link in the same batch (both links declared as enumerations). Emits " +
 					"leaseapp.tenancyEnded{leaseAppKey, leaseEnd, endedAt}. Returns primaryKey. Operator-only (Weaver's service " +
 					"actor via the tenancyEnd target, or by hand). Rejects a non-existent application (UnknownLeaseApplication) " +
 					"or one with no .tenancy / no leaseEnd (NoTenancy) — including a submission that failed to declare the " +
@@ -479,7 +502,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"reads its .listing; rejects NoUnit when the link has no live endpoint and UnitNotLeased when the listing is " +
 					"absent, deleted, or its status is not leased. Otherwise writes .decision {value: lost, decidedAt: " +
 					"<op.submittedAt, canonical UTC>} (create-only under the declared absence; no reason, no " +
-					".decidedProfileSnapshot). Emits leaseapp.applicationLost{leaseAppKey, unitKey}. Returns primaryKey. " +
+					".decidedProfileSnapshot) and frees the applicant's per-(applicant, unit) guard link in the same batch " +
+					"(the applicationFor walk is a declared enumeration). Emits leaseapp.applicationLost{leaseAppKey, unitKey}. Returns primaryKey. " +
 					"Operator-only (Weaver's service actor via leaseApplicationComplete's missing_lossRecorded gap, or by hand via the CLI " +
 					"under the primordial admin, as EndTenancy). " +
 					"Rejects a non-existent application (UnknownLeaseApplication).",

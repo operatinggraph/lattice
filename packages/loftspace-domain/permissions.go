@@ -12,6 +12,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	SetListing               → operator
 //	SetUnitAddress           → operator
 //	SetListingStatus         → operator
+//	FloorListingAvailability → operator
 //	AssignUnitOwner          → operator
 //	RemoveUnitOwner          → operator
 //	SetListing (self)        → consumer
@@ -23,7 +24,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // the script's require_manages probe, which requires the acting identity's own
 // `manages` link to the payload unit before any of the three writes. Editing
 // the rent or the address of a unit one manages is the same act as taking it
-// off-market, so the three share one grant shape. The ownership ops
+// off-market, so the three share one grant shape. FloorListingAvailability is
+// operator-only: Weaver's service actor dispatches it off lease-signing's
+// tenancyEnd target on the standing path. The floor honours a landlord's LATER
+// date (SetListing above the recorded end is kept); a date set BELOW the
+// recorded end is re-raised on every evaluation, and changing a recorded
+// notice date is not a listing edit at all. The ownership ops
 // (AssignUnitOwner / RemoveUnitOwner) carry no such grant: they are what
 // CONFERS management, and the FIRST assignment onto a freshly minted unit is by
 // construction something no already-managing identity can authorize, so
@@ -50,6 +56,7 @@ func Permissions() []pkgmgr.PermissionSpec {
 		mk("SetListing"),
 		mk("SetUnitAddress"),
 		mk("SetListingStatus"),
+		mk("FloorListingAvailability"),
 		mk("AssignUnitOwner"),
 		mk("RemoveUnitOwner"),
 		{

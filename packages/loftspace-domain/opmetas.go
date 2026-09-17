@@ -15,6 +15,11 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // probe to the units it manages (fail-closed, never wider). A client that is
 // not in a self-voiced surface sends no target (descriptorform's selfVoice).
 //
+// FloorListingAvailability is granted to `operator` alone and dispatched by
+// Weaver off lease-signing's tenancyEnd target; its descriptor is the
+// EndTenancy posture — "standing", no self path, the playbook's declared reads
+// mirrored for a by-hand operator repair.
+//
 // AssignUnitOwner is granted to `operator` alone (scope=any, no
 // consumer/landlord row), so it is AuthContext "standing": the shipped
 // loftspace-app posts a real landlord-facing listing form against it
@@ -70,6 +75,44 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): NoListing: none — no VisibleWhen or unit entity lens column reports whether a unit carries a .listing aspect yet; Facet offers Change listing status on every unit row.
 		},
 		{
+			// FloorListingAvailability is dispatched by Weaver off lease-signing's
+			// tenancyEnd target and carries a standing operator grant alone —
+			// no scope=self path, so "standing" and no authContext target to
+			// bind. The descriptor exists so a by-hand operator submission
+			// (Loupe) and any descriptor-driven dispatcher declare the same
+			// reads the target's playbook routes: the unit and its existing
+			// .listing, both REQUIRED — the op rewrites only availableFrom and
+			// preserves the economics, so it must read what is already there
+			// (ddls.go, class-(a)); an undeclared .listing is a NoListing
+			// refusal, never a lazy GET.
+			OperationType: "FloorListingAvailability",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Floor listing availability",
+				ShortLabel:  "Floor availability",
+				Description: "Raise a unit's available-from date to a tenancy's recorded end. Never lowers a later date; a no-op when the listing already reads at or after it.",
+				Icon:        "building",
+				Tone:        "primary",
+				SubmitLabel: "Floor availability",
+				Group:       "Operator repairs",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"unit":{"type":"string","description":"vtx.unit.<NanoID> of the unit whose listing availability is being floored."},` +
+				`"availableFrom":{"type":"string","format":"date-time","title":"Available from","description":"The instant the listing's availableFrom is raised to when the stored date is earlier (RFC3339; a bare YYYY-MM-DD anchors to midnight UTC)."}},` +
+				`"required":["unit","availableFrom"]}`,
+			FieldDescriptions: map[string]string{
+				"unit":          "The unit — filled from the unit in view, not typed. It must already carry a listing.",
+				"availableFrom": "The floor: the listing's availableFrom becomes the LATER of its stored date and this one, rewritten in canonical RFC3339 UTC form. Only this field changes — the listing's economics and status are preserved.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       loftspaceListingDDL,
+				AuthContext: "standing",
+				TargetField: "unit",
+				TargetType:  "unit",
+				Reads:       []string{"{payload.unit}", "{payload.unit}.listing"},
+			},
+			// refusal-courtesy(facet): NoListing: none — no VisibleWhen or unit entity lens column reports whether a unit carries a .listing aspect yet; the refusal is the answer on a by-hand repair.
+		},
+		{
 			OperationType: "SetListing",
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Publish listing economics",
@@ -89,7 +132,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				`"bedrooms":{"type":"integer","title":"Bedrooms","description":"Bedroom count. Must be >= 0."},` +
 				`"bathrooms":{"type":"number","title":"Bathrooms","description":"Optional bathroom count, may be fractional e.g. 1.5. Must be >= 0."},` +
 				`"sqft":{"type":"integer","title":"Square feet","description":"Optional floor area in square feet. Must be > 0."},` +
-				`"availableFrom":{"type":"string","format":"date-time","title":"Available from","description":"Earliest move-in date."},` +
+				`"availableFrom":{"type":"string","format":"date-time","title":"Available from","description":"Earliest move-in date — an RFC3339 instant or a bare YYYY-MM-DD; stored normalized to UTC."},` +
 				`"leaseTermMonths":{"type":"integer","title":"Lease term (months)","description":"Lease term in months. Must be > 0."},` +
 				`"depositAmount":{"type":"number","title":"Security deposit","description":"Optional security deposit, a number > 0 in the listing's currency. Absent = the unit takes no deposit."},` +
 				`"status":{"type":"string","title":"Status","enum":["available","pending","leased","withdrawn"],"description":"Listing availability. 'withdrawn' is off-market and hidden from applicant browse; relist by setting available again."}},` +
@@ -101,7 +144,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"bedrooms":        "Bedroom count.",
 				"bathrooms":       "Optional bathroom count (may be fractional, e.g. 1.5). Omitted clears any existing value (full replace).",
 				"sqft":            "Optional floor area in square feet. Omitted clears any existing value (full replace).",
-				"availableFrom":   "Earliest move-in date.",
+				"availableFrom":   "Earliest move-in date — an RFC3339 instant or a bare YYYY-MM-DD (read as midnight UTC); stored normalized to canonical RFC3339 UTC, any other shape refused.",
 				"leaseTermMonths": "Lease term in whole months.",
 				"depositAmount":   "Optional security deposit, a number > 0 in the listing's currency. REPLACES the stored value, so a re-submit without it clears it (absent = the unit takes no deposit).",
 				"status":          "Listing availability. 'withdrawn' takes the unit off-market (hidden from applicant browse; relist via status=available). Setting only THIS field going forward — without resupplying the economics — is SetListingStatus, a separate op.",

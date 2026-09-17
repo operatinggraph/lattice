@@ -1093,9 +1093,12 @@ func TestCreateLeaseApplication_AppliesToUnit_LinkSentenceValid(t *testing.T) {
 		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
 		Class:         "leaseapp",
 		Payload:       json.RawMessage(`{"applicant":"` + applicantKey + `","unit":"` + unitKey + `","moveInDate":"2026-08-01","leaseTermMonths":12,"requestedRent":2400}`),
+		// A dated application reads the unit's .listing (the availability
+		// floor), so the dispatcher declares it — the descriptor's own
+		// OptionalRead.
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{applicantKey, unitKey},
-			OptionalReads: []string{guardLinkKey(applicantKey, unitKey)},
+			OptionalReads: []string{guardLinkKey(applicantKey, unitKey), unitKey + ".listing"},
 		},
 	}
 	testutil.PublishOp(t, conn, env)
@@ -1551,7 +1554,8 @@ func TestCreateLeaseApplication_SameApplicantDifferentUnits_Allowed(t *testing.T
 // REVIVES that same tombstoned link (a blind create would collide with the
 // tombstone — revive-on-create) rather than minting a new one, and the new
 // application commits. The guard link is the authoritative uniqueness record,
-// freed only by WithdrawLeaseApplication.
+// freed by WithdrawLeaseApplication here and by every terminal state
+// (guard_release_test.go).
 func TestCreateLeaseApplication_ReapplyAfterWithdraw_RevivesGuardLink(t *testing.T) {
 	t.Parallel()
 	ctx, conn := setupLeaseEnv(t)
@@ -2328,6 +2332,31 @@ func decideReadsFor(leaseAppKey, unit string) *processor.ContextHint {
 	}
 }
 
+// declaredEnumerationsBound resolves an op-meta's declared walks
+// (permissions.go) with every {payload.<field>} hub bound to payloadKey — the
+// one substitution DeclaredEnumerations leaves to the caller — so a test
+// envelope declares exactly the relations the descriptor names (the walks off
+// the application's own links), never a hand-listed subset. metaSets defaults
+// to this package's OpMetas.
+func declaredEnumerationsBound(op, actorKey, payloadKey string) []processor.EnumerationHint {
+	hints, skipped := testutil.DeclaredEnumerationsWithSkips(op, actorKey, leasesigning.OpMetas())
+	if len(skipped) == 0 {
+		return hints
+	}
+	for _, m := range leasesigning.OpMetas() {
+		if m.OperationType != op || m.Dispatch == nil {
+			continue
+		}
+		for _, e := range m.Dispatch.Enumerations {
+			if !strings.HasPrefix(e.Hub, "{payload.") {
+				continue
+			}
+			hints = append(hints, processor.EnumerationHint{Hub: payloadKey, Relation: e.Relation, Direction: e.Direction})
+		}
+	}
+	return hints
+}
+
 // decide submits DecideLeaseApplication{leaseAppKey, decision} (class
 // leaseapp) at the given submittedAt and asserts the outcome. unit is kept as
 // a parameter so every call site still names the application's own
@@ -2338,7 +2367,7 @@ func decideReadsFor(leaseAppKey, unit string) *processor.ContextHint {
 func decide(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, leaseAppKey, decision, unit, submittedAt string, want processor.MessageOutcome) {
 	t.Helper()
 	hint := decideReadsFor(leaseAppKey, unit)
-	hint.Enumerations = testutil.DeclaredEnumerations("DecideLeaseApplication", lsActorKey, leasesigning.OpMetas())
+	hint.Enumerations = declaredEnumerationsBound("DecideLeaseApplication", lsActorKey, leaseAppKey)
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -2451,7 +2480,7 @@ func decideReason(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *p
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{"leaseAppKey": leaseAppKey, "decision": decision, "reason": reason})
 	hint := decideReadsFor(leaseAppKey, unit)
-	hint.Enumerations = testutil.DeclaredEnumerations("DecideLeaseApplication", lsActorKey, leasesigning.OpMetas())
+	hint.Enumerations = declaredEnumerationsBound("DecideLeaseApplication", lsActorKey, leaseAppKey)
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,

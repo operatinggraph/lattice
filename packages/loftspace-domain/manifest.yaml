@@ -1,11 +1,14 @@
 name: loftspace-domain
-version: 0.14.0
+version: 0.15.0
 description: |
   LoftSpace listing economics. Adds the leasable facets of a unit — the
   .listing aspect (rent / term / availability) and the .address aspect — on
   top of location-domain's place graph, without introducing a vertex type.
-  The op scripts live on the loftspaceListing vertexType DDL; the listing and
-  address aspect-type DDLs are step-6 write gates. A second vertexType DDL,
+  The op scripts live on the loftspaceListing vertexType DDL (SetListing /
+  SetUnitAddress / SetListingStatus / FloorListingAvailability — the last an
+  operator-only availability floor lease-signing's tenancyEnd target
+  dispatches so a unit is never marketed from a day a recorded term end still
+  covers); the listing and address aspect-type DDLs are step-6 write gates. A second vertexType DDL,
   loftspaceOwnership, owns AssignUnitOwner / RemoveUnitOwner — the landlord→unit
   management link (cap-read.residence's ownership relationship, D1.3). Depends on
   location-domain (which owns vtx.unit). Three projection lenses: availableListings
@@ -74,6 +77,9 @@ declares:
     - operationType: SetListingStatus
       scope: any
       grantsTo: [operator]
+    - operationType: FloorListingAvailability
+      scope: any
+      grantsTo: [operator]
     - operationType: AssignUnitOwner
       scope: any
       grantsTo: [operator]
@@ -91,6 +97,7 @@ declares:
       grantsTo: [consumer]
   opMetas:
     - operationType: SetListingStatus
+    - operationType: FloorListingAvailability
     - operationType: SetListing
     - operationType: SetUnitAddress
     - operationType: AssignUnitOwner

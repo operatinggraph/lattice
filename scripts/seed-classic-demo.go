@@ -640,7 +640,7 @@ func backfillLeaseUnits(ctx context.Context, conn *substrate.Conn, adminKey, uni
 			map[string]any{"leaseAppKey": leaseAppKey, "newUnitKey": unitKey},
 			&processor.ContextHint{
 				Reads:         []string{leaseAppKey, unitKey},
-				OptionalReads: []string{linkKey(leaseAppKey, "appliesToUnit", unitKey)},
+				OptionalReads: []string{linkKey(leaseAppKey, "appliesToUnit", unitKey), leaseAppKey + ".decision", leaseAppKey + ".tenancy"},
 				Enumerations: []processor.EnumerationHint{
 					{Hub: leaseAppKey, Relation: "appliesToUnit", Direction: "out"},
 					{Hub: leaseAppKey, Relation: "applicationFor", Direction: "out"},

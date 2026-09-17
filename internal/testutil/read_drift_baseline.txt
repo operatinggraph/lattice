@@ -117,9 +117,15 @@ read	CreditCafeAccount	lnk.identity.<id>.worksAt.building.<id>
 read	CreditCafeAccount	lnk.identity.<id>.worksAt.floor.<id>
 read	CreditCafeAccount	lnk.identity.<id>.worksAt.unit.<id>
 read	CreditCafeAccount	lnk.leaseapp.<id>.applicationFor.identity.<id>
+# DecideLeaseApplication / EndTenancy / RecordApplicationLoss: the terminal
+# states' guard release (free_applied_to_unit_guard) — the guard key is built
+# from the applicant a walk resolves and the unit another resolves; link-shaped,
+# category 3 (the ReassignLeaseUnit row's shape).
+read	DecideLeaseApplication	lnk.identity.<id>.appliedToUnit.unit.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.manages.unit.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.worksAt.building.<id>
 read	DecideLeaseApplication	lnk.identity.<id>.worksAt.unit.<id>
+read	EndTenancy	lnk.identity.<id>.appliedToUnit.unit.<id>
 read	EndVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 # GiveNotice's landlord probe (require_manages, packages/lease-signing/
 # scripts.go): the manages link is keyed by the unit the application's own
@@ -197,6 +203,7 @@ read	ReassignSessionSeries	lnk.identity.<id>.worksAt.building.<id>
 # instructor-hub twin of this read needs no row: the instructor vertex is the
 # ledBy walk's own far endpoint, admitted as class (e).
 read	ReassignSessionSeries	vtx.studio.<id>.slot<t>
+read	RecordApplicationLoss	lnk.identity.<id>.appliedToUnit.unit.<id>
 read	RecordCapabilityProposal	vtx.capabilityproposal.<id>.request
 # RecordEncounter's workplace fallback (its ONLY non-operator grant is
 # `provider`; frontOfHouse is not among its grantees) reuses SetAppointmentStatus's
@@ -401,7 +408,6 @@ walk	CreditCafeAccount	vtx.floor.<id> containedIn out
 walk	CreditCafeAccount	vtx.leaseapp.<id> appliesToUnit out
 walk	CreditCafeAccount	vtx.unit.<id> containedIn out
 walk	DecideLeaseApplication	vtx.building.<id> containedIn out
-walk	DecideLeaseApplication	vtx.leaseapp.<id> appliesToUnit out
 walk	DecideLeaseApplication	vtx.unit.<id> containedIn out
 walk	EndVisitSeries	vtx.building.<id> containedIn out
 walk	EndVisitSeries	vtx.provider.<id> practicesAt out

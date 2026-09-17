@@ -523,6 +523,53 @@ def leaseapp_unit(app_key):
         return None
     return unit
 
+def free_applied_to_unit_guard(app_key, unit_key):
+    # The mutations that FREE the per-(applicant, unit) duplicate-application
+    # guard link (lnk.identity.<a>.appliedToUnit.unit.<u>, created or revived
+    # by CreateLeaseApplication) once the application reaches a TERMINAL state
+    # -- declined, lost, or its tenancy ended -- so the same applicant can
+    # apply for the same unit again: the re-apply revives the tombstone
+    # through CreateLeaseApplication's existing CAS path. The withdraw and
+    # reassign releases are the precedent (WithdrawLeaseApplication frees the
+    # pair it names; ReassignLeaseUnit frees the vacated pair); this is the
+    # same tombstone for the terminal states that leave the leaseapp itself
+    # alive. Returns [] when there is nothing to free: no live unit (the
+    # caller's own resolution answered None), no live applicant link, or a
+    # guard already absent / tombstoned. Never a refusal -- a terminal
+    # record is not gated on the guard's bookkeeping.
+    #
+    # Accepted window: the guard is per PAIR and names no owning application,
+    # so a terminal op hydrated while a concurrent loss + re-apply on the same
+    # pair commits (a Decide{declined} read before the revived guard landed)
+    # tombstones the NEW application's guard under the OCC pin's own revision
+    # -- milliseconds wide on the default lane's >1 workers, and accepted.
+    if unit_key == None:
+        return []
+    _, unit_id = parts_of(unit_key, "unit", "unit")
+    # The applicant, from the application's OWN applicationFor link -- never
+    # a payload field (ReassignLeaseUnit's resolution).
+    # read-posture: (e) relation=applicationFor epoch=none -- a leaseapp
+    # carries exactly one applicationFor link (required at
+    # CreateLeaseApplication), so this is never a keyspace scan.
+    app_page, _ = kv.Links(app_key, "applicationFor", "out", None, LEASEAPP_UNIT_PAGE_LIMIT)
+    applicant = None
+    for lk in app_page:
+        if not lk.isDeleted:
+            applicant = lk.targetVertex
+    if applicant == None:
+        return []
+    _, applicant_id = parts_of(applicant, "applicant", "identity")
+    guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + unit_id
+    # read-posture: (e) per-candidate follow-up read off the applicationFor
+    # enumeration above + the caller's appliesToUnit walk (data-derived key).
+    guard = kv.Read(guard_key)
+    if guard == None or guard.isDeleted:
+        return []
+    # CAS on the guard's own revision: a concurrent re-apply that revived it
+    # between this read and the commit conflicts instead of being tombstoned
+    # out from under the new application.
+    return [make_link_tombstone_occ(guard_key, applicant, unit_key, "appliedToUnit", "appliedToUnit", guard.revision)]
+
 def require_manages(unit_key, what):
     # The landlord ownership probe -- the scope=self counterpart to
     # require_workplace above, binding the path that guard deliberately cannot
@@ -677,6 +724,32 @@ def execute(state, op):
             # would be silently truncated by the approve's add_months);
             # requestedRent, when supplied, is a positive amount.
             move_in = time.rfc3339_utc(as_rfc3339_instant(move_in))
+            # The unit's own .listing feeds two checks on a dated application:
+            # the availability floor just below and the rent fallback further
+            # down. Read once here. Same key + idiom SetApplicantProfile already
+            # reads for its income-to-rent check.
+            # read-posture: (d) declared optionalReads at CreateLeaseApplication
+            # dispatch — a unit with no listing yet has no date to floor on and
+            # no rent to fall back to.
+            listing = kv.Read(unit + ".listing")
+            if listing == None or listing.isDeleted:
+                listing = None
+            # A move-in before the unit is available is refused where the terms
+            # are minted, not clamped: the terms are the applicant's reviewed
+            # ask, and DecideLeaseApplication's approve commits to them verbatim
+            # (its own MoveInBeforeAvailable is the same refusal at the reader).
+            # The compare is by UTC CALENDAR DAY: every surface promises a day
+            # (a move-in is a day; the listing's availableFrom may be a bare
+            # date, a midnight instant, or a wall-clock instant a landlord's
+            # datetime control produced), so both sides canonicalize to an
+            # instant and their YYYY-MM-DD slices are compared — a move-in ON
+            # the available day is admitted whatever the listing's time of day.
+            if listing != None:
+                available_from = listing.data.get("availableFrom")
+                if type(available_from) == type("") and len(available_from) > 0:
+                    available_at = time.rfc3339_utc(as_rfc3339_instant(available_from))
+                    if move_in[:10] < available_at[:10]:
+                        fail("MoveInBeforeAvailable: a move-in of " + move_in[:10] + " is before unit " + unit + " is available from " + available_at[:10] + " (UTC day)")
             term_months = require_number(p, "leaseTermMonths")
             if term_months != int(term_months) or int(term_months) < 1:
                 fail("InvalidTerms: leaseTermMonths must be a whole, positive month count, got " + str(term_months))
@@ -687,18 +760,14 @@ def execute(state, op):
                 if req_rent == None or req_rent <= 0:
                     fail("InvalidTerms: requestedRent must be a positive amount, got " + str(getattr(p, "requestedRent")))
                 req_rent = two_decimals(req_rent, "requestedRent")
-            if req_rent == None:
+            if req_rent == None and listing != None:
                 # No rent offer from the applicant — fall back to the unit's own
-                # listed rent, so leaseRentSettlementSpec (semantic-contracts) has
-                # a requestedRent to gate missing_account on. Same key + idiom
-                # SetApplicantProfile already reads for its income-to-rent check.
-                # read-posture: (d) declared optionalReads at CreateLeaseApplication
-                # dispatch — a unit with no listing yet has no rent to fall back to.
-                listing = kv.Read(unit + ".listing")
-                if listing != None and not listing.isDeleted:
-                    r = listing.data.get("rentAmount")
-                    if r != None and (type(r) == type(0) or type(r) == type(0.0)) and r > 0:
-                        req_rent = r
+                # listed rent (the .listing read above), so leaseRentSettlementSpec
+                # (semantic-contracts) has a requestedRent to gate missing_account
+                # on.
+                r = listing.data.get("rentAmount")
+                if r != None and (type(r) == type(0) or type(r) == type(0.0)) and r > 0:
+                    req_rent = r
             if req_rent != None:
                 terms_data["requestedRent"] = req_rent
             mutations.append(make_aspect(app_key, "terms", "terms", terms_data))
@@ -921,6 +990,15 @@ def execute(state, op):
             make_aspect_upsert(app_key, "decision", "decision", decision_data),
         ]
 
+        # A decline is a terminal state, so the FIRST decline frees the
+        # per-(applicant, unit) guard link and the applicant may apply for the
+        # unit again (free_applied_to_unit_guard). Only the first: a same-value
+        # re-submission after a re-apply must not tombstone the NEW
+        # application's revived guard. An approve keeps the pair -- it is the
+        # executed lease -- until its tenancy ends (EndTenancy frees it).
+        if decision == "declined" and (prior == None or prior.isDeleted or prior.data.get("value") == None):
+            mutations += free_applied_to_unit_guard(app_key, decide_unit)
+
         # .tenancy: the tenancy-term fact stamped exactly once, on the FIRST
         # approve — CREATE-ONLY (a re-approve of an already-terminal decision is
         # idempotent at the DecisionFinal guard above, but even a same-value
@@ -933,10 +1011,16 @@ def execute(state, op):
         # can only ever build a malformed read key on a decline or re-approve,
         # where it is absent by design). The term itself is derived from the
         # APPLICANT'S OWN .terms first — the approval commits to what the
-        # applicant asked for, never silently clamped to the listing's
-        # availableFrom — and falls back field-by-field to the unit's
-        # .listing only where .terms carries nothing (a bare applicant+unit
-        # application with no moveInDate).
+        # applicant asked for, verbatim — and falls back field-by-field to
+        # the unit's .listing only where .terms carries nothing (a bare
+        # applicant+unit application with no moveInDate). A requested move-in
+        # BEFORE the listing's availableFrom is REFUSED (MoveInBeforeAvailable),
+        # never clamped to it: clamping would sign a lease on terms the
+        # landlord did not read, and the floor on availableFrom (the
+        # tenancyEnd target's FloorListingAvailability) only ever raises the
+        # date, so a start it admits is one the unit is genuinely free for.
+        # The bare application takes availableFrom itself and is equal by
+        # construction.
         if decision == "approved":
             # read-posture: (d) declared optionalReads at DecideLeaseApplication
             # dispatch — None is the expected, common first-approve case.
@@ -994,6 +1078,16 @@ def execute(state, op):
                 # and Priya Raman's live pending application do not) —
                 # time.rfc3339_utc itself rejects a bare date.
                 lease_start = time.rfc3339_utc(as_rfc3339_instant(move_in))
+                # The applicant's own requested start must not precede the
+                # unit's availability (the same refusal CreateLeaseApplication
+                # raises when the terms are minted; re-proven here because the
+                # listing's date may have been floored since). Compared by UTC
+                # CALENDAR DAY, as at the writer: a start ON the available day
+                # is admitted whatever the listing's time of day.
+                if terms_move_in != None and type(available_from) == type("") and len(available_from) > 0:
+                    available_at = time.rfc3339_utc(as_rfc3339_instant(available_from))
+                    if lease_start[:10] < available_at[:10]:
+                        fail("MoveInBeforeAvailable: application " + app_key + " asks to move in " + lease_start[:10] + " but unit " + decide_unit + " is available from " + available_at[:10] + " (UTC day)")
                 # A lease term is a calendar-month count (12 months from Jan
                 # 31 is Jan 31 of next year, never a fixed hour count), and
                 # the builtin clamps the day-of-month to the target month's
@@ -1095,10 +1189,13 @@ def execute(state, op):
     if ot == "WithdrawLeaseApplication":
         # Withdraw / cancel an application: soft-delete the leaseapp so it drops
         # from My Applications (the convergence lens anchors on it + filters
-        # isDeleted → EmptyBehavior delete), and FREE the per-(applicant, unit)
-        # guard link so it stops blocking a re-apply. The complement to
-        # CreateLeaseApplication's guard — an applicant who applied to the wrong
-        # unit can back out + re-apply (the guard revives on re-apply).
+        # isDeleted → EmptyBehavior delete), and — when the application is
+        # UNDECIDED — FREE the per-(applicant, unit) guard link so it stops
+        # blocking a re-apply. The complement to CreateLeaseApplication's guard
+        # — an applicant who applied to the wrong unit can back out + re-apply
+        # (the guard revives on re-apply). A declined or lost application had
+        # its pair freed at the terminal decision, so the guard, if alive,
+        # belongs to a later application on the same pair and is left alone.
         app_key = required_string(p, "leaseAppKey")
         _, app_id = parts_of(app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, app_key):
@@ -1161,12 +1258,15 @@ def execute(state, op):
         # An approved application is an executed lease: its account (heldFor),
         # balance and rent clause hang off it and the unit is leased, so it is
         # never withdrawn — the FE hides the button, and the API refuses the
-        # same way. A declined application stays withdrawable (the applicant
-        # frees the guard link to re-apply).
+        # same way. A declined or lost application stays withdrawable — it
+        # drops from My Applications — but its pair was already freed when the
+        # terminal decision was recorded (free_applied_to_unit_guard), so the
+        # guard is left untouched below: alive, it is a LATER application's.
         # read-posture: (d) declared optionalReads at WithdrawLeaseApplication
         # dispatch — absent is the undecided application, the normal withdraw.
         decision = kv.Read(app_key + ".decision")
-        if decision != None and not decision.isDeleted and decision.data.get("value") == "approved":
+        decided = decision != None and not decision.isDeleted and decision.data.get("value") != None
+        if decided and decision.data.get("value") == "approved":
             fail("AlreadyApproved: application " + app_key + " is an executed lease and cannot be withdrawn")
 
         # Tombstone the application. The applicationFor / appliesToUnit links are
@@ -1174,15 +1274,20 @@ def execute(state, op):
         # dangle off a tombstoned anchor every reader filters.
         mutations = [make_vtx_tombstone(app_key, "leaseapp")]
 
-        # Free the per-(applicant, unit) guard link: tombstone it so a re-apply
-        # revives it. UNCONDITIONED (the withdraw is the authority the application is
-        # gone; an alive guard blocks any concurrent re-apply, so no revive races
-        # this). absent → nothing to free.
+        # Free the per-(applicant, unit) guard link of an UNDECIDED application:
+        # tombstone it so a re-apply revives it. UNCONDITIONED (the withdraw is
+        # the authority the application is gone; an alive guard blocks any
+        # concurrent re-apply, so no revive races this). absent → nothing to
+        # free. The guard key is deterministic per pair, so once a decided
+        # application's pair has been freed and the applicant has re-applied,
+        # the same key is the NEW application's live guard — the decided
+        # branch never touches it, or a third application on the pair would be
+        # admitted past DuplicateApplication.
         guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + unit_id
         # read-posture: (d) declared optionalReads at WithdrawLeaseApplication
         # dispatch — a never-guarded (legacy) application is the absent branch.
         guard = kv.Read(guard_key)
-        if guard != None and not guard.isDeleted:
+        if not decided and guard != None and not guard.isDeleted:
             mutations.append(make_link_tombstone(guard_key, applicant, unit, "appliedToUnit", "appliedToUnit"))
 
         events = [{"class": "leaseapp.applicationWithdrawn",
@@ -1195,12 +1300,14 @@ def execute(state, op):
         # it (TombstoneLocation does not cascade — the SetMenuItemLocation /
         # ReassignSession repair shape), and an ordinary move of a live
         # application to a different unit besides. Re-points appliesToUnit
-        # and re-keys the per-(applicant, unit) duplicate-application guard:
-        # the guard's contract is "at most one live application per
-        # (applicant, unit)", so a moved lease VACATES its old pair — that
-        # guard is freed (tombstoned) alongside the new pair's guard going
-        # live, or a later re-apply / return to the old unit would collide
-        # with a guard nothing about that pair still justifies.
+        # and, for a LIVE application, re-keys the per-(applicant, unit)
+        # duplicate-application guard: the guard's contract is "at most one
+        # live application per (applicant, unit)", so a moved lease VACATES
+        # its old pair — that guard is freed (tombstoned) alongside the new
+        # pair's guard going live, or a later re-apply / return to the old
+        # unit would collide with a guard nothing about that pair still
+        # justifies. A TERMINAL application (declined, lost, tenancy ended)
+        # is re-pointed only — it holds no pair (below).
         lease_app_key = required_string(p, "leaseAppKey")
         _, app_id = parts_of(lease_app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, lease_app_key):
@@ -1253,31 +1360,54 @@ def execute(state, op):
         old_unit = current.targetVertex
         _, old_unit_id = parts_of(old_unit, "oldUnit", "unit")
 
-        # Per-(applicant, new unit) duplicate-application guard — the same
-        # three-way block CreateLeaseApplication runs on a first apply
-        # (guard logic there).
-        guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + new_unit_id
-        # read-posture: (e) per-candidate follow-up read off the
-        # applicationFor enumeration above (data-derived key).
-        guard = kv.Read(guard_key)
-        if guard != None and not guard.isDeleted:
-            fail("DuplicateApplication: applicant " + applicant + " already has a live application for unit " + new_unit)
-        if guard != None:
-            guard_mut = make_link_revive_occ(guard_key, applicant, new_unit, "appliedToUnit", "appliedToUnit", guard.revision)
-        else:
-            guard_mut = make_link(guard_key, applicant, new_unit, "appliedToUnit", "appliedToUnit", {})
+        # The guard is per LIVE pair, and a TERMINAL application — declined
+        # or lost (.decision), or with its tenancy ended (.tenancy.endedAt) —
+        # holds no pair: its guard was freed when the terminal state was
+        # recorded (free_applied_to_unit_guard), so an alive guard on its old
+        # pair is a LATER application's on that pair, and a guard on its new
+        # pair would be minted for an application nothing will ever free. A
+        # terminal application is therefore re-pointed only: no vacated-pair
+        # tombstone, no new-pair guard, no DuplicateApplication check. Both
+        # aspects are declared OptionalReads — absent is the undecided, live
+        # application, the ordinary move.
+        # read-posture: (d) declared optionalReads at ReassignLeaseUnit
+        # dispatch — absent is the undecided application.
+        decision = kv.Read(lease_app_key + ".decision")
+        # read-posture: (d) declared optionalReads at ReassignLeaseUnit
+        # dispatch — absent is the never-approved application.
+        tenancy = kv.Read(lease_app_key + ".tenancy")
+        terminal = False
+        if decision != None and not decision.isDeleted and decision.data.get("value") in ["declined", "lost"]:
+            terminal = True
+        if tenancy != None and not tenancy.isDeleted and tenancy.data.get("endedAt") != None:
+            terminal = True
 
-        # The VACATED (applicant, old unit) guard: the pair the lease no
-        # longer applies to, once this commits. Freed unconditionally when
-        # alive — the guard is per LIVE pair, so nothing about the old pair
-        # still justifies holding it once the lease has moved on.
-        old_guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + old_unit_id
-        # read-posture: (e) per-candidate follow-up read off the
-        # appliesToUnit + applicationFor enumerations above (data-derived key).
-        old_guard = kv.Read(old_guard_key)
-        old_guard_muts = []
-        if old_guard != None and not old_guard.isDeleted:
-            old_guard_muts = [make_link_tombstone_occ(old_guard_key, applicant, old_unit, "appliedToUnit", "appliedToUnit", old_guard.revision)]
+        guard_muts = []
+        if not terminal:
+            # Per-(applicant, new unit) duplicate-application guard — the same
+            # three-way block CreateLeaseApplication runs on a first apply
+            # (guard logic there).
+            guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + new_unit_id
+            # read-posture: (e) per-candidate follow-up read off the
+            # applicationFor enumeration above (data-derived key).
+            guard = kv.Read(guard_key)
+            if guard != None and not guard.isDeleted:
+                fail("DuplicateApplication: applicant " + applicant + " already has a live application for unit " + new_unit)
+            if guard != None:
+                guard_muts.append(make_link_revive_occ(guard_key, applicant, new_unit, "appliedToUnit", "appliedToUnit", guard.revision))
+            else:
+                guard_muts.append(make_link(guard_key, applicant, new_unit, "appliedToUnit", "appliedToUnit", {}))
+
+            # The VACATED (applicant, old unit) guard: the pair the live
+            # application no longer applies to, once this commits. Freed when
+            # alive — nothing about the old pair still justifies holding it
+            # once the application has moved on.
+            old_guard_key = "lnk.identity." + applicant_id + ".appliedToUnit.unit." + old_unit_id
+            # read-posture: (e) per-candidate follow-up read off the
+            # appliesToUnit + applicationFor enumerations above (data-derived key).
+            old_guard = kv.Read(old_guard_key)
+            if old_guard != None and not old_guard.isDeleted:
+                guard_muts.append(make_link_tombstone_occ(old_guard_key, applicant, old_unit, "appliedToUnit", "appliedToUnit", old_guard.revision))
 
         new_applies_to_lnk = "lnk.leaseapp." + app_id + ".appliesToUnit.unit." + new_unit_id
         mutations = [
@@ -1287,8 +1417,7 @@ def execute(state, op):
             # RevisionConflicts instead.
             make_link_tombstone_occ(current.key, lease_app_key, old_unit, "appliesToUnit", "appliesToUnit", current.revision),
             make_link_create_or_revive(new_applies_to_lnk, lease_app_key, new_unit, "appliesToUnit", "appliesToUnit"),
-            guard_mut,
-        ] + old_guard_muts
+        ] + guard_muts
         events = [{"class": "leaseapp.unitReassigned",
                    "data": {"leaseAppKey": lease_app_key, "oldUnitKey": old_unit, "newUnitKey": new_unit}}]
         # primaryKey is the NEW appliesToUnit link, not leaseAppKey: every
@@ -1574,7 +1703,8 @@ def execute(state, op):
         # open-renewal hold is the lens's dispatch gate (tenancy_end_lenses.go);
         # an operator ending a term under an open cycle is admitted, and
         # SignRenewal then refuses TenancyEnded rather than dropping the
-        # endedAt.
+        # endedAt. Recording the end also frees the per-(applicant, unit)
+        # guard link (the walk off the application's own links, below).
         app_key = required_string(p, "leaseAppKey")
         parts_of(app_key, "leaseAppKey", "leaseapp")
         if not vertex_alive(state, app_key):
@@ -1642,7 +1772,16 @@ def execute(state, op):
         for k in tenancy.data:
             ended[k] = tenancy.data[k]
         ended["endedAt"] = end
-        mutations = [make_aspect_update_occ(app_key, "tenancy", "tenancy", ended, tenancy.revision)]
+        # An ended tenancy is the application's terminal state: the
+        # per-(applicant, unit) guard is freed in the same batch so the former
+        # tenant may apply for the unit again (free_applied_to_unit_guard --
+        # the residence design's re-approval-on-the-same-unit case revives
+        # the pair). The unit comes from the application's OWN appliesToUnit
+        # link; a unit that no longer resolves (tombstoned, or the link
+        # broken) means there is no pair left to free, never a refusal -- the
+        # end is recorded regardless. The already-ended no-op arm above never
+        # reaches this.
+        mutations = [make_aspect_update_occ(app_key, "tenancy", "tenancy", ended, tenancy.revision)] + free_applied_to_unit_guard(app_key, leaseapp_unit(app_key))
         events = [{"class": "leaseapp.tenancyEnded",
                    "data": {"leaseAppKey": app_key, "leaseEnd": lease_end, "endedAt": end}}]
         return {"mutations": mutations, "events": events,
@@ -1845,7 +1984,11 @@ def execute(state, op):
         # overwritten with a loss, and the re-hydrated retry reads it as
         # decided — the no-op above. An upsert would silently win that race.
         lost = {"value": "lost", "decidedAt": time.rfc3339_utc(op.submittedAt)}
-        mutations = [make_aspect(app_key, "decision", "decision", lost)]
+        # A loss is terminal: the per-(applicant, unit) guard is freed in the
+        # same batch, so the losing applicant may apply for the unit again once
+        # it relists (free_applied_to_unit_guard; the no-op arm above leaves an
+        # already-recorded loss's guard alone).
+        mutations = [make_aspect(app_key, "decision", "decision", lost)] + free_applied_to_unit_guard(app_key, unit_key)
         events = [{"class": "leaseapp.applicationLost",
                    "data": {"leaseAppKey": app_key, "unitKey": unit_key}}]
         return {"mutations": mutations, "events": events,

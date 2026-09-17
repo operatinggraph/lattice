@@ -35,7 +35,7 @@ func etEnvelope(label, actor, appKey, submittedAt string, hint *processor.Contex
 }
 
 func etDeclaredHint(appKey string) *processor.ContextHint {
-	return &processor.ContextHint{Reads: []string{appKey, appKey + ".tenancy"}}
+	return &processor.ContextHint{Reads: []string{appKey, appKey + ".tenancy"}, Enumerations: declaredEnumerationsBound("EndTenancy", lsActorKey, appKey)}
 }
 
 // etStageRenewedTenancy overwrites the leaseapp's .tenancy with the shape
@@ -297,7 +297,11 @@ func TestEndTenancy_NonOperatorDenied(t *testing.T) {
 // instead of losing its extension to an end the term no longer has.
 func TestEndTenancyScript_PinsTheHydratedTenancyRevision(t *testing.T) {
 	const appKey = "vtx.leaseapp.BBendtenScrHJKMNPQRS"
+	const unitKey = "vtx.unit.BBendtenScrUJKMNPQRS"
+	const applicantKey = "vtx.identity.BBendtenScrAJKMNPQRS"
 	const hydratedRevision = uint64(7)
+	const guardRevision = uint64(11)
+	guardKey := guardLinkKey(applicantKey, unitKey)
 	var script string
 	for _, d := range leasesigning.Package.DDLs {
 		if d.CanonicalName == "leaseapp" {
@@ -322,7 +326,16 @@ func TestEndTenancyScript_PinsTheHydratedTenancyRevision(t *testing.T) {
 			appKey + ".tenancy": {Key: appKey + ".tenancy", Class: "tenancy", VertexKey: appKey, LocalName: "tenancy",
 				Data:     map[string]any{"leaseStart": "2026-01-01T00:00:00Z", "leaseEnd": "2027-01-01T00:00:00Z", "renewalOpensAt": "2026-11-02T00:00:00Z"},
 				Revision: hydratedRevision},
+			unitKey:      {Key: unitKey, Class: "location", Data: map[string]any{}, Revision: 1},
+			applicantKey: {Key: applicantKey, Class: "identity", Data: map[string]any{}, Revision: 1},
+			guardKey:     {Key: guardKey, Class: "appliedToUnit", Data: map[string]any{}, Revision: guardRevision},
 		},
+		// The guard release's two walks off the application's own links: the
+		// unit (appliesToUnit) and the applicant (applicationFor).
+		LinkLister: ralLinkLister{links: []processor.LinkDoc{
+			{Key: appliesToUnitLinkKey(appKey, unitKey), Class: "appliesToUnit", SourceVertex: appKey, TargetVertex: unitKey, Revision: 1},
+			{Key: "lnk.leaseapp." + appKey[len("vtx.leaseapp."):] + ".applicationFor.identity." + applicantKey[len("vtx.identity."):], Class: "applicationFor", SourceVertex: appKey, TargetVertex: applicantKey, Revision: 1},
+		}},
 		DDLLookup:    map[string]processor.MetaVertex{},
 		ScriptSource: script,
 		ScriptClass:  "leaseapp",
@@ -330,8 +343,21 @@ func TestEndTenancyScript_PinsTheHydratedTenancyRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EndTenancy script: %v", err)
 	}
-	if len(result.Mutations) != 1 {
-		t.Fatalf("want exactly one mutation (the .tenancy rewrite), got %d: %+v", len(result.Mutations), result.Mutations)
+	if len(result.Mutations) != 2 {
+		t.Fatalf("want exactly two mutations (the .tenancy rewrite + the guard tombstone), got %d: %+v", len(result.Mutations), result.Mutations)
+	}
+	// The guard release is CAS-pinned on the guard's OWN revision, so a
+	// concurrent re-apply that revived it conflicts instead of being
+	// tombstoned out from under the new application.
+	g := result.Mutations[1]
+	if g.Op != "update" || g.Key != guardKey {
+		t.Fatalf("mutation[1] = %s %s, want update %s (the guard tombstone)", g.Op, g.Key, guardKey)
+	}
+	if deleted, _ := g.Document["isDeleted"].(bool); !deleted {
+		t.Fatalf("the guard mutation must be a tombstone, got %+v", g.Document)
+	}
+	if g.ExpectedRevision == nil || *g.ExpectedRevision != guardRevision {
+		t.Fatalf("guard tombstone expectedRevision = %v, want the guard's own revision %d", g.ExpectedRevision, guardRevision)
 	}
 	m := result.Mutations[0]
 	if m.Op != "update" || m.Key != appKey+".tenancy" {
