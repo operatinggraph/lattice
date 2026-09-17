@@ -650,6 +650,12 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   Eighth (lease-signing guard release, 2026-09-17, caught cold ×2): freeing a deterministic PAIR key from three new
   terminal ops left the two ops that ALREADY freed it (withdraw, reassign) taking a later application's revived key —
   the walk covers the value's existing writers, not only the ones the fire adds.
+  Ninth (clinic status clock, 2026-09-17, caught cold ×2): a new AUTHOR field keyed on `authContextTarget`'s
+  presence — a client hint a scope=any desk actor sets to any patient's identity — let the desk label its own cancel
+  the patient's and silence the notice (key an author on `authTargetValidated`, the proven target); and a gap's
+  closing conjunct borrowed from a sibling timer's fired marker never fires when that timer DISARMS on a terminal
+  status — read the sibling's `freshUntil` null arm before borrowing its marker, and bound on the recorded fact
+  (`at < endsAt`) instead.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any

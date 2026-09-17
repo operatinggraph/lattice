@@ -53,8 +53,10 @@ share one write site and one precedent (wellness `f139d128`), and the notice is 
 ## Verdict — *every status carries its moment and its author; a change the desk makes is told once, keyed on that moment*
 
 1. **`.status` gains `at` and `by`, recorded at the transition.** Every writer stamps `at =
-   time.rfc3339_utc(op.submittedAt)` and `by ∈ {staff, patient, sweep}` (`patient` when `op.authContextTarget
-   != ""`, `sweep` for `MarkPastDueNoShow`, `staff` otherwise) **when the value changes**; a same-value re-write
+   time.rfc3339_utc(op.submittedAt)` and `by ∈ {staff, patient, sweep}` (`patient` when `op.authTargetValidated` —
+   the target step 3 PROVED, never the presence of the client-supplied `authContextTarget` hint (amended at build,
+   2026-09-17: a scope=any desk actor can set that hint to any patient's identity); `sweep` for `MarkPastDueNoShow`;
+   `staff` otherwise, the bound provider included) **when the value changes**; a same-value re-write
    **carries `at` and `by` from the current aspect** — a note added to a cancelled visit, a scheduled re-stamp on a
    reschedule, and a same-value re-set are not transitions, so "checked in 12 min ago" does not reset and a
    cancel notice is not re-sent. The self-confirm leg writes `{value: confirmed, at, by: patient}` (its
@@ -66,9 +68,13 @@ share one write site and one precedent (wellness `f139d128`), and the notice is 
    on the entity, never inferred from the reminder's `remindedFor`.
 3. **One level-triggered lens in `clinic-reminders`: `appointmentChangeNotices`** (anchor appointment,
    `actorAggregate`, `weaver-targets`, no `freshUntil`):
-   - `missing_cancel_notice = status = 'cancelled' AND by = 'staff' AND at <> null AND changeNotice.cancelledFor <> at
-     AND NOT (freshnessExpiry.byTarget.pastDueAppointments >= endsAt)` — a visit cancelled by the desk before it
-     ended; a patient's own cancel, a legacy cancel, and a correction after the visit are not told.
+   - `missing_cancel_notice = status = 'cancelled' AND by = 'staff' AND at <> null AND at < endsAt AND
+     changeNotice.cancelledFor <> at AND NOT (freshnessExpiry.byTarget.pastDueAppointments >= endsAt)` — a visit
+     cancelled by the desk before it ended; a patient's own cancel, a status carrying no `at`/`by`, and a cancel
+     stamped at or after the end are not told. The `at < endsAt` conjunct is load-bearing (amended at build,
+     2026-09-17): the sibling `pastDueAppointments` timer DISARMS the moment a status goes terminal, so a
+     hand-closed noShow/completed later corrected to cancelled records no lapse — the recorded-end conjunct alone
+     would have told the patient about a visit days past.
    - `missing_move_notice = movedAt <> null AND movedBy = 'staff' AND changeNotice.movedFor <> movedAt AND
      nonTerminalAppointment AND NOT (…pastDueAppointments >= endsAt)` — told once per desk move; a second move
      reopens; a patient's own move is not told; a moved-then-cancelled visit gets the cancel notice only.
@@ -78,7 +84,8 @@ share one write site and one precedent (wellness `f139d128`), and the notice is 
 4. **One marker, one op: `RecordAppointmentChangeNotice{appointmentKey, kind: cancelled|moved, changeRef}`**
    (Weaver-actor only; reads `[appointmentKey, appointmentKey.status, appointmentKey.schedule]`, optional
    `[appointmentKey.changeNotice]`). Liveness-guards the appointment; re-checks the change against the live
-   aspect — `cancelled`: `status.value == 'cancelled' AND status.by == 'staff' AND status.at == changeRef`;
+   aspect — `cancelled`: `status.value == 'cancelled' AND status.by == 'staff' AND status.at == changeRef AND
+   status.at < schedule.endsAt`;
    `moved`: `schedule.movedAt == changeRef AND schedule.movedBy == 'staff'` and a non-terminal status — else
    `StaleChange` (a stale row is refused, not trusted). Writes `.changeNotice = {cancelledFor?, movedFor?,
    sentAt}` (class `appointmentChangeNotice`; the other kind's field carried; create when absent, bare update
@@ -191,3 +198,37 @@ share one write site and one precedent (wellness `f139d128`), and the notice is 
    deduping the move notice against the reminder that a move inside 24 h re-arms (two true facts, two messages —
    the wellness precedent accepted the same); a backfill of `at` on legacy statuses; the time-off displacement
    row; a real vendor adapter.
+
+### Build note (2026-09-17)
+
+Shipped `8df02fde` (merge; brief `25783394`). Increments on the branch: `8fd1f4d5` (clinic-domain stamps + columns,
+0.40.0), `5445a6ec` (clinic-reminders lens + op + replyOp + target, 0.13.0), `3895d80e` (absorbed find: the two reminder
+replyOps refuse a token whose recovered key is not a `vtx.appointment.<NanoID>`), `2213df64` (the card), `102167a9` (the
+close fix round). Live on the shared stack (`make refresh-clinic`: both packages diff-applied, `provision-readpath`
+grew the two protected tables by three columns with one auto-recovered structural pause, `bin/clinic-app` cycled;
+`verify-package-clinic-domain` 468/468, `verify-package-clinic-reminders` 129/129): the desk checked a patient in at
+16:30:24Z and the staff read carried `statusAt`/`statusBy: staff`; a desk cancel at 16:30:33Z and a desk move at
+16:30:40Z each produced exactly one `RecordAppointmentChangeNotice` dispatch at 16:30:46Z, both bridge outcomes
+`completed`, `.changeNotice` keyed on the stamp, `changeNoticeSentAt` on both rows; the moved visit's scheduled
+re-stamp carried its absent `at` (a status that records no moment stays that way). No Weaver issue raised.
+
+Deviations from the design body, amended above where they stand: (1) **Verdict §1's author selector is
+`op.authTargetValidated`, not the presence of `authContextTarget`** — the raw target is a client-supplied hint any
+scope=any holder can set, and a desk actor naming a patient's identity would otherwise have labelled its own cancel
+`by: patient` and silenced the notice (caught cold; reachable — the vector lands under the operator grant);
+(2) **the cancel gap carries `status.at < endsAt` and the op refuses `StaleChange` at or after the end** — the design
+relied on the `pastDueAppointments` lapse to bound a post-visit cancel, but that timer disarms the moment a status
+goes terminal, so a hand-closed noShow/completed later corrected to cancelled had no lapse and would have been told
+(caught cold); (3) the card's terminal line adds "(by the patient)" / "(past-due sweep)". Accepted and recorded: two
+staff moves inside one second share a `movedAt` and the one notice carries the live times; `by: staff` covers the
+bound provider; "Patient told" reads the queued send, not the bridge outcome (the reminder line's posture).
+
+Review classification (component: `_packages`): **design-gap ×2** — the author selector keyed on a client hint the
+Processor documents as unproven (the `authTargetValidated` idiom cafe-domain already carries), and a closing conjunct
+borrowed from a sibling timer whose disarm condition the design never read; **implementation-bug ×1** — a carry-vs-stamp
+pin whose fixture submitted every op at one instant, so it could not discriminate; **convention ×1** — six
+history-narrating comments/test docs in the first build ("legacy", "before this build", "this Increment does not
+build"); **review over-reach** — none. One adjacent security fix absorbed (the reminder replyOps' key shape). Two
+dossier sightings appended to `_packages.md` (the borrowed-conjunct class under *the "leg" of a guard*, and the
+proven-vs-present target under *a static declaration is not a trusted value* — a second sighting; the first was the
+cafe `ChargeTab` exemption, 2026-09-05).

@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-15 · `8424b038` · A landlord edits the listing and address of a unit they manage — `SetListing` + `SetUnitAddress` gain the consumer self grant behind the `manages` probe; Facet descriptors flip to self; live.
+- 2026-09-15 · `f3f353d5` · A component dossier holds at most the 12 entries it states for itself — `lint-board` counts them (`--selftest` replays the minting revision); `_packages.md` folded 20 → 12 / 27 → 13 KB, `substrate.md` 13 → 12.
 - 2026-09-15 · `006e92e0` · `lint-workplace-staff-vector` — every workplace-confined op has a non-operator staff vector (41 governed; 4 gaps closed with vectors); café statement reads the recorded arrears due date.
 - 2026-09-15 · `0b256550` · The no-show fee is the studio's recorded policy; the button names the amount; waive is a button; live ([design](../../../docs/reviews/wellness-noshow-fee-2026-09-15.md)).
 - 2026-09-15 · `7507be53` · A wellness debtor is reminded once per arrears episode and claims no new seat — `.arrears` + CreditHold on both booking ops; 3 reminded live ([design](../../../docs/reviews/wellness-arrears-reminder-2026-09-15.md)).
