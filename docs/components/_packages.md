@@ -606,7 +606,7 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   pass — pin the param's admissible domain at its source (loftspace deposit, 2026-09-15, caught cold). Sighting: a replay budget mirrored as a NUMBER (500) was sized against the live-read budget, not the 250 ms wall — a
   98-entry account aborted, and a ScriptTimeout is a rejection the gap re-dispatches forever (clinic arrears, 2026-09-16,
   live install); size by round trips (≈2.5 ms/entry; CI's 5000 ms wall hides it) and PAGE the walk across dispatches,
-  each page closing the gap that dispatched it via alternating phase gaps (arrears resumable replay, 2026-09-16).
+  each page closing the gap that dispatched it via alternating phase gaps (arrears resumable replay, 2026-09-16). Sighting (wellness rolling series, 2026-09-16, caught cold): a walk's page bound was sized on "the only writer mints ≤ 52" and a second writer of the walked relation (the rolling extension) made the set unbounded — a page bound is a claim about EVERY writer of the relation, re-derived when one is added, and the off switch for an unbounded set must not walk it (`StopSessionSeries`).
 - **A standing `scope=any` write on an entity with no workplace confines by the target's STATE MACHINE, not by
   liveness** — a bind accepting any live identity lets a desk actor attach a stranger's record to their own login and
   inherit its grants (identity-domain confines to `unclaimed` for this reason). Minted: clinic `BindPatientIdentity`

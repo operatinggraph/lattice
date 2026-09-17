@@ -62,7 +62,7 @@ the last approaches; the studio card's "runs out in N days" is the only guard to
    never trusted). Then **mint-or-skip**: the occurrence is skipped (no session) when `startsAt <
    time.rfc3339_utc(op.submittedAt)` (the class the horizon would mint is already in the past — the stack was away)
    or any of its studio/instructor cells is live (the slot was booked one-off; the run passes that week, exactly as
-   the desk would); otherwise it mints one occurrence with `CreateSessionSeries`' per-occurrence shape from
+   the desk would; a retired instructor mints the class unled and the horizon drops them); otherwise it mints one occurrence with `CreateSessionSeries`' per-occurrence shape from
    `.definition` (name, capacity, prices) — the loop body factored into a shared `mint_occurrence`. Either way it
    bare-updates `.horizon` (`next* += intervalDays`, `extendAt += intervalDays`, `mintedCount + 1` when minted) and emits
    `wellness.sessionSeriesExtended {seriesKey, studio, startsAt, sessionKey?, skipped?}`. The write moves `extendAt`
@@ -70,16 +70,27 @@ the last approaches; the studio card's "runs out in N days" is the only guard to
    studio/instructor roots + the cells from the payload (CreateSession's own arm); the playbook declares
    `Reads: [row.seriesKey, row.seriesKey.definition, row.seriesKey.horizon, row.studioKey]` and enumerations
    `{row.seriesKey atStudio out}`, `{row.studioKey locatedAt out}`.
-4. **The run's other two verbs keep the horizon true.** `ReassignSessionSeries` shifts `.horizon.next*` and `extendAt`
-   by its delta (the cadence moved with the classes); `TombstoneSessionSeries` stops the roll — `.horizon` rewritten
+4. **The run's other verbs keep the horizon true, and the off switch walks nothing.** `ReassignSessionSeries` shifts
+   `.horizon.next*` and `extendAt` by its delta (the cadence moved with the classes — a backward move can leave the
+   shifted `extendAt` at or before the recorded lapse, so the gap opens without a timer and mints until the cadence is
+   `occurrenceCount` slots ahead again; the window counts cadence slots, not live classes, a skipped slot included —
+   accepted, not clamped). `TombstoneSessionSeries` stops the roll when its walk succeeds — `.horizon` rewritten
    without `extendAt` (`stoppedAt` recorded) — and a rolling series with nothing left to cancel still stops rather than
-   refusing `NoUpcomingOccurrences`. Both read `.horizon` as a **server-derived optionalRead** (`derive_reads`, off the
-   payload's `seriesKey`) so every dispatcher — the app, Facet, a CLI — hydrates it without declaring it; a client
-   that could omit the declaration would otherwise cancel the classes and leave the horizon minting the next window.
+   refusing `NoUpcomingOccurrences`. But a rolling run's `partOf` history grows without bound and outgrows both
+   walks — the 2×64 page bound, and before it the 250 ms Starlark wall (one read per historic occurrence after the
+   walks read `.schedule` first; a daily run reaches the page bound in ~4 months) — so **`StopSessionSeries{seriesKey,
+   studio}`** is the off switch that outlives the walk: the same `[operator, frontOfHouse]` grant and workplace
+   confinement as the call-off, the series' `atStudio` confirmation (`WrongStudio`), `NotRolling` on a run that is not
+   rolling, and one bare write of the stopped `.horizon`. Its remaining classes are called off per class or with the
+   call-off while the walk still fits. All three read `.horizon` (and the series' confirmation reads) as
+   **server-derived optionalReads** (`derive_reads`, off the payload's `seriesKey`) so every dispatcher — the app,
+   Facet, a CLI — hydrates it without declaring it; a client that could omit the declaration would otherwise cancel
+   the classes and leave the horizon minting the next window. `.horizon` has five writers, one owner op per
+   transition: create, extend, move, stop, call-off.
 5. **The desk sees it.** `wellnessSessions` projects `seriesRolling` (`ss.horizon.data.extendAt <> null`); `/api/sessions`
    carries it; the schedule form gains *Keep rolling* beside *Number of classes* (sent as `rolling: true` when the run
    repeats); the studio card's "runs out in N days" is not shown while a rolling run is on its books, and the class
-   card's series line says *rolling*.
+   card's series line says *rolling*, and the roster offers *Stop rolling* (confirmed) beside the call-off.
 6. **Non-goals:** changing the cadence or shape of a rolling series in place (`ReassignSession` per occurrence, or stop
    and re-create); a per-occurrence skip notice; a rolling `CreateSession` (a one-off has no cadence).
 
@@ -146,3 +157,26 @@ the last approaches; the studio card's "runs out in N days" is the only guard to
    (`.horizon`: four writers, one owner op per transition, all on the hydrated revision).
 6. **Adjacent finds:** none from the scout.
 7. **Non-goals:** as §6 above; the reminder/promotion mechanisms; `CreateSession`.
+
+### Build note (2026-09-16)
+
+Shipped `4a43c82d` (`1ce08997` on the fire branch; brief `44db1310`). Live on the shared stack (wellness-domain 0.30.0
+diff-applied, `verify-package-wellness-domain` 562/562, `bin/wellness-app` cycled): a rolling 2-class weekly run at
+Riverside created 05:07:28Z with its first class at 05:15:00Z — the lens armed `@at 05:15:00Z`, the fire recorded the
+lapse, and the third class was minted at 05:15:04Z with the horizon one week on and the timer re-armed at 09-24
+05:15:00Z; `/api/sessions` served the three rows `seriesRolling`; `StopSessionSeries` dropped `extendAt` and the row
+disarmed; the two upcoming classes were then called off. No Weaver issue raised.
+
+Deviations from the brief: (1) **`StopSessionSeries`** (the BLOCKING cold-review find) — the brief made the call-off
+the only stop, whose walk a rolling run's history outgrows; (2) `derive_reads` derives the series' confirmation reads
+beside `.horizon` for the three series verbs (`lint-derive-reads-bare-vector` counts only a vector declaring nothing;
+weakest-wins keeps the app's required reads required); (3) a retired instructor mints the class unled and the horizon
+drops them (`TombstoneInstructor` has no upcoming-classes guard — a refusal would park the gap); (4) two gaps carry
+their own `maxretries_<gap>` column (the Weaver reads the gap's suffix); (5) the walks read `.schedule` first.
+Review classification: one design gap (1 — the walk bound's premise was stated for an eager series and the design
+did not re-derive it for an unbounded one), one brief gap (2), two implementation gaps found by the builder's own
+report and the reviewer (3, 4), five convention findings (stale stop-verb attributions, a missing confirm, the
+`lint-app-op-descriptors` ceiling), one test gap (the own-studio-for-foreign-series vector), no review over-reach.
+Accepted and recorded: a backward move's surplus slots (§4); `ExtendSessionSeries` refused by a cell claimed between
+projection and dispatch re-executes in-process on the hydrated-revision conflict and skips. Adjacent finds: none.
+
