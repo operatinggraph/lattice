@@ -2,6 +2,9 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-15 · `3dfd1b38` · A seat handed from the waitlist inside the late-cancel window cancels free — `promotedAt` stamped, CancelBooking exempts it, badged; live ([design](../../../docs/reviews/wellness-late-promotion-2026-09-15.md)).
+- 2026-09-15 · `5cb0aa03` · A full class offers Join waitlist, not Book, in Facet — `edgeEntitySessions.full` + `VisibleWhen`; the `📐` picker-filter row dissolved ([triage](../../../docs/reviews/verticals-designer-triage-2026-09-15.md)).
+- 2026-09-15 · `c6b25579` · `lint-refusal-courtesy` — every dispatch site declares its courtesy per state refusal (52 ops, Facet incl.); six siblings fixed; [census](../../../docs/reviews/verticals-refusal-courtesy-gate-2026-09-15.md).
 - 2026-09-15 · `fd9cd157` · The desk takes an item off the menu for the day — `SetMenuItemAvailability` sets `.price.available`, both lenses project it, all three pickers grey it, `Charge` refuses `ItemUnavailable`; refused live.
 - 2026-09-15 · `fd9cd157` · A posted charge opens to its receipt — `receiptLines` joins a ledger row to its settled tab by `tabKey`; the statement renders the lines (price, who ordered, voids) collapsed, resident and desk alike; live.
 - 2026-09-15 · `a0ba03a2` · A reminded debtor opens no new tab — `OpenTab` refuses `CreditHold` off `.arrears.sentAt` (heldFor in-walk, both legs); picker badge "owes $X · N days overdue · credit hold", hold panel, confirm; refused live.

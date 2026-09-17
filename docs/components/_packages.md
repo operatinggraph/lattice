@@ -568,6 +568,10 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   lease-signing (2026-09-15, caught cold). Check: for every new `fail(` that reads key K, name the writer of K and
   the key set each op mutates — if they share none, the guarded op re-stamps the shared aspect unchanged under OCC
   (`GiveNotice` on `.tenancy`) or the design records the window as accepted.
+  Sighting (wellness `ReassignSession/CapacityBelowSeated`, 2026-09-16, caught cold): the shrink reads seat cells and
+  writes only `.schedule`; a claim racing into the removed range lands one seat above capacity — recorded as accepted at
+  the site, the DDL prose stating the window instead of a guarantee.
+
 - **A dispatch declaration must name what the runtime actually binds** — a playbook `Params` on an OPTIONAL-hop
   column is a Weaver refusal (`strategist.go` "references row.<col>, which is null/absent") on every row where the
   hop misses, the gap open forever and every fixture seeding the hop; a descriptor hub `{actor}` for a walk the
