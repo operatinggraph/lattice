@@ -46,7 +46,7 @@ func TestPackage_DDLs(t *testing.T) {
 	if vertex.Class != "meta.ddl.vertexType" {
 		t.Fatalf("loftspaceListing class = %q, want meta.ddl.vertexType", vertex.Class)
 	}
-	wantCmds := map[string]bool{"SetListing": false, "SetUnitAddress": false, "SetListingStatus": false}
+	wantCmds := map[string]bool{"SetListing": false, "SetUnitAddress": false, "SetListingStatus": false, "FloorListingAvailability": false}
 	for _, c := range vertex.PermittedCommands {
 		if _, ok := wantCmds[c]; !ok {
 			t.Fatalf("unexpected loftspaceListing command %q", c)
@@ -83,9 +83,10 @@ func TestPackage_DDLs(t *testing.T) {
 		}
 	}
 
-	// The listing aspectType admits two writers (SetListing full upsert +
-	// SetListingStatus status-only rewrite); address admits one.
-	for name, writers := range map[string][]string{"listing": {"SetListing", "SetListingStatus"}, "address": {"SetUnitAddress"}} {
+	// The listing aspectType admits three writers (SetListing full upsert +
+	// SetListingStatus status-only rewrite + FloorListingAvailability's
+	// availableFrom-only floor); address admits one.
+	for name, writers := range map[string][]string{"listing": {"SetListing", "SetListingStatus", "FloorListingAvailability"}, "address": {"SetUnitAddress"}} {
 		asp, ok := byName[name]
 		if !ok {
 			t.Fatalf("missing %s aspectType DDL", name)
@@ -129,14 +130,15 @@ func TestPackage_Permissions(t *testing.T) {
 		scope string
 	}
 	wantPerms := map[grant][]string{
-		{"SetListing", "any"}:        {"operator"},
-		{"SetUnitAddress", "any"}:    {"operator"},
-		{"SetListingStatus", "any"}:  {"operator"},
-		{"AssignUnitOwner", "any"}:   {"operator"},
-		{"RemoveUnitOwner", "any"}:   {"operator"},
-		{"SetListing", "self"}:       {"consumer"},
-		{"SetUnitAddress", "self"}:   {"consumer"},
-		{"SetListingStatus", "self"}: {"consumer"},
+		{"SetListing", "any"}:               {"operator"},
+		{"SetUnitAddress", "any"}:           {"operator"},
+		{"SetListingStatus", "any"}:         {"operator"},
+		{"FloorListingAvailability", "any"}: {"operator"},
+		{"AssignUnitOwner", "any"}:          {"operator"},
+		{"RemoveUnitOwner", "any"}:          {"operator"},
+		{"SetListing", "self"}:              {"consumer"},
+		{"SetUnitAddress", "self"}:          {"consumer"},
+		{"SetListingStatus", "self"}:        {"consumer"},
 	}
 	if got := len(Package.Permissions); got != len(wantPerms) {
 		t.Fatalf("expected %d permissions, got %d", len(wantPerms), got)
@@ -252,13 +254,15 @@ func TestPackage_Permissions(t *testing.T) {
 	if got := len(Package.LoomPatterns); got != 0 {
 		t.Fatalf("expected 0 loomPatterns, got %d", got)
 	}
-	// Four op-metas: the three listing ops (each a landlord-path op) plus
-	// AssignUnitOwner (the shipped post-listing form dispatches it). Each must
-	// stay a FULL descriptor — a bare meta would satisfy the count while
-	// leaving the op unrenderable, which is the S1 hole the Standard exists to
-	// close. RemoveUnitOwner has no shipped screen and carries no op-meta.
-	if got := len(Package.OpMetas); got != 4 {
-		t.Fatalf("expected 4 opMetas, got %d", got)
+	// Five op-metas: the three listing ops (each a landlord-path op),
+	// FloorListingAvailability (the Weaver-dispatched floor, described for a
+	// by-hand operator repair) and AssignUnitOwner (the shipped post-listing
+	// form dispatches it). Each must stay a FULL descriptor — a bare meta would
+	// satisfy the count while leaving the op unrenderable, which is the S1 hole
+	// the Standard exists to close. RemoveUnitOwner has no shipped screen and
+	// carries no op-meta.
+	if got := len(Package.OpMetas); got != 5 {
+		t.Fatalf("expected 5 opMetas, got %d", got)
 	}
 	byOp := map[string]pkgmgr.OpMetaSpec{}
 	for _, m := range Package.OpMetas {
@@ -287,6 +291,26 @@ func TestPackage_Permissions(t *testing.T) {
 	meta := byOp["SetListingStatus"]
 	if meta.Dispatch.Class != loftspaceListingDDL || meta.Dispatch.TargetType != "unit" {
 		t.Fatalf("unexpected SetListingStatus dispatch: %+v", meta.Dispatch)
+	}
+	// The floor is operator-only and Weaver-dispatched: "standing" (no self
+	// path to name), and its declared reads are exactly what the tenancyEnd
+	// playbook routes — the unit and its existing .listing, both required.
+	floor, ok := byOp["FloorListingAvailability"]
+	if !ok {
+		t.Fatal("no opMeta for FloorListingAvailability")
+	}
+	if floor.Presentation == nil || floor.Presentation.Title == "" ||
+		floor.InputSchema == "" || len(floor.FieldDescriptions) == 0 || floor.Dispatch == nil {
+		t.Fatalf("FloorListingAvailability must carry a FULL descriptor, got %+v", floor)
+	}
+	if floor.Dispatch.AuthContext != "standing" || floor.Dispatch.Class != loftspaceListingDDL || floor.Dispatch.TargetType != "unit" {
+		t.Fatalf("unexpected FloorListingAvailability dispatch: %+v", floor.Dispatch)
+	}
+	if got := strings.Join(floor.Dispatch.Reads, ","); got != "{payload.unit},{payload.unit}.listing" {
+		t.Fatalf("FloorListingAvailability reads = %v, want the unit + its .listing", floor.Dispatch.Reads)
+	}
+	if len(floor.Dispatch.OptionalReads) != 0 {
+		t.Fatalf("FloorListingAvailability optionalReads = %v, want none (no self path, so no manages probe to declare)", floor.Dispatch.OptionalReads)
 	}
 }
 

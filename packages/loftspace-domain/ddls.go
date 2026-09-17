@@ -14,8 +14,11 @@ const (
 
 // DDLs returns the package's four DDL meta-vertex declarations:
 //
-//   - loftspaceListing (vertexType) — owns SetListing + SetUnitAddress.
-//   - listing (aspectType) — declares the .listing aspect shape, admits SetListing.
+//   - loftspaceListing (vertexType) — owns SetListing + SetUnitAddress +
+//     SetListingStatus + FloorListingAvailability.
+//   - listing (aspectType) — declares the .listing aspect shape, admits the
+//     three .listing writers (SetListing, SetListingStatus,
+//     FloorListingAvailability).
 //   - address (aspectType) — declares the .address aspect shape, admits SetUnitAddress.
 //   - loftspaceOwnership (vertexType) — owns AssignUnitOwner + RemoveUnitOwner,
 //     which write / tombstone the landlord→unit management link (D1.3).
@@ -49,19 +52,28 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     loftspaceListingDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"SetListing", "SetUnitAddress", "SetListingStatus"},
-		Description: "LoftSpace listing-economics DDL. Owns SetListing + SetUnitAddress + SetListingStatus, which " +
+		PermittedCommands: []string{"SetListing", "SetUnitAddress", "SetListingStatus", "FloorListingAvailability"},
+		Description: "LoftSpace listing-economics DDL. Owns SetListing + SetUnitAddress + SetListingStatus + FloorListingAvailability, which " +
 			"attach the leasable facets onto an EXISTING location unit (vtx.unit.<NanoID>, owned by " +
 			"location-domain) — this package introduces NO vertex type. SetListing writes the .listing aspect " +
-			"{rentAmount, rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom (RFC3339 date), " +
+			"{rentAmount, rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom (an RFC3339 instant or a bare " +
+			"YYYY-MM-DD read as midnight UTC, STORED NORMALIZED in canonical RFC3339 UTC form; anything else is refused " +
+			"InvalidArgument), " +
 			"leaseTermMonths, depositAmount?, status ∈ available|pending|leased|withdrawn}. SetUnitAddress writes the .address aspect " +
 			"{line1, line2?, city, region, postal}. SetListingStatus is a status-only transition: it reads the " +
 			"existing .listing (kv.Read) and rewrites ONLY status, preserving the economics verbatim (rejects a " +
 			"unit with no listing) — the op a lease-application's convergence directOp dispatches to mark a unit " +
 			"leased on approval, and the op a landlord calls to take a unit off-market (withdrawn) or relist it " +
-			"(available). All three are unconditioned upserts (create-if-absent / overwrite-if-present) so " +
-			"an operator can correct a listing or flip status by hand. All three also carry a consumer scope=self " +
-			"grant — the landlord path — and on that validated self path every one of them requires the acting " +
+			"(available). FloorListingAvailability{unit, availableFrom} is an availability floor: it reads the existing " +
+			".listing (rejects NoListing), normalizes both the stored availableFrom and the payload's to a canonical " +
+			"RFC3339 UTC instant (a bare YYYY-MM-DD anchors to midnight UTC), and rewrites availableFrom to the LATER of " +
+			"the two, preserving every other field verbatim — a no-op when the result equals the stored string, so a " +
+			"landlord's later date is never lowered and a re-dispatch writes nothing. It is the op lease-signing's " +
+			"tenancyEnd convergence target dispatches so a unit is never marketed from a day its tenancy's recorded " +
+			"end (endedAt, or a notice's move-out) still covers. All four are unconditioned upserts (create-if-absent / " +
+			"overwrite-if-present) so an operator can correct a listing, flip status or floor a date by hand. The first " +
+			"three also carry a consumer scope=self grant — the landlord path — and on that validated self path every " +
+			"one of them requires the acting " +
 			"identity's own manages link to the payload unit (lnk.identity.<actor>.manages.unit.<unit>, declared as an " +
 			"optionalRead) BEFORE the unit's liveness is checked, so the script's own answer never reveals whether a unit exists. " +
 			"The target unit MUST be alive + " +
@@ -75,7 +87,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			`"bedrooms":{"type":"integer","description":"Bedroom count (SetListing; required, >= 0)."},` +
 			`"bathrooms":{"type":"number","description":"Bathroom count, may be fractional e.g. 1.5 (SetListing; optional, >= 0)."},` +
 			`"sqft":{"type":"integer","description":"Floor area in square feet (SetListing; optional, > 0)."},` +
-			`"availableFrom":{"type":"string","description":"Earliest move-in date, RFC3339 (SetListing; required)."},` +
+			`"availableFrom":{"type":"string","description":"Earliest move-in date — an RFC3339 instant or a bare YYYY-MM-DD read as midnight UTC (SetListing; required; stored normalized in canonical RFC3339 UTC form, anything else refused InvalidArgument). For FloorListingAvailability (required): the instant the listing's date is raised to when the stored date is earlier, the same two shapes admitted."},` +
 			`"leaseTermMonths":{"type":"integer","description":"Lease term in months (SetListing; required, > 0)."},` +
 			`"depositAmount":{"type":"number","description":"Security deposit, a number > 0 with at most two decimals in the listing's currency (SetListing; optional; absent = the unit takes no deposit)."},` +
 			`"status":{"type":"string","enum":["available","pending","leased","withdrawn"],"description":"Listing availability state (SetListing / SetListingStatus; required). 'withdrawn' = off-market (hidden from applicant Browse; relist by flipping back to 'available')."},` +
@@ -94,7 +106,7 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 			"bedrooms":        "Bedroom count, integer >= 0. Stored on the .listing aspect (SetListing).",
 			"bathrooms":       "Optional bathroom count (number, may be fractional e.g. 1.5), >= 0. Stored on the .listing aspect when present (SetListing).",
 			"sqft":            "Optional floor area in square feet (integer > 0). Stored on the .listing aspect when present (SetListing).",
-			"availableFrom":   "Earliest move-in date, RFC3339. Stored verbatim on the .listing aspect (SetListing).",
+			"availableFrom":   "Earliest move-in date — an RFC3339 instant or a bare YYYY-MM-DD (read as midnight UTC). SetListing stores it NORMALIZED to canonical RFC3339 UTC form (whole seconds, Z) and refuses any other shape (InvalidArgument). FloorListingAvailability raises the stored date to this instant when the stored one is earlier (the same two shapes admitted; the stored value is rewritten in canonical form), and never lowers it.",
 			"leaseTermMonths": "Lease term in months (integer > 0). Stored on the .listing aspect (SetListing).",
 			"depositAmount":   "Security deposit, a number > 0 with at most two decimals in the listing's currency (InvalidArgument otherwise). Absent = the unit takes no deposit. Stored on the .listing aspect when present (SetListing REPLACES the stored value on every write — a re-submit without it clears it).",
 			"status":          "Listing availability, one of {available, pending, leased, withdrawn}. 'withdrawn' takes the unit off-market (hidden from applicant Browse; relist via SetListingStatus status=available). Stored on the .listing aspect (SetListing sets it alongside the economics; SetListingStatus rewrites only this field, preserving the rest).",
@@ -148,6 +160,19 @@ func loftspaceListingVertexDDL() pkgmgr.DDLSpec {
 					"clean no-op (no mutation). This is the op the leaseApplicationComplete convergence target " +
 					"dispatches as a directOp to mark a unit leased once its application is approved.",
 			},
+			{
+				Name: "FloorListingAvailability — raise a unit's availability to a tenancy's recorded end",
+				Payload: map[string]any{
+					"unit":          "vtx.unit.<unitNanoID>",
+					"availableFrom": "2027-01-31T00:00:00Z",
+				},
+				ExpectedOutcome: "Validates the unit is alive + a vtx.unit.<NanoID> key, kv.Reads the existing .listing aspect " +
+					"(rejects NoListing if absent), and rewrites availableFrom to the LATER of the stored date and the " +
+					"payload's — both read as RFC3339 UTC instants, a bare YYYY-MM-DD as midnight UTC — preserving " +
+					"rentAmount / bedrooms / status / … verbatim. A no-op (no mutation, no event) when the result equals " +
+					"the stored string: a landlord's later date is never lowered. This is the op the tenancyEnd " +
+					"convergence target dispatches as a directOp once a term's recorded end sits after the listing's date.",
+			},
 		},
 	}
 }
@@ -162,12 +187,13 @@ func listingAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     listingAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"SetListing", "SetListingStatus"},
+		PermittedCommands: []string{"SetListing", "SetListingStatus", "FloorListingAvailability"},
 		Description: "Listing-economics aspect (LoftSpace). Stored as vtx.unit.<NanoID>.listing = {rentAmount, " +
 			"rentCurrency, bedrooms, bathrooms?, sqft?, availableFrom, leaseTermMonths, depositAmount?, status}. Non-sensitive; " +
 			"attaches to a location unit, not an identity. depositAmount is the security deposit, a number > 0 in the " +
-			"listing's currency; absent = no deposit. Written by SetListing (full upsert) and SetListingStatus " +
-			"(status-only rewrite, preserving the rest) — both owned by the loftspaceListing vertexType DDL's " +
+			"listing's currency; absent = no deposit. Written by SetListing (full upsert), SetListingStatus " +
+			"(status-only rewrite, preserving the rest) and FloorListingAvailability (availableFrom raised to a " +
+			"tenancy's recorded end, never lowered, preserving the rest) — all owned by the loftspaceListing vertexType DDL's " +
 			"script; this aspect-type DDL exists so step-6's permittedCommands check, keyed on the mutation's " +
 			"class, admits the write. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
@@ -182,7 +208,7 @@ func listingAspectTypeDDL() pkgmgr.DDLSpec {
 			"bedrooms":        "Bedroom count.",
 			"bathrooms":       "Bathroom count (may be fractional).",
 			"sqft":            "Floor area in square feet.",
-			"availableFrom":   "Earliest move-in date (RFC3339).",
+			"availableFrom":   "Earliest move-in date, canonical RFC3339 UTC (SetListing normalizes a bare YYYY-MM-DD to midnight UTC and an offset instant to UTC). Floored to a tenancy's recorded end by FloorListingAvailability.",
 			"leaseTermMonths": "Lease term in months.",
 			"depositAmount":   "Security deposit, a number > 0 in the listing's currency; absent = no deposit.",
 			"status":          "Availability: available | pending | leased.",
@@ -230,7 +256,8 @@ func addressAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
-// loftspaceListingDDLScript handles SetListing + SetUnitAddress. Known-key reads
+// loftspaceListingDDLScript handles SetListing + SetUnitAddress +
+// SetListingStatus + FloorListingAvailability. Known-key reads
 // only: the target unit is validated by the key the caller lists in
 // ContextHint.Reads. The target MUST be an alive vtx.unit.<NanoID> of
 // a vtx.unit.<NanoID> key. Aspect writes are unconditioned upserts (create-if-absent /
@@ -324,6 +351,32 @@ def copy_data(d):
     for k in d:
         out[k] = d[k]
     return out
+
+def as_rfc3339_instant(s):
+    # A bare "YYYY-MM-DD" (the FE's <input type=date> shape, and what the seed
+    # scripts write for availableFrom) anchors to midnight UTC.
+    # time.rfc3339_utc itself rejects a bare date, so every caller normalizes
+    # through this first; an already-RFC3339 value passes through unchanged.
+    if len(s) == 10:
+        return s + "T00:00:00Z"
+    return s
+
+def required_instant(p, name):
+    # A required instant field: a bare "YYYY-MM-DD" (read as midnight UTC) or
+    # an RFC3339 instant, returned in time.rfc3339_utc's canonical UTC form
+    # (whole seconds, "Z") so the stored value orders lexically against every
+    # other canonical stamp — the tenancyEnd lens compares it as a string
+    # against a term's recorded end, and FloorListingAvailability parses it on
+    # every dispatch, so a free-text value here would be a gap that never
+    # closes. The shape is checked first so the refusal names the FIELD (the
+    # lease-signing required_date_instant idiom); a well-shaped date the
+    # calendar rejects is still the parser's own InvalidArgument.
+    v = required_string(p, name)
+    s = as_rfc3339_instant(v)
+    digits = s[0:4] + s[5:7] + s[8:10]
+    if len(s) < 20 or s[4] != "-" or s[7] != "-" or s[10] != "T" or not digits.isdigit():
+        fail("InvalidArgument: " + name + ": must be an RFC3339 instant or YYYY-MM-DD, got " + v)
+    return time.rfc3339_utc(s)
 
 def parts_of(key, name, want_type):
     # Parse a VERTEX key: exactly 3 segments vtx.<type>.<NanoID>. A non-3-segment
@@ -433,7 +486,7 @@ def execute(state, op):
             "rentAmount": two_decimals(required_number(p, "rentAmount", False), "rentAmount"),
             "rentCurrency": required_string(p, "rentCurrency"),
             "bedrooms": required_number(p, "bedrooms", True),
-            "availableFrom": required_string(p, "availableFrom"),
+            "availableFrom": required_instant(p, "availableFrom"),
             "leaseTermMonths": required_number(p, "leaseTermMonths", False),
             "status": required_status(p),
         }
@@ -527,6 +580,65 @@ def execute(state, op):
         mutations = [make_aspect_upsert(unit, "listing", "listing", data)]
         events = [{"class": "loftspace.listingStatusSet",
                    "data": {"unit": unit, "status": status}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": listing_key}}
+
+    if ot == "FloorListingAvailability":
+        # Availability floor: raise .listing.availableFrom to the payload's
+        # instant when the stored date is earlier, preserving every other
+        # economics field verbatim. The directOp lease-signing's tenancyEnd
+        # target dispatches once a term has a recorded end (endedAt, or the
+        # move-out of a notice) that the listing's date sits before — a unit
+        # is never marketed from a day its sitting tenant still holds. The
+        # floor is a monotone max: a landlord's LATER date (a renovation gap
+        # after the end) is never lowered, and every ended term on the unit
+        # floors to its own end, so the unit converges to the latest end in
+        # any dispatch order. Also callable by an operator by hand.
+        unit = required_string(p, "unit")
+        parts_of(unit, "unit", "unit")
+        # workplace-exempt: (ownership-bound) the ownership probe answers before
+        # require_live_unit, so a caller who manages nothing cannot use this op
+        # to learn whether a unit exists.
+        require_manages(unit, "cannot floor the availability on " + unit)
+        require_live_unit(state, unit)
+        floor_at = time.rfc3339_utc(as_rfc3339_instant(required_string(p, "availableFrom")))
+
+        listing_key = unit + ".listing"
+        # read-posture: (a) declared reads at FloorListingAvailability dispatch
+        # (the tenancyEnd directOp declares unit.listing; the descriptor's
+        # Reads carries the same key for a by-hand submission).
+        existing = kv.Read(listing_key)
+        if existing == None or existing.isDeleted:
+            fail("NoListing: unit " + unit + " has no listing to floor")
+
+        # The stored date may be a bare YYYY-MM-DD (seed data) or an RFC3339
+        # instant (the FE's shape); both normalize to the canonical UTC form
+        # before the max, which is then a plain string compare. A listing with
+        # no date at all floors straight to the payload's.
+        stored = existing.data.get("availableFrom")
+        floored = floor_at
+        if type(stored) == type("") and len(stored) > 0:
+            stored_at = time.rfc3339_utc(as_rfc3339_instant(stored))
+            if stored_at > floored:
+                floored = stored_at
+
+        # Idempotent no-op on STRING equality with the stored value, not
+        # instant equality: the tenancyEnd lens compares the stored string
+        # against the recorded end lexically, and a bare "2027-01-31" reads
+        # below "2027-01-31T00:00:00Z", so an instant-equal no-op would leave
+        # that gap open forever. Rewriting the bare date in canonical form
+        # closes it in one pass; a re-dispatch after that emits NOTHING (no
+        # mutation, no event, no CDC churn). primaryKey is omitted: the
+        # reply-constraint requires a non-empty primaryKey to be a committed
+        # mutation key, and a no-op commits none.
+        if floored == stored:
+            return {"mutations": [], "events": [], "response": {}}
+
+        data = copy_data(existing.data)
+        data["availableFrom"] = floored
+        mutations = [make_aspect_upsert(unit, "listing", "listing", data)]
+        events = [{"class": "loftspace.listingAvailabilityFloored",
+                   "data": {"unit": unit, "availableFrom": floored}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": listing_key}}
 

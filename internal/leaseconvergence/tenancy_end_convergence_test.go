@@ -105,6 +105,7 @@ func (h *harness) seedTenancyApplicationFrom(label string, requestedRent float64
 		Reads: []string{applicantKey, unitKey},
 		OptionalReads: []string{
 			"lnk.identity." + applicantKey[len("vtx.identity."):] + ".appliedToUnit.unit." + unitKey[len("vtx.unit."):],
+			unitKey + ".listing",
 		},
 	})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, appReply.Status, "CreateLeaseApplication(%s): %+v", label, appReply.Error)
@@ -137,6 +138,7 @@ func (h *harness) applyForUnit(label, unitKey string, requestedRent float64) (ap
 		Reads: []string{applicantKey, unitKey},
 		OptionalReads: []string{
 			"lnk.identity." + applicantKey[len("vtx.identity."):] + ".appliedToUnit.unit." + unitKey[len("vtx.unit."):],
+			unitKey + ".listing",
 		},
 	})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, appReply.Status, "CreateLeaseApplication(%s): %+v", label, appReply.Error)

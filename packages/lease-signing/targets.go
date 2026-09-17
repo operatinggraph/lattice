@@ -166,9 +166,13 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				Reads:         []string{"row.entityKey"},
 				OptionalReads: []string{"row.entityKey.decision"},
 				// The unit resolution (scripts.go leaseapp_unit): one outbound
-				// appliesToUnit walk off the application, degree 1 by construction.
+				// appliesToUnit walk off the application, degree 1 by
+				// construction; the applicant resolution (free_applied_to_unit_guard,
+				// the guard the recorded loss frees): one applicationFor walk,
+				// degree 1 likewise.
 				Enumerations: []pkgmgr.EnumerationSpec{
 					{Hub: "row.entityKey", Relation: "appliesToUnit", Direction: "out"},
+					{Hub: "row.entityKey", Relation: "applicationFor", Direction: "out"},
 				},
 			},
 			"missing_leaseDoc": {Action: "triggerLoom", Pattern: "leaseDocument", Subject: "row.entityKey"},

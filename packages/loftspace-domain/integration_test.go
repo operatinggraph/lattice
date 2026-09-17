@@ -47,7 +47,7 @@ const (
 
 // loftspaceOps are the ops the staff actor needs: CreateLocation (to mint the
 // unit it operates on) + the loftspace ops.
-var loftspaceOps = []string{"CreateLocation", "SetListing", "SetUnitAddress", "SetListingStatus", "AssignUnitOwner", "RemoveUnitOwner"}
+var loftspaceOps = []string{"CreateLocation", "SetListing", "SetUnitAddress", "SetListingStatus", "FloorListingAvailability", "AssignUnitOwner", "RemoveUnitOwner"}
 
 func lsStaffCapDoc() *processor.CapabilityDoc {
 	now := time.Now().UTC()
@@ -332,6 +332,202 @@ func TestLoftspace_SetListingStatus(t *testing.T) {
 		`{"unit":"`+unitKey+`","status":"available"}`, processor.OutcomeAccepted)
 	if d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any); d["status"] != "available" {
 		t.Fatalf("relist did not restore available: %v", d)
+	}
+}
+
+// floorListingAvailability submits FloorListingAvailability on the given unit
+// and returns the outcome + the script's own failure message on a rejection.
+// class="" mirrors how Weaver's actuator dispatches the tenancyEnd directOp
+// (the empty-class permittedCommands reverse index); a manual operator call
+// carries "loftspaceListing". The declared reads are exactly the playbook's:
+// the unit and its .listing.
+func floorListingAvailability(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, unitKey, class, availableFrom string) (processor.MessageOutcome, string) {
+	t.Helper()
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "FloorListingAvailability",
+		Actor:         lsStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         class,
+		Payload:       json.RawMessage(`{"unit":"` + unitKey + `","availableFrom":"` + availableFrom + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{unitKey, unitKey + ".listing"}},
+	}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	msg := ""
+	if reply != nil && reply.Error != nil {
+		msg = reply.Error.Message
+	}
+	return outcome, msg
+}
+
+// lsListingRevision returns the current KV revision of the unit's .listing —
+// the no-op pin: an arm that writes nothing must leave it unchanged.
+func lsListingRevision(t *testing.T, ctx context.Context, conn *substrate.Conn, unitKey string) uint64 {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, unitKey+".listing")
+	if err != nil {
+		t.Fatalf("KVGet %s.listing: %v", unitKey, err)
+	}
+	return entry.Revision
+}
+
+// TestLoftspace_FloorListingAvailability proves the availability floor: it
+// raises .listing.availableFrom to the payload's instant when the stored date is
+// earlier, PRESERVING the economics verbatim; keeps a landlord's LATER date
+// (the monotone max — no mutation, no revision bump); canonicalizes a bare
+// YYYY-MM-DD that is instant-equal to the floor (the string-inequality write
+// the tenancyEnd lens's lexical compare depends on); and rejects a unit with no
+// listing (NoListing) without minting one. The raise uses class="" to exercise
+// the directOp dispatch path — exactly how the tenancyEnd convergence target
+// drives it.
+func TestLoftspace_FloorListingAvailability(t *testing.T) {
+	ctx, conn := setupLoftspaceEnv(t)
+	cp, cons := newLoftspacePipeline(t, ctx, conn, "floor-avail")
+
+	unitKey := createUnit(t, ctx, conn, cp, cons)
+
+	// No listing: a unit with no .listing yet has nothing to floor, and the op
+	// must NOT mint a bare {availableFrom}-only listing. With .listing declared
+	// as a required read (the playbook's shape) the absence is refused at
+	// hydration, ahead of the script's own NoListing guard — the same
+	// rejection SetListingStatus's vector pins.
+	if got, msg := floorListingAvailability(t, ctx, conn, cp, cons, "floorNoL001", unitKey, "loftspaceListing", "2027-01-31T00:00:00Z"); got != processor.OutcomeRejected {
+		t.Fatalf("floor on a unit with no listing: outcome=%v msg=%q, want Rejected", got, msg)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, unitKey+".listing"); err == nil {
+		t.Fatalf("FloorListingAvailability minted a listing on a unit that had none")
+	}
+
+	// Seed a full listing with a stale date and optional fields.
+	setListing(t, ctx, conn, cp, cons, "floorSeed01", unitKey,
+		`{"unit":"`+unitKey+`","rentAmount":2400,"rentCurrency":"USD","bedrooms":2,"bathrooms":1.5,"sqft":950,"availableFrom":"2025-09-06T00:00:00Z","leaseTermMonths":12,"depositAmount":2400,"status":"available"}`,
+		processor.OutcomeAccepted)
+
+	// A stale date is raised to the recorded end via the directOp path (empty
+	// class); the payload arrives as a canonical instant (row.marketFrom).
+	if got, msg := floorListingAvailability(t, ctx, conn, cp, cons, "floorRaise1", unitKey, "", "2027-01-31T00:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("floor raise: outcome=%v msg=%q", got, msg)
+	}
+	ldoc := lsReadDoc(t, ctx, conn, unitKey+".listing")
+	if ldoc["class"] != "listing" {
+		t.Fatalf("listing class = %v, want listing (the floor must not change class)", ldoc["class"])
+	}
+	ldata, _ := ldoc["data"].(map[string]any)
+	if ldata["availableFrom"] != "2027-01-31T00:00:00Z" {
+		t.Fatalf("availableFrom = %v, want 2027-01-31T00:00:00Z", ldata["availableFrom"])
+	}
+	if ldata["status"] != "available" || ldata["rentCurrency"] != "USD" {
+		t.Fatalf("economics / status not preserved across the floor: %v", ldata)
+	}
+	for _, f := range []string{"rentAmount", "bedrooms", "bathrooms", "sqft", "leaseTermMonths", "depositAmount"} {
+		if _, ok := ldata[f]; !ok {
+			t.Fatalf("economics field %q dropped on the floor; data=%v", f, ldata)
+		}
+	}
+
+	// A landlord's LATER date is kept: flooring to an earlier end is the
+	// idempotent no-op — ACCEPTED, no mutation, the KV revision does not bump.
+	before := lsListingRevision(t, ctx, conn, unitKey)
+	if got, msg := floorListingAvailability(t, ctx, conn, cp, cons, "floorKeep01", unitKey, "", "2026-12-01T00:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("floor below the stored date: outcome=%v msg=%q", got, msg)
+	}
+	if after := lsListingRevision(t, ctx, conn, unitKey); after != before {
+		t.Fatalf("a floor below the stored date bumped the listing revision %d → %d (it must write NOTHING)", before, after)
+	}
+	if d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any); d["availableFrom"] != "2027-01-31T00:00:00Z" {
+		t.Fatalf("a floor below the stored date lowered it: %v", d)
+	}
+
+	// An at-least-once re-dispatch of the same floor is the same no-op.
+	before = lsListingRevision(t, ctx, conn, unitKey)
+	if got, msg := floorListingAvailability(t, ctx, conn, cp, cons, "floorRaise2", unitKey, "", "2027-01-31T00:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("floor re-dispatch: outcome=%v msg=%q", got, msg)
+	}
+	if after := lsListingRevision(t, ctx, conn, unitKey); after != before {
+		t.Fatalf("an equal re-dispatch bumped the listing revision %d → %d (it must write NOTHING)", before, after)
+	}
+
+	// A bare-date payload (an operator typing a day) normalizes to midnight UTC
+	// before the max; here it is later, so the stored value moves to the
+	// canonical instant, never the bare string.
+	if got, msg := floorListingAvailability(t, ctx, conn, cp, cons, "floorBare01", unitKey, "loftspaceListing", "2027-03-01"); got != processor.OutcomeAccepted {
+		t.Fatalf("bare-date floor: outcome=%v msg=%q", got, msg)
+	}
+	if d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any); d["availableFrom"] != "2027-03-01T00:00:00Z" {
+		t.Fatalf("bare-date floor stored %v, want the canonical instant 2027-03-01T00:00:00Z", d["availableFrom"])
+	}
+}
+
+// lsSeedListingAspect writes a .listing aspect straight into Core KV — the
+// shape of a listing written before SetListing normalized availableFrom (a
+// bare date the seeds once stored verbatim), which the floor op still meets.
+func lsSeedListingAspect(t *testing.T, ctx context.Context, conn *substrate.Conn, unitKey string, data map[string]any) {
+	t.Helper()
+	doc := map[string]any{"class": "listing", "isDeleted": false, "vertexKey": unitKey, "localName": "listing", "data": data}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, unitKey+".listing", b); err != nil {
+		t.Fatalf("seed listing %s: %v", unitKey, err)
+	}
+}
+
+// TestLoftspace_FloorListingAvailabilityCanonicalizesEqualBareDate pins the
+// string-inequality write: a stored bare "2027-01-31" is instant-EQUAL to a
+// floor of "2027-01-31T00:00:00Z", but the tenancyEnd lens compares the stored
+// string against the recorded end lexically and a bare date reads BELOW its
+// own midnight instant — so the op must rewrite the equal-instant bare date in
+// canonical form (one mutation), after which the same floor is a no-op. The
+// bare date is seeded straight into KV: SetListing itself stores the
+// canonical instant, so only a listing written outside it carries this shape.
+func TestLoftspace_FloorListingAvailabilityCanonicalizesEqualBareDate(t *testing.T) {
+	ctx, conn := setupLoftspaceEnv(t)
+	cp, cons := newLoftspacePipeline(t, ctx, conn, "floor-canon")
+
+	unitKey := createUnit(t, ctx, conn, cp, cons)
+	lsSeedListingAspect(t, ctx, conn, unitKey, map[string]any{
+		"rentAmount": 1800, "rentCurrency": "USD", "bedrooms": 1, "availableFrom": "2027-01-31", "leaseTermMonths": 12, "status": "leased"})
+
+	before := lsListingRevision(t, ctx, conn, unitKey)
+	if got, msg := floorListingAvailability(t, ctx, conn, cp, cons, "canonFloor1", unitKey, "", "2027-01-31T00:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("canonicalizing floor: outcome=%v msg=%q", got, msg)
+	}
+	if after := lsListingRevision(t, ctx, conn, unitKey); after == before {
+		t.Fatalf("an instant-equal bare date was left as-is (revision %d unchanged); the lens's lexical compare needs the canonical form written", before)
+	}
+	d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any)
+	if d["availableFrom"] != "2027-01-31T00:00:00Z" {
+		t.Fatalf("availableFrom = %v, want the canonical 2027-01-31T00:00:00Z", d["availableFrom"])
+	}
+	if d["status"] != "leased" || d["rentCurrency"] != "USD" {
+		t.Fatalf("economics / status not preserved across the canonicalizing floor: %v", d)
+	}
+
+	// Now string-equal: the same floor is the no-op.
+	before = lsListingRevision(t, ctx, conn, unitKey)
+	if got, msg := floorListingAvailability(t, ctx, conn, cp, cons, "canonFloor2", unitKey, "", "2027-01-31T00:00:00Z"); got != processor.OutcomeAccepted {
+		t.Fatalf("post-canonical floor: outcome=%v msg=%q", got, msg)
+	}
+	if after := lsListingRevision(t, ctx, conn, unitKey); after != before {
+		t.Fatalf("a string-equal floor bumped the listing revision %d → %d (it must write NOTHING)", before, after)
+	}
+}
+
+// TestLoftspace_FloorListingAvailabilityRejectsDeadUnit proves a tombstoned
+// unit cannot be floored. With the unit declared as a required read, hydration
+// itself refuses the tombstone (InvalidReadKey) before the script's own
+// UnknownUnit guard runs — the same rejection SetListingStatus's dead-unit
+// vector pins; either way nothing is written.
+func TestLoftspace_FloorListingAvailabilityRejectsDeadUnit(t *testing.T) {
+	ctx, conn := setupLoftspaceEnv(t)
+	cp, cons := newLoftspacePipeline(t, ctx, conn, "floor-dead")
+
+	deadKey := "vtx.unit.LSdeadfjoorJKMNPQRST"
+	lsSeedVertex(t, ctx, conn, deadKey, "location", true)
+	if got, msg := floorListingAvailability(t, ctx, conn, cp, cons, "floorDead01", deadKey, "loftspaceListing", "2027-01-31T00:00:00Z"); got != processor.OutcomeRejected {
+		t.Fatalf("floor on a tombstoned unit: outcome=%v msg=%q, want Rejected", got, msg)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, deadKey+".listing"); err == nil {
+		t.Fatalf("FloorListingAvailability minted a listing on a tombstoned unit")
 	}
 }
 
@@ -657,5 +853,39 @@ func TestLoftspace_SetListingAmounts_AtMostTwoDecimals(t *testing.T) {
 		if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, unit+".listing"); err == nil {
 			t.Fatalf("%s: a refused SetListing writes no listing", tc.name)
 		}
+	}
+}
+
+// TestLoftspace_SetListingNormalizesAvailableFrom pins that SetListing stores
+// availableFrom NORMALIZED, never verbatim: a bare YYYY-MM-DD lands as its
+// midnight-UTC instant, an offset instant as the same instant in UTC, and a
+// digit-led non-ISO string is refused InvalidArgument naming the field — the
+// stored value is what the tenancyEnd lens compares lexically and what
+// FloorListingAvailability parses on every dispatch, so a free-text value
+// would be a gap that never closes.
+func TestLoftspace_SetListingNormalizesAvailableFrom(t *testing.T) {
+	ctx, conn := setupLoftspaceEnv(t)
+	cp, cons := newLoftspacePipeline(t, ctx, conn, "listing-normalize")
+
+	unitKey := createUnit(t, ctx, conn, cp, cons)
+	base := `"unit":"` + unitKey + `","rentAmount":2400,"rentCurrency":"USD","bedrooms":2,"leaseTermMonths":12,"status":"available"`
+
+	setListing(t, ctx, conn, cp, cons, "normBare001", unitKey, `{`+base+`,"availableFrom":"2027-01-31"}`, processor.OutcomeAccepted)
+	if d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any); d["availableFrom"] != "2027-01-31T00:00:00Z" {
+		t.Fatalf("bare date stored as %v, want 2027-01-31T00:00:00Z", d["availableFrom"])
+	}
+
+	setListing(t, ctx, conn, cp, cons, "normOffset01", unitKey, `{`+base+`,"availableFrom":"2027-01-31T00:00:00-07:00"}`, processor.OutcomeAccepted)
+	if d, _ := lsReadDoc(t, ctx, conn, unitKey+".listing")["data"].(map[string]any); d["availableFrom"] != "2027-01-31T07:00:00Z" {
+		t.Fatalf("offset instant stored as %v, want 2027-01-31T07:00:00Z", d["availableFrom"])
+	}
+
+	before := lsListingRevision(t, ctx, conn, unitKey)
+	got, msg := setListingWithReason(t, ctx, conn, cp, cons, "normGarbage1", unitKey, `{`+base+`,"availableFrom":"01/31/2027"}`)
+	if got != processor.OutcomeRejected || !strings.Contains(msg, "InvalidArgument: availableFrom: must be an RFC3339 instant or YYYY-MM-DD") {
+		t.Fatalf("non-ISO availableFrom: outcome=%v msg=%q, want Rejected InvalidArgument naming the field", got, msg)
+	}
+	if after := lsListingRevision(t, ctx, conn, unitKey); after != before {
+		t.Fatalf("a refused SetListing rewrote the listing (revision %d → %d)", before, after)
 	}
 }

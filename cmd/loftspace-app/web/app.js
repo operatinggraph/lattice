@@ -1785,6 +1785,12 @@ function openApply(row) {
   $("#apply-unit").textContent = (A.line1 ? A.line1 + " · " : "") + row.unitKey;
   $("#apply-applicant").textContent = nameFor(state.applicant);
   $("#apply-form").reset();
+  // The move-in picker is floored at the listing's own available-from day:
+  // CreateLeaseApplication refuses an earlier date (MoveInBeforeAvailable),
+  // and the day itself is admitted. availableFrom is RFC3339 (or a bare
+  // YYYY-MM-DD on seeded listings); a <input type=date> min wants YYYY-MM-DD.
+  const availableFrom = (row.listing && row.listing.availableFrom) || "";
+  $("#moveInDate").min = availableFrom.slice(0, 10);
   syncTermRequirement();
   $("#apply-overlay").hidden = false;
   $("#moveInDate").focus();
@@ -1805,6 +1811,7 @@ function syncTermRequirement() {
 
 // refusal-courtesy: CreateLeaseApplication/DuplicateApplication: none — the Apply button (renderListingCard) only checks row.status==="available" and state.applicant; it never cross-references state.applications against row.unitKey.
 // refusal-courtesy: CreateLeaseApplication/InvalidTerms: cap — index.html's #leaseTermMonths carries min="1" step="1" and #requestedRent carries min="0" step="1" (requestedRent's floor is looser than the script's ">0", so a typed 0 still round-trips a refusal).
+// refusal-courtesy: CreateLeaseApplication/MoveInBeforeAvailable: cap — openApply sets #moveInDate's min to the listing row's availableFrom day (row.listing.availableFrom.slice(0, 10)), the same floor the script compares against; a typed earlier date is blocked by the browser's own min.
 async function submitApply(ev) {
   ev.preventDefault();
   const row = state.current;
@@ -5577,6 +5584,7 @@ function renderQualification(a) {
 // refusal-courtesy: DecideLeaseApplication/DecisionFinal: hide — decisionOffered excludes a.landlordApproved / a.landlordDeclined rows.
 // refusal-courtesy: DecideLeaseApplication/NotReadyToApprove: hide — decisionOffered requires a.qualified, the lens's readiness clone that already includes the applicant's signature.
 // refusal-courtesy: DecideLeaseApplication/NoListing, InvalidTerms: none — decisionOffered does not check whether the unit still carries a valid .listing; an approve after a listing gap relies entirely on the server refusal.
+// refusal-courtesy: DecideLeaseApplication/MoveInBeforeAvailable: none — the move-in is the applicant's reviewed term (a.termsMoveInDate), never edited here, and the listing's date may have been floored since it was submitted; the refusal toast is the answer.
 async function decideApplication(a, decision) {
   const who = a.applicantName || shortKey(a.applicant);
   // A decline prompts for an optional reason (applicant feedback + a fair-housing

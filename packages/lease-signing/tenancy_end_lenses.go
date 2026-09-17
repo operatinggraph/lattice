@@ -17,8 +17,10 @@ const TenancyEndTarget = "tenancyEnd"
 // TenancyEndLenses returns the tenancyEnd lens (design
 // loftspace-lease-term-and-tenancy-end-design.md §2.2): the leaseapp-anchored
 // frozen-table lens that turns a lease term's end into a RECORDED fact
-// (EndTenancy writes .tenancy.endedAt) and then frees the unit the ended
-// tenancy held (SetListingStatus available). It is the sibling of leaseExpiry
+// (EndTenancy writes .tenancy.endedAt), then frees the unit the ended
+// tenancy held (SetListingStatus available) and floors the unit's marketed
+// availability at the term's recorded end (FloorListingAvailability). It is
+// the sibling of leaseExpiry
 // — the same recorded-lapse timer shape on the same anchor, one horizon later:
 // leaseExpiry watches renewalOpensAt and opens the renewal cycle, this one
 // watches leaseEnd itself and ends the term the cycle did not extend.
@@ -36,8 +38,8 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: TenancyEndTarget + ".{actorSuffix}",
 				BodyColumns: []string{
-					"violating", "missing_tenancyEnded", "missing_relist", "missing_residenceUnwired", "entityKey", "unitKey", "freshUntil",
-					"leaseEnd", "termEnd", "moveOutAt", "endedAt", "unitStatus", "residenceLinkKey",
+					"violating", "missing_tenancyEnded", "missing_relist", "missing_residenceUnwired", "missing_availabilityFloored", "entityKey", "unitKey", "freshUntil",
+					"leaseEnd", "termEnd", "moveOutAt", "endedAt", "unitStatus", "residenceLinkKey", "unitAvailableFrom", "marketFrom",
 				},
 				EmptyBehavior: "delete",
 				KeyColumn:     "entityId",
@@ -48,8 +50,9 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 }
 
 // tenancyEndSpec anchors on EVERY leaseapp (a required MATCH — actorAggregate
-// re-executes per anchor) and projects three gaps, the third split from the
-// second half of "a lease that ends frees its unit AND releases its resident":
+// re-executes per anchor) and projects four gaps, the third split from the
+// second half of "a lease that ends frees its unit AND releases its resident",
+// the fourth the date that unit is marketed from:
 //
 //   - missing_tenancyEnded — the term has ended and nothing has recorded it:
 //     the application is decided approved AND signed (the tenancy is a real
@@ -70,8 +73,43 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 //     that link kept: endedAt is set, residenceLinkKey names a live link, and
 //     sameApplicantLiveTenancyCount is zero. → directOp
 //     UnwireResidesIn{linkKey: row.residenceLinkKey}.
-//   - violating is the explicit OR of the three (Contract #10 §10.2 — Weaver
+//   - missing_availabilityFloored — the unit's listing markets it from a day
+//     this term still covers: marketFrom (below) is non-null, the appliesToUnit
+//     unit is live (unitKey <> null), and its .listing.availableFrom reads
+//     BELOW marketFrom. → directOp FloorListingAvailability{unit: row.unitKey,
+//     availableFrom: row.marketFrom}. Independent of the listing's status and
+//     of the relist: an already-available unit whose date is stale is floored
+//     without a status flip, and a term under notice is floored while still
+//     leased.
+//   - violating is the explicit OR of the four (Contract #10 §10.2 — Weaver
 //     dispatches only violating rows).
+//
+// marketFrom is the day the unit may next be marketed from, or null when the
+// term names none: coalesce(endedAt, CASE WHEN moveOutAt <> null THEN termEnd
+// ELSE null END) — an ended term markets from its RECORDED end (endedAt, which
+// EndTenancy writes as termEnd), a live term under notice from the notice's
+// effective end (termEnd — the move-out, or leaseEnd if the stored move-out
+// is not before it), and a live term with no notice from nothing: a bare
+// leaseEnd is the renewal question's input, not an availability, so it never
+// floors a listing. unitAvailableFrom is u.listing.data.availableFrom
+// verbatim, read off the same .listing aspect unitStatus is.
+//
+// The floor compares STRINGS, and the op's write is on string inequality for
+// that reason. availableFrom is landlord-authored and may be a bare
+// YYYY-MM-DD (seed data) or an RFC3339 instant (the FE's shape); marketFrom is
+// always a canonical RFC3339 UTC instant (every writer normalizes through
+// time.rfc3339_utc). Lexically a bare "2027-01-31" sorts BELOW
+// "2027-01-31T00:00:00Z", so a bare date equal to the recorded end reads as
+// stale here — and FloorListingAvailability, which normalizes both sides to
+// instants before its max, writes the canonical form back whenever the
+// result differs from the stored STRING, closing exactly that row in one
+// pass. An instant-equality no-op in the op would leave it open forever. The
+// op is a monotone max: a landlord's LATER date is never lowered (the gap
+// reads false the moment availableFrom >= marketFrom), every ended term on
+// the unit floors to its own end, and the unit converges to the latest in any
+// dispatch order. A null unitAvailableFrom (no listing, or a listing with no
+// date) reads (null < marketFrom) = false under the null-side rule below and
+// stays closed — a unit with no listing is not marketed at all.
 //
 // termEnd is the term's EFFECTIVE end, carried in both languages (this cypher
 // and EndTenancy's script derive it identically from the same two recorded
@@ -264,6 +302,8 @@ WITH
   app.signature.data.signedAt      AS signedAt,
   u.key                            AS unitKey,
   u.listing.data.status            AS unitStatus,
+  u.listing.data.availableFrom     AS unitAvailableFrom,
+  coalesce(app.tenancy.data.endedAt, CASE WHEN (app.notice.data.moveOutAt <> null) THEN (CASE WHEN (app.notice.data.moveOutAt < app.tenancy.data.leaseEnd) THEN app.notice.data.moveOutAt ELSE app.tenancy.data.leaseEnd END) ELSE null END) AS marketFrom,
   app.freshnessExpiry.data.byTarget.%[1]s AS lapsedAt,
   count(DISTINCT CASE WHEN rn.data.status = 'open' AND rn.data.cycleEnd = app.tenancy.data.leaseEnd THEN rn.key ELSE null END) AS openRenewalCount,
   count(DISTINCT CASE WHEN other.key <> app.key AND other.decision.data.value = 'approved' AND other.tenancy.data.endedAt = null THEN other.key ELSE null END) AS otherLiveTenancyCount,
@@ -279,9 +319,12 @@ RETURN
   endedAt,
   unitStatus,
   residenceLinkKey,
+  unitAvailableFrom,
+  marketFrom,
   CASE WHEN (endedAt <> null) OR (lapsedAt >= termEnd) THEN null ELSE termEnd END AS freshUntil,
   ((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))) AS missing_tenancyEnded,
   ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0)) AS missing_relist,
   ((endedAt <> null) AND (residenceLinkKey <> null) AND (sameApplicantLiveTenancyCount = 0)) AS missing_residenceUnwired,
-  (((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))) OR ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0)) OR ((endedAt <> null) AND (residenceLinkKey <> null) AND (sameApplicantLiveTenancyCount = 0))) AS violating
+  ((marketFrom <> null) AND (unitKey <> null) AND (unitAvailableFrom < marketFrom)) AS missing_availabilityFloored,
+  (((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))) OR ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0)) OR ((endedAt <> null) AND (residenceLinkKey <> null) AND (sameApplicantLiveTenancyCount = 0)) OR ((marketFrom <> null) AND (unitKey <> null) AND (unitAvailableFrom < marketFrom))) AS violating
 `, TenancyEndTarget)

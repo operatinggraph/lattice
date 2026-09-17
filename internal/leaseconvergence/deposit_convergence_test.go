@@ -97,6 +97,7 @@ func (h *harness) seedTenancyApplicationWithDeposit(label string, requestedRent,
 		Reads: []string{applicantKey, unitKey},
 		OptionalReads: []string{
 			"lnk.identity." + applicantKey[len("vtx.identity."):] + ".appliedToUnit.unit." + unitKey[len("vtx.unit."):],
+			unitKey + ".listing",
 		},
 	})
 	require.Equalf(h.t, processor.ReplyStatusAccepted, appReply.Status, "CreateLeaseApplication(%s): %+v", label, appReply.Error)
