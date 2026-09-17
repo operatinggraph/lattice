@@ -110,8 +110,9 @@ aspect at the approval event).
    so a racing second return is rejected rather than replayed), emits `loftspace.depositReturned`, and marks
    `.arrears` stale through the `arrears_stale_mark` helper `post_entry` shares (a credit moves the FIFO). The return credit is an ordinary credit on the
    lease's account: it nets against whatever the tenant still owes (the final rent period, arrears) and the remainder
-   reads "Credit balance: $X" — the refund owed to the tenant. A payout verb, deductions and interest are product
-   rules the PO did not file (alternatives).
+   reads "Credit balance: $X" — the refund owed to the tenant. ~~A payout verb, deductions and interest are product
+   rules the PO did not file (alternatives).~~ *(2026-09-17: the PO filed deductions and a payout; the return nets the
+   recorded deductions and a landlord verb pays a credit balance out — the section at the end. Interest stays unfiled.)*
 6. **Both statements hold the deposit apart.** `ledgerHistory` and one-bill's `rentEntries` project `c.terms.data.purpose AS clausePurpose`;
    `ledger.go` / `one_bill.go` thread `ClausePurpose` and compute `depositHeldCents` (Σ debits − Σ credits over deposit
    rows — custody, not what is unpaid: a payment names no clause) + `depositChargedCents` / `depositChargedAt` /
@@ -148,7 +149,7 @@ aspect at the approval event).
 | Tell the deposit clause apart by its `prose` | Free text is not a key; a landlord-installed clause with the same prose would be returned as a deposit. A recorded `purpose` token is the shape filter. |
 | Return by `CreditAccount` (existing op) | `CreditAccount` records a payment RECEIVED, links no clause, and cannot mark the deposit returned — the gap could never close, and the statement could not tell the return from a payment. |
 | Return at the notice, or at `leaseEnd` | The notice is an intention; `endedAt` is the recorded end every consumer keys on, and it is what a return "rides". |
-| A landlord verb with deductions / a payout verb | Product rules the PO did not file; the refund nets on the ledger today and a credit balance is already rendered. A PO row if observed. |
+| A landlord verb with deductions / a payout verb | ~~Product rules the PO did not file~~ — filed 2026-09-16; built as the section at the end. |
 | Mint the deposit at signature rather than approval | The rent clause is minted at approval; the deposit is due when the lease is granted. The filing says "at approval". |
 
 ## Fire brief (build note, 2026-09-15)
@@ -274,3 +275,127 @@ unproven lease root, `SupersedeClause` accepting a `completed` clause (pre-exist
 grounding named `refreshTenantLedgerBody` as the tenant statement (it is `refreshStatementBody`), the RLS column fixture
 (a Postgres-gated test the brief's green list never ran); **review-over-reach** — the explicit `expectedRevision` pin
 (precedent-consistent, kept with the trade stated in the comment). Adjacent finds: none open.
+
+## Deductions and the payout (PO row 2026-09-16, built 2026-09-17)
+
+**Filed (PO, 2026-09-16, `16af6c9d`):** "`ReturnDeposit` credits the full clause at `endedAt`; no verb records a damage
+deduction first, and what nets above the last rent reads 'Credit balance' forever. `RecordDepositDeduction{amount, reason}`
+while held, a return that nets it, `PayOutBalance` on an ended tenancy; itemized on both statements."
+
+### Decisions (Winston)
+
+1. **A deduction is a ledger entry that moves custody, not what the tenant owes: `.entry.type = "deduction"`.** The
+   deposit is money the tenant already paid; taking part of it for damage changes what comes back, never the account's
+   balance. Every balance reader tests the type explicitly — the arrears FIFO (`scripts.go:568/578`), the resident
+   self-credit walk (`:1545/1547`), `ledger.go:103/141/300`, `one_bill.go:96` — so a third type is ignored by all of
+   them, and custody on the statement is charged − deducted − returned. It is `postedTo` the account and `authorizedBy`
+   the deposit clause (the chain of custody the charge and the return record), `memo` = the reason. No `.arrears` stale
+   mark: a deduction moves no FIFO (the evaluator's replay skips it at capture, so the checkpoint keeps carrying "every
+   debit and credit" and nothing else).
+2. **The clause's `.status` carries the running `deductedCents`** — the return already reads and pins `.status`, so no
+   dispatcher declares a new key. `RecordDepositDeduction` writes it as a bare update on the hydrated key (Contract #3
+   §3.2 re-hydrate retry: two concurrent deductions both land, the total exact); it refuses `DepositNotHeld` unless
+   `state = completed` (active = not charged yet; returned = gone) and `DeductionExceedsDeposit` when `deductedCents +
+   amountCents > terms.amountCents`. `clauseStatus`'s DDL (semantic-contracts) admits the op and names the field.
+3. **`RecordDepositDeduction{accountKey, clauseKey, amountCents, reason}`** (loftspace-ledger, class `transaction`):
+   `reason` required, 1–200 chars. Who: the landlord (the self-scope path `post_entry` proves — the account's own
+   `heldFor` lease, its `appliesToUnit` unit, the caller's `manages` link; the resident branch answers first and is
+   refused `AuthDenied` here) or the operator with no target. Custody off the deterministic `lnk.clause.<c>.chargesTo.
+   account.<a>` (`ClauseAccountMismatch`); `.terms.purpose = deposit` on a `oneTime` `computational` clause
+   (`NotADeposit`). `derive_reads` hydrates account root, clause root, `.terms`, `.status`, the chargesTo link — the
+   `ReturnDeposit` branch's shape. Event `loftspace.depositDeducted`. The self-scope proof is EXTRACTED from `post_entry`
+   into one helper the three self-scoped ops share (returns the lease key + which standing the caller proved); `post_entry`'s
+   behaviour is unchanged and its tests pin it.
+4. **`ReturnDeposit` credits `terms.amountCents − status.deductedCents`.** Net > 0: the credit as today, at the net.
+   Net = 0 (fully deducted): no transaction and no links — a zero-amount entry is not a transaction — the clause still
+   moves to `returned` with `returnedAt` (the pinned write as today), the event carries `amountCents: 0` and no
+   `transactionKey`, the response no `primaryKey`. The gap and its dispatch are unchanged (semantic-contracts'
+   `missing_depositReturn` reads state, not amounts).
+5. **`PayOutBalance{accountKey, leaseAppKey}`** (loftspace-ledger, class `transaction`) pays the whole credit balance
+   out, computed op-side from the account's own `postedTo` history exactly as the resident self-credit walk computes what
+   is owed (the walk is EXTRACTED into `account_balance_cents(acct_key)` and both call it; its page budget exhausted
+   refuses `HistoryTooLong`, never a partial sum). Who: landlord self path or operator, as (3). Guards: the lease root
+   alive, `lnk.account.<a>.heldFor.leaseapp.<l>` alive (`AccountLeaseMismatch`), `.tenancy.endedAt` recorded
+   (`TenancyNotEnded`), `NoCreditBalance` when owed ≥ 0. Writes one `{type: "debit", kind: "payout", amountCents:
+   −owed, postedAt, memo: "Balance paid out to the tenant"}` `postedTo` the account, no `authorizedBy`, `.arrears`
+   stale-marked like every debit. Event `loftspace.balancePaidOut`. Re-submit: owed is 0 → `NoCreditBalance`.
+   `kind` is the recorded provenance of a debit no clause authorizes; `ledgerHistory` and one-bill's `rentEntries`
+   project `t.entry.data.kind AS kind` so both statements label the row by its record, never its memo.
+6. **Both statements itemize.** `ledgerEntryRow` gains `Kind`; `depositSummary` gains `DepositDeductedCents` and
+   `DepositClauseKey` (the deposit charge row's clause — the form needs it); `computeDepositSummary` handles
+   `deduction` (held −=, deducted +=). `/api/one-bill` mirrors. FE: `depositRowTag` tags a `deduction` row
+   " · Deposit deduction" and KEEPS its memo (the reason is the line), a `kind = payout` row " · Balance paid out"
+   (memo dropped, fixed text); the deposit strip reads "Security deposit $D · held since <date>", then "· $X deducted"
+   when any, "· $R returned <date>" once returned, and "· fully deducted, nothing to return" when held is 0 with no
+   return. The landlord ledger form gains "Deduct from deposit" (amount + a required reason, confirm) shown only while
+   `depositHeldCents > 0`, and "Pay out $X to tenant" (confirm) shown only when `balanceCents < 0` and the row's
+   `tenancyEndedAt` is set; every state refusal carries its `refusal-courtesy` line. The tenant statement renders the
+   same rows and strip through the shared helpers.
+7. **Proof.** Package tests: `RecordDepositDeduction` every refusal (resident `AuthDenied`, `DepositNotHeld` on active
+   and returned, `DeductionExceedsDeposit` at the boundary, `ClauseAccountMismatch`, `NotADeposit`, missing reason),
+   the happy path (entry shape, links, `deductedCents` running total across two deductions, no arrears mark); `ReturnDeposit`
+   nets a deduction and the fully-deducted zero-net shape; `PayOutBalance` every refusal and the happy path (the debit
+   zeroes the balance, arrears marked, a second call `NoCreditBalance`); the `Test*UndeclaredSubmitter*` vectors for both
+   new `derive_reads` branches; `post_entry` self-credit unchanged after the extraction (the existing pins). Go:
+   `computeDepositSummary` with a deduction and the zero-net case; goja pins for the tag, memo, strip and the two form
+   gates. `internal/leaseconvergence` `TestLeaseConvergence_DepositChargedAndReturned` gains a deduction between the charge
+   and the end (return credits the net). Live: a deduction on a held deposit on the running app if a lease carries one,
+   else the convergence proof.
+
+### Alternatives rejected
+
+| alternative | why not |
+|---|---|
+| Delete the thing — the landlord records damage with `LoftspaceRecordCharge` and pays out with a hand debit | A charge is owed by the tenant: it ages into arrears and a reminder fires during the notice period for money the deposit already covers; a hand debit is a "charge" on the statement. The filing wants the deduction taken from custody and the payout named. |
+| A deduction as `type: debit` with a marker | Counted by every balance reader; the same arrears false alarm. |
+| Deductions as a list on the clause, the return reads it, statements unpack it | The statement is the ledger; a deduction as a row is itemized by the machinery that already sorts, tags and renders rows. The running total on `.status` is the op-readable figure; the rows are the itemization. |
+| `PayOutBalance{amountCents}` trusted from the payload | The landlord already posts uncapped debits, so trust is not widened — but a figure the op can compute from the record it will not take from a client: the self-credit walk is the precedent and is reused. |
+| Gate the return on a landlord "settle" verb so deductions can follow move-out | Changes the ratified auto-return; the PO did not ask. The notice period is the window. |
+| Project the clause's `returnedAt` for the zero-net return | Derivable: held = 0 and deducted = charged with no credit row IS "nothing to return"; no new column in two packages. |
+
+### Fire brief (build note, 2026-09-17)
+
+**1. Scope** — verbatim the filing above. Green bar: decisions 1–7.
+
+**2. Touch-list (verified live).** `packages/loftspace-ledger/scripts.go` — `post_entry` :1443 (self-scope proof :1467–1576,
+balance walk :1526–1554), `arrears_stale_mark` :1339, `return_deposit` :1770–1909 (entry :1865, status pin :1886–1900),
+`derive_reads` :1911–1987 (ReturnDeposit branch :1941–1977), dispatch table :1999–2017, arrears replay capture :493–497;
+`ddls.go` — `transactionDDL` :291 (PermittedCommands :295, InputSchema :373–381), `accountArrearsAspectTypeDDL` :234;
+`opmetas.go` — `LoftspaceRecordCharge` / `ReturnDeposit` entries (:172–182); `permissions.go` :140–167; `lenses.go` —
+`ledgerHistorySpec` :281–299; `package.go:90` + `manifest.yaml` 0.9.1; `notifications.go` (events, if enumerated).
+`packages/semantic-contracts/ddls.go:487` clauseStatus PermittedCommands + description; `package.go:114` + manifest 0.7.3.
+`packages/one-bill/lenses.go:82` `rentEntriesSpec`; `package.go:29` + manifest 0.5.1. `cmd/loftspace-app/ledger.go`
+(:83 row, :103 balance, :119–156 deposit summary), `one_bill.go` (:77, :96, :224–244), `web/app.js` (`entryPeriodLabel`
+:1529, `depositRowTag` :1545, `entryMemoSuffix` :1556, `rentBalanceLine` :1610, deposit strip :1646, `refreshLedgerBody`
+:3961, `renderLedgerRecordForm` :4182–4235, `refreshStatementBody`), `landlord_applications.go:90` (`tenancyEndedAt`);
+goja harness `rent_arrears_ui_test.go:36`. `internal/leaseconvergence/deposit_convergence_test.go:166–279`.
+
+**3. Precedents.** Ops: `return_deposit` (custody proofs, status pin), `post_entry` (self-scope proof, entry shape, stale
+mark), the self-credit balance walk; grants: `LoftspaceRecordCharge`'s pair; OpMeta: `LoftspaceRecordCharge`; DDL admission:
+`ReturnDeposit` in clauseStatus; lens column: `clausePurpose` in both specs; Go: `computeDepositSummary`; FE: the record form
++ `depositRowTag`; tests: `return_deposit_test.go`, `rent_arrears_ui_test.go`.
+
+**4. Increments.** Inc 1 — loftspace-ledger ops + derive_reads + DDLs + grants + OpMetas + lens column + version;
+semantic-contracts DDL + version; one-bill column + version. Green: `go test ./packages/loftspace-ledger/ ./packages/
+semantic-contracts/ ./packages/one-bill/`, `STRICT=1` every `scripts/lint-*.go`. Inc 2 — `cmd/loftspace-app` Go + FE + goja
+pins. Green: `go test ./cmd/loftspace-app/`, `node --check web/app.js`. Inc 3 — leaseconvergence test. Green: `make
+test-lease-convergence` (leaseshortwindow tag; read the Makefile for the exact target). Then the full gate set.
+
+**5. Gotchas.** Three package version bumps (`lint-package-version`); `Test*UndeclaredSubmitter*` per new `derive_reads`
+op (`lint-derive-reads-bare-vector`); `refusal-courtesy` lines at every dispatch site for every reachable code (incl. the
+helper's `AuthDenied`); `lint-opmeta-required-fields` / `lint-app-op-descriptors` on the new OpMetas; `op_catalog.go`
+admits ops from the opCatalog lens — a missing OpMeta is a refused dispatch; the arrears replay checkpoint schema names
+"every debit and credit" — skip a deduction at capture; a bare update on `.status` for the running total, an explicit pin
+for the terminal return; MERGED ≠ RUNNING — `refresh-loftspace` for the three packages, cycle `bin/loftspace-app`.
+Dossier (`_packages.md`): the "leg" of a guard is every writer of the value and every reader — `deductedCents`' writers
+are one op, its readers the return; a mirror that drops a branch drops the invariant — the extraction keeps the
+resident-first order; a recorded value is read as the fact it records. Dossier (`vertical-apps.md`): a count the FE
+promises applies the op's own predicate — the "Pay out" gate reads the same balance the op computes; a new terminal
+state is a census of every render gate — a `deduction` row through every row renderer and amount formatter. Standing
+checklist: new state (`deductedCents`) has a lifetime — created by the first deduction, carried by the return's
+field-preserving copy, never reset; every fix proven by revert; one deterministic key one writer (none new).
+
+**6. Adjacent finds.** None at scoping.
+
+**7. Non-goals.** Interest on the deposit; a settle verb gating the return; partial payouts; Facet descriptors for the
+two landlord verbs (the landlord console is loftspace-app; `ReturnDeposit`'s precedent).
