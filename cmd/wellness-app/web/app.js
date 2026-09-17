@@ -877,7 +877,7 @@ async function loadSchedule() {
   await renderSchedule();
 }
 
-// refusal-courtesy: CreateBooking/SessionInPast: hide — renderSchedule filters already-started sessions out of the grid before rendering, and scheduleCard disables the button as a second gate for a session that started between load and click.
+// refusal-courtesy: CreateBooking/SessionInPast: hide — renderSchedule filters already-started sessions out of the grid before rendering, and scheduleCard disables the button as a second gate for a session that started between load and click; this is the member's own scope=self leg, which CreateBooking refuses from startsAt on (the desk's until-endsAt walk-in admission is the roster's, renderBookMember/deskCanSeat).
 // refusal-courtesy: JoinWaitlist/SessionInPast: hide — same already-started filter and disable as CreateBooking's SessionInPast above; renderSchedule serves both ops from one card.
 // refusal-courtesy: CreateBooking/SessionFull: hide — scheduleCard swaps the button's action to "waitlist" once full (se.bookedCount >= se.capacity), so it never dispatches CreateBooking; only JoinWaitlist is offered, labeled "Join waitlist".
 // refusal-courtesy: JoinWaitlist/WaitlistFull: none — the full-class button always offers "Join waitlist" with no check of the waitlist's own capacity (MAX_WAITLIST_SIZE); a full waitlist surfaces as a toast.
@@ -1808,6 +1808,21 @@ function updateBookGuestHold() {
   note.innerHTML = held ? bookHoldNote(nameForIdentity(idOf(guestKey)), ledger) : "";
 }
 
+// deskCanSeat mirrors CreateBooking's desk-leg past-class guard
+// (prepare_booking_common, packages/wellness-domain/ddls.go): a staff or
+// operator submission — never the member's own scope=self one — may seat a
+// walk-in until the class ENDS, and is refused SessionInPast once
+// .schedule.endsAt has passed. So the roster's book-a-member form stays up
+// while the class is under way (the walk-in at the door is exactly who it is
+// for) and comes down at endsAt. A row with no endsAt cannot be placed in
+// time and reads as not seatable, the fail-closed side. The member's own grid
+// keeps the startsAt rule (renderSchedule), the self leg's own guard.
+function deskCanSeat(se, nowMs) {
+  if (!se || !se.endsAt) return false;
+  const endMs = new Date(se.endsAt).getTime();
+  return isFinite(endMs) && nowMs < endMs;
+}
+
 // renderBookMember shows the front desk's book-a-member control (and the
 // book-a-guest control beside it) for the selected class, and hides both for
 // everyone else. The picker offers the members this staffer's workplace
@@ -1823,11 +1838,14 @@ function updateBookGuestHold() {
 // takes a typed key instead and leaves the seated-twice guard to the same
 // in-script check.
 //
-// It offers nothing at all for a class that has already begun or is full:
-// CreateBooking answers SessionInPast and SessionFull respectively (ddls.go),
-// so the control could only fail closed — the same reasoning that keeps the
-// attendance control hidden until a class starts, and that excludes the
-// already-seated above.
+// It offers nothing at all for a class that has already ended or is full:
+// CreateBooking answers SessionInPast (past endsAt, on the desk leg —
+// deskCanSeat above) and SessionFull respectively (ddls.go), so the control
+// could only fail closed — the same reasoning that excludes the already-seated
+// above. A class that has STARTED but not ended keeps the form: the desk seats
+// the walk-in at the door, and the roster re-render on success shows the new
+// seat with its attendance buttons already up (canMark, renderRoster), so the
+// walk-in is marked attended in the next click.
 //
 // The control is an affordance, not the authority: which classes a staffer may
 // book into is decided by require_workplace against the SESSION's own location
@@ -1842,13 +1860,13 @@ function updateBookGuestHold() {
 async function renderBookMember(se, bookings, generation) {
   const form = document.getElementById("roster-book");
   const select = document.getElementById("roster-book-member");
-  const started = !!(se && se.startsAt && new Date(se.startsAt).getTime() <= Date.now());
+  const seatable = deskCanSeat(se, Date.now());
   // se.bookedCount (wellnessSessions + countBookingsBySession, sessions.go)
   // already excludes waitlisted rows — bookings.length would not, and would
   // hide this control the moment a full class's waitlist alone reached
   // capacity even with real seats still open.
   const full = !!(se && se.capacity && se.bookedCount >= se.capacity);
-  if (!isStaff() || !se || started || full) {
+  if (!isStaff() || !se || !seatable || full) {
     form.hidden = true;
     return;
   }
@@ -2221,7 +2239,7 @@ async function bookSelectedMember() {
 // an absent leaseAppKey (a guest with no residency) is the designed
 // standard-rate branch, not a narrower case to reject — CreateBooking itself
 // never requires one.
-// refusal-courtesy: CreateBooking/SessionInPast: hide — renderBookMember hides the whole roster-book form (form.hidden = true) once the selected class has started, before this function is ever reachable.
+// refusal-courtesy: CreateBooking/SessionInPast: hide — renderBookMember hides the whole roster-book form (form.hidden = true) once the selected class has ENDED (deskCanSeat: now >= endsAt), before this function is ever reachable; a class that has started but not ended keeps the form, because this is the desk leg (a staff submission, never the member's own scope=self target) and CreateBooking admits a walk-in on that leg until endsAt.
 // refusal-courtesy: CreateBooking/SessionFull: hide — renderBookMember hides the whole roster-book form once the selected class is full, before this function is ever reachable.
 // refusal-courtesy: CreateBooking/DoubleBooked: drop — renderBookMember drops already-seated members from the picker (`free = members.filter(m => !seated.has(m.bookerKey))`); the guest search (searchGuests) additionally disables, rather than drops, an already-seated match, labeling it "already on this class".
 // refusal-courtesy: CreateBooking/ProtectedBooker: none — the member picker (loadMembers, wellnessMembersSpec) is lease-anchored so a kernel identity never appears there, but the guest search (/api/identities?q=) carries no such filter; this site does not uniformly gate it.
@@ -2804,6 +2822,21 @@ async function moveSeries(se, anchor, startsAt, endsAt) {
 // `generation` is renderRoster's own render token (see renderBookMember for
 // the same guard): this awaits a fetch, so a stale render must not append a
 // control for a class the staffer has already navigated away from.
+// reassignCapacityFloor is the Capacity input's lower bound on the reassign
+// form: the class's seated count (se.bookedCount — seat-holding rows,
+// sessions.go), never below 1. ReassignSession refuses CapacityBelowSeated
+// on a shrink that would cut under a claimed seat (packages/wellness-domain/
+// ddls.go), judged by the HIGHEST claimed seat index — seats are never
+// compacted, so a class with seats 1 and 5 claimed refuses a shrink to 3 even
+// though two members fit. The row carries the count, not the highest index,
+// so this floor is the courtesy that catches the common case (a full or
+// gap-free class); a shrink that clears the count but not the highest index
+// surfaces as the op's own refusal, which names the seat.
+function reassignCapacityFloor(se) {
+  const seated = se && Number.isFinite(se.bookedCount) ? se.bookedCount : 0;
+  return Math.max(1, seated);
+}
+
 async function renderReassignControl(se, generation) {
   if (!se || !(isStaff() || isOperatorHat())) return;
   // Moving a class to a different studio is operator-only regardless of hat
@@ -2876,7 +2909,7 @@ async function renderReassignControl(se, generation) {
     '<div class="field"><label>New start</label><input type="datetime-local" id="reassign-starts" step="900" /></div>' +
     '<div class="field"><label>New end</label><input type="datetime-local" id="reassign-ends" step="900" /></div>' +
     '<div class="field"><label>Name</label><input type="text" id="reassign-name" /></div>' +
-    '<div class="field"><label>Capacity</label><input type="number" id="reassign-capacity" min="1" max="200" step="1" /></div>' +
+    '<div class="field"><label>Capacity</label><input type="number" id="reassign-capacity" min="' + reassignCapacityFloor(se) + '" max="200" step="1" /></div>' +
     '<div class="field"><label>Price ($)</label><input type="number" id="reassign-price" min="0" step="0.01" /></div>' +
     '<div class="field"><label>Resident price ($)</label><input type="number" id="reassign-resident-price" min="0" step="0.01" placeholder="same as Price" /></div>' +
     '<button id="reassign-submit">Save</button>' +
@@ -2929,6 +2962,7 @@ async function renderReassignControl(se, generation) {
 // refusal-courtesy: ReassignSession/InstructorConflict, StudioConflict: none — the form has no preview of the studio's or instructor's existing schedule; a collision surfaces as a toast (the catch block passes e.message through verbatim).
 // refusal-courtesy: ReassignSession/SessionTooLong: none — the form caps only the 15-minute grid (SlotGridViolation above); it enforces no maximum span before submit.
 // refusal-courtesy: ReassignSession/InvalidState: none — the "session carries no atStudio link to replace" fault only reaches the operator repair branch, which this form always supplies a chosen studio for (it throws client-side when none is picked); a correctness fault, not a choice this form's controls could gate.
+// refusal-courtesy: ReassignSession/CapacityBelowSeated: cap — the Capacity input's min is reassignCapacityFloor(se) (the row's seated count, se.bookedCount, renderReassignControl) and this function refuses a value under it client-side; the op judges by the highest CLAIMED seat index (seats are never compacted), which the row does not carry, so a shrink that clears the count but cuts under a gap-leaving seat still surfaces as the op's refusal naming that seat.
 async function reassignSession(se) {
   const sessId = idOf(se.sessionKey);
   const select = document.getElementById("reassign-instructor");
@@ -2972,6 +3006,9 @@ async function reassignSession(se) {
   if (capacityInput !== "") {
     const capacity = parseInt(capacityInput, 10);
     if (!Number.isFinite(capacity)) throw new Error("Capacity must be a number.");
+    if (capacity < reassignCapacityFloor(se)) {
+      throw new Error("Capacity cannot drop below the " + se.bookedCount + " seats already claimed on this class.");
+    }
     if (capacity !== se.capacity) payload.capacity = capacity;
   }
   if (priceInput !== "") {
@@ -2999,6 +3036,13 @@ async function reassignSession(se) {
   const optionalReads = se.studioKey
     ? ["lnk.session." + sessId + ".atStudio.studio." + idOf(se.studioKey)]
     : [];
+  // A shrink reads the seat cells it would remove — new capacity+1 .. the
+  // current capacity — to refuse CapacityBelowSeated on a claimed one
+  // (ddls.go); (d)-declared optionalReads, an absent cell being a
+  // never-claimed seat. A raise reads none.
+  if (payload.capacity !== undefined && payload.capacity < se.capacity) {
+    optionalReads.push(...seatKeys(se.sessionKey, se.capacity).slice(payload.capacity));
+  }
   if (payload.newStudio) {
     // (a)-declared required read — require_live_typed validates it alive +
     // class=studio before the move (ddls.go), mirrors newInstructor's

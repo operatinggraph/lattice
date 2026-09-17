@@ -392,6 +392,73 @@ func TestReminders_LastMinuteBooking(t *testing.T) {
 	require.Nil(t, v["freshUntil"])
 }
 
+// TestReminders_WalkInAfterStartNeverReminded — a seat the desk claimed AFTER
+// the class began (CreateBooking's desk leg admits a walk-in until endsAt,
+// wellness-domain ddls.go): .status.bookedAt at or after startsAt. Its
+// remindAt is a day in the past at the instant it is written, so without the
+// bookedAt term the row would arm an already-overdue @at, the fire would open
+// missing_reminder, and RecordBookingReminder would refuse ClassAlreadyStarted
+// three times into a standing GapBudgetExhausted. With it: no timer arms and
+// the gap never opens, even once a lapse is recorded — at the boundary
+// (bookedAt = startsAt) too, since the class has begun at startsAt.
+func TestReminders_WalkInAfterStartNeverReminded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, tc := range []struct{ name, bookedAt string }{
+		{"ten minutes in", "2026-06-30T09:10:00Z"},
+		{"exactly at the start", "2026-06-30T09:00:00Z"},
+	} {
+		f := newRemFixture(t)
+		f.mkBookingSpan(t, "bk", "booked", "flow", "2026-06-30T09:00:00Z", "2026-06-30T10:00:00Z", "2026-06-29T09:00:00Z")
+		f.aspect(t, "bk", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0, "bookedAt": tc.bookedAt})
+
+		v := f.projectReminders(t, "bk")[0].Values
+		require.Nil(t, v["freshUntil"], "%s: a walk-in seated after the start arms no reminder timer", tc.name)
+		require.Equal(t, false, v["missing_reminder"], "%s: no gap before any lapse", tc.name)
+		require.Equal(t, false, v["violating"], tc.name)
+
+		f.recordLapse(t, "bk", map[string]string{WellnessBookingRemindersTarget: "2026-06-29T09:00:00Z"})
+		v = f.projectReminders(t, "bk")[0].Values
+		require.Equal(t, false, v["missing_reminder"], "%s: a recorded lapse opens nothing for a seat claimed after the start", tc.name)
+		require.Equal(t, false, v["violating"], tc.name)
+		require.Nil(t, v["freshUntil"], tc.name)
+	}
+}
+
+// TestReminders_BookedBeforeStartStillReminded is the conjunct's other side:
+// a seat claimed BEFORE the start — a second before it, even — is reminded
+// exactly as before the stamp existed, and so is a legacy seat with no
+// bookedAt at all (`null >= x` is false, so NOT(false) keeps the gate).
+func TestReminders_BookedBeforeStartStillReminded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	const remindAt = "2026-06-29T09:00:00Z"
+	for _, tc := range []struct {
+		name   string
+		status map[string]any
+	}{
+		{"a second before the start", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0, "bookedAt": "2026-06-30T08:59:59Z"}},
+		{"a day before the start", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0, "bookedAt": "2026-06-29T08:00:00Z"}},
+		{"a legacy seat with no bookedAt", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0}},
+	} {
+		f := newRemFixture(t)
+		f.mkBookingSpan(t, "bk", "booked", "flow", "2026-06-30T09:00:00Z", "2026-06-30T10:00:00Z", remindAt)
+		f.aspect(t, "bk", "status", "bookingStatus", tc.status)
+
+		v := f.projectReminders(t, "bk")[0].Values
+		require.Equal(t, remindAt, v["freshUntil"], "%s: the reminder timer arms", tc.name)
+		require.Equal(t, false, v["missing_reminder"], tc.name)
+
+		f.recordLapse(t, "bk", map[string]string{WellnessBookingRemindersTarget: remindAt})
+		v = f.projectReminders(t, "bk")[0].Values
+		require.Equal(t, true, v["missing_reminder"], "%s: the recorded lapse opens the gap", tc.name)
+		require.Equal(t, true, v["violating"], tc.name)
+		require.Nil(t, v["freshUntil"], tc.name)
+	}
+}
+
 // TestReminders_SiblingTargetLapseAloneIsNotThisTargetsLapse is the per-target
 // isolation vector. A booking anchors BOTH wellnessBookingReminders and
 // pastDueBookings in ONE marker aspect, so reading the aspect's presence — or its

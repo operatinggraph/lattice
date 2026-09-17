@@ -100,6 +100,7 @@ func reassignSessionOpMeta() pkgmgr.OpMetaSpec {
 		// refusal-courtesy(facet): InstructorConflict, StudioConflict: none — the requested new time is not a property of any row Facet's entity lens offers; no `available` column could preview a collision before submit.
 		// refusal-courtesy(facet): SlotGridViolation: none — the descriptor's startsAt/endsAt fields carry format:"date-time" with no step constraint; Facet's generic renderer enforces no 15-minute grid.
 		// refusal-courtesy(facet): SessionTooLong: none — the descriptor enforces no maximum span before submit.
+		// refusal-courtesy(facet): CapacityBelowSeated: unreachable — the descriptor's InputSchema carries no capacity field (this op-meta covers the reschedule case alone, per the doc comment above), so a Facet submission never supplies new_capacity and the shrink branch that reads the seat cells is never entered.
 		Presentation: &pkgmgr.OpPresentationSpec{
 			Title:       "Reschedule class",
 			Description: "Move this class to a new time.",
