@@ -83,5 +83,9 @@ count. The prompt and badge are goja-pinned (`ledger_ui_test.go`); no browser ve
 adapter passes the type verbatim into `ADD COLUMN IF NOT EXISTS`; no `int*` precedent existed). Two finds from the
 displacement fire's review absorbed here: `TestChangeNotices_CancelByWithoutAtNotTold` gains the marker-present vector
 that alone discriminates its `at <> null` conjunct, and `verify-package-clinic-domain.go`'s permission census gains
-`MarkPastDueNoShow` and `BackfillAppointmentSite`. Review classification: none beyond the absorbed finds (a dead
-singular branch on the ≥ 2 prompt removed at admit).
+`MarkPastDueNoShow` and `BackfillAppointmentSite`. CI red once on `unit-3`: `ledger_rls_test.go` hand-builds
+`read_clinic_patients` without the two columns and its handler reads the roster through `queryPatients` (502); the
+test is `POSTGRES_TEST_DSN`-gated and skipped locally — fixed at `9b2cf0ee` (the table gains the columns; the SELECT
+coalesces a null count to 0), `bin/clinic-app` re-cycled 15:13:56. Review classification: **implementation-bug ×1**
+(the hand-built-table census — a fifth sighting on `vertical-apps.md`'s census entry; the local gate for a read-model
+column is now the package run under the stack's DSN), a dead singular branch on the ≥ 2 prompt removed at admit.

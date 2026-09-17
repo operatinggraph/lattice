@@ -169,3 +169,8 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   Fourth sighting (LoftSpace `deduction` entry type, 2026-09-17, caught cold): the new row type reached the tag and
   the strip and missed the one-bill monthly subtotal (`netCents` treated non-debit as a payment) and the sign glyph —
   the census covers every ARITHMETIC over the discriminator, not only the labels; a goja pin per fold.
+  Fifth sighting (Clinic `no_show_count`, 2026-09-17, CI red): a new read-model column reached the roster test that
+  hand-builds `read_clinic_patients` and missed the ARREARS test that hand-builds the same table (`ledger_rls_test.go`
+  — its handler reads the roster through `queryPatients`); the tests are `POSTGRES_TEST_DSN`-gated and skip locally, so
+  the census of `BuildProtectedTableDDL("<table>"` is grepped across every `_test.go`, and the package is run once with
+  the stack's DSN before the merge.
