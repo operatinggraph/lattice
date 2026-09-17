@@ -292,11 +292,17 @@ while held, a return that nets it, `PayOutBalance` on an ended tenancy; itemized
    the deposit clause (the chain of custody the charge and the return record), `memo` = the reason. No `.arrears` stale
    mark: a deduction moves no FIFO (the evaluator's replay skips it at capture, so the checkpoint keeps carrying "every
    debit and credit" and nothing else).
-2. **The clause's `.status` carries the running `deductedCents`** — the return already reads and pins `.status`, so no
-   dispatcher declares a new key. `RecordDepositDeduction` writes it as a bare update on the hydrated key (Contract #3
-   §3.2 re-hydrate retry: two concurrent deductions both land, the total exact); it refuses `DepositNotHeld` unless
-   `state = completed` (active = not charged yet; returned = gone) and `DeductionExceedsDeposit` when `deductedCents +
-   amountCents > terms.amountCents`. `clauseStatus`'s DDL (semantic-contracts) admits the op and names the field.
+2. **The running total lives on loftspace-ledger's own aspect `vtx.clause.<id>.deductions` = `{totalCents, count,
+   lastRecordedAt}` (class `depositDeductions`)** — *amended at build (2026-09-17): the total was to ride clause
+   `.status`, but a self-granted op admitted by another package's DDL is the S9 escalation `lint-package-standard`
+   refuses (a standing grant matches on operationType alone), so the aspect is this package's, the `leaseDeposit`-on-
+   `leaseapp` precedent.* `RecordDepositDeduction` creates it on the first deduction and bare-updates it after
+   (Contract #3 §3.2 re-hydrate retry: two concurrent deductions both land, the total exact); it refuses
+   `DepositNotHeld` unless `.status.state = completed` (active = not charged yet; returned = gone) and
+   `DeductionExceedsDeposit` when `totalCents + amountCents > terms.amountCents`. `ReturnDeposit` reads it (an
+   optionalRead in `derive_reads`) and ALSO writes it — unchanged when present, `{0, 0}` when absent — because the two
+   ops otherwise share no written key and per-key OCC cannot serialize a boundary-time deduction against the
+   Weaver-dispatched return (caught cold; the race test pins it). semantic-contracts is untouched.
 3. **`RecordDepositDeduction{accountKey, clauseKey, amountCents, reason}`** (loftspace-ledger, class `transaction`):
    `reason` required, 1–200 chars. Who: the landlord (the self-scope path `post_entry` proves — the account's own
    `heldFor` lease, its `appliesToUnit` unit, the caller's `manages` link; the resident branch answers first and is
@@ -319,6 +325,11 @@ while held, a return that nets it, `PayOutBalance` on an ended tenancy; itemized
    (`TenancyNotEnded`), `NoCreditBalance` when owed ≥ 0. Writes one `{type: "debit", kind: "payout", amountCents:
    −owed, postedAt, memo: "Balance paid out to the tenant"}` `postedTo` the account, no `authorizedBy`, `.arrears`
    stale-marked like every debit. Event `loftspace.balancePaidOut`. Re-submit: owed is 0 → `NoCreditBalance`.
+   *Build-forced (caught cold):* a content-unchanged bare update of the hydrated **account root** is the idempotency
+   anchor — `.arrears` is absent on a never-evaluated account, so two racing payouts both landed; the resident
+   self-credit cap in `post_entry` carries the same anchor (two racing self-credits each capped at `owed` minted a
+   credit balance the payout makes cashable). `accountDDL` admits `PayOutBalance` + `CreditAccount`, at the accepted
+   cost of class inference for both (every dispatcher passes `class: transaction`; the CLI needs `--class`).
    `kind` is the recorded provenance of a debit no clause authorizes; `ledgerHistory` and one-bill's `rentEntries`
    project `t.entry.data.kind AS kind` so both statements label the row by its record, never its memo.
 6. **Both statements itemize.** `ledgerEntryRow` gains `Kind`; `depositSummary` gains `DepositDeductedCents` and
@@ -399,3 +410,28 @@ field-preserving copy, never reset; every fix proven by revert; one deterministi
 
 **7. Non-goals.** Interest on the deposit; a settle verb gating the return; partial payouts; Facet descriptors for the
 two landlord verbs (the landlord console is loftspace-app; `ReturnDeposit`'s precedent).
+
+**Shipped `fa8c1e53` (merge of `8d3f9f71`), CI watched, live 2026-09-17.** `reinstall-package` loftspace-ledger
+0.9.1 → 0.10.0 (31 created, 15 updated) and one-bill 0.5.1 → 0.5.2, `provision-readpath`, `bin/loftspace-app` rebuilt
+and cycled. Live through the landlord's own path (Nora Vance, dev-login → session token → Gateway, self authContext):
+`PayOutBalance` on Riley Chen's live tenancy → `TenancyNotEnded`; `RecordDepositDeduction` naming her rent clause →
+`NotADeposit`; `/api/ledger` serves `depositDeductedCents` / `depositClauseKey`. No live lease carries a charged deposit
+(every approved tenancy predates the deposit), so the happy path — deduct, net return, zero-net return, payout — stands on
+the package tests, the three race tests and `TestLeaseConvergence_DepositChargedAndReturned` (a deduction between the
+charge and the end; the return credits the net).
+
+Deviations from the brief: decision 2's home (above); the two landlord verbs carry full OpMetas with a Facet `Dispatch`
+(S1 requires a descriptor for a self-granted op; Facet degrades to "Open an account to do this" with no account
+candidates); `lint-app-op-descriptors`' loftspace ceiling 19 → 21; the `.deductions` write on every return; the
+account-root anchors; `arrears_entries` skips a non-debit/credit entry at capture; the resident branch's root update.
+
+Review classification (one cold pass over the whole diff, one cold pass over the fix round — 3 SHOULD-FIX + 4 NIT in
+the first, 0 BLOCKING + 3 SHOULD-FIX doc/comment in the second, all fixed before merge): **design-gap** ×3 — the
+deduction ↔ return race the amendment opened (`_packages.md` third sighting on the guard-reads-a-key-it-never-writes
+entry, **promotion due**), the payout's absent anchor + the pre-existing resident self-credit race it made cashable
+(same entry), the negative net; **implementation-bug** ×2 — the one-bill monthly subtotal counting a deduction as a
+payment and the credit-sign glyph (`vertical-apps.md` fourth sighting on the terminal-state census entry: arithmetic,
+not only labels), the inert `cap` courtesy (`vertical-apps.md`, folded into the retired refusal-courtesy entry's walk
+clause); **brief-gap** ×2 — no negative vectors for "every balance reader ignores a deduction" (five added), the
+README; **convention** ×3 — history-narrating comments, invalid NanoIDs, a stale DDL sentence. Adjacent finds: none
+open (the class-inference cost and the re-projection fan-out are accepted and recorded above).

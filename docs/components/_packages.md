@@ -571,6 +571,12 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   Sighting (wellness `ReassignSession/CapacityBelowSeated`, 2026-09-16, caught cold): the shrink reads seat cells and
   writes only `.schedule`; a claim racing into the removed range lands one seat above capacity — recorded as accepted at
   the site, the DDL prose stating the window instead of a guarantee.
+  Third sighting (loftspace-ledger `RecordDepositDeduction` ↔ `ReturnDeposit`, 2026-09-17, caught cold): moving the
+  running total onto its own aspect left the two ops with no shared written key — the return now re-stamps
+  `.deductions` unchanged; the same pass found `PayOutBalance`'s only anchor (`.arrears`) absent on a never-evaluated
+  account and the resident self-credit cap racing itself — both anchor on a content-unchanged account-root update.
+  **Promotion due** (three sightings): a gate over each op's guard-read local names vs its mutated local names, per
+  vertex type, defaulting to deny where two ops share none and no `# race-accepted:` names the window.
 
 - **A dispatch declaration must name what the runtime actually binds** — a playbook `Params` on an OPTIONAL-hop
   column is a Weaver refusal (`strategist.go` "references row.<col>, which is null/absent") on every row where the

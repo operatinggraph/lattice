@@ -42,7 +42,8 @@ Facet's descriptor form for any described op), and fails a site with no `// refu
 census (49 ops · 180 pairs · 111 sites, [census](../reviews/verticals-refusal-courtesy-gate-2026-09-15.md)) found
 four siblings without their sibling's courtesy and fixed them. The half that stays a walk: the gate proves a
 declaration EXISTS and is not stale, never that the named `hide`/`drop`/`cap` fires in the state — a reviewer
-opens the mechanism the clause names; and a `none — the state is not projected` is the pointer to the lens
+opens the mechanism the clause names (2026-09-17, LoftSpace deposit deduction, caught cold: a `cap` pointing at `input.max` on a bare
+number input outside a `<form>` blocked nothing — the handler now enforces the bound before submit; GiveNotice's `cap` carries the same debt); and a `none — the state is not projected` is the pointer to the lens
 column the next fire adds (the third sighting's fix), not a settled verdict.
 
 - **A staff-leg descriptor context that passes no `me` silently drops every `{actor}` enumeration the
@@ -165,3 +166,6 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   mandated test row per new terminal value (`TestApplicationStatus`) plus the goja pin per new terminal boolean
   covering the banner, the disposition chip, `taskDisposition` and `decisionOffered` (the `rival_task_ui_test.go`
   shape).
+  Fourth sighting (LoftSpace `deduction` entry type, 2026-09-17, caught cold): the new row type reached the tag and
+  the strip and missed the one-bill monthly subtotal (`netCents` treated non-debit as a payment) and the sign glyph —
+  the census covers every ARITHMETIC over the discriminator, not only the labels; a goja pin per fold.
