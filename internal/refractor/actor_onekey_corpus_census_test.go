@@ -202,6 +202,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"wellnessNoShowSettlement":          oneKey,
 	"wellnessOrphanedBookingSettlement": oneKey,
 	"wellnessWaitlistPromotion":         oneKey,
+	"wellnessSeriesHorizon":             oneKey,
 	"wellnessRefundSettlement":          oneKey,
 }
 

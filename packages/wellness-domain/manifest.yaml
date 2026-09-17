@@ -1,5 +1,5 @@
 name: wellness-domain
-version: 0.29.0
+version: 0.30.0
 description: |
   Wellness bookable domain: studio / session / booking / instructor vertex
   types + their aspects and links, written by Create*/Tombstone*/Cancel*/Bind*
@@ -142,6 +142,8 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: sessionSeriesDefinition
       class: meta.ddl.aspectType
+    - canonicalName: sessionSeriesHorizon
+      class: meta.ddl.aspectType
     - canonicalName: wellnessrefund
       class: meta.ddl.aspectType
     - canonicalName: wellnessRefundDetail
@@ -186,6 +188,10 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: wellnessSeriesHorizon
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   permissions:
     - operationType: CreateStudio
       scope: any
@@ -206,6 +212,9 @@ declares:
       scope: any
       grantsTo: [operator, frontOfHouse]
     - operationType: ReassignSessionSeries
+      scope: any
+      grantsTo: [operator, frontOfHouse]
+    - operationType: StopSessionSeries
       scope: any
       grantsTo: [operator, frontOfHouse]
     - operationType: TombstoneSession
@@ -253,6 +262,9 @@ declares:
     - operationType: PromoteWaitlistedBookings
       scope: any
       grantsTo: [operator]
+    - operationType: ExtendSessionSeries
+      scope: any
+      grantsTo: [operator]
     - operationType: RecordBookingChangeNotification
       scope: any
       grantsTo: [operator]
@@ -261,6 +273,8 @@ declares:
       lensRef: wellnessOrphanedBookingSettlement
     - targetId: wellnessWaitlistPromotion
       lensRef: wellnessWaitlistPromotion
+    - targetId: wellnessSeriesHorizon
+      lensRef: wellnessSeriesHorizon
   opMetas:
     - operationType: CreateBooking
     - operationType: JoinWaitlist
@@ -271,6 +285,7 @@ declares:
     - operationType: CreateSession
     - operationType: CreateSessionSeries
     - operationType: TombstoneSessionSeries
+    - operationType: StopSessionSeries
     - operationType: ReassignSessionSeries
     - operationType: CreateStudio
     - operationType: TombstoneStudio

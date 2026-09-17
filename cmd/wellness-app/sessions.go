@@ -39,6 +39,10 @@ type sessionProjection struct {
 	// on the row that tells one occurrence of a weekly class from a standalone
 	// one.
 	SeriesKey string `json:"seriesKey"`
+	// SeriesRolling is true while the occurrence's series carries a live
+	// rolling window (its .horizon has an extendAt): the next class is minted
+	// as the window's earliest starts, so the run never runs out.
+	SeriesRolling bool `json:"seriesRolling"`
 	// CoveringLocations is the staff read boundary's term: the studio's own
 	// location plus its containedIn ancestors. Consumed by mayReadRoster, not
 	// rendered — sessionRow deliberately does not carry it, so the schedule
@@ -72,8 +76,11 @@ type sessionRow struct {
 	// tests for its presence to decide whether a class belongs to a recurring
 	// run at all, and an always-present empty string makes that test read as a
 	// value rather than an absence.
-	SeriesKey   string `json:"seriesKey,omitempty"`
-	BookedCount int    `json:"bookedCount"`
+	SeriesKey string `json:"seriesKey,omitempty"`
+	// SeriesRolling is sent only when true: a rolling run is the exception a
+	// card labels, and an absent field reads the same as false to the FE.
+	SeriesRolling bool `json:"seriesRolling,omitempty"`
+	BookedCount   int  `json:"bookedCount"`
 }
 
 // computeSessions decodes every wellnessSessions row, joins each to its
@@ -119,6 +126,7 @@ func computeSessions(keys []string, get kvGetter, bookedCounts map[string]int) [
 			InstructorKey:      p.InstructorKey,
 			InstructorName:     p.InstructorName,
 			SeriesKey:          p.SeriesKey,
+			SeriesRolling:      p.SeriesRolling,
 			BookedCount:        bookedCounts[p.SessionKey],
 		})
 	}
@@ -247,6 +255,7 @@ func computeRosterSessions(keys []string, get kvGetter, bookedCounts map[string]
 			InstructorKey:      p.InstructorKey,
 			InstructorName:     p.InstructorName,
 			SeriesKey:          p.SeriesKey,
+			SeriesRolling:      p.SeriesRolling,
 			BookedCount:        bookedCounts[p.SessionKey],
 		})
 	}

@@ -151,6 +151,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator", "frontOfHouse"},
 		},
 		{
+			OperationType: "StopSessionSeries",
+			Scope:         "any",
+			Note:          "Grants the operator and front-of-house staff the right to submit StopSessionSeries (stops a rolling class from scheduling further occurrences; nothing on the grid is touched) — the same studio front-desk beat as TombstoneSessionSeries, confined by the same in-script workplace walk on the series' own studio, and the one series verb that never walks the run's occurrences, so it works on a rolling run of any age. Not granted to `provider`, for TombstoneSessionSeries's reason.",
+			GrantsTo:      []string{"operator", "frontOfHouse"},
+		},
+		{
 			OperationType: "TombstoneSession",
 			Scope:         "any",
 			Note:          "Grants the operator and front-of-house staff the right to submit TombstoneSession (cancels a class off a studio's grid), and a bound instructor the right to cancel a class THEY lead — the script's standing guard routes a non-operator caller by whether they supply an instructor param: with one, to the session it is ledBy-bound to via its own instructor identifiedBy binding; without one, to a studio at a location they worksAt (falling back to the session's own atLocation snapshot if its studio was since tombstoned).",
@@ -228,6 +234,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "PromoteWaitlistedBookings",
 			Scope:         "any",
 			Note:          "Grants the operator alone the right to seat a class's waitlist into the seats that class already has free. The Weaver service actor holds the operator role (bootstrap primordial grant) — this is the ONLY grant its wellnessWaitlistPromotion directOp dispatch (targets.go) needs. No consumer path exists and none should: a member choosing WHICH waitlisted booking gets a seat is the queue-jumping this op exists to prevent, and the op takes no booking key to bind a self-scope guard to. No front-of-house path either — the desk already has CreateBooking for seating someone directly.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "ExtendSessionSeries",
+			Scope:         "any",
+			Note:          "Grants the operator alone the right to mint the next occurrence of a rolling class series. The Weaver service actor holds the operator role (bootstrap primordial grant) — this is the ONLY grant its wellnessSeriesHorizon directOp dispatch (targets.go) needs. No front-of-house path: the desk puts classes on the grid with CreateSession/CreateSessionSeries under the workplace confinement those ops run, which this op never runs — it trusts the series' own recorded horizon instead. The script narrows further still, to Weaver's own dispatch actor (an in-script primordial-actor guard), so an operator-role holder that is not Weaver cannot use it to put a class on a studio's grid outside that confinement.",
 			GrantsTo:      []string{"operator"},
 		},
 	}

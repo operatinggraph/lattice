@@ -57,14 +57,21 @@ const OrphanedBookingSettlementTarget = "wellnessOrphanedBookingSettlement"
 // binding Weaver reads (targets.go).
 const WaitlistPromotionTarget = "wellnessWaitlistPromotion"
 
+// SeriesHorizonTarget is the §10.8 TargetID == wellnessSeriesHorizon's
+// OutputKeyPattern prefix — the §10.2↔§10.8 binding Weaver reads
+// (targets.go), and the byTarget key under which the fired MarkExpired
+// records the horizon's lapse on the series.
+const SeriesHorizonTarget = "wellnessSeriesHorizon"
+
 // Lenses returns the package's six flat projection lenses,
 // wellnessIdentitiesRead (the one protected Postgres/RLS layer this package
-// carries), and two convergence lenses targets.go's WeaverTargets dispatches
-// over: wellnessOrphanedBookingSettlement (missing_release →
-// ReleaseOrphanedBooking) and wellnessWaitlistPromotion (missing_promotion →
-// PromoteWaitlistedBookings). No aggregation (no WITH) on the six flat
-// ones, so OPTIONAL-matched neighbour bindings are live directly in RETURN —
-// the same §4-B1 no-WITH-drop shape clinic-domain's lenses use.
+// carries), and three convergence lenses targets.go's WeaverTargets
+// dispatches over: wellnessOrphanedBookingSettlement (missing_release →
+// ReleaseOrphanedBooking), wellnessWaitlistPromotion (missing_promotion →
+// PromoteWaitlistedBookings) and wellnessSeriesHorizon (missing_occurrence /
+// missing_led_occurrence → ExtendSessionSeries). No aggregation (no WITH) on
+// the six flat ones, so OPTIONAL-matched neighbour bindings are live directly
+// in RETURN — the same §4-B1 no-WITH-drop shape clinic-domain's lenses use.
 func Lenses() []pkgmgr.LensSpec {
 	return []pkgmgr.LensSpec{
 		{
@@ -190,6 +197,23 @@ func Lenses() []pkgmgr.LensSpec {
 				AnchorType:       "session",
 				OutputKeyPattern: WaitlistPromotionTarget + ".{actorSuffix}",
 				BodyColumns:      []string{"violating", "missing_promotion", "entityKey", "sessionKey", "startsAt", "capacity", "seatedCount", "waitlistedCount", "freshUntil", "maxretries_promotion"},
+				EmptyBehavior:    "delete",
+				KeyColumn:        "entityId",
+				Freshness:        "auto",
+			},
+		},
+		{
+			CanonicalName:  SeriesHorizonTarget,
+			Class:          "meta.lens",
+			Adapter:        "nats-kv",
+			Bucket:         "weaver-targets",
+			Engine:         "full",
+			Spec:           seriesHorizonSpec,
+			ProjectionKind: "actorAggregate",
+			Output: &pkgmgr.OutputDescriptorSpec{
+				AnchorType:       "sessionseries",
+				OutputKeyPattern: SeriesHorizonTarget + ".{actorSuffix}",
+				BodyColumns:      []string{"violating", "missing_occurrence", "missing_led_occurrence", "entityKey", "seriesKey", "studioKey", "nextStartsAt", "nextEndsAt", "extendAt", "instructorKey", "lapsedAt", "freshUntil", "maxretries_occurrence", "maxretries_led_occurrence"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -455,6 +479,12 @@ RETURN
 // precisely, but it makes the walk depend on the taxonomy resolver being armed
 // for no gain here.) The labelled `(s:studio)` head is what keeps the
 // comprehension anchored rather than seeding the whole keyspace.
+//
+// seriesRolling reads the occurrence's series for a live rolling window
+// (`.horizon.extendAt` present — dropped by the stop (StopSessionSeries or the call-off) that ends the
+// roll), so the desk can tell a run the platform keeps on the books from one
+// whose count is its whole life; false on a one-off and on a non-rolling
+// series alike.
 const wellnessSessionsSpec = `MATCH (se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
 OPTIONAL MATCH (se)-[:ledBy]->(i:instructor)
@@ -473,6 +503,7 @@ RETURN
   i.key AS instructorKey,
   i.profile.data.displayName AS instructorName,
   ss.key AS seriesKey,
+  (ss.horizon.data.extendAt <> null) AS seriesRolling,
   [(s)-[:locatedAt]->(pl)-[:containedIn*0..7]->(c) | c.key] + [(se)-[:atLocation]->(apl)-[:containedIn*0..7]->(ac) WHERE s.key = null | ac.key] AS coveringLocations,
   (s.key = null) AS missingStudio,
   (i.key = null) AS missingInstructor`
@@ -730,6 +761,58 @@ RETURN
   ((waitlistedCount > 0) AND (seatedCount < capacity) AND NOT (lapsedAt >= startsAt)) AS violating,
   %[2]d AS maxretries_promotion
 `, WaitlistPromotionTarget, maxPromotionRetries)
+
+// seriesHorizonSpec is the convergence lens behind the wellnessSeriesHorizon
+// Weaver target: one row per rolling series, anchored on the SERIES because
+// the moving window is a recorded fact on the series (.horizon), never
+// derivable from its occurrences — a lens cannot do date arithmetic and
+// wellnessSessions carries no aggregate, so "the last class on the books" is
+// not projectable from the sessions. ExtendSessionSeries writes the horizon
+// forward by one interval on every dispatch, so one dispatch closes the gap.
+//
+// TWO GAPS, ONE OP. The instructor is nullable (a series may run unled), and
+// a Params column templated off a null row column is a Weaver data error, not
+// a dropped field — so the led and the unled windows are two gaps, both
+// dispatching ExtendSessionSeries, the led one passing `instructor:
+// row.instructorKey` (targets.go). Each conjuncts on what its dispatch binds:
+// studioKey (the atStudio hop is OPTIONAL, and Params reads it) and the
+// instructor's presence or absence.
+//
+// NO CLOCK. The lens never reads $now: freshUntil binds DIRECTLY to
+// .horizon.extendAt — the start of the window's earliest class, a recorded
+// fact — and the gate reads the lapse the fired MarkExpired records under
+// THIS target's key on the series (byTarget.wellnessSeriesHorizon). The gap
+// opens when `lapsedAt >= extendAt`; the dispatch moves extendAt one interval
+// past that lapse, so the same row re-projects closed and freshUntil re-arms
+// on the new deadline. A past freshUntil fires at once (weaver.md), so a
+// horizon that lapsed while the stack was down still catches up, one class
+// per dispatch. The retry budget is projected once per gap
+// (maxretries_occurrence, maxretries_led_occurrence): Weaver reads
+// `maxretries_` + the gap column's own suffix, so a budget under one name
+// caps one gap and leaves the other on the engine default. compareAny
+// answers false when either operand is nil, so a
+// series no timer has fired on reads not-lapsed, and a stopped series
+// (extendAt dropped by StopSessionSeries or the call-off) projects freshUntil null and both gaps
+// false — nothing left to arm.
+var seriesHorizonSpec = fmt.Sprintf(`MATCH (ss:sessionseries {key: $actorKey})
+OPTIONAL MATCH (ss)-[:atStudio]->(s:studio)
+RETURN
+  ss.key AS actorKey,
+  ss.key AS entityKey,
+  ss.key AS seriesKey,
+  s.key AS studioKey,
+  ss.horizon.data.nextStartsAt AS nextStartsAt,
+  ss.horizon.data.nextEndsAt AS nextEndsAt,
+  ss.horizon.data.extendAt AS extendAt,
+  ss.horizon.data.instructor AS instructorKey,
+  ss.freshnessExpiry.data.byTarget.%[1]s AS lapsedAt,
+  CASE WHEN (ss.horizon.data.extendAt <> null) AND NOT (ss.freshnessExpiry.data.byTarget.%[1]s >= ss.horizon.data.extendAt) THEN ss.horizon.data.extendAt ELSE null END AS freshUntil,
+  ((ss.horizon.data.extendAt <> null) AND (s.key <> null) AND (ss.horizon.data.instructor = null) AND (ss.freshnessExpiry.data.byTarget.%[1]s >= ss.horizon.data.extendAt)) AS missing_occurrence,
+  ((ss.horizon.data.extendAt <> null) AND (s.key <> null) AND (ss.horizon.data.instructor <> null) AND (ss.freshnessExpiry.data.byTarget.%[1]s >= ss.horizon.data.extendAt)) AS missing_led_occurrence,
+  ((ss.horizon.data.extendAt <> null) AND (s.key <> null) AND (ss.freshnessExpiry.data.byTarget.%[1]s >= ss.horizon.data.extendAt)) AS violating,
+  %[2]d AS maxretries_occurrence,
+  %[2]d AS maxretries_led_occurrence
+`, SeriesHorizonTarget, maxOccurrenceRetries)
 
 // wellnessIdentitiesReadSpec projects one row per NAMED identity — the
 // roster wellness-app resolves the signed-in actor's own name against. The

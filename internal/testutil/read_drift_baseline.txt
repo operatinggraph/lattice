@@ -279,6 +279,11 @@ read	Settle	vtx.leaseapp.<id>
 read	StartVisitSeries	lnk.identity.<id>.worksAt.building.<id>
 read	StartVisitSeries	vtx.visitseries.<id>.paused
 read	StartVisitSeries	vtx.visitseries.<id>.series
+# StopSessionSeries' front-of-house binder is CreateSessionSeries' workplace
+# walk verbatim (worksAt_covers off the caller-supplied studio) — the same
+# category-2 confinement read TombstoneSessionSeries and the other
+# staff-widened wellness ops carry.
+read	StopSessionSeries	lnk.identity.<id>.worksAt.building.<id>
 read	TombstoneAppointment	lnk.appointment.<id>.forPatient.patient.<id>
 read	TombstoneAppointment	lnk.appointment.<id>.withProvider.provider.<id>
 read	TombstoneAppointment	vtx.appointment.<id>.schedule
@@ -586,6 +591,11 @@ walk	Settle	vtx.unit.<id> containedIn out
 walk	SettleStaleTab	vtx.tab.<id> chargedTo out
 walk	StartVisitSeries	vtx.building.<id> containedIn out
 walk	StartVisitSeries	vtx.provider.<id> practicesAt out
+# StopSessionSeries' front-of-house binder walks the studio's rooms and their
+# containment the way TombstoneSessionSeries' rows do — its only walks: the
+# stop is the one series verb that never enumerates the run's occurrences.
+walk	StopSessionSeries	vtx.building.<id> containedIn out
+walk	StopSessionSeries	vtx.studio.<id> locatedAt out
 walk	TombstoneSession	vtx.building.<id> containedIn out
 walk	TombstoneSession	vtx.session.<id> atStudio out
 walk	TombstoneSession	vtx.session.<id> ledBy out

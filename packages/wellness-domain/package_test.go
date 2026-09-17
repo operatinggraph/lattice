@@ -42,22 +42,22 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // one would not break a read: it would silently re-admit double-booking. That is
 // why they are pinned by name rather than counted.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 22; got != want {
+	if got, want := len(Package.DDLs), 23; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 9; got != want {
+	if got, want := len(Package.Lenses), 10; got != want {
 		t.Errorf("Lenses: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 23; got != want {
+	if got, want := len(Package.Permissions), 25; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 16; got != want {
+	if got, want := len(Package.OpMetas), 17; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 2; got != want {
+	if got, want := len(Package.WeaverTargets), 3; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
@@ -89,6 +89,7 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"instructorIdentityClaim", "meta.ddl.aspectType"},
 		{"identityInstructorClaim", "meta.ddl.aspectType"},
 		{"sessionSeriesDefinition", "meta.ddl.aspectType"},
+		{"sessionSeriesHorizon", "meta.ddl.aspectType"},
 		{"wellnessrefund", "meta.ddl.aspectType"},
 		{"wellnessRefundDetail", "meta.ddl.aspectType"},
 		{"bookingChangeNotificationOp", "meta.ddl.vertexType"},
@@ -103,7 +104,7 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
 		}
 	}
-	for i, want := range []string{"wellnessStudios", "wellnessSessions", "wellnessBookings", "wellnessInstructors", "wellnessMembers", "wellnessBookers", "wellnessIdentitiesRead", "wellnessOrphanedBookingSettlement", "wellnessWaitlistPromotion"} {
+	for i, want := range []string{"wellnessStudios", "wellnessSessions", "wellnessBookings", "wellnessInstructors", "wellnessMembers", "wellnessBookers", "wellnessIdentitiesRead", "wellnessOrphanedBookingSettlement", "wellnessWaitlistPromotion", "wellnessSeriesHorizon"} {
 		if i >= len(Package.Lenses) {
 			break
 		}
@@ -130,6 +131,9 @@ func TestPackage_StructurePins(t *testing.T) {
 		// studio's whole standing booking (permissions.go).
 		{"TombstoneSessionSeries", "any", staff},
 		{"ReassignSessionSeries", "any", staff},
+		// StopSessionSeries is the rolling run's walk-free off switch, the
+		// same front-desk beat and confinement as TombstoneSessionSeries.
+		{"StopSessionSeries", "any", staff},
 		{"TombstoneSession", "any", []string{"operator", "provider", "frontOfHouse"}},
 		{"ReassignSession", "any", []string{"operator", "frontOfHouse", "provider"}},
 		{"CreateBooking", "any", staff}, {"CreateBooking", "self", []string{"consumer"}},
@@ -141,6 +145,10 @@ func TestPackage_StructurePins(t *testing.T) {
 		{"BindInstructorIdentity", "any", operatorOnly},
 		{"ReleaseOrphanedBooking", "any", operatorOnly},
 		{"PromoteWaitlistedBookings", "any", operatorOnly},
+		// ExtendSessionSeries is Weaver-only like the two above it: the
+		// script pins op.actor to Weaver's dispatch actor, so the operator
+		// grant is the dispatch's authority, never a desk verb.
+		{"ExtendSessionSeries", "any", operatorOnly},
 		{"RecordBookingChangeNotification", "any", operatorOnly},
 	}
 	if got := len(Package.Permissions); got != len(wantPerms) {

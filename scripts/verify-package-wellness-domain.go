@@ -8,27 +8,28 @@
 // orchestration-base + service-domain + identity-domain + lease-signing).
 // Asserts:
 //
-//	22 DDLs: studio (CreateStudio + TombstoneStudio + SetStudioProfile), session (CreateSession +
+//	23 DDLs: studio (CreateStudio + TombstoneStudio + SetStudioProfile), session (CreateSession +
 //	  TombstoneSession + ReassignSession + CreateSessionSeries +
-//	  TombstoneSessionSeries + ReassignSessionSeries), sessionseries
-//	  (CreateSessionSeries + TombstoneSessionSeries + ReassignSessionSeries),
+//	  TombstoneSessionSeries + ReassignSessionSeries + ExtendSessionSeries),
+//	  sessionseries (CreateSessionSeries + TombstoneSessionSeries +
+//	  ReassignSessionSeries + ExtendSessionSeries + StopSessionSeries),
 //	  booking (CreateBooking + CancelBooking +
 //	  JoinWaitlist + SetBookingAttendance + ReleaseOrphanedBooking +
 //	  PromoteWaitlistedBookings), instructor (CreateInstructor +
 //	  TombstoneInstructor + SetInstructorProfile + BindInstructorIdentity),
 //	  bookingChangeNotificationOp (RecordBookingChangeNotification), each
-//	  vertexType, plus 16 aspectType DDLs (studioProfile, sessionSchedule,
+//	  vertexType, plus 17 aspectType DDLs (studioProfile, sessionSchedule,
 //	  studioSlotClaim, instructorSlotClaim, bookerSlotClaim, sessionSeatClaim,
 //	  sessionWaitlistClaim, sessionBookerClaim, bookingStatus,
 //	  instructorProfile, instructorIdentityClaim, identityInstructorClaim,
-//	  sessionSeriesDefinition, wellnessrefund [deliberately Class
+//	  sessionSeriesDefinition, sessionSeriesHorizon, wellnessrefund [deliberately Class
 //	  meta.ddl.aspectType — ddls.go's comment explains why a vertex-shaped
 //	  mutation uses the aspectType Kind], wellnessRefundDetail,
 //	  bookingChangeNotification), each with its self-description.
-//	23 permission vertices: one per (operationType, scope) pair (Contract #8
+//	25 permission vertices: one per (operationType, scope) pair (Contract #8
 //	  §8.1). Most ops carry a single scope=any vertex granted to operator;
 //	  CreateStudio/TombstoneStudio/SetStudioProfile/CreateSession/CreateSessionSeries/
-//	  TombstoneSessionSeries/ReassignSessionSeries additionally grant
+//	  TombstoneSessionSeries/ReassignSessionSeries/StopSessionSeries additionally grant
 //	  frontOfHouse at scope=any (the
 //	  studio front-desk beat — the series call-off and series move are
 //	  deliberately NOT granted to provider, unlike TombstoneSession);
@@ -41,17 +42,22 @@
 //	  CreateAppointment precedent); SetInstructorProfile's scope=any vertex is
 //	  ALSO granted to provider (a bound instructor's own profile);
 //	  RecordBookingChangeNotification carries a single scope=any vertex
-//	  granted to operator (the bridge's service-actor authority).
-//	9 lens canonicalNames: the six flat projections (wellnessStudios,
+//	  granted to operator (the bridge's service-actor authority), as does
+//	  ExtendSessionSeries (Weaver's dispatch authority; the script narrows
+//	  it to Weaver's own actor).
+//	10 lens canonicalNames: the six flat projections (wellnessStudios,
 //	  wellnessSessions, wellnessBookings, wellnessInstructors, wellnessMembers,
 //	  wellnessBookers), the one Protected Postgres lens (wellnessIdentitiesRead),
-//	  and the two convergence lenses (wellnessOrphanedBookingSettlement,
-//	  wellnessWaitlistPromotion) the weaverTargets below dispatch over.
-//	2 meta.weaverTarget playbooks: wellnessOrphanedBookingSettlement
+//	  and the three convergence lenses (wellnessOrphanedBookingSettlement,
+//	  wellnessWaitlistPromotion, wellnessSeriesHorizon) the weaverTargets
+//	  below dispatch over.
+//	3 meta.weaverTarget playbooks: wellnessOrphanedBookingSettlement
 //	  (LensRef wellnessOrphanedBookingSettlement, gap missing_release →
-//	  directOp ReleaseOrphanedBooking) and wellnessWaitlistPromotion (LensRef
+//	  directOp ReleaseOrphanedBooking), wellnessWaitlistPromotion (LensRef
 //	  wellnessWaitlistPromotion, gap missing_promotion → directOp
-//	  PromoteWaitlistedBookings) — each asserted for targetId, its installed
+//	  PromoteWaitlistedBookings) and wellnessSeriesHorizon (LensRef
+//	  wellnessSeriesHorizon, gap missing_occurrence → directOp
+//	  ExtendSessionSeries) — each asserted for targetId, its installed
 //	  lensRef resolving to the matching lens's own NanoID, and its gap key's
 //	  action/operation.
 //	1 package vertex + manifest aspect (name=wellness-domain).
@@ -80,10 +86,10 @@ const (
 
 var wellnessExpectedOps = []string{
 	"CreateStudio", "TombstoneStudio", "SetStudioProfile",
-	"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries",
+	"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries", "StopSessionSeries",
 	"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance",
 	"CreateInstructor", "TombstoneInstructor", "SetInstructorProfile", "BindInstructorIdentity",
-	"ReleaseOrphanedBooking", "PromoteWaitlistedBookings", "RecordBookingChangeNotification",
+	"ReleaseOrphanedBooking", "PromoteWaitlistedBookings", "ExtendSessionSeries", "RecordBookingChangeNotification",
 }
 
 // permGrant is one expected (scope, grantee-role) pair for an operationType's
@@ -104,6 +110,7 @@ var wellnessOpGrants = map[string][]permGrant{
 	"CreateSessionSeries":             {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"TombstoneSessionSeries":          {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"ReassignSessionSeries":           {{"any", "operator"}, {"any", "frontOfHouse"}},
+	"StopSessionSeries":               {{"any", "operator"}, {"any", "frontOfHouse"}},
 	"TombstoneSession":                {{"any", "operator"}, {"any", "provider"}, {"any", "frontOfHouse"}},
 	"ReassignSession":                 {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
 	"CreateBooking":                   {{"any", "operator"}, {"any", "frontOfHouse"}, {"self", "consumer"}},
@@ -116,6 +123,7 @@ var wellnessOpGrants = map[string][]permGrant{
 	"BindInstructorIdentity":          {{"any", "operator"}},
 	"ReleaseOrphanedBooking":          {{"any", "operator"}},
 	"PromoteWaitlistedBookings":       {{"any", "operator"}},
+	"ExtendSessionSeries":             {{"any", "operator"}},
 	"RecordBookingChangeNotification": {{"any", "operator"}},
 }
 
@@ -208,15 +216,16 @@ func main() {
 
 	ddlChecks := []ddlCheck{
 		{canonical: "studio", class: "meta.ddl.vertexType", ops: []string{"CreateStudio", "TombstoneStudio", "SetStudioProfile"}},
-		{canonical: "session", class: "meta.ddl.vertexType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
-		{canonical: "sessionseries", class: "meta.ddl.vertexType", ops: []string{"CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
+		{canonical: "session", class: "meta.ddl.vertexType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries", "ExtendSessionSeries"}},
+		{canonical: "sessionseries", class: "meta.ddl.vertexType", ops: []string{"CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries", "ExtendSessionSeries", "StopSessionSeries"}},
 		{canonical: "booking", class: "meta.ddl.vertexType", ops: []string{"CreateBooking", "CancelBooking", "JoinWaitlist", "SetBookingAttendance", "ReleaseOrphanedBooking", "PromoteWaitlistedBookings"}},
 		{canonical: "instructor", class: "meta.ddl.vertexType", ops: []string{"CreateInstructor", "TombstoneInstructor", "SetInstructorProfile", "BindInstructorIdentity"}},
 		{canonical: "studioProfile", class: "meta.ddl.aspectType", ops: []string{"CreateStudio", "SetStudioProfile"}},
-		{canonical: "sessionSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "ReassignSession", "CreateSessionSeries", "ReassignSessionSeries"}},
+		{canonical: "sessionSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "ReassignSession", "CreateSessionSeries", "ReassignSessionSeries", "ExtendSessionSeries"}},
 		{canonical: "sessionSeriesDefinition", class: "meta.ddl.aspectType", ops: []string{"CreateSessionSeries"}},
-		{canonical: "studioSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
-		{canonical: "instructorSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries"}},
+		{canonical: "sessionSeriesHorizon", class: "meta.ddl.aspectType", ops: []string{"CreateSessionSeries", "ExtendSessionSeries", "ReassignSessionSeries", "TombstoneSessionSeries", "StopSessionSeries"}},
+		{canonical: "studioSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries", "ExtendSessionSeries"}},
+		{canonical: "instructorSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries", "ExtendSessionSeries"}},
 		{canonical: "bookerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking"}},
 		{canonical: "bookingStatus", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance", "PromoteWaitlistedBookings"}},
 		{canonical: "sessionSeatClaim", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "CancelBooking", "ReleaseOrphanedBooking", "PromoteWaitlistedBookings"}},
@@ -445,6 +454,7 @@ func main() {
 		{canonical: "wellnessIdentitiesRead", class: "meta.lens"},
 		{canonical: "wellnessOrphanedBookingSettlement", class: "meta.lens"},
 		{canonical: "wellnessWaitlistPromotion", class: "meta.lens"},
+		{canonical: "wellnessSeriesHorizon", class: "meta.lens"},
 	}
 	lensNanoIDByCanonical := map[string]string{}
 	for _, el := range expectedLenses {
@@ -484,6 +494,13 @@ func main() {
 			gapKey:    "missing_promotion",
 			action:    "directOp",
 			operation: "PromoteWaitlistedBookings",
+		},
+		{
+			targetID:  "wellnessSeriesHorizon",
+			lensRef:   "wellnessSeriesHorizon",
+			gapKey:    "missing_occurrence",
+			action:    "directOp",
+			operation: "ExtendSessionSeries",
 		},
 	}
 	for _, et := range expectedTargets {

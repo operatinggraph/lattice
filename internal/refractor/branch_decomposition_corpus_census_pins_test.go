@@ -151,6 +151,10 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"wellnessSessions":          {"g3/o3!no-aggregating-item", 0, 3},
 	"wellnessStudios":           {"g0/o0!no-aggregating-item", 0, 0},
 	"wellnessWaitlistPromotion": {"g1/o1[b] g0/o0!no-aggregating-item", 1, 1},
+	// One OPTIONAL MATCH off the series anchor (atStudio), 0..1, flat, no
+	// aggregation — the shape wellnessOrphanedBookingSettlement's own
+	// single-hop row already carries.
+	"wellnessSeriesHorizon": {"g1/o1!no-aggregating-item", 0, 1},
 }
 
 // decomposingCorpusLenses is the population whose sibling branches the executor
@@ -312,4 +316,5 @@ var footprintValidationVerdicts = map[string]bool{
 	"wellnessOrphanedBookingSettlement": true,
 	"wellnessRefundSettlement":          true,
 	"wellnessWaitlistPromotion":         true,
+	"wellnessSeriesHorizon":             true,
 }

@@ -1422,3 +1422,59 @@ func TestWorkplace_TombstoneStudioConfinedToTheStaffersBuilding(t *testing.T) {
 		t.Fatalf("%s must be tombstoned by the operator's accepted retire", placeless)
 	}
 }
+
+// TestWorkplace_StaffStopSeriesConfinedToTheirBuilding: StopSessionSeries
+// grants frontOfHouse at scope=any (permissions.go), confined by
+// CreateSessionSeries' studio -locatedAt-> location walk off the
+// caller-supplied studio — sound only because the series' own atStudio link is
+// then required to match it, exactly as the call-off and the move are. The
+// positive sibling leads: the same stop at the staffer's own building lands.
+func TestWorkplace_StaffStopSeriesConfinedToTheirBuilding(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "wdwcstopseries")
+	wcSeedStaff(t, ctx, conn)
+	capDoc := wcStaffCapDoc()
+	capDoc.PlatformPermissions = append(capDoc.PlatformPermissions,
+		processor.PlatformPermission{OperationType: "StopSessionSeries", Scope: "any"})
+	testutil.SeedCapDoc(t, ctx, conn, capDoc)
+
+	studioA := createStudio(t, ctx, conn, cp, cons, "wdwcstopstudioa00001", "Studio A")
+	studioB := createStudio(t, ctx, conn, cp, cons, "wdwcstopstudiob00001", "Studio B")
+	wfSeedStudioAt(t, ctx, conn, studioA, wcBuildingAKey, wcBuildingAID)
+	wfSeedStudioAt(t, ctx, conn, studioB, wcBuildingBKey, wcBuildingBID)
+	seriesA, _ := createSeries(t, ctx, conn, cp, cons, "wdwcstopcreatea00001", studioA, "", true)
+	seriesB, _ := createSeries(t, ctx, conn, cp, cons, "wdwcstopcreateb00001", studioB, "", true)
+
+	// POSITIVE SIBLING: stopping a run at the staffer's own building.
+	if got, _, why := stopSeriesAs(t, ctx, conn, cp, cons, "wdwcstopseriesa00001", seriesA, studioA, "2026-07-07T12:00:00Z", wcStaffKey); got != processor.OutcomeAccepted {
+		t.Fatalf("staff StopSessionSeries at its OWN building = %v (%s), want Accepted", got, why)
+	}
+	if _, has := horizonData(t, ctx, conn, seriesA)["extendAt"]; has {
+		t.Errorf("the accepted stop must drop the horizon's extendAt")
+	}
+
+	got, _, why := stopSeriesAs(t, ctx, conn, cp, cons, "wdwcstopseriesb00001", seriesB, studioB, "2026-07-07T12:00:00Z", wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff StopSessionSeries at ANOTHER building = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "does not worksAt") {
+		t.Errorf("cross-building StopSessionSeries was rejected by something other than the workplace guard: %q", why)
+	}
+	if _, has := horizonData(t, ctx, conn, seriesB)["extendAt"]; !has {
+		t.Errorf("the denied cross-building stop closed the horizon; it must be denied before any mutation")
+	}
+
+	// The other conjunct: the staffer names their OWN studio for a series
+	// held elsewhere. The workplace walk passes, and the series' atStudio
+	// confirmation refuses — the two checks are a conjunction, not a choice.
+	got, _, why = stopSeriesAs(t, ctx, conn, cp, cons, "wdwcstopseriesb00002", seriesB, studioA, "2026-07-07T12:00:00Z", wcStaffKey)
+	if got != processor.OutcomeRejected {
+		t.Fatalf("staff StopSessionSeries naming their own studio for another studio's series = %v, want Rejected", got)
+	}
+	if !strings.Contains(why, "WrongStudio") {
+		t.Errorf("own-studio-for-foreign-series stop was rejected by something other than the studio confirmation: %q", why)
+	}
+	if _, has := horizonData(t, ctx, conn, seriesB)["extendAt"]; !has {
+		t.Errorf("the WrongStudio-refused stop closed the horizon; it must be refused before any mutation")
+	}
+}
