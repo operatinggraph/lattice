@@ -386,16 +386,24 @@ func TestChangeNotices_NoAtByCancelNotTold(t *testing.T) {
 // TestChangeNotices_CancelByWithoutAtNotTold — the at <> null conjunct on
 // its own: a cancelled status carrying by: staff but no at has no changeRef
 // to dispatch, so the gap stays closed instead of opening one the op can
-// only refuse (StaleChange: no at).
+// only refuse (StaleChange: no at). With no marker `cancelledFor <> at` is
+// already `null <> null` false, so only the second vector — a marker from an
+// earlier notice against an aspect with no at, where `"x" <> null` reads
+// true — discriminates the conjunct.
 func TestChangeNotices_CancelByWithoutAtNotTold(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
-	f := newRemFixture(t)
-	f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "cancelled", statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd})
-
-	v := f.projectChangeNotices(t, "appt")
-	requireNoticeGaps(t, v, false, false, "by: staff but no at → no changeRef to dispatch")
+	t.Run("no marker", func(t *testing.T) {
+		f := newRemFixture(t)
+		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "cancelled", statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd})
+		requireNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, "by: staff but no at → no changeRef to dispatch")
+	})
+	t.Run("marker from an earlier notice", func(t *testing.T) {
+		f := newRemFixture(t)
+		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "cancelled", statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, cancelledFor: cnCancelAt})
+		requireNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, "cancelled by staff, no at, cancelledFor set → still no changeRef to dispatch")
+	})
 }
 
 // TestChangeNotices_CancelAfterVisitEndedNotTold — the sibling

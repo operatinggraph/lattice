@@ -60,6 +60,8 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 		{Name: "identity_key", Type: "text"},
 		{Name: "email", Type: "text"},
 		{Name: "phone", Type: "text"},
+		{Name: "no_show_count", Type: "integer"},
+		{Name: "last_no_show_at", Type: "text"},
 	})
 	if err != nil {
 		t.Fatalf("build protected DDL: %v", err)
@@ -81,11 +83,14 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 	// signed-in identity, anchor_id = the patient's own key — which equals
 	// subPatientA in this fixture) — proving A's self-grant unlocks EXACTLY
 	// A's own row, never B's, and that the wildcard is still the only way to
-	// see the whole roster.
-	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
-	      VALUES ('pat-A', 'vtx.patient.` + subPatientA + `', 'vtx.patient.` + subPatientA + `', 'Alice Rivera', '{` + subPatientA + `}', 1)`)
-	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
-	      VALUES ('pat-B', 'vtx.patient.` + subPatientB + `', 'vtx.patient.` + subPatientB + `', 'Bob Nguyen', '{` + subPatientB + `}', 1)`)
+	// see the whole roster. no_show_count is never null in a real projection
+	// (the lens's count() aggregate floors at 0), so every seeded row states
+	// it explicitly — a bare column list would leave it SQL NULL, which
+	// protectedPatientRow.NoShowCount (a plain int) cannot scan.
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, no_show_count, projection_seq)
+	      VALUES ('pat-A', 'vtx.patient.` + subPatientA + `', 'vtx.patient.` + subPatientA + `', 'Alice Rivera', '{` + subPatientA + `}', 0, 1)`)
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, no_show_count, projection_seq)
+	      VALUES ('pat-B', 'vtx.patient.` + subPatientB + `', 'vtx.patient.` + subPatientB + `', 'Bob Nguyen', '{` + subPatientB + `}', 0, 1)`)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
 	      VALUES ($1, $1, 'cap-read', 1, false)`, subPatientA)
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -96,15 +101,17 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 	// identifiedBy identity, so its SECURE name column is NULL and only its
 	// plaintext unlinked_name is populated, the mirror image of A/B above. No
 	// self-grant is seeded for it, so only the wildcard staff actor can see it.
-	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, unlinked_name, authz_anchors, projection_seq)
-	      VALUES ('pat-W', 'vtx.patient.WWWWWWWWWWWWWWWWWWWW', 'vtx.patient.WWWWWWWWWWWWWWWWWWWW', 'Wendy Walk-in', '{WWWWWWWWWWWWWWWWWWWW}', 1)`)
+	// This patient also carries two recorded no-shows, proving the count and
+	// its latest date round-trip through the real RLS table and JSON response.
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, unlinked_name, authz_anchors, no_show_count, last_no_show_at, projection_seq)
+	      VALUES ('pat-W', 'vtx.patient.WWWWWWWWWWWWWWWWWWWW', 'vtx.patient.WWWWWWWWWWWWWWWWWWWW', 'Wendy Walk-in', '{WWWWWWWWWWWWWWWWWWWW}', 2, '2026-08-01T15:00:00Z', 1)`)
 
 	// A fourth row is an IDENTIFIED patient whose identity's .name aspect was
 	// shredded (ShredIdentityKey): both name and unlinked_name are NULL — the
 	// disjoint pair's only shared-empty state. queryPatients must still return
 	// this row (as "no name", never an error) rather than fail the scan.
-	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, authz_anchors, projection_seq)
-	      VALUES ('pat-S', 'vtx.patient.SSSSSSSSSSSSSSSSSSSS', 'vtx.patient.SSSSSSSSSSSSSSSSSSSS', '{SSSSSSSSSSSSSSSSSSSS}', 1)`)
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, authz_anchors, no_show_count, projection_seq)
+	      VALUES ('pat-S', 'vtx.patient.SSSSSSSSSSSSSSSSSSSS', 'vtx.patient.SSSSSSSSSSSSSSSSSSSS', '{SSSSSSSSSSSSSSSSSSSS}', 0, 1)`)
 
 	reader := poolInSchema(t, dsn, clinicRLSTestRole)
 	defer reader.Close()
@@ -157,6 +164,9 @@ func TestStaffPatientsReadBoundary_WildcardSeesEverything(t *testing.T) {
 		walkIn, ok := byKey["vtx.patient.WWWWWWWWWWWWWWWWWWWW"]
 		if !ok || walkIn.Name != "Wendy Walk-in" {
 			t.Fatalf("walk-in patient W must fall back to unlinked_name, got %+v (present=%v)", walkIn, ok)
+		}
+		if walkIn.NoShowCount != 2 || walkIn.LastNoShowAt == nil || *walkIn.LastNoShowAt != "2026-08-01T15:00:00Z" {
+			t.Fatalf("walk-in patient W must round-trip its recorded no-show count and date, got %+v", walkIn)
 		}
 		shredded, ok := byKey["vtx.patient.SSSSSSSSSSSSSSSSSSSS"]
 		if !ok {
@@ -280,6 +290,8 @@ func TestStaffPatientsReadBoundary_WorkplaceAnchorSeesSharedBuildingOnly(t *test
 		{Name: "identity_key", Type: "text"},
 		{Name: "email", Type: "text"},
 		{Name: "phone", Type: "text"},
+		{Name: "no_show_count", Type: "integer"},
+		{Name: "last_no_show_at", Type: "text"},
 	})
 	if err != nil {
 		t.Fatalf("build protected DDL: %v", err)
@@ -308,10 +320,10 @@ func TestStaffPatientsReadBoundary_WorkplaceAnchorSeesSharedBuildingOnly(t *test
 	// clinicPatientsReadSpec's own authz_anchors shape: [patient's own NanoID]
 	// + [the practicesAt building of every provider it has an appointment
 	// with].
-	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
-	      VALUES ('pat-C', '` + patientRiverside + `', '` + patientRiverside + `', 'Cara Ibarra', '{CCCCCCCCCCCCCCCCCCCC,` + riverside + `}', 1)`)
-	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, projection_seq)
-	      VALUES ('pat-D', '` + patientDowntown + `', '` + patientDowntown + `', 'Dana Osei', '{DDDDDDDDDDDDDDDDDDDD,` + downtown + `}', 1)`)
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, no_show_count, projection_seq)
+	      VALUES ('pat-C', '` + patientRiverside + `', '` + patientRiverside + `', 'Cara Ibarra', '{CCCCCCCCCCCCCCCCCCCC,` + riverside + `}', 0, 1)`)
+	exec(`INSERT INTO read_clinic_patients (patient_id, entity_key, patient_key, name, authz_anchors, no_show_count, projection_seq)
+	      VALUES ('pat-D', '` + patientDowntown + `', '` + patientDowntown + `', 'Dana Osei', '{DDDDDDDDDDDDDDDDDDDD,` + downtown + `}', 0, 1)`)
 
 	// The front-desk actor holds ONLY a per-building cap-read.staff grant
 	// (service-location's staffReadGrants shape) for Riverside — never the

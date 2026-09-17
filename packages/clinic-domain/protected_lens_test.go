@@ -653,6 +653,94 @@ func TestClinicPatientsRead_WorkplaceAnchorDedupesAcrossAppointments(t *testing.
 	require.Len(t, anchors, 3, "authz_anchors must not grow by one entry per appointment, and must not collapse a genuinely distinct building")
 }
 
+// TestClinicPatientsRead_NoShowCountDefaultsToZero — a patient with
+// appointments but none of them a no-show projects no_show_count = 0 and
+// last_no_show_at = null: the CASE's ELSE null keeps a non-matching
+// appointment out of both aggregates, so a patient who has only ever been
+// seen or cancelled never reads a phantom no-show.
+func TestClinicPatientsRead_NoShowCountDefaultsToZero(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+
+	f.vtx(t, "apptDone", "appointment")
+	f.edge(t, "forPatient", "apptDone", "alice")
+	f.aspect(t, "apptDone", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z", "reason": "Annual checkup"})
+	f.aspect(t, "apptDone", "status", "appointmentStatus", map[string]any{"value": "completed", "at": "2026-07-01T15:30:00Z", "by": "staff"})
+
+	f.vtx(t, "apptCancelled", "appointment")
+	f.edge(t, "forPatient", "apptCancelled", "alice")
+	f.aspect(t, "apptCancelled", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-05T15:00:00Z", "endsAt": "2026-07-05T15:30:00Z", "reason": "Follow-up"})
+	f.aspect(t, "apptCancelled", "status", "appointmentStatus", map[string]any{"value": "cancelled", "at": "2026-07-04T09:00:00Z", "by": "staff"})
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, int64(0), v["no_show_count"], "neither a completed nor a cancelled visit is a no-show")
+	require.Nil(t, v["last_no_show_at"])
+}
+
+// TestClinicPatientsRead_NoShowCountCountsDistinctAppointments — two of a
+// patient's four appointments are no-shows (one completed, one cancelled)
+// and one of the no-shows is through a provider who practicesAt TWO
+// buildings, so that single appointment fans into two rows in the raw
+// pattern match before the WITH's aggregate boundary collapses them — the
+// same fan-out buildingAnchors' own collect(DISTINCT) absorbs. Without
+// DISTINCT on the CASE's appointment key, count() would read that one
+// no-show twice and report 3. last_no_show_at reads the later of the two
+// no-shows' recorded startsAt (lexical max on an RFC3339 UTC string), never
+// the completed or cancelled visit's.
+func TestClinicPatientsRead_NoShowCountCountsDistinctAppointments(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "alice", "patient")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+
+	f.vtx(t, "riverside", "building")
+	f.vtx(t, "downtown", "building")
+
+	// A no-show whose provider practicesAt two buildings, fanning this one
+	// appointment into two pattern rows ahead of the WITH.
+	f.vtx(t, "apptNoShow1", "appointment")
+	f.vtx(t, "drsam", "provider")
+	f.edge(t, "forPatient", "apptNoShow1", "alice")
+	f.edge(t, "withProvider", "apptNoShow1", "drsam")
+	f.edge(t, "practicesAt", "drsam", "riverside")
+	f.edge(t, "practicesAt", "drsam", "downtown")
+	f.aspect(t, "apptNoShow1", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z", "reason": "Annual checkup"})
+	f.aspect(t, "apptNoShow1", "status", "appointmentStatus", map[string]any{"value": "noShow", "at": "2026-07-01T15:35:00Z", "by": "sweep"})
+
+	// A second, later no-show through a single-building provider.
+	f.vtx(t, "apptNoShow2", "appointment")
+	f.vtx(t, "drpat", "provider")
+	f.edge(t, "forPatient", "apptNoShow2", "alice")
+	f.edge(t, "withProvider", "apptNoShow2", "drpat")
+	f.edge(t, "practicesAt", "drpat", "downtown")
+	f.aspect(t, "apptNoShow2", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-08-01T15:00:00Z", "endsAt": "2026-08-01T15:30:00Z", "reason": "Follow-up"})
+	f.aspect(t, "apptNoShow2", "status", "appointmentStatus", map[string]any{"value": "noShow", "at": "2026-08-01T15:35:00Z", "by": "sweep"})
+
+	f.vtx(t, "apptCompleted", "appointment")
+	f.edge(t, "forPatient", "apptCompleted", "alice")
+	f.aspect(t, "apptCompleted", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-06-15T15:00:00Z", "endsAt": "2026-06-15T15:30:00Z", "reason": "Checkup"})
+	f.aspect(t, "apptCompleted", "status", "appointmentStatus", map[string]any{"value": "completed", "at": "2026-06-15T15:30:00Z", "by": "staff"})
+
+	f.vtx(t, "apptCancelled", "appointment")
+	f.edge(t, "forPatient", "apptCancelled", "alice")
+	f.aspect(t, "apptCancelled", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-09-01T15:00:00Z", "endsAt": "2026-09-01T15:30:00Z", "reason": "Checkup"})
+	f.aspect(t, "apptCancelled", "status", "appointmentStatus", map[string]any{"value": "cancelled", "at": "2026-08-30T09:00:00Z", "by": "staff"})
+
+	rows := f.project(t, clinicPatientsReadSpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, int64(2), v["no_show_count"], "DISTINCT must keep the two-building no-show from being counted twice")
+	require.Equal(t, "2026-08-01T15:00:00Z", v["last_no_show_at"], "the later no-show's recorded startsAt, never the completed or cancelled visit's")
+}
+
 // seedRegisteredPatient seeds a named patient plus the building it was
 // REGISTERED at — the registeredAtSite link CreatePatient records on the
 // patient from the submitting staffer's live worksAt links. The registrar

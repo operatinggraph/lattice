@@ -390,6 +390,8 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "identity_key", Type: "text"},
 				{Name: "email", Type: "text"},
 				{Name: "phone", Type: "text"},
+				{Name: "no_show_count", Type: "integer"},
+				{Name: "last_no_show_at", Type: "text"},
 			},
 			SecureColumns: []pkgmgr.SecureColumn{
 				{Column: "name", HolderTypes: []string{"identity"}, Field: "value"},
@@ -973,6 +975,21 @@ RETURN
 // event re-scans this UNANCHORED lens the same way it does
 // landlordLeaseApplicationsRead, so a shredded patient's contact scrubs to
 // null on the next projection touch.
+//
+// no_show_count and last_no_show_at ride the same WITH the workplace fan-out
+// already folds on p, id: count(DISTINCT CASE …) over the appointment hop
+// counts every appointment whose .status.data.value is 'noShow', and DISTINCT
+// is load-bearing for the identical reason it is on buildingAnchors — the
+// appointment hop fans out per provider/site, so an undeduped count would
+// grow with the patient's building count rather than their no-show count.
+// max(CASE …) over the same predicate reads the recorded startsAt of the
+// latest one; lexical max on an RFC3339 UTC string is chronological max, the
+// same idiom clinic-ledger's max(tx.key) rests on. No appointments, or none
+// with that status, means both project their aggregate zero-value: 0 and
+// null respectively — collect()'s null-dropping behavior does not apply to
+// count/max, so the CASE's ELSE null is what keeps a non-matching appointment
+// out of both aggregates rather than counting a null key or maxing a null
+// timestamp.
 const clinicPatientsReadSpec = `MATCH (p:patient)
 WHERE p.demographics.data.registeredAt <> null
 OPTIONAL MATCH (p)-[:identifiedBy]->(id:identity)
@@ -980,7 +997,9 @@ OPTIONAL MATCH (p)<-[:forPatient]-(a:appointment)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)-[:practicesAt]->(b:building)
 OPTIONAL MATCH (a)-[:atSite]->(b2:building)
 OPTIONAL MATCH (p)-[:registeredAtSite]->(b3:building)
-WITH p, id, collect(DISTINCT coalesce(nanoIdFromKey(b.key), nanoIdFromKey(b2.key))) + collect(DISTINCT nanoIdFromKey(b3.key)) AS buildingAnchors
+WITH p, id, collect(DISTINCT coalesce(nanoIdFromKey(b.key), nanoIdFromKey(b2.key))) + collect(DISTINCT nanoIdFromKey(b3.key)) AS buildingAnchors,
+  count(DISTINCT CASE WHEN a.status.data.value = 'noShow' THEN a.key ELSE null END) AS noShowCount,
+  max(CASE WHEN a.status.data.value = 'noShow' THEN a.schedule.data.startsAt ELSE null END) AS lastNoShowAt
 RETURN
   nanoIdFromKey(p.key)         AS patient_id,
   p.key                        AS entity_key,
@@ -990,6 +1009,8 @@ RETURN
   id.key                       AS identity_key,
   id.email.data                AS email,
   id.phone.data                AS phone,
+  noShowCount                  AS no_show_count,
+  lastNoShowAt                 AS last_no_show_at,
   [nanoIdFromKey(p.key)] + buildingAnchors
                                AS authz_anchors
 `

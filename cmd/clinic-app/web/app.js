@@ -712,7 +712,13 @@ function renderPatientContact() {
   const arrearsEl = $("#patient-arrears");
   renderConnectLogin();
   renderResetLogin();
-  if (arrearsEl) arrearsEl.textContent = state.patient ? arrearsBadgeText(state.arrears.get(state.patient)) : "";
+  if (arrearsEl) {
+    const badges = [
+      state.patient ? arrearsBadgeText(state.arrears.get(state.patient)) : "",
+      state.patient ? noShowBadgeText(state.patients.find((p) => p.patientKey === state.patient)) : "",
+    ].filter(Boolean);
+    arrearsEl.textContent = badges.join(" · ");
+  }
   if (!el) return;
   const m = state.patients.find((p) => p.patientKey === state.patient);
   if (!m) {
@@ -871,7 +877,7 @@ function populatePatientSelect() {
   for (const p of options) {
     const o = document.createElement("option");
     o.value = p.patientKey;
-    const badge = arrearsBadgeText(state.arrears.get(p.patientKey));
+    const badge = [arrearsBadgeText(state.arrears.get(p.patientKey)), noShowBadgeText(p)].filter(Boolean).join(" · ");
     o.textContent = p.name + (badge ? " — " + badge : "");
     sel.append(o);
   }
@@ -3167,6 +3173,14 @@ async function submitBook(ev) {
     return;
   }
 
+  // Courtesy only — CreateAppointment enforces nothing about no-shows either.
+  // Asked after the arrears prompt, same posture: declining leaves the form
+  // exactly as it was.
+  const noShowPrompt = noShowBookingPrompt(nameForPatient(state.patient), state.patients.find((p) => p.patientKey === state.patient));
+  if (noShowPrompt && !window.confirm(noShowPrompt)) {
+    return;
+  }
+
   const asSelf = actingAsSelf();
 
   const submit = $("#book-submit");
@@ -3916,6 +3930,18 @@ function arrearsBadgeText(row) {
   return text;
 }
 
+// noShowBadgeText renders a patient roster row's recorded no-show count (the
+// clinicPatientsRead lens's no_show_count column, GET /api/staff/patients) as
+// the short "3 no-shows" the switcher option text and the patient-contact
+// line append beside the arrears badge — "" for no row or a count under 1,
+// so a caller can append the result unconditionally, the same posture as
+// arrearsBadgeText.
+function noShowBadgeText(row) {
+  if (!row || !(Number(row.noShowCount) >= 1)) return "";
+  const n = Number(row.noShowCount);
+  return n + (n === 1 ? " no-show" : " no-shows");
+}
+
 // apptArrearsLine is the desk's flag beside Check in — "💳 " + arrearsBadgeText
 // for a patient who owes something, "" when row is absent or the balance is
 // not positive (arrearsBadgeText's own early return covers that; this
@@ -3937,6 +3963,21 @@ function overdueBookingPrompt(name, row) {
   const days = Number(row.daysOverdue) || 0;
   return name + " owes " + moneyAmount(row.balanceCents) + ", " + days + (days === 1 ? " day" : " days") +
     " overdue. Book them anyway?";
+}
+
+// noShowBookingPrompt is the confirm() message submitBook shows before
+// booking a patient with a habit of no-shows — "" when row is absent or
+// noShowCount is under 2 (one no-show is not a habit; the threshold is a UI
+// courtesy, CreateAppointment enforces nothing), so the caller can gate
+// window.confirm on the return value being non-empty, same posture as
+// overdueBookingPrompt. The date clause names the latest recorded no-show
+// (localDate of row.lastNoShowAt) and is omitted entirely when that field is
+// absent, rather than printing a blank or "Invalid Date".
+function noShowBookingPrompt(name, row) {
+  if (!row || !(Number(row.noShowCount) >= 2)) return "";
+  const count = Number(row.noShowCount);
+  const dateClause = row.lastNoShowAt ? ", the last on " + localDate(row.lastNoShowAt) : "";
+  return name + " has " + count + " recorded no-shows" + dateClause + ". Book them anyway?";
 }
 
 // customerMemo strips a raw entity key from a ledger memo before it reaches

@@ -75,7 +75,7 @@ var clinicExpectedOps = []string{
 	"CreatePatient", "TombstonePatient", "BindPatientIdentity", "UnbindPatientIdentity",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
-	"EvaluateAppointmentDisplacement",
+	"MarkPastDueNoShow", "BackfillAppointmentSite", "EvaluateAppointmentDisplacement",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite", "BindProviderIdentity",
 }
 
@@ -121,6 +121,8 @@ var clinicOpGrants = map[string][]permGrant{
 	"TombstoneAppointment":     {{"any", "operator"}},
 	// Weaver-dispatched only (clinic-reminders' appointmentDisplacements
 	// target's directOp) — operator authority, the MarkPastDueNoShow idiom.
+	"MarkPastDueNoShow":               {{"any", "operator"}},
+	"BackfillAppointmentSite":         {{"any", "operator"}},
 	"EvaluateAppointmentDisplacement": {{"any", "operator"}},
 	"SetSiteProfile":                  {{"any", "operator"}},
 	"AssignProviderSite":              {{"any", "operator"}},
