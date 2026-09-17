@@ -309,13 +309,16 @@ func TestRecordAppointmentChangeNotice_StaleChangeRefused(t *testing.T) {
 		{"cancelled: at differs from changeRef", "cancelled", "2025-12-20T14:00:00Z", cnStaffCancelled(), cnSchedule("", "")},
 		{"cancelled: by patient", "cancelled", cnCancelAt, map[string]any{"value": "cancelled", "at": cnCancelAt, "by": "patient"}, cnSchedule("", "")},
 		{"cancelled: status is not cancelled", "cancelled", cnCancelAt, cnScheduled(), cnSchedule("", "")},
-		{"cancelled: legacy status with no at", "cancelled", cnCancelAt, map[string]any{"value": "cancelled"}, cnSchedule("", "")},
+		{"cancelled: status carries no at", "cancelled", cnCancelAt, map[string]any{"value": "cancelled"}, cnSchedule("", "")},
+		{"cancelled: stamped after the visit's end", "cancelled", "2026-07-01T16:00:00Z", map[string]any{"value": "cancelled", "at": "2026-07-01T16:00:00Z", "by": "staff"}, cnSchedule("", "")},
+		{"cancelled: stamped at the visit's end", "cancelled", cnEndsAt, map[string]any{"value": "cancelled", "at": cnEndsAt, "by": "staff"}, cnSchedule("", "")},
 		{"moved: movedAt differs from changeRef", "moved", "2025-12-21T09:00:00Z", cnScheduled(), cnSchedule(cnMovedAt, "staff")},
 		{"moved: movedBy patient", "moved", cnMovedAt, cnScheduled(), cnSchedule(cnMovedAt, "patient")},
 		{"moved: never moved", "moved", cnMovedAt, cnScheduled(), cnSchedule("", "")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			suffix := string(rune('A' + i))
+			// One NanoID-alphabet letter per vector (no I / O in the alphabet).
+			suffix := string("ABCDEFGHJKMN"[i])
 			apptKey := "vtx.appointment.CRcnSt" + suffix + "HJKMNPQRSTUVW"
 			cnSeedAppointment(t, ctx, conn, apptKey, true, tc.status, tc.schedule)
 			env, reply := cnSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crcnstale"+suffix, apptKey, tc.kind, tc.changeRef, processor.OutcomeRejected)

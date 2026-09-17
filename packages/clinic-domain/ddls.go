@@ -967,7 +967,7 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 			"reason":     "Visit reason / chief complaint.",
 			"selfBooked": "true when the visit was booked on the consumer scope=self path (the patient's own login, self-scoped); absent on a front-desk / operator booking. Recorded by CreateAppointment, carried unchanged by RescheduleAppointment; it selects whether the visit holds a patientSelfDayClaim for its provider + UTC day.",
 			"movedAt":    "When this move was made (RFC3339, canonical UTC) = op.submittedAt. Stamped fresh by RescheduleAppointment on every call; absent until the first move (CreateAppointment writes neither field).",
-			"movedBy":    "Who made this move: staff (front desk / operator) or patient (the consumer self-service path). Stamped fresh by RescheduleAppointment on every call, alongside movedAt.",
+			"movedBy":    "Who made this move: staff (front desk / operator / the bound provider — every writer whose self-service target step 3 did not prove) or patient (the consumer self-service path, authTargetValidated). Stamped fresh by RescheduleAppointment on every call, alongside movedAt.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -1025,7 +1025,7 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 			"lateCancel":     "true when the patient cancelled their own visit inside the 24-hour late-cancel window (submitted at or after startsAt − 24h) — the cancel carries the no-show fee. Absent otherwise; a same-value cancelled re-set carries it forward.",
 			"correctedFrom":  "The terminal status this correction overwrote, present only on a CorrectAppointmentStatus write — the only trace of the wrong call once the upsert lands.",
 			"at":             "When the current value last CHANGED (RFC3339, canonical UTC) = the writing op's submittedAt. Stamped fresh on every value change; carried forward unchanged by a same-value re-write. Optional: a .status carrying no at records no moment.",
-			"by":             "Who made the current value's last change: staff (front desk / operator), patient (the consumer self-service path), or sweep (MarkPastDueNoShow's automated dispatch). Stamped fresh alongside at on every value change; carried forward unchanged by a same-value re-write.",
+			"by":             "Who made the current value's last change: staff (front desk / operator / the bound provider — every writer whose self-service target step 3 did not prove), patient (the consumer self-service path, authTargetValidated), or sweep (MarkPastDueNoShow's automated dispatch). Stamped fresh alongside at on every value change; carried forward unchanged by a same-value re-write.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -3197,11 +3197,22 @@ def status_author(op):
     # staff otherwise (the caller's own op decides when "otherwise" means the
     # automated sweep instead, by passing "sweep" to stamp_status directly
     # rather than calling this).
+    #
+    # The patient label keys on authTargetValidated, NOT on authContextTarget
+    # being non-empty: the raw target is a client-supplied hint that any
+    # scope=any holder can set, so a staff actor posting authContext.target =
+    # <some patient's identity> would otherwise stamp by: patient / movedBy:
+    # patient on a change the desk made — and the appointmentChangeNotices
+    # lens (clinic-reminders) tells the patient only about desk-authored
+    # changes, so that forged label would silence the notice. Step 3 sets
+    # authTargetValidated only when it proved the target (scope=self target ==
+    # actor, or a task grant scoped to exactly that target); a staff actor's
+    # scope=any authorization leaves it false whatever the hint says.
     # authcontext-target: (selector) every call site has already proven
     # ownership of the acted-on appointment/patient before writing .status —
     # this only picks which LABEL the write's author field carries, never a
     # security decision of its own.
-    if op.authContextTarget != "":
+    if op.authTargetValidated:
         return "patient"
     return "staff"
 

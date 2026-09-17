@@ -162,11 +162,11 @@ func TestChangeNotices_PatientCancelNotTold(t *testing.T) {
 	require.Equal(t, "patient", v["statusBy"])
 }
 
-// TestChangeNotices_LegacyCancelNotTold — a .status written before at/by
-// existed carries neither: `null = 'staff'` is false (nil-false) and `null <>
-// null` is false, so a legacy cancel is silent on install rather than told
-// about a moment that was never recorded.
-func TestChangeNotices_LegacyCancelNotTold(t *testing.T) {
+// TestChangeNotices_NoAtByCancelNotTold — a cancelled .status carrying
+// neither at nor by: `null = 'staff'` is false (nil-false) and `null <> null`
+// is false, so a cancel with no recorded moment or author is silent rather
+// than told about a moment that was never recorded.
+func TestChangeNotices_NoAtByCancelNotTold(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -194,20 +194,21 @@ func TestChangeNotices_CancelByWithoutAtNotTold(t *testing.T) {
 	requireNoticeGaps(t, v, false, false, "by: staff but no at → no changeRef to dispatch")
 }
 
-// TestChangeNotices_CancelAfterVisitEndedNotTold — the desk cancelled (a
-// correction) after the sibling pastDueAppointments target recorded a fire
-// at or after endsAt: the visit is over, the cancel is book-keeping, not
-// news. The sibling fire for an EARLIER endsAt the schedule has outrun is
-// not evidence this visit ended — that gap stays open.
+// TestChangeNotices_CancelAfterVisitEndedNotTold — the sibling
+// pastDueAppointments target recorded a fire at or after endsAt on a visit
+// the desk cancelled: the visit is over, the notice is moot. The cancel's own
+// at is BEFORE endsAt here, so only the recorded-end conjunct closes it. The
+// sibling fire for an EARLIER endsAt the schedule has outrun is not evidence
+// this visit ended — that gap stays open.
 func TestChangeNotices_CancelAfterVisitEndedNotTold(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	t.Run("fired at endsAt", func(t *testing.T) {
 		f := newRemFixture(t)
-		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "cancelled", statusAt: "2026-07-05T16:00:00Z", statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd})
+		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "cancelled", statusAt: cnCancelAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd})
 		f.recordLapse(t, "appt", map[string]string{PastDueAppointmentsTarget: cnVisitEnd})
-		requireNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, "the visit ENDED (a recorded pastDueAppointments fire >= endsAt) — a cancel after it is moot")
+		requireNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, "the visit ENDED (a recorded pastDueAppointments fire >= endsAt) — the notice is moot")
 	})
 	t.Run("fired for an outrun endsAt", func(t *testing.T) {
 		f := newRemFixture(t)
@@ -221,6 +222,33 @@ func TestChangeNotices_CancelAfterVisitEndedNotTold(t *testing.T) {
 		f.recordLapse(t, "appt", map[string]string{AppointmentRemindersTarget: "2026-07-05T16:00:00Z"})
 		requireNoticeGaps(t, f.projectChangeNotices(t, "appt"), true, false, "only the pastDueAppointments key is the visit's recorded end")
 	})
+}
+
+// TestChangeNotices_CancelStampedAfterEndNotTold — the at < endsAt conjunct
+// on its own: the desk cancelled a visit AFTER its own end (a manual noShow /
+// completed corrected to cancelled — the sibling pastDueAppointments timer is
+// disarmed on a terminal status, so NO lapse is ever recorded and the
+// recorded-end conjunct has nothing to close on). A cancel stamped at or
+// after endsAt is a correction, not news; one second before endsAt is still
+// told.
+func TestChangeNotices_CancelStampedAfterEndNotTold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, tc := range []struct {
+		name, at string
+		open     bool
+	}{
+		{"stamped after endsAt", "2026-07-05T16:00:00Z", false},
+		{"stamped at endsAt exactly", cnVisitEnd, false},
+		{"stamped one second before endsAt", "2026-07-05T15:29:59Z", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRemFixture(t)
+			f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "cancelled", statusAt: tc.at, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd})
+			requireNoticeGaps(t, f.projectChangeNotices(t, "appt"), tc.open, false, "no recorded lapse; at "+tc.at+" vs endsAt "+cnVisitEnd)
+		})
+	}
 }
 
 // TestChangeNotices_StaffMoveUntold — the desk moved the visit (movedAt,
@@ -272,8 +300,8 @@ func TestChangeNotices_SecondMoveReopens(t *testing.T) {
 
 // TestChangeNotices_PatientMoveNotTold — the patient moved their own visit
 // (movedBy: patient): the desk made no change to tell them about. A
-// schedule with no movedBy at all (a legacy move, or a movedAt written by a
-// path that dropped the author) reads `null = 'staff'` false the same way.
+// schedule carrying a movedAt but no movedBy reads `null = 'staff'` false
+// the same way.
 func TestChangeNotices_PatientMoveNotTold(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

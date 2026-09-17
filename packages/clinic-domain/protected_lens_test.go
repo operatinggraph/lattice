@@ -1134,8 +1134,8 @@ func TestProtectedAppointmentReads_EncounterWithoutDocumentationProjectsNull(t *
 		require.Nil(t, v["amended_at"], "%s: no .documentation aspect → null amended_at", name)
 		require.Nil(t, v["follow_up_requested"], "%s: no .documentation aspect → null follow_up_requested", name)
 		require.Nil(t, v["follow_up_date"], "%s: no .documentation aspect → null follow_up_date", name)
-		// This fixture's .status carries no at/by (a legacy pre-build shape) and
-		// no .changeNotice aspect exists — both project null, null-safe.
+		// This fixture's .status carries no at/by and no .changeNotice aspect
+		// exists — both project null, null-safe.
 		require.Nil(t, v["status_at"], "%s: no at on .status → null status_at", name)
 		require.Nil(t, v["status_by"], "%s: no by on .status → null status_by", name)
 		require.Nil(t, v["change_notice_sent_at"], "%s: no .changeNotice aspect → null change_notice_sent_at", name)
@@ -1145,8 +1145,7 @@ func TestProtectedAppointmentReads_EncounterWithoutDocumentationProjectsNull(t *
 // TestProtectedAppointmentReads_ProjectsChangeNoticeSentAt proves the present
 // case on both patient- and provider-anchored protected read models: an
 // appointment carrying the .changeNotice aspect (written by clinic-reminders'
-// RecordAppointmentChangeNotice, a sibling package's op this Increment does
-// not build) projects its sentAt.
+// RecordAppointmentChangeNotice, a sibling package's op) projects its sentAt.
 func TestProtectedAppointmentReads_ProjectsChangeNoticeSentAt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

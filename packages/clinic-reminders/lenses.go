@@ -253,16 +253,30 @@ RETURN
 //     the gap reopens and a fresh notice (a fresh externalRef) goes out.
 //   - by = 'staff' / movedBy = 'staff': only the desk's change is told; a
 //     patient's own cancel or move (by/movedBy = patient) and the sweep's
-//     no-show (by = sweep) are not. `=` on a null operand is FALSE in this
-//     engine (nil-false), so a legacy .status written before at/by existed
-//     reads `null = 'staff'` false and is never told — the 23 cancelled
-//     visits live at install are silent, by design (no backfill: the moment
-//     was never recorded).
+//     no-show (by = sweep) are not. staff covers every non-self writer —
+//     the front desk, an operator, and the bound provider acting on their own
+//     schedule (clinic-domain's status_author labels by the proven
+//     self-service target alone). `=` on a null operand is FALSE in this
+//     engine (nil-false), so a .status carrying no by reads `null = 'staff'`
+//     false and is never told: a status with no recorded author has no
+//     desk-made change to tell, and no backfill fabricates one.
 //   - at <> null guards the cancel gap the same way: a cancelled status with
-//     a by but no at (unconstructible today, but the two fields are
-//     independent keys) has no changeRef to dispatch and stays closed rather
-//     than opening a gap the op can only refuse. movedAt <> null guards the
-//     move gap for the same reason.
+//     a by but no at (the two fields are independent keys) has no changeRef
+//     to dispatch and stays closed rather than opening a gap the op can only
+//     refuse. movedAt <> null guards the move gap for the same reason.
+//   - at < endsAt on the cancel gap: a cancel stamped at or after the visit's
+//     own end is a book-keeping correction, not news — a visit closed out by
+//     hand as noShow / completed (which disarms the sibling pastDueAppointments
+//     timer, so no lapse is ever recorded on it) and later corrected to
+//     cancelled by the desk stamps an at past endsAt, and the recorded-end
+//     conjunct below has no marker to close on. Both operands are canonical
+//     UTC, so the lexical compare is chronological; the op re-checks the same
+//     bound (StaleChange). The move gap needs no such term: nonTerminal
+//     already excludes every closed-out visit.
+//   - Two desk moves inside one whole second share a movedAt (rfc3339_utc is
+//     whole seconds), so the second is not re-told; the op re-checks the
+//     LIVE .schedule before sending, so the one message carries the latest
+//     times. Accepted.
 //   - nonTerminalAppointment on the move gap only: a moved-then-cancelled
 //     visit gets the cancel notice alone (there is no future time to tell
 //     the patient about), and a completed / noShow visit is over. The cancel
@@ -308,7 +322,7 @@ RETURN
   a.changeNotice.data.cancelledFor AS cancelledFor,
   a.changeNotice.data.movedFor AS movedFor,
   a.changeNotice.data.sentAt AS noticeSentAt,
-  ((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_cancel_notice,
+  ((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.status.data.at < a.schedule.data.endsAt) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_cancel_notice,
   ((a.schedule.data.movedAt <> null) AND (a.schedule.data.movedBy = 'staff') AND (a.changeNotice.data.movedFor <> a.schedule.data.movedAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_move_notice,
-  (((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) OR ((a.schedule.data.movedAt <> null) AND (a.schedule.data.movedBy = 'staff') AND (a.changeNotice.data.movedFor <> a.schedule.data.movedAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt))) AS violating`,
+  (((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.status.data.at < a.schedule.data.endsAt) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) OR ((a.schedule.data.movedAt <> null) AND (a.schedule.data.movedBy = 'staff') AND (a.changeNotice.data.movedFor <> a.schedule.data.movedAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt))) AS violating`,
 	nonTerminalAppointment, PastDueAppointmentsTarget)

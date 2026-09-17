@@ -330,7 +330,7 @@ func TestRecordAppointmentChangeNotice_MarkerUpdateIsBare(t *testing.T) {
 
 // TestRecordAppointmentChangeNotice_ActorGuardIsFirst pins the guard ORDER
 // the design requires: the primordial actor check is the first statement in
-// the RecordAppointmentChangeNotice branch, ahead of every payload-shape,
+// the RecordAppointmentChangeNotice branch, before every payload-shape,
 // liveness and re-check oracle, so a non-Weaver submitter learns nothing
 // about the appointment it named.
 func TestRecordAppointmentChangeNotice_ActorGuardIsFirst(t *testing.T) {

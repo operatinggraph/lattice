@@ -71,11 +71,12 @@ func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 			"with changeRef = row.statusAt; missing_move_notice with changeRef = row.movedAt). Reads [appointmentKey, " +
 			"appointmentKey.status, appointmentKey.schedule] and optionally [appointmentKey.changeNotice]: it " +
 			"liveness-guards the appointment (UnknownAppointment) and re-checks the change against the live aspect — " +
-			"kind=cancelled requires .status.value = cancelled AND .status.by = staff AND .status.at = changeRef; " +
+			"kind=cancelled requires .status.value = cancelled AND .status.by = staff AND .status.at = changeRef AND " +
+			".status.at < .schedule.endsAt (a cancel stamped at or after the visit's own end is a correction, not news); " +
 			"kind=moved requires .schedule.movedAt = changeRef AND .schedule.movedBy = staff (StaleChange otherwise) " +
 			"on a non-terminal status (InvalidState otherwise — a moved-then-cancelled visit gets the cancel notice " +
 			"only) — so a stale row is refused, not trusted. A patient's own cancel or move (by/movedBy = patient) " +
-			"and a legacy status with no at are never told. The marker write is a create when the aspect is absent " +
+			"and a status carrying no at are never told. The marker write is a create when the aspect is absent " +
 			"and a bare update on the hydrated key when it exists (§3.2-conditioned on the step-4 revision, " +
 			"retry-eligible in-process), so a cancel notice and a move notice converging on one appointment " +
 			"re-execute on conflict and never drop each other's field. Submitted under Weaver's service-actor " +
@@ -273,6 +274,11 @@ def execute(state, op):
                 fail("StaleChange: " + appt_key + ".status carries no at; nothing to tell")
             if status_at != change_ref:
                 fail("StaleChange: " + appt_key + " status at " + status_at + " is not the dispatched changeRef " + change_ref)
+            # A cancel stamped at or after the visit's own end is a
+            # book-keeping correction, not news (the lens's at < endsAt
+            # conjunct, re-checked here; both canonical UTC).
+            if status_at >= ends_at:
+                fail("StaleChange: " + appt_key + " cancelled at " + status_at + ", after the visit's end " + ends_at + "; nothing to tell")
         else:
             moved_at = schedule.data.get("movedAt")
             if moved_at == None:

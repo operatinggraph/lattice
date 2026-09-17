@@ -187,18 +187,17 @@ func TestClinicAppointments_StatusTransitionProjects(t *testing.T) {
 	require.Equal(t, "confirmed", rows[0].Values["status"])
 	require.Nil(t, rows[0].Values["reason"], "absent optional reason → null column")
 	require.Nil(t, rows[0].Values["reminderSentAt"], "no .reminder aspect → null reminderSentAt (null-safe)")
-	// A legacy .status carrying no at/by (written before this build) projects
-	// null for both — no backfill, no fabricated proxy.
+	// A .status carrying no at/by projects null for both — no fabricated
+	// proxy for a moment that was never recorded.
 	require.Nil(t, rows[0].Values["statusAt"], "no at on .status → null statusAt")
 	require.Nil(t, rows[0].Values["statusBy"], "no by on .status → null statusBy")
 }
 
 // TestClinicAppointments_ProjectsChangeNoticeSentAt proves the null-safe read
 // off the appointment's .changeNotice aspect — written by clinic-reminders'
-// RecordAppointmentChangeNotice (a sibling package's op this Increment does
-// not build), not clinic-domain itself. The column exists so a fixture that
-// DOES carry the aspect (this test) or does not (every other fixture in this
-// file) both project correctly, ahead of that op landing.
+// RecordAppointmentChangeNotice, a sibling package's op, never by
+// clinic-domain itself. A fixture that DOES carry the aspect (this test) and
+// one that does not (every other fixture in this file) both project.
 func TestClinicAppointments_ProjectsChangeNoticeSentAt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
