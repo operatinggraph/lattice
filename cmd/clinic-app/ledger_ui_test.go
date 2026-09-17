@@ -10,11 +10,11 @@ import (
 )
 
 // ledgerUIDecls lifts the shipped moneyAmount/customerMemo/shortKey/localDate/
-// arrearsBadgeText/apptArrearsLine/overdueBookingPrompt/ledgerLineLabel/
-// visitPickerOptions/openChargeOptions/defaultWaiveTarget/
-// selfPayCapMessage/ledgerBalanceLine declarations out of the embedded
-// app.js — the followup_addressed_test.go / lease_term_ui_test.go pattern:
-// the REAL shipped source runs here, not a copy, so these pins are a
+// arrearsBadgeText/apptArrearsLine/overdueBookingPrompt/noShowBadgeText/
+// noShowBookingPrompt/ledgerLineLabel/visitPickerOptions/openChargeOptions/
+// defaultWaiveTarget/selfPayCapMessage/ledgerBalanceLine declarations out of
+// the embedded app.js — the followup_addressed_test.go / lease_term_ui_test.go
+// pattern: the REAL shipped source runs here, not a copy, so these pins are a
 // statement about what ships. moneyAmount/customerMemo/shortKey/localDate
 // are dependencies the other calls call; all are self-contained (no
 // DOM/state), so goja can evaluate them directly.
@@ -26,6 +26,8 @@ var ledgerUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction arrearsBadgeText\(row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction apptArrearsLine\(row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction overdueBookingPrompt\(name, row\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction noShowBadgeText\(row\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction noShowBookingPrompt\(name, row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction ledgerLineLabel\(t, byKey\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction visitPickerOptions\(appts\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction openChargeOptions\(transactions\) \{\n.*?\n\}\n`),
@@ -167,6 +169,93 @@ func TestOverdueBookingPrompt(t *testing.T) {
 	t.Run("overdue, 1 day (singular)", func(t *testing.T) {
 		want := "Riley Chen owes $15, 1 day overdue. Book them anyway?"
 		if got := run(t, "Riley Chen", map[string]interface{}{"balanceCents": 1500, "isOverdue": true, "daysOverdue": 1}); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestNoShowBadgeText(t *testing.T) {
+	vm := ledgerUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("noShowBadgeText"))
+	if !ok {
+		t.Fatal("noShowBadgeText is not a function after evaluating its declaration")
+	}
+	run := func(t *testing.T, row map[string]interface{}) string {
+		t.Helper()
+		arg := goja.Value(goja.Undefined())
+		if row != nil {
+			arg = vm.ToValue(row)
+		}
+		res, err := fn(goja.Undefined(), arg)
+		if err != nil {
+			t.Fatalf("noShowBadgeText(%v) threw: %v", row, err)
+		}
+		return res.String()
+	}
+	for _, tc := range []struct {
+		name string
+		row  map[string]interface{}
+		want string
+	}{
+		{"no row", nil, ""},
+		{"zero no-shows", map[string]interface{}{"noShowCount": 0}, ""},
+		{"one no-show", map[string]interface{}{"noShowCount": 1}, "1 no-show"},
+		{"three no-shows", map[string]interface{}{"noShowCount": 3}, "3 no-shows"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := run(t, tc.row); got != tc.want {
+				t.Errorf("noShowBadgeText(%v) = %q, want %q", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNoShowBookingPrompt(t *testing.T) {
+	vm := ledgerUIVM(t)
+	fn, ok := goja.AssertFunction(vm.Get("noShowBookingPrompt"))
+	if !ok {
+		t.Fatal("noShowBookingPrompt is not a function after evaluating its declaration")
+	}
+	run := func(t *testing.T, name string, row map[string]interface{}) string {
+		t.Helper()
+		arg := goja.Value(goja.Undefined())
+		if row != nil {
+			arg = vm.ToValue(row)
+		}
+		res, err := fn(goja.Undefined(), vm.ToValue(name), arg)
+		if err != nil {
+			t.Fatalf("noShowBookingPrompt(%q, %v) threw: %v", name, row, err)
+		}
+		return res.String()
+	}
+	localDateFn, ok := goja.AssertFunction(vm.Get("localDate"))
+	if !ok {
+		t.Fatal("localDate is not a function after evaluating its declaration")
+	}
+	wantLastNoShow, err := localDateFn(goja.Undefined(), vm.ToValue("2026-08-01T15:00:00Z"))
+	if err != nil {
+		t.Fatalf("localDate(2026-08-01T15:00:00Z) threw: %v", err)
+	}
+
+	t.Run("no row", func(t *testing.T) {
+		if got := run(t, "Riley Chen", nil); got != "" {
+			t.Errorf("got %q, want \"\"", got)
+		}
+	})
+	t.Run("one no-show is not a habit", func(t *testing.T) {
+		if got := run(t, "Riley Chen", map[string]interface{}{"noShowCount": 1, "lastNoShowAt": "2026-08-01T15:00:00Z"}); got != "" {
+			t.Errorf("got %q, want \"\"", got)
+		}
+	})
+	t.Run("two no-shows, with the latest date", func(t *testing.T) {
+		want := "Riley Chen has 2 recorded no-shows, the last on " + wantLastNoShow.String() + ". Book them anyway?"
+		if got := run(t, "Riley Chen", map[string]interface{}{"noShowCount": 2, "lastNoShowAt": "2026-08-01T15:00:00Z"}); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+	t.Run("no recorded date omits the date clause", func(t *testing.T) {
+		want := "Riley Chen has 3 recorded no-shows. Book them anyway?"
+		if got := run(t, "Riley Chen", map[string]interface{}{"noShowCount": 3}); got != want {
 			t.Errorf("got %q, want %q", got, want)
 		}
 	})

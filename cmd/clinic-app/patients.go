@@ -27,12 +27,22 @@ import (
 // handle, whereas an omitted/null field would surface the literal string
 // "undefined" wherever the FE assigns it straight into a DOM node with no
 // fallback (populatePatientSelect's option text).
+//
+// NoShowCount / LastNoShowAt ride the same row (clinic-domain's
+// no_show_count / last_no_show_at columns): NoShowCount is the count of
+// every appointment this patient has ever been marked noShow for — never
+// null, the aggregate's zero-value — and LastNoShowAt is the recorded
+// startsAt (RFC3339 UTC) of the latest one, null exactly when the count is
+// zero. They feed the desk's repeat-no-show booking prompt and roster badge
+// (web/app.js's noShowBookingPrompt / noShowBadgeText).
 type protectedPatientRow struct {
-	PatientKey  string  `json:"patientKey"`
-	Name        string  `json:"name"`
-	Email       *string `json:"email,omitempty"`
-	Phone       *string `json:"phone,omitempty"`
-	IdentityKey *string `json:"identityKey,omitempty"`
+	PatientKey   string  `json:"patientKey"`
+	Name         string  `json:"name"`
+	Email        *string `json:"email,omitempty"`
+	Phone        *string `json:"phone,omitempty"`
+	IdentityKey  *string `json:"identityKey,omitempty"`
+	NoShowCount  int     `json:"noShowCount"`
+	LastNoShowAt *string `json:"lastNoShowAt,omitempty"`
 }
 
 // selectPatientsSQL reads the protected model. It carries NO auth WHERE — the
@@ -52,7 +62,7 @@ type protectedPatientRow struct {
 // the empty string for a shredded identified patient — see
 // protectedPatientRow's Name doc.
 const selectPatientsSQL = `
-SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key
+SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key, no_show_count, last_no_show_at
 FROM read_clinic_patients
 ORDER BY COALESCE(name, unlinked_name, ''), patient_key`
 
@@ -64,7 +74,7 @@ ORDER BY COALESCE(name, unlinked_name, ''), patient_key`
 // searchable by their plaintext unlinked_name instead of silently dropping
 // out of every filtered query.
 const selectPatientsFilteredSQL = `
-SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key
+SELECT patient_key, COALESCE(name, unlinked_name, ''), email, phone, identity_key, no_show_count, last_no_show_at
 FROM read_clinic_patients
 WHERE COALESCE(name, unlinked_name) ILIKE $1
 ORDER BY COALESCE(name, unlinked_name, ''), patient_key
@@ -102,7 +112,7 @@ func queryPatients(ctx context.Context, pool pgxBeginner, actorID, q string) ([]
 	out := make([]protectedPatientRow, 0)
 	for rows.Next() {
 		var row protectedPatientRow
-		if err := rows.Scan(&row.PatientKey, &row.Name, &row.Email, &row.Phone, &row.IdentityKey); err != nil {
+		if err := rows.Scan(&row.PatientKey, &row.Name, &row.Email, &row.Phone, &row.IdentityKey, &row.NoShowCount, &row.LastNoShowAt); err != nil {
 			return nil, err
 		}
 		out = append(out, row)
