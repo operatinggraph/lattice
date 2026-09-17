@@ -59,7 +59,7 @@ const (
 var clinicOps = []string{
 	"CreatePatient", "TombstonePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
-	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
+	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "EvaluateAppointmentDisplacement", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite",
 	// location-domain ops the multi-site tests need to mint a building directly
 	// (mirrors loftspace-domain's setupLoftspaceEnv installing location-domain
@@ -531,6 +531,18 @@ func TestClinic_CreateBookable(t *testing.T) {
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	if st, _ := status["data"].(map[string]any); st["value"] != "scheduled" {
 		t.Fatalf("initial status = %v, want scheduled", st["value"])
+	}
+	// The booking writer records the visit clear of the provider's time-off
+	// (.displacement {displaced: false, at = this op's submittedAt}); this
+	// provider has no .timeOff, so no checkedFor is stamped.
+	disp := clReadDoc(t, ctx, conn, apptKey+".displacement")
+	if disp["class"] != "appointmentDisplacement" {
+		t.Fatalf("displacement class = %v, want appointmentDisplacement", disp["class"])
+	}
+	if dd, _ := disp["data"].(map[string]any); dd["displaced"] != false || dd["at"] != clSubmittedAnchor {
+		t.Fatalf("displacement data = %v, want {displaced: false, at: %s}", disp["data"], clSubmittedAnchor)
+	} else if _, has := dd["checkedFor"]; has {
+		t.Fatalf("a provider with no .timeOff yields no checkedFor; got %v", disp["data"])
 	}
 	// Links: forPatient + withProvider (appointment is the source).
 	forPatient := "lnk.appointment." + apptID + ".forPatient.patient." + patientKey[len("vtx.patient."):]
@@ -1951,10 +1963,19 @@ func TestClinic_ProviderTimeOffEnforced(t *testing.T) {
 		`{"providerKey":"`+providerKey+`","ranges":[{"from":"2026-07-06T00:00:00Z","to":"2026-07-13T00:00:00Z","reason":"Vacation"}]}`,
 		[]string{providerKey}, processor.OutcomeAccepted)
 
-	// The .timeOff aspect landed with one range carrying the reason.
+	// The .timeOff aspect landed with one range carrying the reason, setAt =
+	// the write's own submittedAt (the human-readable instant) and setRef =
+	// its requestId — the opaque per-write key every live visit's
+	// displacement check is keyed on.
 	off := clReadDoc(t, ctx, conn, providerKey+".timeOff")
 	if off["class"] != "providerTimeOff" {
 		t.Fatalf("timeOff class = %v, want providerTimeOff", off["class"])
+	}
+	if od, _ := off["data"].(map[string]any); od["setAt"] != clSubmittedAnchor {
+		t.Fatalf("timeOff setAt = %v, want the op's submittedAt %s", od["setAt"], clSubmittedAnchor)
+	}
+	if od, _ := off["data"].(map[string]any); od["setRef"] != testutil.GenReqID("tooff0001") {
+		t.Fatalf("timeOff setRef = %v, want the op's requestId %s", od["setRef"], testutil.GenReqID("tooff0001"))
 	}
 	if od, _ := off["data"].(map[string]any); od["ranges"] == nil {
 		t.Fatalf("timeOff ranges missing: %v", off["data"])

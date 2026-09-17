@@ -124,6 +124,9 @@ func TestClinicAppointmentsRead_ProjectsPatientSelfAnchor(t *testing.T) {
 	require.Equal(t, "2026-06-30T09:00:00Z", v["status_at"])
 	require.Equal(t, "staff", v["status_by"])
 	require.Nil(t, v["change_notice_sent_at"], "no .changeNotice aspect on this fixture → null change_notice_sent_at")
+	require.Nil(t, v["displaced"], "no .displacement aspect on this fixture → null displaced")
+	require.Nil(t, v["displaced_from"], "no .displacement aspect on this fixture → null displaced_from")
+	require.Nil(t, v["displaced_to"], "no .displacement aspect on this fixture → null displaced_to")
 
 	// The headline: authz_anchors is exactly [alice's bare NanoID].
 	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]),
@@ -397,6 +400,7 @@ func TestProviderAppointmentsRead_ProjectsProviderSelfAnchor(t *testing.T) {
 	require.Equal(t, "2026-06-30T09:00:00Z", v["status_at"])
 	require.Equal(t, "staff", v["status_by"])
 	require.Nil(t, v["change_notice_sent_at"], "no .changeNotice aspect on this fixture → null change_notice_sent_at")
+	require.Nil(t, v["displaced"], "no .displacement aspect on this fixture → null displaced")
 
 	// The headline: authz_anchors is exactly [the provider's bare NanoID], NOT
 	// the patient's — the anchor axis flips relative to clinicAppointmentsRead.
@@ -1139,6 +1143,31 @@ func TestProtectedAppointmentReads_EncounterWithoutDocumentationProjectsNull(t *
 		require.Nil(t, v["status_at"], "%s: no at on .status → null status_at", name)
 		require.Nil(t, v["status_by"], "%s: no by on .status → null status_by", name)
 		require.Nil(t, v["change_notice_sent_at"], "%s: no .changeNotice aspect → null change_notice_sent_at", name)
+	}
+}
+
+// TestProtectedAppointmentReads_ProjectsDisplacement proves the three
+// displacement columns on both patient- and provider-anchored protected read
+// models: a displaced visit projects displaced = true with the covering
+// range, so the patient's own card and the provider's schedule both render
+// the line off the same recorded fact.
+func TestProtectedAppointmentReads_ProjectsDisplacement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "appt", "alice", "drsam")
+	f.aspect(t, "appt", "displacement", "appointmentDisplacement", map[string]any{"displaced": true, "checkedFor": "CLtimeOffRefHJKMNPQR", "at": "2026-06-21T09:15:03Z", "from": "2026-06-30T00:00:00Z", "to": "2026-07-03T00:00:00Z"})
+
+	for name, spec := range map[string]string{
+		"clinicAppointmentsReadSpec":   clinicAppointmentsReadSpec,
+		"providerAppointmentsReadSpec": providerAppointmentsReadSpec,
+	} {
+		rows := f.project(t, spec)
+		require.Len(t, rows, 1, "%s: exactly one row per appointment", name)
+		require.Equal(t, true, rows[0].Values["displaced"], "%s: displaced projects", name)
+		require.Equal(t, "2026-06-30T00:00:00Z", rows[0].Values["displaced_from"], "%s: displaced_from projects", name)
+		require.Equal(t, "2026-07-03T00:00:00Z", rows[0].Values["displaced_to"], "%s: displaced_to projects", name)
 	}
 }
 

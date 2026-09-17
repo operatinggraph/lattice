@@ -251,8 +251,8 @@ func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
 	for _, l := range Package.Lenses {
 		lensByName[l.CanonicalName] = l
 	}
-	if len(Package.WeaverTargets) != 6 {
-		t.Fatalf("expected 6 weaverTargets, got %d", len(Package.WeaverTargets))
+	if len(Package.WeaverTargets) != 7 {
+		t.Fatalf("expected 7 weaverTargets, got %d", len(Package.WeaverTargets))
 	}
 	for _, wt := range Package.WeaverTargets {
 		lens, ok := lensByName[wt.LensRef]
@@ -307,8 +307,8 @@ func TestClinicReminders_PlaybookColumnsMatchLens(t *testing.T) {
 // conflict. An explicit CAS is skipped by that retry path, so when both gaps
 // open on one appointment and Weaver dispatches both, the loser would be
 // rejected outright and wait out the mark lease instead of re-executing
-// carrying the winner's field. The update still carries the other kind's
-// field forward; the create branch is the absent case.
+// carrying the winner's field. The update still carries the other kinds'
+// fields forward; the create branch is the absent case.
 func TestRecordAppointmentChangeNotice_MarkerUpdateIsBare(t *testing.T) {
 	for _, want := range []string{
 		`existing = kv.Read(appt_key + ".changeNotice")`,
@@ -316,7 +316,8 @@ func TestRecordAppointmentChangeNotice_MarkerUpdateIsBare(t *testing.T) {
 		`marker_mut = {"op": "create", "key": marker_key, "document": marker_doc}`,
 		`marker["cancelledFor"] = change_ref`,
 		`marker["movedFor"] = change_ref`,
-		`for field in ["cancelledFor", "movedFor"]:`,
+		`marker["displacedFor"] = change_ref`,
+		`for field in ["cancelledFor", "movedFor", "displacedFor"]:`,
 	} {
 		if !strings.Contains(recordChangeNoticeScript, want) {
 			t.Errorf("recordChangeNoticeScript must contain %q", want)

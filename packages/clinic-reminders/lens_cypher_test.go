@@ -496,9 +496,10 @@ func requireClockFree(t *testing.T, name, spec string) {
 // A lens that projects no freshUntil arms no timer, so nothing ever writes an
 // entry under its target id; such a lens must NOT read one (a read of an entry
 // with no writer is a conjunct that can never flip). appointmentChangeNotices
-// is that lens: level-triggered, it reads only the sibling pastDueAppointments
-// entry as its visit-over term. visitSeriesDue and visitSeriesSiteBackfill read
-// no freshnessExpiry marker at all.
+// and appointmentDisplacements are those lenses: level-triggered, each reads
+// only the sibling pastDueAppointments entry as its visit-over term.
+// visitSeriesDue and visitSeriesSiteBackfill read no freshnessExpiry marker at
+// all.
 func TestConvergenceLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
 	specs := map[string]pkgmgr.LensSpec{}
 	for _, l := range Lenses() {
@@ -527,9 +528,9 @@ func TestConvergenceLenses_ReadTheirOwnTargetsMarkerEntry(t *testing.T) {
 		"appointmentReminders, followUpReminders and pastDueAppointments each read a recorded lapse; visitSeriesDue "+
 			"reads a qualifying visit instead of a freshnessExpiry marker, so it is deliberately not one of the "+
 			"three — a drop below 3 is a lens that went back to a clock")
-	require.Equal(t, 1, levelTriggered,
-		"appointmentChangeNotices is the one level-triggered target that reads the sibling's recorded end; a freshUntil "+
-			"column appearing on it is a timer nothing designed")
+	require.Equal(t, 2, levelTriggered,
+		"appointmentChangeNotices and appointmentDisplacements are the two level-triggered targets that read the "+
+			"sibling's recorded end; a freshUntil column appearing on either is a timer nothing designed")
 }
 
 // TestReminders_TerminalStatusNeverViolates is the agreement vector between the

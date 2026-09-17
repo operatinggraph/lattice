@@ -82,6 +82,7 @@ const (
 // does not need a lens to be written badly in order to cover them.
 var corpusAnchorIndexVerdicts = map[string]string{
 	"appointmentChangeNotices": hopIndexed,
+	"appointmentDisplacements": hopIndexed,
 	"appointmentReminders":     hopIndexed,
 	"augurDispatchPending":     hopIndexed,
 	"backgroundCheckFreshness": hopIndexed,

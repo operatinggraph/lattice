@@ -69,6 +69,9 @@ func TestStaffAppointmentsReadBoundary_WildcardSeesEverything(t *testing.T) {
 		{Name: "status_at", Type: "text"},
 		{Name: "status_by", Type: "text"},
 		{Name: "change_notice_sent_at", Type: "text"},
+		{Name: "displaced", Type: "boolean"},
+		{Name: "displaced_from", Type: "text"},
+		{Name: "displaced_to", Type: "text"},
 		{Name: "follow_up_requested", Type: "boolean"},
 		{Name: "follow_up_date", Type: "text"},
 	}

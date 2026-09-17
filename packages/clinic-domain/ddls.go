@@ -40,6 +40,7 @@ const (
 	profileAspectDDL        = "providerProfile"
 	scheduleAspectDDL       = "appointmentSchedule"
 	statusAspectDDL         = "appointmentStatus"
+	displacementAspectDDL   = "appointmentDisplacement"
 	hoursAspectDDL          = "providerHours"
 	timeOffAspectDDL        = "providerTimeOff"
 	encounterAspectDDL      = "appointmentEncounter"
@@ -117,6 +118,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		profileAspectTypeDDL(),
 		scheduleAspectTypeDDL(),
 		statusAspectTypeDDL(),
+		displacementAspectTypeDDL(),
 		hoursAspectTypeDDL(),
 		timeOffAspectTypeDDL(),
 		providerSlotClaimAspectTypeDDL(),
@@ -428,10 +430,15 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 			"{windows: [{day (0=Sun..6=Sat), openSec, closeSec}]} (UTC seconds-of-day) — the opt-in recurring-weekly " +
 			"business-hours windows CreateAppointment / RescheduleAppointment enforce (an out-of-hours booking is " +
 			"rejected OutsideHours); an absent .hours aspect or windows=[] means the provider is unconstrained. " +
-			"SetProviderTimeOff upserts the .timeOff exceptions aspect {ranges: [{from, to, reason?}]} (RFC3339 UTC " +
+			"SetProviderTimeOff upserts the .timeOff exceptions aspect {ranges: [{from, to, reason?}], setAt, setRef} (RFC3339 UTC " +
 			"instants) — the opt-in date-specific blackout layer on top of the recurring hours (vacation / holiday / " +
 			"out-sick): a booking overlapping any blocked range is rejected ProviderUnavailable, even if it falls " +
-			"inside the weekly .hours; an absent .timeOff aspect or ranges=[] means no blackouts. BindProviderIdentity " +
+			"inside the weekly .hours; an absent .timeOff aspect or ranges=[] means no blackouts. Every write (a clear " +
+			"included) is the event each of the provider's live, already-booked visits is checked against: setRef = the " +
+			"write's requestId (opaque, distinct per save) is the key clinic-reminders' appointmentDisplacements lens " +
+			"compares each non-terminal appointment's .displacement.checkedFor against, opening a gap where they differ, " +
+			"and EvaluateAppointmentDisplacement records on each visit whether the current ranges cover it; setAt = the " +
+			"write's submittedAt is the human-readable instant beside it. BindProviderIdentity " +
 			"binds an existing provider to a pre-minted vtx.identity (both validated alive + typed): it mints " +
 			"lnk.provider.<id>.identifiedBy.identity.<id> (provider identifiedBy identity, Contract #1 §1.1), claims a " +
 			"CreateOnly guard aspect on EACH side (.identityClaim on the provider, .providerClaim on the identity — " +
@@ -506,9 +513,12 @@ func providerVertexTypeDDL() pkgmgr.DDLSpec {
 					},
 				},
 				ExpectedOutcome: "Validates the provider is alive + class=provider and each range (from/to RFC3339 " +
-					"UTC, from<to), then upserts vtx.provider.<NanoID>.timeOff {ranges}. Subsequent CreateAppointment / " +
+					"UTC, from<to), then upserts vtx.provider.<NanoID>.timeOff {ranges, setAt: op.submittedAt, setRef: op.requestId}. Subsequent CreateAppointment / " +
 					"RescheduleAppointment reject a booking overlapping any range (ProviderUnavailable), even inside the " +
-					"weekly .hours. ranges=[] clears all blackouts.",
+					"weekly .hours; every live visit already booked with the provider is re-checked against the new " +
+					"ranges (EvaluateAppointmentDisplacement, dispatched per visit by clinic-reminders' appointmentDisplacements " +
+					"gap keyed on setRef). ranges=[] clears all blackouts and mints a fresh setRef, so a displaced visit reads " +
+					"clear again.",
 			},
 			{
 				Name:    "BindProviderIdentity — bind a provider to its login identity",
@@ -525,7 +535,7 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     appointmentVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "EvaluateAppointmentDisplacement", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		Description: "Clinic appointment DDL. Vertex shape: vtx.appointment.<NanoID>, class=appointment, root data = " +
 			"{} (minimal, D5). CreateAppointment validates the patient (class=patient) + provider (class=provider) " +
 			"are alive, then atomically mints the appointment + the .schedule aspect {startsAt, endsAt, remindAt, reason?} + " +
@@ -642,7 +652,25 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"them as caller-supplied + link-validated params like SetAppointmentStatus does — Weaver's directOp dispatch " +
 			"can only template row.<column> / row.<column>.<aspect> keys into ContextHint.Reads (Contract #10 §10.8), " +
 			"which cannot express the withProvider/forPatient LINK read SetAppointmentStatus's caller-supplied path " +
-			"requires, so this op has no human caller to supply them. BackfillAppointmentSite{appointmentKey} is the " +
+			"requires, so this op has no human caller to supply them. EvaluateAppointmentDisplacement{appointmentKey, " +
+			"providerKey, checkedFor} is the orchestration-internal evaluation clinic-reminders' appointmentDisplacements " +
+			"Weaver target dispatches once per (time-off write × live visit of that provider): it records on the visit " +
+			"whether the provider's CURRENT .timeOff ranges cover it, as the .displacement aspect {displaced, checkedFor?, " +
+			"at, from?, to?, reason?}. It liveness-guards the appointment, resolves the provider LIVE off the withProvider " +
+			"link (appointment_provider) and refuses ProviderMismatch when providerKey names another; a terminal status is " +
+			"the empty batch (nothing to displace). The verdict is the half-open overlap test enforce_time_off runs " +
+			"(time_off_overlap) over .schedule.{startsAt, endsAt} against the LIVE .timeOff — checkedFor (the .timeOff.setRef " +
+			"the row was projected against) is informational: a time-off re-written between projection and dispatch is " +
+			"evaluated as it now stands, and the write records the live setRef as checkedFor, so the gap closes on what " +
+			"was actually evaluated. at is stamped when displaced FLIPS and carried when it does not (the displaced notice " +
+			"keys on it — a provider re-saving their time-off must not re-tell a still-displaced patient); from/to/reason " +
+			"are the covering range when displaced, absent otherwise. Emits clinic.appointmentDisplaced / " +
+			"clinic.appointmentReinstated only on a flip. CreateAppointment and RescheduleAppointment write the same aspect " +
+			"as {displaced: false, checkedFor: <the provider's setRef, when the aspect carries one>, at} right after their own " +
+			"enforce_time_off passes — they have just proved the visit clear of the current ranges, and a displaced visit " +
+			"the desk moves to a free slot must read clear at once. A displaced visit stays open for the desk: the " +
+			"appointmentReminders and pastDueAppointments gaps read displaced = true and stand down, and MarkPastDueNoShow's " +
+			"live overlap no-op stays as the race guard. BackfillAppointmentSite{appointmentKey} is the " +
 			"orchestration-internal auto-remediation twin of CreateAppointment's own site-writing branch, dispatched by " +
 			"the clinicSiteBackfill Weaver target's missing_site gap (lenses.go) for a LIVE appointment carrying no " +
 			"atSite link — the pre-existing corpus CreateAppointment minted before a site was ever supplied, plus any " +
@@ -681,7 +709,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			`"leaseAppKey":{"type":"string","description":"Optional vtx.leaseapp.<NanoID> the patient claims residency under (CreateAppointment; optional). Checked against the lease's applicationFor link matching the patient's identifiedBy identity — a mismatch falls through with no residentVisit link, never a hard failure."},` +
 			`"site":{"type":"string","description":"vtx.building.<NanoID> clinic site the appointment is booked at. Optional on CreateAppointment; required on SetAppointmentSite (no-op if the appointment already carries one). When supplied, validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment) — a mismatch is REJECTED, not a silent fall-through. Writes an atSite link (appointment→building)."},` +
 			`"appointmentId":{"type":"string","description":"Optional bare NanoID for the new appointment vertex (CreateAppointment); absent → minted."},` +
-			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / CorrectAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite / TombstoneAppointment; required, validated alive)."},` +
+			`"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> of an existing appointment (RescheduleAppointment / SetAppointmentStatus / CorrectAppointmentStatus / MarkPastDueNoShow / EvaluateAppointmentDisplacement / BackfillAppointmentSite / SetAppointmentSite / TombstoneAppointment; required, validated alive)."},` +
+			`"providerKey":{"type":"string","description":"vtx.provider.<NanoID> the row was projected against (EvaluateAppointmentDisplacement; required). Must be the appointment's own withProvider provider (ProviderMismatch otherwise) — the op resolves the provider live off the link and reads THAT provider's .timeOff."},` +
+			`"checkedFor":{"type":"string","description":"The provider's .timeOff.setRef the appointmentDisplacements row was projected against (EvaluateAppointmentDisplacement; required; an opaque write key, not an instant). Informational: the op evaluates the LIVE .timeOff and records its live setRef as .displacement.checkedFor."},` +
 			`"status":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"],"description":"New status (SetAppointmentStatus; required). Transitioning TO a terminal value (completed/cancelled/noShow) for the first time also requires provider + patient (to release the held slot-claim cells; omitted on a non-terminal transition or an idempotent same-value re-set). CorrectAppointmentStatus also requires it, restricted to the three terminal values."},` +
 			`"note":{"type":"string","description":"Audit note for the transition, e.g. a cancel / no-show reason (SetAppointmentStatus; optional). REQUIRED on CorrectAppointmentStatus — a correction rewrites a record already treated as final. Stored on .status, distinct from the .schedule visit reason; an omitted note carries none."},` +
 			`"noShowFeeCents":{"type":"number","description":"Optional no-show fee in integer cents, only meaningful when status is noShow (SetAppointmentStatus / CorrectAppointmentStatus; optional, must be > 0 when supplied). Defaults to 2500 when omitted. Stored on .status; clinic-ledger's clinicNoShowSettlement lens reads it to post a DebitAccount charge against the patient's ledger account. A patient's own cancel inside the 24-hour late-cancel window stores the 2500 default itself (with lateCancel: true) — never caller-supplied on that path."},` +
@@ -702,7 +732,9 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 			"leaseAppKey":       "Optional full vtx.leaseapp.<NanoID> key the patient claims residency under (CreateAppointment). Verified via the lease's applicationFor link matching the patient's own identifiedBy identity before writing a residentVisit link (appointment→leaseapp); a mismatch or absent lease silently omits the link.",
 			"site":              "Full vtx.building.<NanoID> clinic site key. Optional on CreateAppointment; required on SetAppointmentSite (no-op if the appointment already carries a live one). Validated alive + a vtx.building.<NanoID> key AND that the provider practicesAt it (clinicSiteAssignment link) — rejected (UnknownSite / NotALocation / ProviderNotAtSite) if either check fails, not a silent fall-through. Writes an atSite link (appointment→building).",
 			"appointmentId":     "Optional bare NanoID (no dots / key segments) for the new appointment vertex. Absent → minted with nanoid.new().",
-			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / CorrectAppointmentStatus / MarkPastDueNoShow / BackfillAppointmentSite / SetAppointmentSite validate it alive + class=appointment; TombstoneAppointment validates it alive).",
+			"appointmentKey":    "Full vtx.appointment.<NanoID> key of an existing appointment (RescheduleAppointment rewrites its .schedule; SetAppointmentStatus / CorrectAppointmentStatus / MarkPastDueNoShow / EvaluateAppointmentDisplacement / BackfillAppointmentSite / SetAppointmentSite validate it alive + class=appointment; TombstoneAppointment validates it alive).",
+			"providerKey":       "Full vtx.provider.<NanoID> key the appointmentDisplacements row named (EvaluateAppointmentDisplacement; required). Refused ProviderMismatch unless it is the appointment's own withProvider provider, resolved live off the link.",
+			"checkedFor":        "The .timeOff.setRef the row was projected against (EvaluateAppointmentDisplacement; required; an opaque write key). Informational — the op evaluates the live .timeOff and records ITS setRef as .displacement.checkedFor.",
 			"status":            "New appointment status, one of {scheduled, confirmed, checkedIn, completed, cancelled, noShow} (SetAppointmentStatus; required). The first transition to a terminal value also requires provider + patient. CorrectAppointmentStatus requires it too, restricted to the three terminal values.",
 			"note":              "Audit note recorded with a status transition (e.g. a cancel / no-show reason). Optional on SetAppointmentStatus, REQUIRED on CorrectAppointmentStatus. Stored on the .status aspect, distinct from the .schedule visit reason; omitted → no note.",
 			"noShowFeeCents":    "Optional no-show fee in integer cents (SetAppointmentStatus / CorrectAppointmentStatus, only meaningful when status is noShow; must be > 0 when supplied, defaults to 2500 when omitted). Stored on the .status aspect; read by clinic-ledger's clinicNoShowSettlement lens to post a DebitAccount charge. A patient's own late cancel (inside startsAt − 24h) stores the 2500 default with lateCancel: true.",
@@ -808,6 +840,18 @@ func appointmentVertexTypeDDL() pkgmgr.DDLSpec {
 					"cells — the same effect as a staff-submitted SetAppointmentStatus(noShow) minus the fee and the " +
 					"caller-supplied provider/patient params a human dispatcher would send. Emits clinic.appointmentStatusSet{auto: true}. " +
 					"Submitted under Weaver's service-actor authority only (clinic-reminders' pastDueAppointments target); " +
+					"no human/consumer caller.",
+			},
+			{
+				Name:    "EvaluateAppointmentDisplacement — Weaver-dispatched displacement check (appointmentDisplacements target)",
+				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>", "providerKey": "vtx.provider.<NanoID>", "checkedFor": "<the provider's .timeOff.setRef>"},
+				ExpectedOutcome: "Validates the appointment is alive + class=appointment and that providerKey is its own withProvider " +
+					"provider (ProviderMismatch otherwise). A terminal status (completed/cancelled/noShow) is the empty batch. " +
+					"Otherwise reads the provider's LIVE .timeOff and the visit's .schedule, runs the half-open overlap test, and " +
+					"writes vtx.appointment.<NanoID>.displacement = {displaced, checkedFor: <the live setRef>, at, from?, to?, " +
+					"reason?} — a create when absent, a bare update otherwise; at is stamped when displaced flips and carried " +
+					"when it does not. Emits clinic.appointmentDisplaced or clinic.appointmentReinstated only on a flip. " +
+					"Submitted under Weaver's service-actor authority only (clinic-reminders' appointmentDisplacements target); " +
 					"no human/consumer caller.",
 			},
 			{
@@ -1037,6 +1081,55 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 	}
 }
 
+// displacementAspectTypeDDL declares the .displacement aspect (class
+// appointmentDisplacement) — the recorded verdict "does the provider's
+// current time-off cover this visit?", the step-6 write gate for its three
+// writers. Declaration-only (the script lives on the appointment vertexType
+// DDL). NON-sensitive: instants and a bool on a vtx.appointment, no PHI.
+func displacementAspectTypeDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     displacementAspectDDL,
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment", "EvaluateAppointmentDisplacement"},
+		Description: "Appointment displacement aspect (clinic). Stored as vtx.appointment.<NanoID>.displacement (class " +
+			"appointmentDisplacement) = {displaced: bool, checkedFor?, at, from?, to?, reason?}. Non-sensitive. The recorded " +
+			"answer to \"do the provider's CURRENT .timeOff ranges cover this visit?\" — a visit booked and then covered by a " +
+			"later time-off write is displaced: the reminder and the past-due sweep (clinic-reminders' appointmentReminders / " +
+			"pastDueAppointments gaps) read displaced = true and stand down, the patient is told once (the " +
+			"appointmentChangeNotices displaced gap, keyed on at), and the desk resolves the visit. Three writers, whose " +
+			"appointment vertexType DDL owns every script here: CreateAppointment and RescheduleAppointment write {displaced: " +
+			"false, checkedFor: <the provider's .timeOff.setRef, when the aspect carries one>, at} right after their own " +
+			"enforce_time_off passes (the visit is proved clear of the current ranges); EvaluateAppointmentDisplacement " +
+			"(Weaver-dispatched per visit by the appointmentDisplacements gap whenever checkedFor differs from the provider's " +
+			"live setRef) writes the evaluated truth. checkedFor follows the provider's latest setRef (equality closes the gap); " +
+			"at = the writing op's submittedAt, stamped when displaced FLIPS and carried unchanged when a re-evaluation " +
+			"leaves it as it was, so a provider re-saving a time-off that still covers the visit re-tells nobody; from/to/" +
+			"reason are the covering range when displaced, absent otherwise. A visit with no .displacement reads exactly as " +
+			"a non-displaced one on every gate (nil-false). Created by whichever writer runs first; dies with the " +
+			"appointment. Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"displaced":{"type":"boolean"},"checkedFor":{"type":"string"},"at":{"type":"string"},` +
+			`"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"displaced":  "true when a range of the provider's .timeOff covers [startsAt, endsAt) as last evaluated; false when the visit is clear (a booking writer's own proof, or an evaluation against ranges that do not cover it).",
+			"checkedFor": "The provider's .timeOff.setRef this verdict was evaluated against — an opaque write key, not an instant. The appointmentDisplacements gap opens while it differs from the live setRef; absent when the provider's .timeOff carried no setRef (or did not exist) at the write.",
+			"at":         "When displaced last CHANGED (RFC3339, canonical UTC) = the writing op's submittedAt; carried forward unchanged when a re-evaluation leaves displaced as it was. The displaced notice keys on it.",
+			"from":       "The covering time-off range's start (RFC3339, canonical UTC). Present only when displaced is true.",
+			"to":         "The covering time-off range's exclusive end (RFC3339, canonical UTC). Present only when displaced is true.",
+			"reason":     "The covering range's reason, when the provider recorded one. Present only when displaced is true and the range carries a reason.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "appointment displacement aspect — a covered visit",
+				Payload:         map[string]any{"displaced": true, "checkedFor": "<the provider's .timeOff.setRef>", "at": "2026-06-20T09:15:03Z", "from": "2026-07-06T00:00:00Z", "to": "2026-07-13T00:00:00Z", "reason": "Vacation"},
+				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.displacement; written by EvaluateAppointmentDisplacement (and as {displaced: false, checkedFor?, at} by CreateAppointment / RescheduleAppointment).",
+			},
+		},
+	}
+}
+
 // providerSlotClaimAspectTypeDDL declares the .slot<cellcode> aspect (class
 // providerSlotClaim) — a deterministic per-15-minute-cell existence marker on the
 // provider hub. The step-6 write gate for CreateAppointment / RescheduleAppointment /
@@ -1137,23 +1230,32 @@ func timeOffAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"SetProviderTimeOff"},
 		Description: "Provider time-off exceptions aspect (clinic). Stored as vtx.provider.<NanoID>.timeOff (class " +
-			"providerTimeOff) = {ranges: [{from, to, reason?}]} where from/to are canonical-UTC RFC3339 instants with " +
+			"providerTimeOff) = {ranges: [{from, to, reason?}], setAt, setRef} where from/to are canonical-UTC RFC3339 instants with " +
 			"from<to. Non-sensitive (operational, not PHI). OPT-IN: an absent aspect or ranges=[] means no blackouts. " +
 			"The date-specific blackout LAYER on top of the recurring weekly .hours — a booking must be inside an .hours " +
 			"window AND outside every .timeOff range. Written ONLY by SetProviderTimeOff (whose provider vertexType DDL " +
 			"owns the script); this aspect-type DDL is the step-6 write gate. Read on demand by CreateAppointment / " +
-			"RescheduleAppointment to reject a booking overlapping any range (ProviderUnavailable). Declaration-only: no op handler.",
+			"RescheduleAppointment to reject a booking overlapping any range (ProviderUnavailable), and by " +
+			"EvaluateAppointmentDisplacement / MarkPastDueNoShow to tell whether the current ranges cover an already-booked " +
+			"visit. Every write, a clear included, stamps setRef = the writing op's requestId — an opaque per-save key, " +
+			"stable across a redelivery of the same op — which clinic-reminders' appointmentDisplacements lens keys each " +
+			"visit's re-check on (a .displacement.checkedFor that differs from it opens the gap; two saves inside one " +
+			"second get two refs, so no in-flight evaluation can close the gap on a stale one) — and setAt = the op's " +
+			"submittedAt (canonical UTC), the human-readable instant. A .timeOff carrying no setRef triggers no re-check. " +
+			"Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
-		InputSchema:  `{"type":"object","properties":{"ranges":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}}}}`,
+		InputSchema:  `{"type":"object","properties":{"ranges":{"type":"array","items":{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"reason":{"type":"string"}}}},"setAt":{"type":"string"},"setRef":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"ranges": "Time-off blackout ranges: a list of {from, to, reason?} (RFC3339 UTC instants, from<to). A booking whose [start,end) overlaps any range is rejected (ProviderUnavailable).",
+			"setAt":  "When these ranges were written (RFC3339, canonical UTC) = SetProviderTimeOff's submittedAt, re-stamped on every write including a clear. Human-readable; the displacement re-check keys on setRef, not this.",
+			"setRef": "The opaque key of the write that produced these ranges = SetProviderTimeOff's requestId, distinct per save and stable across a redelivery of the same op. The appointmentDisplacements gap compares each live visit's .displacement.checkedFor against it; equality means the visit was evaluated against these ranges.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "provider time-off aspect",
-				Payload:         map[string]any{"ranges": []any{map[string]any{"from": "2026-07-06T00:00:00Z", "to": "2026-07-13T00:00:00Z", "reason": "Vacation"}}},
-				ExpectedOutcome: "Stored as vtx.provider.<NanoID>.timeOff; written by SetProviderTimeOff; enforced by CreateAppointment / RescheduleAppointment.",
+				Payload:         map[string]any{"ranges": []any{map[string]any{"from": "2026-07-06T00:00:00Z", "to": "2026-07-13T00:00:00Z", "reason": "Vacation"}}, "setAt": "2026-06-20T09:15:00Z", "setRef": "<the write's requestId>"},
+				ExpectedOutcome: "Stored as vtx.provider.<NanoID>.timeOff; written by SetProviderTimeOff; enforced by CreateAppointment / RescheduleAppointment; setRef keys each live visit's displacement re-check.",
 			},
 		},
 	}
@@ -2353,8 +2455,18 @@ def execute(state, op):
             clean.append(cr)
         # Unconditioned upsert of the WHOLE .timeOff aspect (create-if-absent — it is
         # opt-in, CreateProvider does not init it). No OCC: time-off is config, not a
-        # write-path claim key.
-        mutations = [make_aspect_upsert(prkey, "timeOff", "providerTimeOff", {"ranges": clean})]
+        # write-path claim key. Every write, a clear (ranges=[]) included, is
+        # an EVENT each of the provider's live visits is checked against:
+        # setRef = this op's requestId (opaque, distinct per save, stable
+        # across a redelivery of the same op) is the key the
+        # appointmentDisplacements lens (clinic-reminders) compares each
+        # visit's .displacement.checkedFor against — two saves inside one
+        # wall-second get two refs, so an evaluation in flight against the
+        # first can never close the gap on the second; setAt = this write's
+        # submittedAt (canonical UTC) is the human-readable instant beside it.
+        mutations = [make_aspect_upsert(prkey, "timeOff", "providerTimeOff",
+                                        {"ranges": clean, "setAt": time.rfc3339_utc(op.submittedAt),
+                                         "setRef": op.requestId})]
         events = [{"class": "clinic.providerTimeOffSet",
                    "data": {"providerKey": prkey, "rangeCount": len(clean)}}]
         return {"mutations": mutations, "events": events,
@@ -3042,21 +3154,30 @@ def enforce_hours(provider, starts_at, ends_at):
             return
     fail("OutsideHours: provider " + provider + " is not available at the requested time (UTC weekday " + str(sw) + ", " + str(ss) + "s-" + str(es) + "s of day); no matching availability window")
 
-def time_off_overlap(provider, starts_at, ends_at):
+def time_off_aspect(provider):
     # Opt-in provider date-specific time-off (Capability-KV §06 — the op's own
-    # Starlark logic): read the provider's .timeOff aspect on demand (kv.Read,
-    # §2.5 — config, not the booking serialization point) and return the first
-    # blocked [from, to) range overlapping [starts_at, ends_at), or None if none
-    # does. An absent / deleted aspect or ranges=[] means NO blackouts (backward-
-    # compatible with providers created before this capability). Ranges are
-    # canonical-UTC RFC3339 (lexical == chronological); half-open overlap test
-    # (a.start < b.end AND b.start < a.end) — back-to-back (appt ending exactly at
-    # a range's from, or starting exactly at its to) does NOT overlap, so a
-    # booking up to the start of a blackout (or from its end) is allowed.
-    # read-posture: (c) config — deliberately unsnapshotted (out of OCC so a
-    # time-off edit never conflicts a concurrent booking commit)
+    # Starlark logic): the provider's LIVE .timeOff aspect, read on demand
+    # (kv.Read, §2.5 — config, not the booking serialization point), or None
+    # when absent / deleted (NO blackouts, and no setRef to record — a provider
+    # that has never declared time-off). One read serves both the overlap
+    # test and the setRef the booking writers stamp as
+    # .displacement.checkedFor.
+    # read-posture: (c) config on the booking and sweep legs (Create / Reschedule / MarkPastDueNoShow) — deliberately unsnapshotted, out of OCC so a time-off edit never conflicts a concurrent booking commit; served HYDRATED for EvaluateAppointmentDisplacement, whose playbook (clinic-reminders appointmentDisplacements) lists this key in Reads
     off = kv.Read(provider + ".timeOff")
     if off == None or off.isDeleted:
+        return None
+    return off
+
+def time_off_overlap_in(off, starts_at, ends_at):
+    # The first blocked [from, to) range of the time-off aspect off (as
+    # time_off_aspect returns it; None = no blackouts) overlapping
+    # [starts_at, ends_at), or None if none does. ranges=[] means NO
+    # blackouts. Ranges are canonical-UTC RFC3339 (lexical == chronological);
+    # half-open overlap test (a.start < b.end AND b.start < a.end) —
+    # back-to-back (appt ending exactly at a range's from, or starting exactly
+    # at its to) does NOT overlap, so a booking up to the start of a blackout
+    # (or from its end) is allowed.
+    if off == None:
         return None
     ranges = off.data.get("ranges")
     if ranges == None or type(ranges) != type([]) or len(ranges) == 0:
@@ -3072,10 +3193,52 @@ def time_off_overlap(provider, starts_at, ends_at):
             return r
     return None
 
+def time_off_overlap(provider, starts_at, ends_at):
+    # time_off_overlap_in over the provider's live .timeOff — the one-call
+    # form MarkPastDueNoShow's race guard reads.
+    return time_off_overlap_in(time_off_aspect(provider), starts_at, ends_at)
+
 def enforce_time_off(provider, starts_at, ends_at):
-    r = time_off_overlap(provider, starts_at, ends_at)
+    # Refuses a booking overlapping any blackout range (ProviderUnavailable)
+    # and returns the .timeOff aspect it checked against (None when the
+    # provider has none), so the caller stamps .displacement.checkedFor off
+    # the same read that proved the visit clear.
+    off = time_off_aspect(provider)
+    r = time_off_overlap_in(off, starts_at, ends_at)
     if r != None:
         fail("ProviderUnavailable: provider " + provider + " is on time-off " + r.get("from") + "/" + r.get("to") + "; requested " + starts_at + "/" + ends_at)
+    return off
+
+def clear_displacement(off, op):
+    # The .displacement a booking writer records right after enforce_time_off
+    # passes: {displaced: False, checkedFor: <the provider's .timeOff.setRef
+    # when the aspect carries one>, at: this write's submittedAt}. The writer
+    # has just proved the visit clear of the CURRENT ranges, so it stamps the
+    # verdict itself — a new booking never dispatches an evaluation, and a
+    # displaced visit the desk moves to a free slot reads clear at once, not
+    # at the next time-off edit.
+    data = {"displaced": False, "at": time.rfc3339_utc(op.submittedAt)}
+    if off != None:
+        set_ref = off.data.get("setRef")
+        if set_ref != None:
+            data["checkedFor"] = set_ref
+    return data
+
+def stamp_displacement(data, cur_disp, changed, op):
+    # .displacement.at says when displaced last CHANGED: a flip
+    # (changed=True) stamps THIS write's moment; a re-evaluation that leaves
+    # displaced as it was carries the CURRENT aspect's at forward unchanged,
+    # so the displaced notice (keyed on at) is not re-sent when a provider
+    # re-saves a time-off that still covers the visit. An aspect with no at
+    # (or none at all) stamps fresh — there is no moment to carry.
+    # The stamp_status idiom.
+    if not changed and cur_disp != None and not cur_disp.isDeleted:
+        cur_at = cur_disp.data.get("at")
+        if cur_at != None:
+            data["at"] = cur_at
+            return data
+    data["at"] = time.rfc3339_utc(op.submittedAt)
+    return data
 
 def enforce_future(starts_at, submitted_at):
     # Soft past-time guard (Capability-KV §06 — the op's own Starlark logic). The
@@ -3616,7 +3779,9 @@ def execute(state, op):
 
         # Provider date-specific time-off (opt-in; ProviderUnavailable if the booking
         # overlaps a blackout range) — the exception layer on top of the weekly hours.
-        enforce_time_off(provider, starts_at, ends_at)
+        # The aspect it checked against is kept: the .displacement write below
+        # records that this visit was proved clear of it (clear_displacement).
+        time_off = enforce_time_off(provider, starts_at, ends_at)
 
         # Discretize [startsAt, endsAt) into its covered 15-minute cells — lossless
         # under the grid constraint (AppointmentTooLong past 24h/96 cells).
@@ -3742,6 +3907,7 @@ def execute(state, op):
             make_vtx(appt_key, "appointment", {}),
             make_aspect(appt_key, "schedule", "appointmentSchedule", sched),
             make_aspect(appt_key, "status", "appointmentStatus", stamp_status({"value": "scheduled"}, None, True, op, status_author(op))),
+            make_aspect(appt_key, "displacement", "appointmentDisplacement", clear_displacement(time_off, op)),
             make_link(for_patient_lnk, appt_key, patient, "forPatient", "forPatient", {}),
             make_link(with_provider_lnk, appt_key, provider, "withProvider", "withProvider", {}),
         ]
@@ -3854,7 +4020,8 @@ def execute(state, op):
 
         # Provider date-specific time-off (opt-in; ProviderUnavailable if the new time
         # overlaps a blackout range) — the move must also avoid the provider's time-off.
-        enforce_time_off(provider, starts_at, ends_at)
+        # The aspect it checked against is kept for the .displacement write below.
+        time_off = enforce_time_off(provider, starts_at, ends_at)
 
         # A terminal appointment (cancelled / completed / noShow) is never moved:
         # its cells were released at the terminal transition, so a move would
@@ -3976,6 +4143,13 @@ def execute(state, op):
         # rejected, so a failed reschedule leaves the original booking's claims fully
         # intact (design §2.5).
         mutations = [make_aspect_upsert(appt_key, "schedule", "appointmentSchedule", sched)]
+        # The moved visit is proved clear of the provider's current time-off:
+        # record it (clear_displacement) as a bare, unconditioned upsert — the
+        # key is not one this op reads, and the Processor serializes it against
+        # the other two writers; a stale verdict is corrected by the
+        # appointmentDisplacements level gap on the next projection. A
+        # displaced visit the desk moves to a free slot reads clear at once.
+        mutations.append(make_aspect_upsert(appt_key, "displacement", "appointmentDisplacement", clear_displacement(time_off, op)))
         if write_status:
             # status_reset IS the changed flag here: confirmed/checkedIn→scheduled
             # is a real transition (stamp fresh); scheduled→scheduled is the
@@ -4378,6 +4552,123 @@ def execute(state, op):
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": "noShow", "auto": True}}]
         return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": appt_key}}
+
+    if ot == "EvaluateAppointmentDisplacement":
+        # The Weaver-dispatched evaluation clinic-reminders' appointmentDisplacements
+        # target dispatches once per (time-off write × live visit of that
+        # provider): does the provider's CURRENT .timeOff cover this visit?
+        # The verdict is RECORDED on the visit (.displacement) rather than
+        # walked at the time-off write — a provider hub carries every
+        # appointment ever booked with them, so the per-visit level gap pages
+        # that walk across dispatches by construction. Like MarkPastDueNoShow
+        # this is its own operationType with no human caller: it resolves the
+        # provider LIVE off the withProvider link (appointment_provider, the
+        # bounded read-posture (e)) and refuses a providerKey that names
+        # another, so the row can never point the evaluation at a provider
+        # the visit is not with.
+        appt_key = required_string(p, "appointmentKey")
+        _, appt_id = parts_of(appt_key, "appointmentKey", "appointment")
+        if not vertex_alive(state, appt_key):
+            fail("UnknownAppointment: " + appt_key)
+        cls = class_of(state, appt_key)
+        if cls != "appointment":
+            fail("WrongClass: appointmentKey: " + appt_key + " has class " + str(cls) + ", required appointment")
+        provider_param = required_string(p, "providerKey")
+        parts_of(provider_param, "providerKey", "provider")
+        # checkedFor is the .timeOff.setRef the row was projected against —
+        # an opaque write key, informational: the evaluation below reads the
+        # LIVE aspect and records ITS setRef, so a time-off re-written
+        # between projection and dispatch is evaluated as it now stands (the
+        # truth converges faster than a refusal would, and the write is
+        # idempotent). Required non-empty; never a date.
+        required_string(p, "checkedFor")
+
+        # A terminal visit has nothing to displace: the empty batch (no
+        # primaryKey — the write-footprint reply constraint, commit_path.go).
+        # read-posture: (d) declared in contextHint.optionalReads by this op's
+        # only caller (the appointmentDisplacements playbook, clinic-reminders
+        # displacement.go) — a never-set status is a live scheduled visit, so
+        # absence is a branch, not an error.
+        cur_status = kv.Read(appt_key + ".status")
+        cur_val = None
+        if cur_status != None and not cur_status.isDeleted:
+            cur_val = cur_status.data.get("value")
+        if cur_val in TERMINAL_STATUSES:
+            return {"mutations": [], "events": [], "response": {}}
+
+        provider = appointment_provider(appt_id)
+        if provider == None:
+            fail("MissingBinding: appointment " + appt_key + " has no bound provider; cannot evaluate displacement")
+        if provider != provider_param:
+            fail("ProviderMismatch: appointment " + appt_key + " is withProvider " + provider + ", not " + provider_param)
+
+        # read-posture: (a) declared in contextHint.reads by the
+        # appointmentDisplacements playbook (clinic-reminders displacement.go)
+        # — the visit's span, always needed for the overlap test.
+        schedule = kv.Read(appt_key + ".schedule")
+        if schedule == None or schedule.isDeleted:
+            fail("MissingSchedule: " + appt_key + ".schedule is absent; cannot evaluate displacement")
+        starts_at = schedule.data.get("startsAt")
+        ends_at = schedule.data.get("endsAt")
+        if starts_at == None or ends_at == None:
+            fail("MissingSchedule: " + appt_key + ".schedule carries no startsAt/endsAt")
+
+        # The provider's LIVE .timeOff (the playbook lists row.providerKey.timeOff
+        # in Reads, so time_off_aspect's read is served hydrated here) and the
+        # same half-open overlap test enforce_time_off runs against a new
+        # booking.
+        time_off = time_off_aspect(provider)
+        covering = time_off_overlap_in(time_off, starts_at, ends_at)
+        displaced = covering != None
+
+        # The current verdict, for flip-vs-carry of at and for the
+        # create-or-update choice below.
+        # read-posture: (d) declared in contextHint.optionalReads by the
+        # appointmentDisplacements playbook (clinic-reminders displacement.go)
+        # — absent on a visit no writer has recorded a verdict for yet.
+        cur_disp = kv.Read(appt_key + ".displacement")
+        was_displaced = False
+        if cur_disp != None and not cur_disp.isDeleted:
+            was_displaced = cur_disp.data.get("displaced") == True
+        flipped = displaced != was_displaced
+
+        data = {"displaced": displaced}
+        if time_off != None:
+            set_ref = time_off.data.get("setRef")
+            if set_ref != None:
+                data["checkedFor"] = set_ref
+        data = stamp_displacement(data, cur_disp, flipped, op)
+        if displaced:
+            data["from"] = covering.get("from")
+            data["to"] = covering.get("to")
+            reason = covering.get("reason")
+            if reason != None:
+                data["reason"] = reason
+
+        disp_doc = {"class": "appointmentDisplacement", "vertexKey": appt_key,
+                    "localName": "displacement", "isDeleted": False, "data": data}
+        if cur_disp != None:
+            # A BARE update on the hydrated key (a logically-deleted aspect is
+            # still a live KV envelope): the Processor conditions it on the
+            # step-4 revision the optionalRead observed (Contract #3 §3.2), a
+            # defaulted, retry-eligible condition — a booking writer landing
+            # concurrently re-executes this evaluation over its write rather
+            # than being clobbered by it.
+            disp_mut = {"op": "update", "key": appt_key + ".displacement", "document": disp_doc}
+        else:
+            disp_mut = {"op": "create", "key": appt_key + ".displacement", "document": disp_doc}
+
+        events = []
+        if flipped:
+            if displaced:
+                events.append({"class": "clinic.appointmentDisplaced",
+                               "data": {"appointmentKey": appt_key, "providerKey": provider,
+                                        "from": data["from"], "to": data["to"]}})
+            else:
+                events.append({"class": "clinic.appointmentReinstated",
+                               "data": {"appointmentKey": appt_key, "providerKey": provider}})
+        return {"mutations": [disp_mut], "events": events,
                 "response": {"primaryKey": appt_key}}
 
     if ot == "BackfillAppointmentSite":

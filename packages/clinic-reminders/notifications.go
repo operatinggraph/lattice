@@ -348,7 +348,7 @@ func recordChangeNotificationVertexTypeDDL() pkgmgr.DDLSpec {
 		Description: "Appointment-change notification-outcome replyOp (clinic-reminders). RecordAppointmentChangeNotification{externalRef, status, result?} " +
 			"is the op the bridge submits after its \"notification\" adapter Executes for the external.notification event " +
 			"RecordAppointmentChangeNotice emitted. externalRef is <appointmentKey>:<kind>:<changeRef> — split on the FIRST " +
-			"':' to recover the appointment key, then on the SECOND ':' to split kind (cancelled|moved) from changeRef (an " +
+			"':' to recover the appointment key, then on the SECOND ':' to split kind (cancelled|moved|displaced) from changeRef (an " +
 			"RFC3339 instant; the segment left over after the second ':', so it carries its own colons). The op writes " +
 			"vtx.appointment.<NanoID>.changeNotification = {kind, changeRef, status, sentAt} (class appointmentChangeNotification) " +
 			"as an UNCONDITIONED update — create-if-absent, overwrite-if-present, latest outcome wins — and runs NO " +
@@ -403,14 +403,14 @@ func changeNotificationAspectTypeDDL() pkgmgr.DDLSpec {
 			"declaration-only, no op handler. Audit/observability marker — gates no lens.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"kind":{"type":"string","enum":["cancelled","moved"],"description":"The kind of change this notice was for."},` +
-			`"changeRef":{"type":"string","description":"The value that identifies WHICH change: the .status.at instant for a cancel, the .schedule.movedAt instant for a move (RFC3339)."},` +
+			`{"kind":{"type":"string","enum":["cancelled","moved","displaced"],"description":"The kind of change this notice was for."},` +
+			`"changeRef":{"type":"string","description":"The value that identifies WHICH change: the .status.at instant for a cancel, the .schedule.movedAt instant for a move, the .displacement.at instant for a displacement (RFC3339)."},` +
 			`"status":{"type":"string","description":"The adapter's terminal verdict (completed|failed)."},` +
 			`"sentAt":{"type":"string","description":"RFC3339 instant the outcome was recorded (the replyOp's submittedAt, canonical UTC)."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"kind":      "The kind of change this notice was for: cancelled or moved.",
-			"changeRef": "The value identifying which change: the .status.at instant for a cancel, the .schedule.movedAt instant for a move.",
+			"kind":      "The kind of change this notice was for: cancelled, moved or displaced.",
+			"changeRef": "The value identifying which change: the .status.at instant for a cancel, the .schedule.movedAt instant for a move, the .displacement.at instant for a displacement.",
 			"status":    "The adapter's terminal verdict (completed|failed).",
 			"sentAt":    "RFC3339 instant the outcome was recorded (op.submittedAt, canonical UTC).",
 		},
@@ -462,7 +462,7 @@ def required_status(p):
         fail("InvalidArgument: status: must be one of completed, failed; got " + st)
     return st
 
-CHANGE_KINDS = ["cancelled", "moved"]
+CHANGE_KINDS = ["cancelled", "moved", "displaced"]
 
 def split_external_ref(ref):
     # Keys carry dots, never colons, so the first ':' ends the key; the kind
@@ -485,7 +485,7 @@ def split_external_ref(ref):
     kind = rest[:idx2]
     change_ref = rest[idx2 + 1:]
     if kind not in CHANGE_KINDS:
-        fail("InvalidArgument: externalRef: kind must be one of cancelled, moved; got " + kind)
+        fail("InvalidArgument: externalRef: kind must be one of cancelled, moved, displaced; got " + kind)
     if len(change_ref) == 0:
         fail("InvalidArgument: externalRef: changeRef segment is empty; got " + ref)
     return appt_key, kind, change_ref
@@ -534,7 +534,7 @@ func notificationPermissions() []pkgmgr.PermissionSpec {
 		{
 			OperationType: changeNotificationOp,
 			Scope:         "any",
-			Note:          "Grants the operator (the bridge's service actor) the right to submit RecordAppointmentChangeNotification — the replyOp the bridge posts after its \"notification\" adapter Executes for a cancel or move notice.",
+			Note:          "Grants the operator (the bridge's service actor) the right to submit RecordAppointmentChangeNotification — the replyOp the bridge posts after its \"notification\" adapter Executes for a cancel, move or displaced notice.",
 			GrantsTo:      []string{"operator"},
 		},
 	}

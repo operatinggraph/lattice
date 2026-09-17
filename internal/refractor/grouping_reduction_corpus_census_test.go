@@ -81,6 +81,7 @@ type groupingVerdict struct {
 var corpusGroupingVerdicts = map[string]groupingVerdict{
 	"applicantRosterRead":            {"p", 0},
 	"appointmentChangeNotices":       {"p", 0},
+	"appointmentDisplacements":       {"p", 0},
 	"appointmentReminders":           {"p", 0},
 	"augurDispatchPending":           {"p", 0},
 	"augurProposals":                 {"p", 0},

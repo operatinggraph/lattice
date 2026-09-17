@@ -3,11 +3,11 @@ package clinicreminders
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
 // The appointment-change notice: a patient whose visit the desk cancelled,
-// or moved to a new time, is told once per change. The
-// appointmentChangeNotices lens (lenses.go) projects the two level-triggered
-// gaps; RecordAppointmentChangeNotice is the directOp its playbook
-// (targets.go) dispatches, and the .changeNotice marker it writes is what
-// closes them. The op mirrors RecordAppointmentReminder (ddls.go): the same
+// or moved to a new time, or whose provider's time-off now covers it, is
+// told once per change. The appointmentChangeNotices lens (lenses.go)
+// projects the three level-triggered gaps; RecordAppointmentChangeNotice is
+// the directOp its playbook (targets.go) dispatches, and the .changeNotice
+// marker it writes is what closes them. The op mirrors RecordAppointmentReminder (ddls.go): the same
 // Weaver-actor guard, the same declared-read posture, the same
 // external.notification egress off its own outbox. The bridge's replyOp for
 // that egress, RecordAppointmentChangeNotification, lives beside the
@@ -18,7 +18,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     writes the .changeNotice aspect on an existing clinic-domain appointment
 //     (the freshnessMarker idiom).
 //   - appointmentChangeNotice (aspectType) — declares .changeNotice =
-//     {cancelledFor?, movedFor?, sentAt} and admits RecordAppointmentChangeNotice
+//     {cancelledFor?, movedFor?, displacedFor?, sentAt} and admits RecordAppointmentChangeNotice
 //     as its writer, so the Processor's step-6 validator permits the marker
 //     write. Declaration-only: no op handler.
 const (
@@ -26,7 +26,7 @@ const (
 	changeNoticeAspectDDL = "appointmentChangeNotice"
 
 	// changeNoticeOp is the single operation the appointmentChangeNotices
-	// playbook dispatches, for both of its gaps.
+	// playbook dispatches, for all three of its gaps.
 	changeNoticeOp = "RecordAppointmentChangeNotice"
 )
 
@@ -41,14 +41,16 @@ func changeNoticeDDLs() []pkgmgr.DDLSpec {
 
 // recordChangeNoticeVertexTypeDDL owns the RecordAppointmentChangeNotice
 // script. The op is the directOp the appointmentChangeNotices playbook
-// dispatches when missing_cancel_notice or missing_move_notice opens. It
-// re-checks the change the row named against the LIVE aspect before telling
-// anyone — .status {value: cancelled, by: staff, at = changeRef} for a
-// cancel, .schedule {movedAt = changeRef, movedBy: staff} on a non-terminal
-// visit for a move — and refuses StaleChange when the row it was dispatched
-// from has been outrun (a visit moved twice between projection and dispatch
-// is told about the CURRENT move on the next dispatch, never the
-// intermediate one). The .changeNotice write is a create when the marker is
+// dispatches when missing_cancel_notice, missing_move_notice or
+// missing_displaced_notice opens. It re-checks the change the row named
+// against the LIVE aspect before telling anyone — .status {value: cancelled,
+// by: staff, at = changeRef} for a cancel, .schedule {movedAt = changeRef,
+// movedBy: staff} on a non-terminal visit for a move, .displacement
+// {displaced: true, at = changeRef} on a non-terminal visit for a
+// displacement — and refuses StaleChange when the row it was dispatched from
+// has been outrun (a visit moved twice between projection and dispatch is
+// told about the CURRENT move on the next dispatch, never the intermediate
+// one; a visit reinstated before its displaced notice went out is not told). The .changeNotice write is a create when the marker is
 // absent and a BARE update when it exists: the marker is a declared
 // optionalRead, so the Processor conditions the update on the step-4
 // revision (§3.2) as a defaulted, retry-eligible condition — two kinds
@@ -60,39 +62,47 @@ func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{changeNoticeOp},
 		Description: "Appointment-change notice op handler (clinic-reminders). RecordAppointmentChangeNotice{appointmentKey, " +
-			"kind: cancelled|moved, changeRef} tells a patient once about one change the desk made to their visit and " +
-			"records that it did: it writes vtx.appointment.<NanoID>.changeNotice = {cancelledFor?, movedFor?, sentAt} " +
-			"(class appointmentChangeNotice) on a LIVE appointment, setting cancelledFor = changeRef for kind=cancelled " +
-			"or movedFor = changeRef for kind=moved and carrying the other kind's field forward, and emits " +
+			"kind: cancelled|moved|displaced, changeRef} tells a patient once about one change to their visit — a desk " +
+			"cancel, a desk move, or a displacement by the provider's later-declared time-off — and " +
+			"records that it did: it writes vtx.appointment.<NanoID>.changeNotice = {cancelledFor?, movedFor?, displacedFor?, sentAt} " +
+			"(class appointmentChangeNotice) on a LIVE appointment, setting cancelledFor = changeRef for kind=cancelled, " +
+			"movedFor = changeRef for kind=moved or displacedFor = changeRef for kind=displaced and carrying the other " +
+			"kinds' fields forward, and emits " +
 			"external.notification off its own outbox (instanceKey = idempotencyKey = externalRef = " +
 			"<appointmentKey>:<kind>:<changeRef>) to the bridge's \"notification\" adapter; " +
 			"RecordAppointmentChangeNotification (notifications.go) records the outcome. It is the directOp the " +
-			"appointmentChangeNotices §10.8 playbook dispatches for both of that lens's gaps (missing_cancel_notice " +
-			"with changeRef = row.statusAt; missing_move_notice with changeRef = row.movedAt). Reads [appointmentKey, " +
-			"appointmentKey.status, appointmentKey.schedule] and optionally [appointmentKey.changeNotice]: it " +
+			"appointmentChangeNotices §10.8 playbook dispatches for all three of that lens's gaps (missing_cancel_notice " +
+			"with changeRef = row.statusAt; missing_move_notice with changeRef = row.movedAt; missing_displaced_notice " +
+			"with changeRef = row.displacedAt). Reads [appointmentKey, " +
+			"appointmentKey.status, appointmentKey.schedule] and optionally [appointmentKey.changeNotice] (plus " +
+			"[appointmentKey.displacement] on the displaced shape): it " +
 			"liveness-guards the appointment (UnknownAppointment) and re-checks the change against the live aspect — " +
 			"kind=cancelled requires .status.value = cancelled AND .status.by = staff AND .status.at = changeRef AND " +
 			".status.at < .schedule.endsAt (a cancel stamped at or after the visit's own end is a correction, not news); " +
 			"kind=moved requires .schedule.movedAt = changeRef AND .schedule.movedBy = staff (StaleChange otherwise) " +
 			"on a non-terminal status (InvalidState otherwise — a moved-then-cancelled visit gets the cancel notice " +
-			"only) — so a stale row is refused, not trusted. A patient's own cancel or move (by/movedBy = patient) " +
-			"and a status carrying no at are never told. The marker write is a create when the aspect is absent " +
+			"only); kind=displaced requires .displacement.displaced = true AND .displacement.at = changeRef " +
+			"(StaleChange otherwise — a visit reinstated, or displaced afresh, since the row was projected is not told " +
+			"from this row) on a non-terminal status (InvalidState otherwise — a displaced-then-cancelled visit gets " +
+			"the cancel notice only) — so a stale row is refused, not trusted. A patient's own cancel or move " +
+			"(by/movedBy = patient) and a status carrying no at are never told. The displaced notice's params carry the " +
+			"covering range (from/to) beside the visit's times. The marker write is a create when the aspect is absent " +
 			"and a bare update on the hydrated key when it exists (§3.2-conditioned on the step-4 revision, " +
-			"retry-eligible in-process), so a cancel notice and a move notice converging on one appointment " +
+			"retry-eligible in-process), so two notices of different kinds converging on one appointment " +
 			"re-execute on conflict and never drop each other's field. Submitted under Weaver's service-actor " +
 			"authority only. Mints NO vertex of its own type.",
 		Script: recordChangeNoticeScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"appointmentKey":{"type":"string","description":"vtx.appointment.<NanoID> whose visit changed (required; validated alive). The caller MUST list it, appointmentKey.status and appointmentKey.schedule in ContextHint.Reads."},` +
-			`"kind":{"type":"string","enum":["cancelled","moved"],"description":"Which change this notice is for: cancelled (the desk cancelled the visit) or moved (the desk moved it to a new time). Required."},` +
-			`"changeRef":{"type":"string","description":"The value that identifies WHICH change: the .status.at instant for kind=cancelled, the .schedule.movedAt instant for kind=moved (RFC3339, canonical UTC). Required; refused StaleChange when it no longer matches the live aspect."}},` +
+			`"kind":{"type":"string","enum":["cancelled","moved","displaced"],"description":"Which change this notice is for: cancelled (the desk cancelled the visit), moved (the desk moved it to a new time) or displaced (the provider's time-off now covers it; the clinic will reschedule). Required."},` +
+			`"changeRef":{"type":"string","description":"The value that identifies WHICH change: the .status.at instant for kind=cancelled, the .schedule.movedAt instant for kind=moved, the .displacement.at instant for kind=displaced (RFC3339, canonical UTC). Required; refused StaleChange when it no longer matches the live aspect."}},` +
 			`"required":["appointmentKey","kind","changeRef"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.appointment.<NanoID> the change-notice marker was written on."}}}`,
 		FieldDescription: map[string]string{
-			"appointmentKey": "Full vtx.appointment.<NanoID> key whose visit changed. RecordAppointmentChangeNotice validates it is alive, re-checks the change against its live .status / .schedule, then writes the .changeNotice aspect on it. The caller MUST list this key, appointmentKey.status and appointmentKey.schedule in ContextHint.Reads.",
-			"kind":           "cancelled or moved — which change this notice tells the patient about, and which .changeNotice field (cancelledFor / movedFor) records it.",
-			"changeRef":      "The change's own identifier, re-checked against the live aspect before anything is sent: .status.at for cancelled, .schedule.movedAt for moved. Recorded verbatim so the lens's equality closes the gap, and a later move (a new movedAt) reopens it.",
+			"appointmentKey": "Full vtx.appointment.<NanoID> key whose visit changed. RecordAppointmentChangeNotice validates it is alive, re-checks the change against its live .status / .schedule / .displacement, then writes the .changeNotice aspect on it. The caller MUST list this key, appointmentKey.status and appointmentKey.schedule in ContextHint.Reads (and appointmentKey.displacement in OptionalReads for kind=displaced).",
+			"kind":           "cancelled, moved or displaced — which change this notice tells the patient about, and which .changeNotice field (cancelledFor / movedFor / displacedFor) records it.",
+			"changeRef":      "The change's own identifier, re-checked against the live aspect before anything is sent: .status.at for cancelled, .schedule.movedAt for moved, .displacement.at for displaced. Recorded verbatim so the lens's equality closes the gap, and a later move (a new movedAt) or a fresh displacement (a new at) reopens it.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -111,6 +121,14 @@ func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 					"vtx.appointment.<NanoID>:moved:2026-09-17T09:30:00Z. Refuses StaleChange if the visit has moved again since " +
 					"the row was projected — the next dispatch carries the current move.",
 			},
+			{
+				Name:    "RecordAppointmentChangeNotice — a visit the provider's time-off now covers",
+				Payload: map[string]any{"appointmentKey": "vtx.appointment.<NanoID>", "kind": "displaced", "changeRef": "2026-09-17T11:04:20Z"},
+				ExpectedOutcome: "Validates the appointment is alive, non-terminal, and that .displacement = {displaced: true, at: 2026-09-17T11:04:20Z}, " +
+					"then writes displacedFor: 2026-09-17T11:04:20Z (carrying any existing cancelledFor / movedFor) and emits the notice keyed " +
+					"vtx.appointment.<NanoID>:displaced:2026-09-17T11:04:20Z whose params carry the covering range's from/to beside the visit's " +
+					"times. Refuses StaleChange if the visit reads clear again, or was displaced afresh, since the row was projected.",
+			},
 		},
 	}
 }
@@ -127,28 +145,32 @@ func changeNoticeAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{changeNoticeOp},
 		Description: "Appointment change-notice marker aspect (clinic-reminders). Stored as vtx.appointment.<NanoID>.changeNotice " +
-			"(class appointmentChangeNotice) = {cancelledFor?, movedFor?, sentAt}. Non-sensitive. Written ONLY by " +
+			"(class appointmentChangeNotice) = {cancelledFor?, movedFor?, displacedFor?, sentAt}. Non-sensitive. Written ONLY by " +
 			"RecordAppointmentChangeNotice (whose appointmentChangeNoticeOp vertexType DDL owns the script) as a " +
-			"create-or-update carrying the other kind's field forward; this aspect-type DDL is the step-6 write gate. " +
+			"create-or-update carrying the other kinds' fields forward; this aspect-type DDL is the step-6 write gate. " +
 			"Declaration-only: no op handler. cancelledFor = the .status.at the cancel notice was for (equality closes " +
 			"missing_cancel_notice); movedFor = the .schedule.movedAt the last move notice was for (equality closes " +
-			"missing_move_notice; a further move reopens it). Created at the first notice, carried per kind, never " +
+			"missing_move_notice; a further move reopens it); displacedFor = the .displacement.at the last displaced " +
+			"notice was for (equality closes missing_displaced_notice; a fresh displacement — a new at — reopens it, a " +
+			"re-evaluation that carries at does not). Created at the first notice, carried per kind, never " +
 			"reset; dies with the appointment.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"cancelledFor":{"type":"string","description":"The .status.at instant (RFC3339, canonical UTC) the cancel notice was for."},` +
 			`"movedFor":{"type":"string","description":"The .schedule.movedAt instant (RFC3339, canonical UTC) the last move notice was for."},` +
-			`"sentAt":{"type":"string","description":"RFC3339 instant the latest notice of either kind was recorded (the op's submittedAt, canonical UTC)."}}}`,
+			`"displacedFor":{"type":"string","description":"The .displacement.at instant (RFC3339, canonical UTC) the last displaced notice was for."},` +
+			`"sentAt":{"type":"string","description":"RFC3339 instant the latest notice of any kind was recorded (the op's submittedAt, canonical UTC)."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"cancelledFor": "The .status.at instant the cancel notice was for. cancelledFor = statusAt closes the cancel gap.",
 			"movedFor":     "The .schedule.movedAt instant the last move notice was for. movedFor = the current movedAt closes the move gap; a further RescheduleAppointment reopens it.",
-			"sentAt":       "RFC3339 instant the latest notice of either kind was recorded (op.submittedAt, canonical UTC).",
+			"displacedFor": "The .displacement.at instant the last displaced notice was for. displacedFor = the current at closes the displaced gap; a fresh displacement (a new at) reopens it, a re-evaluation that carries at does not.",
+			"sentAt":       "RFC3339 instant the latest notice of any kind was recorded (op.submittedAt, canonical UTC).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "appointment change-notice marker aspect",
-				Payload:         map[string]any{"cancelledFor": "2026-09-17T14:02:11Z", "movedFor": "2026-09-17T09:30:00Z", "sentAt": "2026-09-17T14:02:15Z"},
+				Payload:         map[string]any{"cancelledFor": "2026-09-17T14:02:11Z", "movedFor": "2026-09-17T09:30:00Z", "displacedFor": "2026-09-17T11:04:20Z", "sentAt": "2026-09-17T14:02:15Z"},
 				ExpectedOutcome: "Stored as vtx.appointment.<NanoID>.changeNotice; written by RecordAppointmentChangeNotice.",
 			},
 		},
@@ -158,9 +180,10 @@ func changeNoticeAspectTypeDDL() pkgmgr.DDLSpec {
 // recordChangeNoticeScript handles RecordAppointmentChangeNotice. It reads
 // the appointment ROOT (declared read) to assert the visit is alive, its
 // .status and .schedule aspects (declared reads) to re-check the change the
-// row named and for the visit times every notice carries, and the
-// appointment's own .changeNotice (declared optionalRead) so the write can
-// carry the other kind's field. The change is re-checked against the live
+// row named and for the visit times every notice carries, its .displacement
+// (declared optionalRead on the displaced shape) for that kind's re-check,
+// and the appointment's own .changeNotice (declared optionalRead) so the
+// write can carry the other kinds' fields. The change is re-checked against the live
 // aspect before anything is emitted: a row Weaver dispatched from is a
 // snapshot, and a cancel or move it names that the graph has since outrun is
 // refused StaleChange rather than told.
@@ -195,7 +218,7 @@ def vertex_alive(state, key):
         return False
     return True
 
-CHANGE_KINDS = ["cancelled", "moved"]
+CHANGE_KINDS = ["cancelled", "moved", "displaced"]
 
 # TERMINAL_STATUSES is clinic-domain's own list (ddls.go): a visit at one of
 # these has no future time left to be told about.
@@ -204,7 +227,7 @@ TERMINAL_STATUSES = ["completed", "cancelled", "noShow"]
 def required_kind(p):
     kind = required_string(p, "kind")
     if kind not in CHANGE_KINDS:
-        fail("InvalidArgument: kind: must be one of cancelled, moved; got " + kind)
+        fail("InvalidArgument: kind: must be one of cancelled, moved, displaced; got " + kind)
     return kind
 
 def execute(state, op):
@@ -279,7 +302,7 @@ def execute(state, op):
             # conjunct, re-checked here; both canonical UTC).
             if status_at >= ends_at:
                 fail("StaleChange: " + appt_key + " cancelled at " + status_at + ", after the visit's end " + ends_at + "; nothing to tell")
-        else:
+        elif kind == "moved":
             moved_at = schedule.data.get("movedAt")
             if moved_at == None:
                 fail("StaleChange: " + appt_key + ".schedule carries no movedAt; nothing to tell")
@@ -292,26 +315,53 @@ def execute(state, op):
             # is no future time to tell the patient about.
             if status_value in TERMINAL_STATUSES:
                 fail("InvalidState: " + appt_key + " is " + str(status_value) + "; a moved visit that has since ended is not told about the move")
+        else:
+            # The live verdict: displaced = true AND at = changeRef, else the
+            # row has been outrun — the visit was reinstated (a time-off
+            # clear, a move to a free slot: displaced now false), or displaced
+            # afresh (a new at, told from the next row), and this row is not
+            # told. A re-evaluation that leaves the visit displaced CARRIES at,
+            # so it still matches here.
+            # read-posture: (d) declared in contextHint.optionalReads by the
+            # appointmentChangeNotices target's missing_displaced_notice gap
+            # (targets.go) — appointmentKey.displacement.
+            displacement = kv.Read(appt_key + ".displacement")
+            if displacement == None or displacement.isDeleted:
+                fail("StaleChange: " + appt_key + ".displacement is absent; nothing to tell")
+            if displacement.data.get("displaced") != True:
+                fail("StaleChange: " + appt_key + " reads clear of the provider's time-off; nothing to tell")
+            displaced_at = displacement.data.get("at")
+            if displaced_at == None:
+                fail("StaleChange: " + appt_key + ".displacement carries no at; nothing to tell")
+            if displaced_at != change_ref:
+                fail("StaleChange: " + appt_key + " displaced at " + displaced_at + " is not the dispatched changeRef " + change_ref +
+                     "; the visit was displaced afresh since the row was projected")
+            # A displaced-then-cancelled visit gets the cancel notice only.
+            if status_value in TERMINAL_STATUSES:
+                fail("InvalidState: " + appt_key + " is " + str(status_value) + "; a displaced visit that has since ended is not told about the displacement")
+            displaced_from = displacement.data.get("from")
+            displaced_to = displacement.data.get("to")
 
         sent_at = time.rfc3339_utc(op.submittedAt)
 
-        # The marker carries BOTH kinds' fields: a cancel notice and a move
-        # notice converging on one appointment each set their own field and
-        # carry the other's forward, so neither write erases the other's
-        # evidence.
+        # The marker carries EVERY kind's field: notices of different kinds
+        # converging on one appointment each set their own field and carry
+        # the others' forward, so no write erases another's evidence.
         # read-posture: (d) declared optionalReads at appointmentChangeNotices
         # dispatch (the create-or-update branch below).
         existing = kv.Read(appt_key + ".changeNotice")
         marker = {}
         if existing != None and not existing.isDeleted:
-            for field in ["cancelledFor", "movedFor"]:
+            for field in ["cancelledFor", "movedFor", "displacedFor"]:
                 carried = existing.data.get(field)
                 if carried != None:
                     marker[field] = carried
         if kind == "cancelled":
             marker["cancelledFor"] = change_ref
-        else:
+        elif kind == "moved":
             marker["movedFor"] = change_ref
+        else:
+            marker["displacedFor"] = change_ref
         marker["sentAt"] = sent_at
 
         marker_key = appt_key + ".changeNotice"
@@ -337,11 +387,17 @@ def execute(state, op):
         # Fire the actual notification send off this op's own transactional
         # outbox. The external ref keys on (appointmentKey, kind, changeRef): a
         # redelivery of the SAME change reuses the key so the adapter dedups,
-        # while a second move (a new movedAt) mints a fresh key and sends
-        # again — the same reopen semantics the .changeNotice marker has.
+        # while a second move (a new movedAt) or a fresh displacement (a new
+        # at) mints a fresh key and sends again — the same reopen semantics
+        # the .changeNotice marker has. The displaced notice carries the
+        # covering range beside the visit's times, so the message can say
+        # when the provider is away.
         ext_ref = appt_key + ":" + kind + ":" + change_ref
         params = {"appointmentKey": appt_key, "changeType": kind, "changeRef": change_ref,
                   "startsAt": starts_at, "endsAt": ends_at}
+        if kind == "displaced":
+            params["from"] = displaced_from
+            params["to"] = displaced_to
         events.append({"class": "external.notification",
                        "data": {"instanceKey": ext_ref, "adapter": "notification",
                                 "replyOp": "RecordAppointmentChangeNotification",

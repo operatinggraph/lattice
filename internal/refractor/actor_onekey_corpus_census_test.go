@@ -90,6 +90,7 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	// at the anchor across the whole pattern.
 	"applicantOnboarding":            oneKey,
 	"appointmentChangeNotices":       oneKey,
+	"appointmentDisplacements":       oneKey,
 	"appointmentReminders":           oneKey,
 	"augurDispatchPending":           oneKey,
 	"backgroundCheckFreshness":       oneKey,

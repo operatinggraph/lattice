@@ -179,6 +179,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			GrantsTo:      []string{"operator"},
 		},
 		{
+			OperationType: "EvaluateAppointmentDisplacement",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit EvaluateAppointmentDisplacement operations (orchestration-internal: clinic-reminders' appointmentDisplacements directOp playbook, dispatched by Weaver's service actor for each live visit of a provider whose .timeOff was written since the visit was last checked — the MarkPastDueNoShow grant idiom).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
 			OperationType: "BackfillAppointmentSite",
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit BackfillAppointmentSite operations (orchestration-internal: this package's own clinicSiteBackfill directOp playbook, dispatched by Weaver's service actor for a live appointment carrying no atSite link — the MarkPastDueNoShow grant idiom).",

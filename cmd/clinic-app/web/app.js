@@ -5303,9 +5303,19 @@ function renderApptCard(a, opts) {
   statusClock.className = "meta status-clock";
   statusClock.textContent = statusClockLabel(a, Date.now());
 
-  // Once a desk cancel or move has told the patient (clinic-reminders'
-  // RecordAppointmentChangeNotice, surfaced via changeNoticeSentAt). Absent
-  // until sent — same idiom as the reminder-sent line above.
+  // The provider's time-off now covers this visit, as RECORDED on the visit
+  // (the clinic-domain lenses' displaced / displacedFrom / displacedTo
+  // columns, written by EvaluateAppointmentDisplacement). One line for every
+  // hat — the patient's own card included, since the desk's client-side
+  // conflict badge below never renders there. Absent unless displaced.
+  const displacement = document.createElement("div");
+  displacement.className = "meta displacement";
+  displacement.textContent = displacementLabel(a);
+
+  // Once a desk cancel, a desk move or a displacement has told the patient
+  // (clinic-reminders' RecordAppointmentChangeNotice, surfaced via
+  // changeNoticeSentAt). Absent until sent — same idiom as the reminder-sent
+  // line above.
   const changeNotice = document.createElement("div");
   changeNotice.className = "meta change-notice";
   if (a.changeNoticeSentAt) {
@@ -5531,6 +5541,7 @@ function renderApptCard(a, opts) {
   if (statusNote.textContent) card.append(statusNote);
   if (reminder.textContent) card.append(reminder);
   if (statusClock.textContent) card.append(statusClock);
+  if (displacement.textContent) card.append(displacement);
   if (changeNotice.textContent) card.append(changeNotice);
   if (documented.textContent) card.append(documented);
   if (noteBlock) card.append(noteBlock);
@@ -5605,6 +5616,25 @@ function statusClockLabel(a, nowMs) {
     return label;
   }
   return "";
+}
+
+// displacementLabel renders the card's displacement line off the
+// clinic-domain lenses' displaced / displacedFrom / displacedTo columns: the
+// recorded fact that the provider's time-off covers this visit. "" unless
+// displaced is exactly true (a null verdict — no .displacement recorded — and
+// a clear one both render nothing). The range is the covering time-off's
+// [from, to) in the viewer's local time; a range the row does not carry, or
+// one that does not parse, is left off rather than rendered as "Invalid
+// Date". Pure: no DOM, no state, no clock.
+function displacementLabel(a) {
+  if (a.displaced !== true) return "";
+  let label = "⛔ Provider unavailable";
+  const from = a.displacedFrom ? new Date(a.displacedFrom) : null;
+  const to = a.displacedTo ? new Date(a.displacedTo) : null;
+  if (from && to && !isNaN(from) && !isNaN(to)) {
+    label += " · " + from.toLocaleString() + " – " + to.toLocaleString();
+  }
+  return label + " — the clinic will reschedule";
 }
 
 function statusClass(status) {

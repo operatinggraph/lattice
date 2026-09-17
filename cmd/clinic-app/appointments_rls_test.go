@@ -136,6 +136,9 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		{Name: "status_at", Type: "text"},
 		{Name: "status_by", Type: "text"},
 		{Name: "change_notice_sent_at", Type: "text"},
+		{Name: "displaced", Type: "boolean"},
+		{Name: "displaced_from", Type: "text"},
+		{Name: "displaced_to", Type: "text"},
 		{Name: "follow_up_requested", Type: "boolean"},
 		{Name: "follow_up_date", Type: "text"},
 	}
@@ -161,8 +164,8 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 
 	// Seed: patient A's appointment (anchor A) + patient B's appointment (anchor
 	// B); self-grants for both.
-	exec(`INSERT INTO read_clinic_appointments (appointment_id, entity_key, starts_at, status, status_at, status_by, patient_key, patient_name, authz_anchors, projection_seq)
-	      VALUES ('appt-A', 'vtx.appointment.appt-A', '2026-07-01T15:00:00Z', 'scheduled', '2026-06-28T09:00:00Z', 'staff', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', $1, 1)`, []string{subPatientA})
+	exec(`INSERT INTO read_clinic_appointments (appointment_id, entity_key, starts_at, status, status_at, status_by, displaced, displaced_from, displaced_to, patient_key, patient_name, authz_anchors, projection_seq)
+	      VALUES ('appt-A', 'vtx.appointment.appt-A', '2026-07-01T15:00:00Z', 'scheduled', '2026-06-28T09:00:00Z', 'staff', true, '2026-07-01T00:00:00Z', '2026-07-02T00:00:00Z', 'vtx.patient.`+subPatientA+`', 'Alice Rivera', $1, 1)`, []string{subPatientA})
 	exec(`INSERT INTO read_clinic_appointments (appointment_id, entity_key, starts_at, status, patient_key, patient_name, authz_anchors, projection_seq)
 	      VALUES ('appt-B', 'vtx.appointment.appt-B', '2026-07-02T15:00:00Z', 'scheduled', 'vtx.patient.`+subPatientB+`', 'Bob Nguyen', $1, 1)`, []string{subPatientB})
 	exec(`INSERT INTO actor_read_grants (actor_id, anchor_id, grant_source, projection_seq, is_deleted)
@@ -224,6 +227,12 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		if got := rows[0].StatusBy; got == nil || *got != "staff" {
 			t.Fatalf("statusBy must come through the JSON, got %v", got)
 		}
+		if got := rows[0].Displaced; got == nil || !*got {
+			t.Fatalf("displaced must come through the JSON as true, got %v", got)
+		}
+		if from, to := rows[0].DisplacedFrom, rows[0].DisplacedTo; from == nil || to == nil || *from != "2026-07-01T00:00:00Z" || *to != "2026-07-02T00:00:00Z" {
+			t.Fatalf("displacedFrom/To must come through the JSON, got %v/%v", from, to)
+		}
 	})
 
 	// The bridge itself: a session whose subject is a LOGIN, not a patient.
@@ -234,6 +243,9 @@ func TestReadBoundary_RLS_Enforcement(t *testing.T) {
 		}
 		if len(rows) != 1 || rows[0].EntityKey != "vtx.appointment.appt-C" {
 			t.Fatalf("the bound login must see exactly appt-C (the identity→patient grant bridge is what makes a real sign-in work), got %+v", rows)
+		}
+		if rows[0].Displaced != nil {
+			t.Fatalf("a row with no displacement verdict must read null displaced, never false; got %v", *rows[0].Displaced)
 		}
 	})
 
