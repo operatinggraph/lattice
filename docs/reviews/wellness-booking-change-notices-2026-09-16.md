@@ -32,8 +32,9 @@ contract surface, no fork).
   [values.go:121](../../internal/refractor/ruleengine/full/values.go); `IS NOT NULL` mis-evaluates,
   [edge-manifest/lenses.go:578](../../packages/edge-manifest/lenses.go)); `coalesce` is supported
   ([cafe-domain/lenses.go:302](../../packages/cafe-domain/lenses.go)).
-- **Live census (Core KV, 2026-09-16):** 76 live `.status` aspects; 16 `booked` carry no `classStartsAt` (claimed
-  before the snapshot existed), 3 `booked` carry `promotedAt`. The processor has no "parent vertex alive" constraint
+- **Census (Core KV, 2026-09-16):** 76 `.status` aspects (a `.status` outlives its root — the count is of aspects, not
+  live seats); 16 `booked` carry no `classStartsAt` (claimed before the snapshot existed), 3 `booked` carry
+  `promotedAt` — all three on tombstoned roots, so the install sends nothing; 0 live seats sat on a moved class. The processor has no "parent vertex alive" constraint
   on an aspect write (`step6_validate.go` constraint set), so an audit aspect can land on a tombstoned booking.
 - **Facet + FE:** `wellnessBookings` ([lenses.go:507-528](../../packages/wellness-domain/lenses.go)) projects
   `reminderSentAt` and `promotedAt`; `bookingRow` carries both ([bookings.go:55-77](../../cmd/wellness-app/bookings.go));
@@ -49,7 +50,7 @@ contract surface, no fork).
      AND status = 'booked' AND NOT class-over`;
    `class-over` is the sibling `pastDueBookings` fired marker, exactly as the reminder lens reads it. A booked seat
    claimed before the snapshot existed (`classStartsAt` absent) gets no move notice rather than a false one — the
-   16 live legacy seats stay quiet; the 3 live promoted seats are told once on install (a true fact, late).
+   legacy seats stay quiet; a live promoted seat is told once on install (a true fact, late).
 2. **One marker, one op.** `RecordBookingChangeNotice{bookingKey, sessionKey, kind: promoted|moved, changeRef}`
    (Weaver-actor only, mirroring `RecordBookingReminder`) re-checks the change against the live aspect (`promotedAt
    = changeRef` / `schedule.startsAt = changeRef`, else refuses `StaleChange` — a stale row is refused, not trusted),
@@ -134,3 +135,29 @@ contract surface, no fork).
    warning, retired at `endsAt`) — the walk-in unit closes the reminder gate for a seat claimed after start.
 7. **Non-goals:** a real vendor adapter (FakeNotification is the sink); notifying a waitlisted member of a move (no
    seat, no charge); a session-level `movedAt`; the reminder mechanism itself; the sibling rows above.
+
+### Build note (2026-09-16)
+
+Shipped `f139d128` (CI green); brief `9176bd9b`. Increments landed on `main` in one merge: `650ad003` (domain replyOp +
+call-off emission + `wellnessBookings` columns, 0.28.0), `5698c00f` (the lens + notice op + target, 0.4.0), `a8200c9d`
+(the badge), `399454ef` (the close fix round). Live on the shared stack (both packages diff-applied, `bin/wellness-app`
+cycled, `verify-package-wellness-domain` 530/530): a 1-seat $10 class two days out, A booked, B waitlisted;
+capacity 1 → 2 seated B at 00:52:16Z and the promotion notice was recorded at 00:52:19Z (bridge reply, outcome
+`completed`); the class moved 18:00 → 19:00 and both seats were told at 00:52:34Z, B's marker carrying `promotedFor`
+beside `movedFor`; `/api/bookings` served `movedFor` + `changeNoticeSentAt`; the class was called off and the release
+told both seats in the batch that tombstoned them, the outcome landing on the dead bookings. No Weaver issue raised.
+
+Deviations from the brief: (1) `ReleaseOrphanedBooking` gained the primordial-actor guard (Weaver's dispatch actor
+only) — `lint-conventions` binds it to any `Scope:"any"` op that forwards payload-named keys into an `external.*`
+event, and no client, CLI, harness or verify script submits the op; (2) both gaps carry `se.schedule.data.startsAt <>
+null` — the OPTIONAL walk is unbound for the whole call-off window and the design's formula read that as a move;
+(3) the marker write is bare, not OCC-pinned — the brief's precedent line was wrong (corrected above). Review
+classification: two design gaps (2, 3 — the second a brief citing a lint that never bound), one convention (two
+narrating comments), one implementation nit (the replyOp accepted any key type), one cold-review find fixed
+(the notice op refused nothing for a tombstoned session — a row projected before the tombstone and dispatched after
+it would have told a member "you're in" about a class being called off), no review over-reach. Two dossier sightings
+appended (`_packages.md`: the OPTIONAL-hop column, the dropped-precedent-check). Accepted and recorded: `StaleChange`
+and the `booked` check read keys the op never writes, so a move or cancellation landing between hydration and commit
+yields one notice for the pre-race state, which the level-triggered gap then corrects; three refusals before a success
+latch `GapBudgetExhausted` until the class ends (each needs a change inside the projection→dispatch window).
+Adjacent finds: none new; the three sibling ★ rows are this run's next units.

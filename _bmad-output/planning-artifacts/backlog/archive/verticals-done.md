@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-15 · `fd9cd157` · The desk takes an item off the menu for the day — `SetMenuItemAvailability` sets `.price.available`, both lenses project it, all three pickers grey it, `Charge` refuses `ItemUnavailable`; refused live.
 - 2026-09-15 · `fd9cd157` · A posted charge opens to its receipt — `receiptLines` joins a ledger row to its settled tab by `tabKey`; the statement renders the lines (price, who ordered, voids) collapsed, resident and desk alike; live.
 - 2026-09-15 · `a0ba03a2` · A reminded debtor opens no new tab — `OpenTab` refuses `CreditHold` off `.arrears.sentAt` (heldFor in-walk, both legs); picker badge "owes $X · N days overdue · credit hold", hold panel, confirm; refused live.
 - 2026-09-15 · `a0ba03a2` · A tab's total always equals its live lines — `VoidCharge` voids by `lineId` only (amount-only form retired), itemsMemo re-derived, workplace confined before the line lookup; proven live at $0.

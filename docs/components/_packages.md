@@ -583,6 +583,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   playbook declaring `Reads: [row.entityKey]` ran on the live seam — the bare `.status` update landed unconditioned.
   Check (Reads): for an op whose sole dispatcher is a playbook, every `(a)`/`(d)` annotation resolves to a
   `Reads`/`OptionalReads` entry on that playbook, never to the test harness's hand declaration.
+  Sighting (wellness `wellnessBookingChangeNotices`, 2026-09-16, builder-caught): a level-triggered gap templating
+  `row.startsAt` off the OPTIONAL `forSession` walk reads null for the whole call-off window — the gap carries
+  `se.schedule.data.startsAt <> null` as its own conjunct.
 - **A gap's budget and cadence are derived from its WHOLE loop, not one arm or one window** — a cap summed over
   one arm of a multi-relation sweep under-sizes it (erasure residue caps, 2026-08-24, 2× and 3×); a gap that
   re-opens on a recorded clock lapse mints a successor per window while the prior instance stays live (lease-signing
@@ -697,7 +700,8 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   and its `accountKey:dueAt` notification key, whose per-head uniqueness was a property of café's `postedAt + term`
   that a RECORDED due date lacks (2026-09-15, both SHOULD-FIX); a checkpoint mirrored from a head that returns
   postedAt + balance was wrong for a head that also returns the order-sensitive `episodeStart` (wellness/loftspace,
-  2026-09-16). Check: for every precedent branch or
+  2026-09-16). Sighting: the wellness change-notice op mirrors the reminder op and drops its `ClassAlreadyStarted` guard —
+  stated at the site with what refuses upstream (2026-09-16, caught cold). Check: for every precedent branch or
   conjunct the mirror omits, write what it enforced and name the new site that enforces it; for every key component,
   compare and boundary the mirror KEEPS, name what makes it unique / ordered in THIS package's data (mandated vector
   for an episode mechanism: the reminded item retired exactly while the episode continues); for every `<x>Ref`, name
