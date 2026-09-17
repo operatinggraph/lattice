@@ -394,6 +394,12 @@ func main() {
 		if len(parts) != 4 {
 			continue
 		}
+		// The bootstrap-resolved id wins: a stack whose history left a second
+		// vertex carrying the same canonical name (a superseded operator role)
+		// would otherwise resolve by map-iteration order.
+		if _, resolved := roleIDByCanonical[val]; resolved {
+			continue
+		}
 		roleIDByCanonical[val] = parts[2]
 	}
 
