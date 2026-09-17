@@ -35,6 +35,9 @@ type cnAppt struct {
 	movedBy      string // .schedule.movedBy
 	cancelledFor string // .changeNotice.cancelledFor
 	movedFor     string // .changeNotice.movedFor
+	displaced    *bool  // .displacement.displaced (nil = no .displacement aspect unless displacedAt is set)
+	displacedAt  string // .displacement.at
+	displacedFor string // .changeNotice.displacedFor
 }
 
 // mkChangeNoticeAppt seeds one appointment {.status, .schedule} + a
@@ -58,13 +61,30 @@ func (f *remFixture) mkChangeNoticeAppt(t *testing.T, name string, a cnAppt) {
 		sched["movedBy"] = a.movedBy
 	}
 	f.aspect(t, name, "schedule", "appointmentSchedule", sched)
-	if a.cancelledFor != "" || a.movedFor != "" {
+	if a.displaced != nil || a.displacedAt != "" {
+		disp := map[string]any{"checkedFor": "CRtimeOffRef1HJKMNPQ"}
+		if a.displaced != nil {
+			disp["displaced"] = *a.displaced
+		}
+		if a.displacedAt != "" {
+			disp["at"] = a.displacedAt
+		}
+		if a.displaced != nil && *a.displaced {
+			disp["from"] = cnDisplacedFrom
+			disp["to"] = cnDisplacedTo
+		}
+		f.aspect(t, name, "displacement", "appointmentDisplacement", disp)
+	}
+	if a.cancelledFor != "" || a.movedFor != "" || a.displacedFor != "" {
 		marker := map[string]any{"sentAt": cnNoticeSentAt}
 		if a.cancelledFor != "" {
 			marker["cancelledFor"] = a.cancelledFor
 		}
 		if a.movedFor != "" {
 			marker["movedFor"] = a.movedFor
+		}
+		if a.displacedFor != "" {
+			marker["displacedFor"] = a.displacedFor
 		}
 		f.aspect(t, name, "changeNotice", "appointmentChangeNotice", marker)
 	}
@@ -87,25 +107,209 @@ func (f *remFixture) projectChangeNotices(t *testing.T, apptName string) map[str
 	return out[0].Values
 }
 
-// requireNoticeGaps asserts both gap columns and violating in one place, so
-// every vector checks the column it is NOT about too.
+// requireNoticeGaps asserts the cancel and move gap columns and violating in
+// one place, so every vector checks the column it is NOT about too. The
+// displaced gap is asserted closed here — every cancel / move vector seeds no
+// displacement — and requireAllNoticeGaps is the three-column form.
 func requireNoticeGaps(t *testing.T, v map[string]any, cancel, move bool, why string) {
+	t.Helper()
+	requireAllNoticeGaps(t, v, cancel, move, false, why)
+}
+
+// requireAllNoticeGaps asserts all three gap columns and violating.
+func requireAllNoticeGaps(t *testing.T, v map[string]any, cancel, move, displaced bool, why string) {
 	t.Helper()
 	require.Equal(t, cancel, v["missing_cancel_notice"], "missing_cancel_notice: "+why)
 	require.Equal(t, move, v["missing_move_notice"], "missing_move_notice: "+why)
-	require.Equal(t, cancel || move, v["violating"], "violating = either gap: "+why)
+	require.Equal(t, displaced, v["missing_displaced_notice"], "missing_displaced_notice: "+why)
+	require.Equal(t, cancel || move || displaced, v["violating"], "violating = any gap: "+why)
 	_, hasFreshUntil := v["freshUntil"]
 	require.False(t, hasFreshUntil, "the change-notice lens arms no timer — no freshUntil column")
 }
 
 const (
-	cnVisitAt      = "2026-07-05T15:00:00Z"
-	cnVisitEnd     = "2026-07-05T15:30:00Z"
-	cnCancelAt     = "2026-06-20T14:02:11Z"
-	cnMoveAt       = "2026-06-21T09:30:00Z"
-	cnMoveNext     = "2026-06-22T11:00:00Z"
-	cnNoticeSentAt = "2026-06-20T14:02:15Z"
+	cnVisitAt        = "2026-07-05T15:00:00Z"
+	cnVisitEnd       = "2026-07-05T15:30:00Z"
+	cnCancelAt       = "2026-06-20T14:02:11Z"
+	cnMoveAt         = "2026-06-21T09:30:00Z"
+	cnMoveNext       = "2026-06-22T11:00:00Z"
+	cnNoticeSentAt   = "2026-06-20T14:02:15Z"
+	cnDisplacedAt    = "2026-06-21T09:15:03Z"
+	cnDisplacedNext  = "2026-06-23T08:00:02Z"
+	cnDisplacedFrom  = "2026-07-05T00:00:00Z"
+	cnDisplacedTo    = "2026-07-06T00:00:00Z"
+	cnSchedStampedAt = "2026-06-01T10:00:00Z"
 )
+
+// TestChangeNotices_DisplacedUntold — the visit's provider's time-off covers
+// it (displaced: true, at stamped) and no displacedFor: the displaced gap
+// opens; nothing was cancelled or moved. The columns the target templates off
+// (entityKey, displacedAt) are non-null.
+func TestChangeNotices_DisplacedUntold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true), displacedAt: cnDisplacedAt})
+
+	v := f.projectChangeNotices(t, "appt")
+	requireAllNoticeGaps(t, v, false, false, true, "displaced, at stamped, no displacedFor")
+	require.Equal(t, true, v["displaced"])
+	require.Equal(t, cnDisplacedAt, v["displacedAt"], "the target templates changeRef off this column")
+	require.Nil(t, v["displacedFor"])
+}
+
+// TestChangeNotices_DisplacedTold — displacedFor = displacement.at: converged.
+// A re-evaluation that leaves the visit displaced CARRIES at (clinic-domain's
+// stamp_displacement), so the same equality holds and the patient is not
+// re-told.
+func TestChangeNotices_DisplacedTold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true), displacedAt: cnDisplacedAt, displacedFor: cnDisplacedAt})
+
+	v := f.projectChangeNotices(t, "appt")
+	requireAllNoticeGaps(t, v, false, false, false, "displacedFor = at closes the displaced gap")
+	require.Equal(t, cnDisplacedAt, v["displacedFor"])
+}
+
+// TestChangeNotices_DisplacedAfreshReopens — told once (displacedFor = the
+// first at), reinstated, then displaced again by a later time-off write: the
+// fresh at differs from displacedFor and the gap reopens for a fresh notice.
+func TestChangeNotices_DisplacedAfreshReopens(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true), displacedAt: cnDisplacedNext, displacedFor: cnDisplacedAt})
+
+	v := f.projectChangeNotices(t, "appt")
+	requireAllNoticeGaps(t, v, false, false, true, "at <> displacedFor (the last displacement the patient was told of) → told again")
+}
+
+// TestChangeNotices_NotDisplacedNotTold — a visit recorded CLEAR (displaced:
+// false, the booking writers' shape or a reinstatement), and one with no
+// .displacement at all: `false = true` / `null = true` are false, nothing to
+// tell. A reinstatement is not told (the reminder resumes and says the visit
+// stands), even when a displaced notice went out earlier.
+func TestChangeNotices_NotDisplacedNotTold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	t.Run("recorded clear", func(t *testing.T) {
+		f := newRemFixture(t)
+		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(false), displacedAt: cnDisplacedAt})
+		requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, false, "displaced: false → nothing to tell")
+	})
+	t.Run("reinstated after a displaced notice", func(t *testing.T) {
+		f := newRemFixture(t)
+		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(false), displacedAt: cnDisplacedNext, displacedFor: cnDisplacedAt})
+		requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, false, "a reinstatement is not told, whatever displacedFor says")
+	})
+	t.Run("no .displacement", func(t *testing.T) {
+		f := newRemFixture(t)
+		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd})
+		v := f.projectChangeNotices(t, "appt")
+		requireAllNoticeGaps(t, v, false, false, false, "no .displacement → null = true is false")
+		require.Nil(t, v["displaced"])
+		require.Nil(t, v["displacedAt"])
+	})
+}
+
+// TestChangeNotices_DisplacedWithoutAtNotTold — the at <> null conjunct on
+// its own: a .displacement carrying displaced: true but no at has no
+// changeRef to dispatch, so the gap stays closed instead of opening one the
+// op can only refuse (StaleChange: no at). With no marker either,
+// `displacedFor <> at` is already `null <> null` false, so the conjunct is
+// discriminated by the second vector: a marker from an earlier notice
+// (displacedFor set) against an aspect with no at reads `"x" <> null` true,
+// and only the at <> null term keeps that gap closed.
+func TestChangeNotices_DisplacedWithoutAtNotTold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	t.Run("no marker", func(t *testing.T) {
+		f := newRemFixture(t)
+		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true)})
+		requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, false, "displaced: true but no at → no changeRef to dispatch")
+	})
+	t.Run("marker from an earlier notice", func(t *testing.T) {
+		f := newRemFixture(t)
+		f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true), displacedFor: cnDisplacedAt})
+		requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, false, "displaced: true, no at, displacedFor set → still no changeRef to dispatch")
+	})
+}
+
+// TestChangeNotices_DisplacedThenCancelledByStaff — displaced (untold) and
+// then cancelled by the desk: the cancel gap opens, the displaced gap does
+// NOT (nonTerminalAppointment is false on cancelled) — the patient is told
+// the visit is off, never that the provider is away for a visit that will
+// not happen. Every terminal status keeps the displaced gap closed.
+func TestChangeNotices_DisplacedThenCancelledByStaff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "cancelled", statusAt: cnCancelAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true), displacedAt: cnDisplacedAt})
+	requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), true, false, false, "displaced-then-cancelled → the cancel notice only")
+
+	for _, status := range []string{"completed", "noShow"} {
+		t.Run(status, func(t *testing.T) {
+			f := newRemFixture(t)
+			f.mkChangeNoticeAppt(t, "appt", cnAppt{status: status, statusAt: cnCancelAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true), displacedAt: cnDisplacedAt})
+			requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, false, "a "+status+" visit is over; nothing to tell")
+		})
+	}
+}
+
+// TestChangeNotices_DisplacedOnNonTerminalTold — every non-terminal status
+// opens the displaced gap: a confirmed or checked-in visit the provider can
+// no longer attend is still told.
+func TestChangeNotices_DisplacedOnNonTerminalTold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	for _, status := range []string{"scheduled", "confirmed", "checkedIn"} {
+		t.Run(status, func(t *testing.T) {
+			f := newRemFixture(t)
+			f.mkChangeNoticeAppt(t, "appt", cnAppt{status: status, statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true), displacedAt: cnDisplacedAt})
+			requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, true, "a "+status+" displaced visit is told")
+		})
+	}
+}
+
+// TestChangeNotices_DisplacedVisitEndedNotTold — a displaced visit the
+// sibling pastDueAppointments target has recorded as over: the notice is
+// moot and the gap closes.
+func TestChangeNotices_DisplacedVisitEndedNotTold(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, displaced: boolp(true), displacedAt: cnDisplacedAt})
+	f.recordLapse(t, "appt", map[string]string{PastDueAppointmentsTarget: cnVisitEnd})
+	requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, false, false, "the visit ENDED (a recorded pastDueAppointments fire >= endsAt) — the notice is moot")
+}
+
+// TestChangeNotices_DisplacedAndMovedBothOpen — a desk move untold AND a
+// displacement untold on one visit: both gaps read open, and violating
+// follows. RescheduleAppointment writes .schedule and .displacement in ONE
+// batch (the moved visit reads clear), so the committed state this vector
+// seeds is a later re-displacement of the moved slot — a fresh time-off
+// write covering the new time, a legitimate second notice — or a per-key
+// CDC ordering transient between the two aspects' projections. Either way
+// the op re-checks each fact against the live aspect at dispatch, so a
+// transient is refused StaleChange there, never told.
+func TestChangeNotices_DisplacedAndMovedBothOpen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newRemFixture(t)
+	f.mkChangeNoticeAppt(t, "appt", cnAppt{status: "scheduled", statusAt: cnSchedStampedAt, statusBy: "staff", startsAt: cnVisitAt, endsAt: cnVisitEnd, movedAt: cnMoveAt, movedBy: "staff", displaced: boolp(true), displacedAt: cnDisplacedAt})
+	requireAllNoticeGaps(t, f.projectChangeNotices(t, "appt"), false, true, true, "two untold facts → two open gaps")
+}
 
 // TestChangeNotices_StaffCancelUntold — the desk cancelled (by: staff, at
 // stamped) and no marker: the cancel gap opens; nothing moved, so the move
@@ -463,10 +667,14 @@ func TestChangeNotices_BodyColumnsMatchReturn(t *testing.T) {
 		_, ok := v[col]
 		require.Truef(t, ok, "BodyColumn %q is not a RETURN column — the row would carry a key the cypher never fills", col)
 	}
-	for _, gap := range []string{"missing_cancel_notice", "missing_move_notice"} {
+	for _, gap := range []string{"missing_cancel_notice", "missing_move_notice", "missing_displaced_notice"} {
 		_, declared := gaps[gap]
 		require.Truef(t, declared, "gap column %q must be declared in the target's Gaps map", gap)
 	}
 	require.Equal(t, "row.statusAt", gaps["missing_cancel_notice"].Params["changeRef"], "the cancel gap's changeRef is the recorded status moment")
 	require.Equal(t, "row.movedAt", gaps["missing_move_notice"].Params["changeRef"], "the move gap's changeRef is the recorded move moment")
+	require.Equal(t, "row.displacedAt", gaps["missing_displaced_notice"].Params["changeRef"], "the displaced gap's changeRef is the recorded displacement moment")
+	require.Equal(t, "displaced", gaps["missing_displaced_notice"].Params["kind"])
+	require.Equal(t, []string{"row.entityKey.changeNotice", "row.entityKey.displacement"}, gaps["missing_displaced_notice"].OptionalReads,
+		"the displaced re-check reads the visit's .displacement — declared beside the marker")
 }

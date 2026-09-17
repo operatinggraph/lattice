@@ -111,6 +111,7 @@ const corpusWalkScopeMinimum = 55
 var corpusActorWalkScopeDigests = map[string]string{
 	"applicantOnboarding":            "identity:applicationFor,scopedTo|leaseapp:applicationFor,appliesToUnit|meta:forOperation|task:forOperation,scopedTo|unit:appliesToUnit",
 	"appointmentChangeNotices":       "appointment:forPatient|patient:forPatient",
+	"appointmentDisplacements":       "appointment:withProvider|provider:withProvider",
 	"appointmentReminders":           "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
 	"augurDispatchPending":           "none",
 	"backgroundCheckFreshness":       "none",

@@ -1,11 +1,11 @@
 name: clinic-domain
-version: 0.40.0
+version: 0.41.0
 depends:
   - location-domain
 description: |
   Clinic bookable domain. Owns three vertex types —
   patient, provider, appointment — with their aspects (.demographics, .profile,
-  .schedule, .status, .encounter, .documentation, provider/patient
+  .schedule, .status, .displacement, .encounter, .documentation, provider/patient
   .slot<cellcode> claims) and
   links (forPatient, withProvider, identifiedBy), written by the
   Create*/Reschedule/SetAppointmentStatus/RecordEncounter/Tombstone* ops.
@@ -131,6 +131,8 @@ declares:
     - canonicalName: appointmentSchedule
       class: meta.ddl.aspectType
     - canonicalName: appointmentStatus
+      class: meta.ddl.aspectType
+    - canonicalName: appointmentDisplacement
       class: meta.ddl.aspectType
     - canonicalName: providerHours
       class: meta.ddl.aspectType
@@ -269,6 +271,9 @@ declares:
       scope: any
       grantsTo: [operator, provider]
     - operationType: MarkPastDueNoShow
+      scope: any
+      grantsTo: [operator]
+    - operationType: EvaluateAppointmentDisplacement
       scope: any
       grantsTo: [operator]
     - operationType: BackfillAppointmentSite

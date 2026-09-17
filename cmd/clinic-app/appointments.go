@@ -135,7 +135,9 @@ func (s *server) handleAppointments(w http.ResponseWriter, r *http.Request) {
 // already scoped the rows to the requesting actor before they reach here, so
 // there is no client-side filter. Nullable columns (the OPTIONAL provider walk,
 // and the optional reason/status-note/reminder/encounter fields) are pointers so
-// an absent value stays absent rather than rendering a misleading empty string.
+// an absent value stays absent rather than rendering a misleading empty string;
+// Displaced is a pointer for the same reason — a visit no writer has recorded
+// a displacement verdict for is null, not false.
 // JSON tags deliberately match availabilityRow's (appointmentKey, not entityKey)
 // so the FE's shared card renderer (renderApptCard et al.) needs no changes
 // between the unprotected and protected read paths.
@@ -160,6 +162,9 @@ type protectedAppointmentRow struct {
 	StatusAt               *string `json:"statusAt,omitempty"`
 	StatusBy               *string `json:"statusBy,omitempty"`
 	ChangeNoticeSentAt     *string `json:"changeNoticeSentAt,omitempty"`
+	Displaced              *bool   `json:"displaced,omitempty"`
+	DisplacedFrom          *string `json:"displacedFrom,omitempty"`
+	DisplacedTo            *string `json:"displacedTo,omitempty"`
 	FollowUpRequested      bool    `json:"followUpRequested,omitempty"`
 	FollowUpDate           *string `json:"followUpDate,omitempty"`
 }
@@ -189,6 +194,7 @@ SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''
        site_key, site_name,
        reminder_sent_at, follow_up_reminder_sent_at, documented_at, amended_at,
        status_at, status_by, change_notice_sent_at,
+       displaced, displaced_from, displaced_to,
        COALESCE(follow_up_requested, false), follow_up_date
 FROM read_clinic_appointments
 ORDER BY starts_at, appointment_id`
@@ -229,6 +235,7 @@ func queryMyAppointments(ctx context.Context, pool pgxBeginner, actorID string) 
 			&row.SiteKey, &row.SiteName,
 			&row.ReminderSentAt, &row.FollowUpReminderSentAt, &row.DocumentedAt, &row.AmendedAt,
 			&row.StatusAt, &row.StatusBy, &row.ChangeNoticeSentAt,
+			&row.Displaced, &row.DisplacedFrom, &row.DisplacedTo,
 			&row.FollowUpRequested, &row.FollowUpDate,
 		); err != nil {
 			return nil, err
@@ -295,6 +302,7 @@ SELECT entity_key, COALESCE(starts_at, ''), ends_at, reason, COALESCE(status, ''
        site_key, site_name,
        reminder_sent_at, follow_up_reminder_sent_at, documented_at, amended_at,
        status_at, status_by, change_notice_sent_at,
+       displaced, displaced_from, displaced_to,
        COALESCE(follow_up_requested, false), follow_up_date
 FROM read_provider_appointments
 ORDER BY starts_at, appointment_id`
@@ -330,6 +338,7 @@ func queryMyProviderSchedule(ctx context.Context, pool pgxBeginner, actorID stri
 			&row.SiteKey, &row.SiteName,
 			&row.ReminderSentAt, &row.FollowUpReminderSentAt, &row.DocumentedAt, &row.AmendedAt,
 			&row.StatusAt, &row.StatusBy, &row.ChangeNoticeSentAt,
+			&row.Displaced, &row.DisplacedFrom, &row.DisplacedTo,
 			&row.FollowUpRequested, &row.FollowUpDate,
 		); err != nil {
 			return nil, err

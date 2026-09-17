@@ -9,6 +9,7 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	// One OPTIONAL MATCH off the appointment anchor (forPatient), 0..1, flat,
 	// no aggregation — the informational patient hop and nothing else.
 	"appointmentChangeNotices":       {"g1/o1!no-aggregating-item", 0, 1},
+	"appointmentDisplacements":       {"g1/o1!no-aggregating-item", 0, 1},
 	"appointmentReminders":           {"g2/o2!no-aggregating-item", 0, 2},
 	"augurDispatchPending":           {"g0/o0!no-aggregating-item", 0, 0},
 	"augurProposals":                 {"g0/o0!no-aggregating-item", 0, 0},
@@ -305,6 +306,7 @@ var multiGroupDecomposingLenses = []string{
 var footprintValidationVerdicts = map[string]bool{
 	"applicantOnboarding":               true,
 	"appointmentChangeNotices":          true,
+	"appointmentDisplacements":          true,
 	"appointmentReminders":              true,
 	"augurDispatchPending":              false,
 	"backgroundCheckFreshness":          false,

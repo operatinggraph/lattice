@@ -65,10 +65,22 @@
 // no deadline: one gap per change kind, keyed on the recorded moment, closed
 // by the .changeNotice marker RecordAppointmentChangeNotice writes.
 //
-//	vtx.appointment.<id>.changeNotice = {cancelledFor?, movedFor?, sentAt}  (class appointmentChangeNotice — this package)
-//	op RecordAppointmentChangeNotice{appointmentKey, kind: cancelled|moved, changeRef}  (create-or-update on a live appointment; refuses StaleChange)
-//	lens appointmentChangeNotices (weaver-target, full)  (cancelledFor <> status.at / movedFor <> schedule.movedAt gates, desk-authored only)
-//	playbook missing_cancel_notice / missing_move_notice → directOp(RecordAppointmentChangeNotice, changeRef: row.statusAt | row.movedAt)
+//	vtx.appointment.<id>.changeNotice = {cancelledFor?, movedFor?, displacedFor?, sentAt}  (class appointmentChangeNotice — this package)
+//	op RecordAppointmentChangeNotice{appointmentKey, kind: cancelled|moved|displaced, changeRef}  (create-or-update on a live appointment; refuses StaleChange)
+//	lens appointmentChangeNotices (weaver-target, full)  (cancelledFor <> status.at / movedFor <> schedule.movedAt gates, desk-authored only; displacedFor <> displacement.at)
+//	playbook missing_cancel_notice / missing_move_notice / missing_displaced_notice → directOp(RecordAppointmentChangeNotice, changeRef: row.statusAt | row.movedAt | row.displacedAt)
+//
+// A visit a provider's LATER-declared time-off covers is displaced
+// (displacement.go): SetProviderTimeOff stamps .timeOff.setRef (the write's
+// requestId) on every write, the appointmentDisplacements lens opens a level
+// gap on every live visit whose .displacement.checkedFor differs from it, and
+// clinic-domain's
+// EvaluateAppointmentDisplacement records the verdict on the visit. The
+// reminder and the past-due sweep read .displacement.displaced and stand
+// down; the patient is told once through the displaced notice above.
+//
+//	lens appointmentDisplacements (weaver-target, full)  (pr.timeOff.setRef <> null AND a.displacement.checkedFor <> setRef, non-terminal, not ended)
+//	playbook missing_displacement_check → directOp(EvaluateAppointmentDisplacement, appointmentKey: row.entityKey, providerKey: row.providerKey, checkedFor: row.timeOffSetRef)
 //
 // Both reminder ops and the notice op also fire the actual notification send
 // off their own transactional outbox to the bridge's "notification" adapter
@@ -91,7 +103,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "clinic-reminders",
-	Version: "0.13.0",
+	Version: "0.14.0",
 	Description: "Clinic appointment & follow-up reminders + recurring visit series + the auto no-show closer (the " +
 		"clinic vertical's orchestration): the .reminder / .followUpReminder marker aspects + RecordAppointmentReminder / " +
 		"RecordFollowUpReminder ops, the appointmentReminders + followUpReminders weaver-target convergence lenses " +
@@ -107,9 +119,14 @@ var Package = pkgmgr.Definition{
 		"falls back to once the series' provider is tombstoned and the practicesAt walk yields nothing — " +
 		"backfilled by the visitSeriesSiteBackfill convergence lens's BackfillVisitSeriesSite directOp when the " +
 		"provider practises at exactly one site, and set by hand with SetVisitSeriesSite when it does not. The " +
-		"appointmentChangeNotices lens tells a patient once about each change the desk makes to their visit — a " +
-		"staff cancel (keyed on .status.at) or a staff move (keyed on .schedule.movedAt) — level-triggered on the " +
-		"recorded fact, closed by the .changeNotice marker RecordAppointmentChangeNotice writes. Both " +
+		"appointmentChangeNotices lens tells a patient once about each change to their visit — a " +
+		"staff cancel (keyed on .status.at), a staff move (keyed on .schedule.movedAt) or a displacement by the " +
+		"provider's later-declared time-off (keyed on .displacement.at) — level-triggered on the " +
+		"recorded fact, closed by the .changeNotice marker RecordAppointmentChangeNotice writes. The " +
+		"appointmentDisplacements lens re-checks every live visit against its provider's latest time-off write " +
+		"(.timeOff.setRef vs the visit's .displacement.checkedFor) and dispatches clinic-domain's " +
+		"EvaluateAppointmentDisplacement per visit to record the verdict; the reminder and past-due gaps read it " +
+		"and stand down for a displaced visit. Both " +
 		"reminder ops and the notice op also fire " +
 		"external.notification off their own outbox to the bridge's \"notification\" adapter; " +
 		"RecordAppointmentReminderNotification / RecordFollowUpReminderNotification / " +

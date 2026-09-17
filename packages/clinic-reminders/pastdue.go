@@ -76,8 +76,8 @@ func pastDueAppointmentsLens() pkgmgr.LensSpec {
 // graph data, so the row is a pure function of the subgraph and re-projecting it
 // at any later instant reaches the same verdict.
 //
-// The four-term gate (status is non-terminal AND status is not checkedIn AND a
-// recorded lapse at endsAt):
+// The five-term gate (status is non-terminal AND status is not checkedIn AND
+// not displaced AND a recorded lapse at endsAt):
 //
 //   - nonTerminalAppointment (lenses.go) — the appointment has NOT already
 //     reached a terminal outcome. The same fragment gates appointmentReminders,
@@ -100,6 +100,16 @@ func pastDueAppointmentsLens() pkgmgr.LensSpec {
 //     projects violating=false with the lapse still recorded, and a later
 //     checkedIn → scheduled/confirmed move (non-terminal moves freely) re-opens
 //     the gap on the next projection with no clearing write.
+//   - notDisplacedAppointment (lenses.go) — the provider's time-off does not
+//     cover the visit as last recorded (.displacement.displaced). A displaced
+//     visit is the provider's unavailability, not the patient's no-show: the
+//     sweep stands down and the desk closes the visit (MarkPastDueNoShow's
+//     own live overlap no-op stays as the race guard for a displacement
+//     evaluated after this row projected). Like the checkedIn exclusion it
+//     narrows only the two dispatch bools, never freshUntil: the @at still
+//     arms and the recorded end every sibling reads is still written, and a
+//     reinstatement (a time-off clear, a move) re-opens the gap on the next
+//     projection off the lapse already recorded.
 //   - freshnessExpiry.data.byTarget.pastDueAppointments >= endsAt — a timer this
 //     target armed fired at or after the visit's scheduled end, with no terminal
 //     status recorded. compareAny answers false when either operand is nil, so an
@@ -128,9 +138,9 @@ RETURN
   p.key AS patientKey,
   pr.key AS providerKey,
   CASE WHEN %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt) THEN a.schedule.data.endsAt ELSE null END AS freshUntil,
-  (%[1]s AND %[3]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_noshow_transition,
-  (%[1]s AND %[3]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS violating`,
-	nonTerminalAppointment, PastDueAppointmentsTarget, `(a.status.data.value <> 'checkedIn')`)
+  (%[1]s AND %[3]s AND %[4]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_noshow_transition,
+  (%[1]s AND %[3]s AND %[4]s AND (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS violating`,
+	nonTerminalAppointment, PastDueAppointmentsTarget, `(a.status.data.value <> 'checkedIn')`, notDisplacedAppointment)
 
 // pastDueAppointmentsTarget returns the §10.8 playbook for the auto-no-show
 // convergence: the single missing_noshow_transition gap → directOp(MarkPastDueNoShow)

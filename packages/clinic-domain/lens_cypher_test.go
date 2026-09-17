@@ -155,6 +155,9 @@ func TestClinicAppointments_JoinsPatientAndProvider(t *testing.T) {
 	require.Equal(t, "2026-06-30T09:00:00Z", v["statusAt"], "anchor aspect-hop a.status.data.at")
 	require.Equal(t, "staff", v["statusBy"], "anchor aspect-hop a.status.data.by")
 	require.Nil(t, v["changeNoticeSentAt"], "no .changeNotice aspect → null changeNoticeSentAt (null-safe)")
+	require.Nil(t, v["displaced"], "no .displacement aspect → null displaced (null-safe)")
+	require.Nil(t, v["displacedFrom"], "no .displacement aspect → null displacedFrom")
+	require.Nil(t, v["displacedTo"], "no .displacement aspect → null displacedTo")
 	require.Equal(t, patientKey, v["patientKey"])
 	_, hasPatientName := v["patientName"]
 	require.False(t, hasPatientName, "patient name is PHI — never projected into the open (unauthenticated) clinicAppointments lens; names live only in Protected clinicAppointmentsRead")
@@ -191,6 +194,52 @@ func TestClinicAppointments_StatusTransitionProjects(t *testing.T) {
 	// proxy for a moment that was never recorded.
 	require.Nil(t, rows[0].Values["statusAt"], "no at on .status → null statusAt")
 	require.Nil(t, rows[0].Values["statusBy"], "no by on .status → null statusBy")
+}
+
+// TestClinicAppointments_ProjectsDisplacement proves the three columns off
+// the appointment's own .displacement aspect: a displaced visit projects
+// displaced = true with the covering range; a visit recorded clear projects
+// displaced = false with null from/to (the booking writers' shape carries no
+// range); a visit with no aspect at all projects null for all three.
+func TestClinicAppointments_ProjectsDisplacement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	seed := func(t *testing.T, f *lensFixture, displacement map[string]any) map[string]any {
+		f.vtx(t, "appt", "appointment")
+		f.vtx(t, "alice", "patient")
+		f.vtx(t, "drsam", "provider")
+		f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+		f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
+		f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-08T15:00:00Z", "endsAt": "2026-07-08T15:30:00Z"})
+		f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "scheduled", "at": "2026-06-20T09:00:00Z", "by": "staff"})
+		if displacement != nil {
+			f.aspect(t, "appt", "displacement", "appointmentDisplacement", displacement)
+		}
+		f.edge(t, "forPatient", "appt", "alice")
+		f.edge(t, "withProvider", "appt", "drsam")
+		rows := f.project(t, clinicAppointmentsSpec)
+		require.Len(t, rows, 1)
+		return rows[0].Values
+	}
+	t.Run("displaced", func(t *testing.T) {
+		v := seed(t, newLensFixture(t), map[string]any{"displaced": true, "checkedFor": "CLtimeOffRefHJKMNPQR", "at": "2026-06-21T09:15:03Z", "from": "2026-07-06T00:00:00Z", "to": "2026-07-13T00:00:00Z", "reason": "Vacation"})
+		require.Equal(t, true, v["displaced"])
+		require.Equal(t, "2026-07-06T00:00:00Z", v["displacedFrom"])
+		require.Equal(t, "2026-07-13T00:00:00Z", v["displacedTo"])
+	})
+	t.Run("recorded clear", func(t *testing.T) {
+		v := seed(t, newLensFixture(t), map[string]any{"displaced": false, "checkedFor": "CLtimeOffRefHJKMNPQR", "at": "2026-06-21T09:15:03Z"})
+		require.Equal(t, false, v["displaced"])
+		require.Nil(t, v["displacedFrom"], "a clear verdict carries no range")
+		require.Nil(t, v["displacedTo"], "a clear verdict carries no range")
+	})
+	t.Run("no aspect", func(t *testing.T) {
+		v := seed(t, newLensFixture(t), nil)
+		require.Nil(t, v["displaced"])
+		require.Nil(t, v["displacedFrom"])
+		require.Nil(t, v["displacedTo"])
+	})
 }
 
 // TestClinicAppointments_ProjectsChangeNoticeSentAt proves the null-safe read

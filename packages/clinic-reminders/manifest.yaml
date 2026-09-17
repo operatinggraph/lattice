@@ -1,5 +1,5 @@
 name: clinic-reminders
-version: 0.13.0
+version: 0.14.0
 description: |
   Clinic appointment & follow-up reminders + recurring visit series + the auto
   no-show closer — the clinic vertical's orchestration. Four one-shot/rolling @at
@@ -23,9 +23,15 @@ description: |
   freshness re-open (open-at-deadline instead of reopen-at-expiry), while
   visitSeriesDue is level-triggered on a recorded visit instead of a clock lapse.
   The appointmentChangeNotices weaver-target lens tells a patient once about each
-  change the desk makes to their visit — a staff cancel (keyed on .status.at) or a
-  staff move (keyed on .schedule.movedAt) — level-triggered on the recorded fact and
-  closed by the .changeNotice marker RecordAppointmentChangeNotice writes. Both
+  change to their visit — a staff cancel (keyed on .status.at), a staff move (keyed
+  on .schedule.movedAt) or a displacement by the provider's later-declared time-off
+  (keyed on .displacement.at) — level-triggered on the recorded fact and closed by
+  the .changeNotice marker RecordAppointmentChangeNotice writes. The
+  appointmentDisplacements lens re-checks every live visit against its provider's
+  latest time-off write (SetProviderTimeOff's .timeOff.setRef vs the visit's
+  .displacement.checkedFor) and dispatches clinic-domain's
+  EvaluateAppointmentDisplacement per visit to record the verdict; the reminder
+  and past-due gaps read that verdict and stand down for a displaced visit. Both
   reminder ops and the notice op also fire external.notification off their own
   outbox to the bridge's "notification" adapter; RecordAppointmentReminderNotification /
   RecordFollowUpReminderNotification / RecordAppointmentChangeNotification record
@@ -103,6 +109,10 @@ declares:
       adapter: nats-kv
       bucket: weaver-targets
       engine: full
+    - canonicalName: appointmentDisplacements
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
   permissions:
     - operationType: RecordAppointmentReminder
       scope: any
@@ -156,6 +166,8 @@ declares:
       lensRef: visitSeriesSiteBackfill
     - targetId: pastDueAppointments
       lensRef: pastDueAppointments
+    - targetId: appointmentDisplacements
+      lensRef: appointmentDisplacements
   opMetas:
     - operationType: RecordAppointmentReminder
     - operationType: RecordFollowUpReminder

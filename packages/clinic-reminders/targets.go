@@ -13,16 +13,22 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     Loom pattern) because a reminder is a single op — no multi-step externalTask
 //     flow — exactly the objectLiveness → TombstoneObject GC precedent.
 //
-// appointmentChangeNotices' two gaps → one remediation op:
+// appointmentChangeNotices' three gaps → one remediation op:
 //
-//   - missing_cancel_notice / missing_move_notice → directOp(RecordAppointmentChangeNotice)
-//     with kind = the literal and changeRef = row.statusAt / row.movedAt, the
-//     recorded moment of the change the lens keyed the gap on. Reads route the
-//     root (liveness), .status and .schedule (the op's live re-check); the
+//   - missing_cancel_notice / missing_move_notice / missing_displaced_notice →
+//     directOp(RecordAppointmentChangeNotice) with kind = the literal and
+//     changeRef = row.statusAt / row.movedAt / row.displacedAt, the recorded
+//     moment of the change the lens keyed the gap on. Reads route the root
+//     (liveness), .status and .schedule (the op's live re-check); the
 //     .changeNotice marker is an OptionalRead — absent on the first notice — so
-//     the op can carry the other kind's field across a bare update. Every
+//     the op can carry the other kinds' fields across a bare update; the
+//     displaced shape adds the visit's .displacement (its re-check reads it).
+//     Every
 //     row.<col> named here is an appointmentChangeNotices BodyColumn, and every
 //     Params column is one the gap's own conjunct requires non-null.
+//
+// appointmentDisplacements' single gap → directOp(EvaluateAppointmentDisplacement)
+// (displacement.go).
 //
 // Params{appointmentKey: row.entityKey, remindedFor: row.startsAt} routes the
 // candidate appointment key + the startsAt this reminder is for into the op's
@@ -53,7 +59,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		{
 			TargetID: AppointmentChangeNoticesTarget,
 			Description: "A patient whose visit the desk cancelled is told once. A patient whose visit the desk moved " +
-				"to a new time is told once per move.",
+				"to a new time is told once per move. A patient whose provider's time-off now covers their visit is " +
+				"told once that the clinic will reschedule.",
 			LensRef: "appointmentChangeNotices",
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_cancel_notice": {
@@ -72,11 +79,26 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.entityKey.schedule"},
 					OptionalReads: []string{"row.entityKey.changeNotice"},
 				},
+				// The displaced re-check reads the visit's .displacement — present
+				// on every violating row (the gap's own conjunct is displaced =
+				// true), declared OPTIONAL beside .changeNotice because a
+				// booking writer's concurrent bare upsert may re-shape it between
+				// projection and dispatch, and the op answers that with
+				// StaleChange, never a hydration miss.
+				"missing_displaced_notice": {
+					Action:        "directOp",
+					Operation:     changeNoticeOp,
+					Class:         changeNoticeOpDDL,
+					Params:        map[string]string{"appointmentKey": "row.entityKey", "kind": "displaced", "changeRef": "row.displacedAt"},
+					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.entityKey.schedule"},
+					OptionalReads: []string{"row.entityKey.changeNotice", "row.entityKey.displacement"},
+				},
 			},
 		},
 		followUpRemindersTarget(),
 		visitSeriesDueTarget(),
 		visitSeriesSiteBackfillTarget(),
 		pastDueAppointmentsTarget(),
+		appointmentDisplacementsTarget(),
 	}
 }

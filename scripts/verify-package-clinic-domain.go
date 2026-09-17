@@ -75,6 +75,7 @@ var clinicExpectedOps = []string{
 	"CreatePatient", "TombstonePatient", "BindPatientIdentity", "UnbindPatientIdentity",
 	"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff",
 	"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment",
+	"EvaluateAppointmentDisplacement",
 	"SetSiteProfile", "AssignProviderSite", "RemoveProviderSite", "BindProviderIdentity",
 }
 
@@ -118,10 +119,13 @@ var clinicOpGrants = map[string][]permGrant{
 	"SetAppointmentSite":       {{"any", "operator"}, {"any", "frontOfHouse"}, {"any", "provider"}},
 	"RecordEncounter":          {{"any", "operator"}, {"any", "provider"}},
 	"TombstoneAppointment":     {{"any", "operator"}},
-	"SetSiteProfile":           {{"any", "operator"}},
-	"AssignProviderSite":       {{"any", "operator"}},
-	"RemoveProviderSite":       {{"any", "operator"}},
-	"BindProviderIdentity":     {{"any", "operator"}},
+	// Weaver-dispatched only (clinic-reminders' appointmentDisplacements
+	// target's directOp) — operator authority, the MarkPastDueNoShow idiom.
+	"EvaluateAppointmentDisplacement": {{"any", "operator"}},
+	"SetSiteProfile":                  {{"any", "operator"}},
+	"AssignProviderSite":              {{"any", "operator"}},
+	"RemoveProviderSite":              {{"any", "operator"}},
+	"BindProviderIdentity":            {{"any", "operator"}},
 }
 
 // ddlCheck describes one DDL to verify: its canonical name, its expected meta
@@ -197,11 +201,12 @@ func main() {
 	ddlChecks := []ddlCheck{
 		{canonical: "patient", class: "meta.ddl.vertexType", ops: []string{"CreatePatient", "TombstonePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"}},
 		{canonical: "provider", class: "meta.ddl.vertexType", ops: []string{"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"}},
-		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"}},
+		{canonical: "appointment", class: "meta.ddl.vertexType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "EvaluateAppointmentDisplacement", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"}},
 		{canonical: "patientDemographics", class: "meta.ddl.aspectType", ops: []string{"CreatePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"}},
 		{canonical: "providerProfile", class: "meta.ddl.aspectType", ops: []string{"CreateProvider", "SetProviderProfile"}},
 		{canonical: "appointmentSchedule", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment"}},
 		{canonical: "appointmentStatus", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "RescheduleAppointment"}},
+		{canonical: "appointmentDisplacement", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "EvaluateAppointmentDisplacement"}},
 		{canonical: "providerHours", class: "meta.ddl.aspectType", ops: []string{"SetProviderHours"}},
 		{canonical: "providerTimeOff", class: "meta.ddl.aspectType", ops: []string{"SetProviderTimeOff"}},
 		{canonical: "providerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"}},

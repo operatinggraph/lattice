@@ -85,9 +85,33 @@ func cnSeedChangeNotice(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	}
 }
 
+const (
+	cnDisplacedAt   = "2025-12-22T08:00:02Z"
+	cnDisplacedFrom = "2026-07-05T00:00:00Z"
+	cnDisplacedTo   = "2026-07-06T00:00:00Z"
+)
+
+// cnSeedDisplacement writes the visit's .displacement in the shape
+// clinic-domain's EvaluateAppointmentDisplacement leaves.
+func cnSeedDisplacement(t *testing.T, ctx context.Context, conn *substrate.Conn, apptKey string, data map[string]any) {
+	t.Helper()
+	key := apptKey + ".displacement"
+	doc := map[string]any{"class": "appointmentDisplacement", "vertexKey": apptKey, "localName": "displacement", "isDeleted": false, "data": data}
+	b, _ := json.Marshal(doc)
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, key, b); err != nil {
+		t.Fatalf("seed displacement %s: %v", key, err)
+	}
+}
+
+// cnDisplaced is the .displacement a covering time-off write leaves.
+func cnDisplaced() map[string]any {
+	return map[string]any{"displaced": true, "checkedFor": "CRtimeOffRef1HJKMNPQ", "at": cnDisplacedAt, "from": cnDisplacedFrom, "to": cnDisplacedTo, "reason": "Out sick"}
+}
+
 // cnSubmit drives one RecordAppointmentChangeNotice as `actor` with the exact
 // declared-read posture the appointmentChangeNotices target dispatches under
-// (Reads: root, .status, .schedule; OptionalReads: .changeNotice). Class is
+// (Reads: root, .status, .schedule; OptionalReads: .changeNotice, plus
+// .displacement on the displaced shape). Class is
 // LEFT EMPTY so the Processor's operationType→class reverse index is what
 // resolves the handler (the target's Class pin names the same
 // appointmentChangeNoticeOp DDL; the unpinned path is the stricter one to
@@ -95,6 +119,10 @@ func cnSeedChangeNotice(t *testing.T, ctx context.Context, conn *substrate.Conn,
 func cnSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
 	actor, label, apptKey, kind, changeRef string, want processor.MessageOutcome) (*processor.OperationEnvelope, *processor.OperationReply) {
 	t.Helper()
+	optionalReads := []string{apptKey + ".changeNotice"}
+	if kind == "displaced" {
+		optionalReads = append(optionalReads, apptKey+".displacement")
+	}
 	env := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID(label),
 		Lane:          processor.LaneDefault,
@@ -104,7 +132,7 @@ func cnSubmit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *proce
 		Payload:       json.RawMessage(`{"appointmentKey":"` + apptKey + `","kind":"` + kind + `","changeRef":"` + changeRef + `"}`),
 		ContextHint: &processor.ContextHint{
 			Reads:         []string{apptKey, apptKey + ".status", apptKey + ".schedule"},
-			OptionalReads: []string{apptKey + ".changeNotice"},
+			OptionalReads: optionalReads,
 		},
 	}
 	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
@@ -142,8 +170,9 @@ func cnOutboxEvents(t *testing.T, ctx context.Context, conn *substrate.Conn, req
 // cnRequireNotice asserts the outbox carries exactly one external.notification
 // keyed <apptKey>:<kind>:<changeRef> beside clinic.appointmentChangeNoticeSent,
 // addressed to the notification adapter with this package's replyOp and the
-// visit-identifying params.
-func cnRequireNotice(t *testing.T, ctx context.Context, conn *substrate.Conn, requestID, apptKey, kind, changeRef string) {
+// visit-identifying params. It returns the params so a kind-specific vector
+// can pin what else its notice carries.
+func cnRequireNotice(t *testing.T, ctx context.Context, conn *substrate.Conn, requestID, apptKey, kind, changeRef string) map[string]any {
 	t.Helper()
 	notifs, seen := cnOutboxEvents(t, ctx, conn, requestID)
 	if len(notifs) != 1 {
@@ -180,6 +209,7 @@ func cnRequireNotice(t *testing.T, ctx context.Context, conn *substrate.Conn, re
 			t.Fatalf("params.%s = %q, want %q (params: %v)", field, got, want, params)
 		}
 	}
+	return params
 }
 
 // TestRecordAppointmentChangeNotice_CancelledWritesMarkerAndEmits is the
@@ -279,6 +309,129 @@ func TestRecordAppointmentChangeNotice_CancelAfterMoveCarriesMovedFor(t *testing
 	cnRequireNotice(t, ctx, conn, env.RequestID, apptKey, "cancelled", cnCancelAt)
 }
 
+// TestRecordAppointmentChangeNotice_DisplacedWritesMarkerAndEmits is the
+// ADMIT path for a displacement: changeRef = the live .displacement.at on a
+// scheduled visit, the op writes displacedFor and emits the notice keyed
+// <apptKey>:displaced:<at>, whose params carry the covering range's from/to
+// beside the visit's times.
+func TestRecordAppointmentChangeNotice_DisplacedWritesMarkerAndEmits(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "cndisp", Instance: "cr-cndisp"})
+
+	apptKey := "vtx.appointment.CRcnDispHJKMNPQRSTUV"
+	cnSeedAppointment(t, ctx, conn, apptKey, true, cnScheduled(), cnSchedule("", ""))
+	cnSeedDisplacement(t, ctx, conn, apptKey, cnDisplaced())
+
+	env, reply := cnSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crcndisp0001", apptKey, "displaced", cnDisplacedAt, processor.OutcomeAccepted)
+	if reply.PrimaryKey != apptKey {
+		t.Fatalf("primaryKey = %q, want %q", reply.PrimaryKey, apptKey)
+	}
+	md, _ := crReadDoc(t, ctx, conn, apptKey+".changeNotice")["data"].(map[string]any)
+	if got, _ := md["displacedFor"].(string); got != cnDisplacedAt {
+		t.Fatalf("changeNotice displacedFor = %q, want %q", got, cnDisplacedAt)
+	}
+	if got, _ := md["sentAt"].(string); got != crSubmittedAnchor {
+		t.Fatalf("changeNotice sentAt = %q, want the op's submittedAt %q", got, crSubmittedAnchor)
+	}
+	for _, absent := range []string{"cancelledFor", "movedFor"} {
+		if _, has := md[absent]; has {
+			t.Fatalf("a first displaced notice must carry no %s; got %v", absent, md)
+		}
+	}
+	params := cnRequireNotice(t, ctx, conn, env.RequestID, apptKey, "displaced", cnDisplacedAt)
+	if got, _ := params["from"].(string); got != cnDisplacedFrom {
+		t.Fatalf("params.from = %q, want the covering range's %q (params: %v)", got, cnDisplacedFrom, params)
+	}
+	if got, _ := params["to"].(string); got != cnDisplacedTo {
+		t.Fatalf("params.to = %q, want the covering range's %q (params: %v)", got, cnDisplacedTo, params)
+	}
+}
+
+// TestRecordAppointmentChangeNotice_DisplacedCarriesOtherKinds — a move
+// notice and a cancel notice were recorded earlier (the visit was moved,
+// cancelled, then corrected back to scheduled) and the visit is now
+// displaced: the displaced notice sets displacedFor AND carries cancelledFor
+// and movedFor forward, as a bare update on the seeded marker. The converse:
+// a MOVE notice on a visit whose displaced notice went out carries
+// displacedFor.
+func TestRecordAppointmentChangeNotice_DisplacedCarriesOtherKinds(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "cndispcarry", Instance: "cr-cndispcarry"})
+
+	t.Run("displaced carries cancelledFor and movedFor", func(t *testing.T) {
+		apptKey := "vtx.appointment.CRcnDispCarHJKMNPQRS"
+		cnSeedAppointment(t, ctx, conn, apptKey, true, cnScheduled(), cnSchedule(cnMovedAt, "staff"))
+		cnSeedDisplacement(t, ctx, conn, apptKey, cnDisplaced())
+		cnSeedChangeNotice(t, ctx, conn, apptKey, map[string]any{"cancelledFor": cnCancelAt, "movedFor": cnMovedAt, "sentAt": "2025-12-21T09:30:05Z"})
+		seeded, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, apptKey+".changeNotice")
+		if err != nil {
+			t.Fatalf("read seeded marker: %v", err)
+		}
+
+		env, reply := cnSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crcndispcar01", apptKey, "displaced", cnDisplacedAt, processor.OutcomeAccepted)
+		md, _ := crReadDoc(t, ctx, conn, apptKey+".changeNotice")["data"].(map[string]any)
+		for field, want := range map[string]string{"displacedFor": cnDisplacedAt, "cancelledFor": cnCancelAt, "movedFor": cnMovedAt, "sentAt": crSubmittedAnchor} {
+			if got, _ := md[field].(string); got != want {
+				t.Fatalf("changeNotice %s = %q, want %q (data: %v)", field, got, want, md)
+			}
+		}
+		if rev := reply.Revisions[apptKey+".changeNotice"]; rev <= seeded.Revision {
+			t.Fatalf("changeNotice revision = %d, want > the seeded %d (an update over the existing marker)", rev, seeded.Revision)
+		}
+		cnRequireNotice(t, ctx, conn, env.RequestID, apptKey, "displaced", cnDisplacedAt)
+	})
+	t.Run("moved carries displacedFor", func(t *testing.T) {
+		apptKey := "vtx.appointment.CRcnMoveCarHJKMNPQRS"
+		cnSeedAppointment(t, ctx, conn, apptKey, true, cnScheduled(), cnSchedule(cnMovedAt, "staff"))
+		cnSeedChangeNotice(t, ctx, conn, apptKey, map[string]any{"displacedFor": cnDisplacedAt, "sentAt": "2025-12-22T08:00:05Z"})
+
+		env, _ := cnSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crcnmovecar01", apptKey, "moved", cnMovedAt, processor.OutcomeAccepted)
+		md, _ := crReadDoc(t, ctx, conn, apptKey+".changeNotice")["data"].(map[string]any)
+		for field, want := range map[string]string{"movedFor": cnMovedAt, "displacedFor": cnDisplacedAt} {
+			if got, _ := md[field].(string); got != want {
+				t.Fatalf("changeNotice %s = %q, want %q (a move notice must not erase the displaced notice; data: %v)", field, got, want, md)
+			}
+		}
+		cnRequireNotice(t, ctx, conn, env.RequestID, apptKey, "moved", cnMovedAt)
+	})
+}
+
+// TestRecordAppointmentChangeNotice_DisplacedStaleRefused — the row named a
+// displacement the live aspect no longer carries: reinstated (displaced:
+// false), displaced afresh (another at), carrying no at, or never evaluated
+// (no .displacement). Each is refused StaleChange, writes no marker and
+// sends nothing; a displaced visit that has since reached a terminal status
+// is refused InvalidState (the cancel notice alone is told).
+func TestRecordAppointmentChangeNotice_DisplacedStaleRefused(t *testing.T) {
+	ctx, conn := setupRemEnv(t)
+	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "cndispstale", Instance: "cr-cndispstale"})
+
+	for i, tc := range []struct {
+		name, changeRef, wantReason string
+		status                      map[string]any
+		displacement                map[string]any
+	}{
+		{"reinstated: displaced false", cnDisplacedAt, "StaleChange", cnScheduled(), map[string]any{"displaced": false, "checkedFor": "CRtimeOffRef2HJKMNPQ", "at": cnDisplacedAt}},
+		{"displaced afresh: at differs from changeRef", cnDisplacedAt, "StaleChange", cnScheduled(), map[string]any{"displaced": true, "at": "2025-12-23T08:00:02Z", "from": cnDisplacedFrom, "to": cnDisplacedTo}},
+		{"no at", cnDisplacedAt, "StaleChange", cnScheduled(), map[string]any{"displaced": true, "from": cnDisplacedFrom, "to": cnDisplacedTo}},
+		{"no .displacement", cnDisplacedAt, "StaleChange", cnScheduled(), nil},
+		{"terminal: cancelled", cnDisplacedAt, "InvalidState", cnStaffCancelled(), cnDisplaced()},
+		{"terminal: completed", cnDisplacedAt, "InvalidState", map[string]any{"value": "completed", "at": cnCancelAt, "by": "staff"}, cnDisplaced()},
+		{"terminal: noShow", cnDisplacedAt, "InvalidState", map[string]any{"value": "noShow", "at": cnCancelAt, "by": "sweep"}, cnDisplaced()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			suffix := string("ABCDEFGHJKMN"[i])
+			apptKey := "vtx.appointment.CRcnDs" + suffix + "HJKMNPQRSTUVW"
+			cnSeedAppointment(t, ctx, conn, apptKey, true, tc.status, cnSchedule("", ""))
+			if tc.displacement != nil {
+				cnSeedDisplacement(t, ctx, conn, apptKey, tc.displacement)
+			}
+			env, reply := cnSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, "crcndispst"+suffix, apptKey, "displaced", tc.changeRef, processor.OutcomeRejected)
+			cnRequireRefusal(t, ctx, conn, env, reply, apptKey, tc.wantReason)
+		})
+	}
+}
+
 // cnRequireRefusal pins a refusal by its named reason, and that no marker and
 // no outbox (no external.notification) were written for it.
 func cnRequireRefusal(t *testing.T, ctx context.Context, conn *substrate.Conn, env *processor.OperationEnvelope, reply *processor.OperationReply, apptKey, wantReason string) {
@@ -376,10 +529,10 @@ func TestRecordAppointmentChangeNotice_NonWeaverActorRefusedFirst(t *testing.T) 
 
 // TestRecordAppointmentChangeNotice_TombstonedAppointmentRefused proves the
 // liveness guard (vertex_alive): a TOMBSTONED appointment (present in KV,
-// isDeleted=true, with its .status / .schedule still carrying the change the
-// row named — so hydration succeeds and the guard, not a HydrationMiss, is
-// what fires) is refused UnknownAppointment, for both kinds, and writes no
-// dangling marker and sends nothing.
+// isDeleted=true, with its .status / .schedule / .displacement still carrying
+// the change the row named — so hydration succeeds and the guard, not a
+// HydrationMiss, is what fires) is refused UnknownAppointment, for all three
+// kinds, and writes no dangling marker and sends nothing.
 func TestRecordAppointmentChangeNotice_TombstonedAppointmentRefused(t *testing.T) {
 	ctx, conn := setupRemEnv(t)
 	cp, cons := testutil.CapabilityPipeline(t, ctx, conn, testutil.PipelineConfig{Durable: "cndead", Instance: "cr-cndead"})
@@ -387,9 +540,12 @@ func TestRecordAppointmentChangeNotice_TombstonedAppointmentRefused(t *testing.T
 	apptKey := "vtx.appointment.CRcnDeadHJKMNPQRSTUV"
 	cnSeedAppointment(t, ctx, conn, apptKey, false, cnStaffCancelled(), cnSchedule(cnMovedAt, "staff"))
 
+	cnSeedDisplacement(t, ctx, conn, apptKey, cnDisplaced())
+
 	for _, tc := range []struct{ kind, changeRef, label string }{
 		{"cancelled", cnCancelAt, "crcndead0001"},
 		{"moved", cnMovedAt, "crcndead0002"},
+		{"displaced", cnDisplacedAt, "crcndead0003"},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			env, reply := cnSubmit(t, ctx, conn, cp, cons, bootstrap.WeaverIdentityKey, tc.label, apptKey, tc.kind, tc.changeRef, processor.OutcomeRejected)
@@ -479,6 +635,14 @@ func TestRecordAppointmentChangeNotification_LandsAndOverwrites(t *testing.T) {
 		t.Fatalf("redelivered reply: outcome = %v, want Accepted (reply: %+v)", outcome, reply.Error)
 	}
 	cnRequireChangeNotification(t, ctx, conn, apptKey, "cancelled", cnCancelAt, "completed")
+
+	// The displaced notice's reply lands the same way — the kind the split
+	// admits includes it.
+	outcome, reply = cnSubmitReply(t, ctx, conn, cp, cons, "crcnnotif004", apptKey+":displaced:"+cnDisplacedAt, "completed", "notification sent")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("displaced reply: outcome = %v, want Accepted (reply: %+v)", outcome, reply.Error)
+	}
+	cnRequireChangeNotification(t, ctx, conn, apptKey, "displaced", cnDisplacedAt, "completed")
 }
 
 // TestRecordAppointmentChangeNotification_LandsOnTombstonedAppointment — the

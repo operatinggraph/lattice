@@ -38,8 +38,8 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // see TestPackage_EncounterAspectIsSensitiveAndCustodied — the one deliberate
 // exception this loop excludes and tests separately.
 func TestPackage_DDLs(t *testing.T) {
-	if got := len(Package.DDLs); got != 22 {
-		t.Fatalf("expected 22 DDLs, got %d", got)
+	if got := len(Package.DDLs); got != 23 {
+		t.Fatalf("expected 23 DDLs, got %d", got)
 	}
 
 	byName := map[string]pkgmgr.DDLSpec{}
@@ -50,7 +50,7 @@ func TestPackage_DDLs(t *testing.T) {
 	vertexCmds := map[string][]string{
 		"patient":              {"CreatePatient", "TombstonePatient", "BackfillPatientRegistration", "BindPatientIdentity", "UnbindPatientIdentity"},
 		"provider":             {"CreateProvider", "TombstoneProvider", "SetProviderProfile", "SetProviderHours", "SetProviderTimeOff", "BindProviderIdentity"},
-		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
+		"appointment":          {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "EvaluateAppointmentDisplacement", "BackfillAppointmentSite", "SetAppointmentSite", "RecordEncounter", "TombstoneAppointment"},
 		"clinicSite":           {"SetSiteProfile"},
 		"clinicSiteAssignment": {"AssignProviderSite", "RemoveProviderSite"},
 	}
@@ -84,6 +84,7 @@ func TestPackage_DDLs(t *testing.T) {
 		"providerProfile":           {"CreateProvider", "SetProviderProfile"},
 		"appointmentSchedule":       {"CreateAppointment", "RescheduleAppointment"},
 		"appointmentStatus":         {"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "RescheduleAppointment"},
+		"appointmentDisplacement":   {"CreateAppointment", "RescheduleAppointment", "EvaluateAppointmentDisplacement"},
 		"providerHours":             {"SetProviderHours"},
 		"providerTimeOff":           {"SetProviderTimeOff"},
 		"providerSlotClaim":         {"CreateAppointment", "RescheduleAppointment", "SetAppointmentStatus", "MarkPastDueNoShow", "TombstoneAppointment"},
@@ -286,6 +287,9 @@ func TestPackage_Permissions(t *testing.T) {
 		// Weaver-only auto no-show (clinic-reminders' pastDueAppointments target's
 		// only caller) — operator authority, the RecordAppointmentReminder idiom.
 		"MarkPastDueNoShow": operatorOnly(),
+		// Weaver-only displacement evaluation (clinic-reminders'
+		// appointmentDisplacements target's only caller) — the same idiom.
+		"EvaluateAppointmentDisplacement": operatorOnly(),
 		// Weaver-only site backfill (this package's own clinicSiteBackfill
 		// target's only caller) — operator authority, the MarkPastDueNoShow idiom.
 		"BackfillAppointmentSite": operatorOnly(),

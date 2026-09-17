@@ -132,6 +132,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"applicantOnboarding":            {narrow, "identity leaseapp meta task unit", modeLabel},
 	"applicantRosterRead":            {narrow, "building identity leaseapp unit", modeLabel},
 	"appointmentChangeNotices":       {narrow, "appointment patient", modeRelation},
+	"appointmentDisplacements":       {narrow, "appointment provider", modeRelation},
 	"appointmentReminders":           {narrow, "appointment patient provider", modeRelation},
 	"augurDispatchPending":           {narrow, "augurproposal", modeRelation},
 	"augurProposals":                 {narrow, "augurproposal", modeRelation},

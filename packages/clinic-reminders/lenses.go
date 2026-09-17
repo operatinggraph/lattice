@@ -32,10 +32,28 @@ const AppointmentChangeNoticesTarget = "appointmentChangeNotices"
 // TERMINAL_STATUSES is clinic-domain's (ddls.go): completed, cancelled, noShow.
 const nonTerminalAppointment = `(a.status.data.value <> 'completed') AND (a.status.data.value <> 'cancelled') AND (a.status.data.value <> 'noShow')`
 
+// notDisplacedAppointment is the "the provider's time-off does not cover this
+// visit, as last recorded" test, spliced into the two dispatch gates that
+// stand down for a displaced visit — appointmentReminders' missing_reminder
+// (a reminder for a visit the provider cannot attend) and pastDueAppointments'
+// missing_noshow_transition (a no-show the patient did not cause). It reads
+// the visit's own .displacement aspect (clinic-domain; written clear by the
+// booking writers and evaluated per time-off write by
+// EvaluateAppointmentDisplacement, dispatched from displacement.go). `=` on a
+// null operand is FALSE in this engine (nil-false), so a visit carrying no
+// .displacement reads `null = true` false → NOT false → the gate behaves
+// exactly as for a non-displaced visit. Neither lens splices it into
+// freshUntil: the @at still arms for a displaced visit, so a visit reinstated
+// by a time-off edit or a move is reminded on the lapse already recorded, and
+// the recorded end every sibling reads is still written.
+const notDisplacedAppointment = `NOT (a.displacement.data.displaced = true)`
+
 // Lenses returns the package's weaver-target convergence lenses: appointmentReminders
 // (the ~24h-ahead appointment reminder), appointmentChangeNotices (the
-// level-triggered desk-cancel / desk-move notice — changenotice.go owns the op;
-// the lens is below), followUpReminders (the at-the-date
+// level-triggered desk-cancel / desk-move / displaced notice — changenotice.go owns
+// the op; the lens is below), appointmentDisplacements (the level-triggered
+// re-check of every live visit against its provider's latest time-off write,
+// displacement.go), followUpReminders (the at-the-date
 // follow-up reminder, followups.go), visitSeriesDue (the recurring visit-series
 // gap, visitseries.go), visitSeriesSiteBackfill (the series'
 // missing atSite link, visitseries_site.go — the one gap here that is not
@@ -81,7 +99,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "appointment",
 				OutputKeyPattern: "appointmentChangeNotices.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_cancel_notice", "missing_move_notice", "entityKey", "patientKey", "status", "statusAt", "statusBy", "startsAt", "endsAt", "movedAt", "movedBy", "cancelledFor", "movedFor", "noticeSentAt"},
+				BodyColumns:      []string{"violating", "missing_cancel_notice", "missing_move_notice", "missing_displaced_notice", "entityKey", "patientKey", "status", "statusAt", "statusBy", "startsAt", "endsAt", "movedAt", "movedBy", "displaced", "displacedAt", "displacedFor", "cancelledFor", "movedFor", "noticeSentAt"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -91,6 +109,7 @@ func Lenses() []pkgmgr.LensSpec {
 		visitSeriesSiteBackfillLens(),
 		visitSeriesReadLens(),
 		pastDueAppointmentsLens(),
+		appointmentDisplacementsLens(),
 	}
 }
 
@@ -139,8 +158,8 @@ func Lenses() []pkgmgr.LensSpec {
 // the lapse is recorded on the spot (internal/weaver/temporal.go). Nulling a
 // past deadline here would arm nothing and the gap would never open at all.
 //
-// The four-term gate (remindedFor <> startsAt AND a recorded lapse at remindAt
-// AND a non-terminal status AND no recorded lapse at endsAt):
+// The five-term gate (remindedFor <> startsAt AND a recorded lapse at remindAt
+// AND a non-terminal status AND no recorded lapse at endsAt AND not displaced):
 //
 //   - remindedFor <> startsAt — NOT yet reminded for the CURRENT scheduled time.
 //     This single term subsumes never-reminded (no .reminder aspect → remindedFor
@@ -167,6 +186,14 @@ func Lenses() []pkgmgr.LensSpec {
 //     evidence the appointment ended. The nil-false lands on the right side —
 //     while nothing has fired, NOT(false) leaves the gap open, which is the
 //     default a not-yet-ended appointment needs.
+//   - notDisplacedAppointment — the provider's time-off does not cover the
+//     visit as last recorded (.displacement.displaced, clinic-domain). A
+//     displaced visit is not reminded: the provider cannot attend it, and the
+//     patient is told so once through appointmentChangeNotices instead. The
+//     term is on the two dispatch bools ONLY, never on freshUntil: the @at
+//     still arms and the lapse still records, so a visit reinstated (a
+//     time-off clear, or a move to a free slot) is reminded on the next
+//     projection off the lapse already recorded, with no timer to re-arm.
 //
 // Between startsAt and endsAt the gap therefore stays open and
 // RecordAppointmentReminder's own guard (time.rfc3339_utc(op.submittedAt) <
@@ -220,19 +247,21 @@ RETURN
   p.key AS patientKey,
   pr.key AS providerKey,
   CASE WHEN (a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt) AND NOT (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) THEN a.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_reminder,
-  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS violating`,
-	nonTerminalAppointment, PastDueAppointmentsTarget, AppointmentRemindersTarget)
+  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt) AND %[4]s) AS missing_reminder,
+  ((a.reminder.data.remindedFor <> a.schedule.data.startsAt) AND (a.freshnessExpiry.data.byTarget.%[3]s >= a.schedule.data.remindAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt) AND %[4]s) AS violating`,
+	nonTerminalAppointment, PastDueAppointmentsTarget, AppointmentRemindersTarget, notDisplacedAppointment)
 
 // appointmentChangeNoticesSpec is the one-row-per-appointment change-notice
 // convergence cypher: a patient whose visit the desk cancelled, or moved to a
-// new time, is told once per change. Unlike appointmentRemindersSpec it
-// projects NO freshUntil and arms NO timer — both gaps are level-triggered
-// states over recorded facts, not deadlines: a cancel is .status {value:
-// cancelled, by: staff, at}, a move is .schedule {movedAt, movedBy: staff},
-// both stamped by clinic-domain's writers at the transition. There is
-// nothing to wait for; the row is violating the moment the fact lands and
-// converged the moment the notice is recorded.
+// new time, or whose provider's time-off now covers it, is told once per
+// change. Unlike appointmentRemindersSpec it projects NO freshUntil and arms
+// NO timer — all three gaps are level-triggered states over recorded facts,
+// not deadlines: a cancel is .status {value: cancelled, by: staff, at}, a
+// move is .schedule {movedAt, movedBy: staff}, a displacement is
+// .displacement {displaced: true, at}, each stamped by clinic-domain's
+// writers at the transition. There is nothing to wait for; the row is
+// violating the moment the fact lands and converged the moment the notice is
+// recorded.
 //
 // The lifecycle for one appointment:
 //
@@ -251,6 +280,18 @@ RETURN
 //     changeRef: row.movedAt} writes movedFor = movedAt → closed. A SECOND
 //     move stamps a fresh movedAt that differs from the recorded movedFor →
 //     the gap reopens and a fresh notice (a fresh externalRef) goes out.
+//   - EvaluateAppointmentDisplacement (clinic-domain, dispatched by this
+//     package's appointmentDisplacements gap after a SetProviderTimeOff)
+//     records .displacement {displaced: true, at = op.submittedAt, from, to}
+//     when the provider's new ranges cover the visit. With no displacedFor,
+//     `null <> at` is true → missing_displaced_notice opens.
+//     RecordAppointmentChangeNotice{kind: displaced, changeRef: row.displacedAt}
+//     writes displacedFor = at → closed. A re-evaluation that leaves the
+//     visit displaced (the provider re-saves a still-covering time-off)
+//     CARRIES at, so the gap stays closed and the patient is not re-told; a
+//     reinstatement (displaced → false) closes it silently — the reminder
+//     resumes and says the visit stands — and a LATER displacement stamps a
+//     fresh at and is told again, once.
 //   - by = 'staff' / movedBy = 'staff': only the desk's change is told; a
 //     patient's own cancel or move (by/movedBy = patient) and the sweep's
 //     no-show (by = sweep) are not. staff covers every non-self writer —
@@ -277,11 +318,18 @@ RETURN
 //     whole seconds), so the second is not re-told; the op re-checks the
 //     LIVE .schedule before sending, so the one message carries the latest
 //     times. Accepted.
-//   - nonTerminalAppointment on the move gap only: a moved-then-cancelled
-//     visit gets the cancel notice alone (there is no future time to tell
-//     the patient about), and a completed / noShow visit is over. The cancel
-//     gap carries no status-list conjunct beyond `= 'cancelled'` — cancelled
-//     IS terminal, and it is the one terminal value the desk is told about.
+//   - nonTerminalAppointment on the move and displaced gaps only: a
+//     moved-then-cancelled or displaced-then-cancelled visit gets the cancel
+//     notice alone (there is no future time to tell the patient about), and
+//     a completed / noShow visit is over. A displaced-then-moved visit reads
+//     displaced = false from the move's own .displacement write and gets the
+//     move notice only. The cancel gap carries no status-list conjunct beyond
+//     `= 'cancelled'` — cancelled IS terminal, and it is the one terminal
+//     value the desk is told about.
+//   - displaced = true AND at <> null on the displaced gap: nil-false keeps a
+//     visit with no .displacement (or one recorded clear) silent, and an
+//     aspect carrying no at has no changeRef to dispatch, so it stays closed
+//     rather than opening a gap the op can only refuse.
 //   - NOT (a.freshnessExpiry.data.byTarget.pastDueAppointments >= endsAt) —
 //     the visit is OVER, a recorded fact from the sibling pastDueAppointments
 //     target's fired @at on this same appointment anchor (exactly the conjunct
@@ -296,14 +344,15 @@ RETURN
 // Every operand is stored graph data; the lens reads no clock. `<>` is the
 // engine's two-valued null test (null <> 'x' true, null <> null false), which
 // is what lets the absent-marker case open the gap and the absent-fact case
-// (no at, no movedAt) keep it closed. violating repeats both gap expressions
-// verbatim — the engine has no column references in RETURN.
+// (no at, no movedAt, no displacement) keep it closed. violating repeats the
+// three gap expressions verbatim — the engine has no column references in
+// RETURN.
 //
 // One-row-per-anchor: forPatient is 0..1 (CreateAppointment writes exactly
 // one), so the OPTIONAL walk does not fan out; it is INFORMATIONAL (no
-// Params binds patientKey). entityKey, statusAt and movedAt are load-bearing
-// for dispatch (the target's Params template off them); the rest is
-// observability. Built with fmt.Sprintf so the shared nonTerminalAppointment
+// Params binds patientKey). entityKey, statusAt, movedAt and displacedAt are
+// load-bearing for dispatch (the target's Params template off them); the
+// rest is observability. Built with fmt.Sprintf so the shared nonTerminalAppointment
 // fragment and the sibling target id come from their constants; the cypher
 // has no negated relationship pattern, only scalar NOT comparisons.
 var appointmentChangeNoticesSpec = fmt.Sprintf(`MATCH (a:appointment {key: $actorKey})
@@ -319,10 +368,14 @@ RETURN
   a.schedule.data.endsAt AS endsAt,
   a.schedule.data.movedAt AS movedAt,
   a.schedule.data.movedBy AS movedBy,
+  a.displacement.data.displaced AS displaced,
+  a.displacement.data.at AS displacedAt,
+  a.changeNotice.data.displacedFor AS displacedFor,
   a.changeNotice.data.cancelledFor AS cancelledFor,
   a.changeNotice.data.movedFor AS movedFor,
   a.changeNotice.data.sentAt AS noticeSentAt,
   ((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.status.data.at < a.schedule.data.endsAt) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_cancel_notice,
   ((a.schedule.data.movedAt <> null) AND (a.schedule.data.movedBy = 'staff') AND (a.changeNotice.data.movedFor <> a.schedule.data.movedAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_move_notice,
-  (((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.status.data.at < a.schedule.data.endsAt) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) OR ((a.schedule.data.movedAt <> null) AND (a.schedule.data.movedBy = 'staff') AND (a.changeNotice.data.movedFor <> a.schedule.data.movedAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt))) AS violating`,
+  ((a.displacement.data.displaced = true) AND (a.displacement.data.at <> null) AND (a.changeNotice.data.displacedFor <> a.displacement.data.at) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) AS missing_displaced_notice,
+  (((a.status.data.value = 'cancelled') AND (a.status.data.by = 'staff') AND (a.status.data.at <> null) AND (a.status.data.at < a.schedule.data.endsAt) AND (a.changeNotice.data.cancelledFor <> a.status.data.at) AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) OR ((a.schedule.data.movedAt <> null) AND (a.schedule.data.movedBy = 'staff') AND (a.changeNotice.data.movedFor <> a.schedule.data.movedAt) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt)) OR ((a.displacement.data.displaced = true) AND (a.displacement.data.at <> null) AND (a.changeNotice.data.displacedFor <> a.displacement.data.at) AND %[1]s AND NOT (a.freshnessExpiry.data.byTarget.%[2]s >= a.schedule.data.endsAt))) AS violating`,
 	nonTerminalAppointment, PastDueAppointmentsTarget)
