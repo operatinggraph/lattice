@@ -62,9 +62,15 @@ func bookingStatusData(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 
 // requirePromoted asserts a booking's .status now reads as a seated booking:
 // value booked, the given seat, NO waitlistSlot left behind (the two are
-// mutually exclusive by construction, ddls.go), and promotedAt stamped with
-// the promoting dispatch's own submittedAt — the instant CancelBooking's
-// late-cancel rule measures the window against for this booking.
+// mutually exclusive by construction, ddls.go), promotedAt stamped with the
+// promoting dispatch's own submittedAt — the instant CancelBooking's
+// late-cancel rule measures the window against for this booking — bookedAt
+// still the JoinWaitlist claim's own submittedAt (the joinWaitlist helper's
+// fixed 2026-07-07T12:00:00Z, carried by the promotion upsert, never
+// re-stamped), and priceCents snapshotted at this seating (a number: 0 on the
+// free classes these fixtures build — a waitlisted booking carries none until
+// it holds a seat; TestPromotion_SnapshotsPriceAtSeating pins the priced
+// case).
 func requirePromoted(t *testing.T, ctx context.Context, conn *substrate.Conn, bookingKey string, wantSeat int, wantPromotedAt string) {
 	t.Helper()
 	data := bookingStatusData(t, ctx, conn, bookingKey)
@@ -79,6 +85,12 @@ func requirePromoted(t *testing.T, ctx context.Context, conn *substrate.Conn, bo
 	}
 	if got, _ := data["promotedAt"].(string); got != wantPromotedAt {
 		t.Fatalf("%s .status.promotedAt = %q, want %q (the promoting op's submittedAt)", bookingKey, got, wantPromotedAt)
+	}
+	if got, _ := data["bookedAt"].(string); got != "2026-07-07T12:00:00Z" {
+		t.Fatalf("%s .status.bookedAt = %q, want the JoinWaitlist claim's submittedAt 2026-07-07T12:00:00Z carried forward by the promotion", bookingKey, got)
+	}
+	if _, isNumber := data["priceCents"].(float64); !isNumber {
+		t.Fatalf("%s .status.priceCents = %v, want the price snapshotted at seating (a number)", bookingKey, data["priceCents"])
 	}
 }
 

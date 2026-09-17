@@ -299,7 +299,17 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"them (name non-empty, capacity re-validated 1..200, priceCents/residentPriceCents re-validated >= 0 — " +
 			"the same bounds CreateSession enforces) and otherwise carried forward unchanged, OCC-conditioned on its " +
 			"current revision — a class no longer needs TombstoneSession + recreate (stranding every booking) just " +
-			"to add seats, fix a typo'd name, or reprice. " +
+			"to add seats, fix a typo'd name, or reprice. A capacity LOWER than the current one is refused " +
+			"CapacityBelowSeated when any seat cell in the removed range (new capacity+1 .. current capacity) is " +
+			"claimed — judged by the HIGHEST claimed seat index, not the seated count, because seat indexes are never " +
+			"compacted (seats 1 and 5 claimed on a class of five refuse a shrink to 3 even though two fit), and the " +
+			"refusal names that seat. The refusal is judged on the hydrated cells and is advisory against a " +
+			"concurrent claim: the op writes no seat cell, so a shrink to 4 racing a CreateBooking that claims seat5 " +
+			"both commit — that seat sits one above capacity, invisible to claim_free_seats (which walks " +
+			"1..capacity), released by its own cancellation, and the card's seated count reads one above capacity " +
+			"for that seat's life; nothing is orphaned. The shrink reads only the removed range (at most the delta, " +
+			"≤ 199 cells; a dispatcher declaring none of them, such as the lattice CLI, pays that delta as live " +
+			"reads — up to 199 for a 200→1 shrink); a raise reads no seat cell. " +
 			"Standing binder mirrors the union of CreateSession's and TombstoneSession's: the operator passes " +
 			"unconditionally; a non-operator caller supplying its own bound instructor (validated via ledBy + " +
 			"identifiedBy, same as TombstoneSession) may reassign/reschedule only a class THEY currently lead; " +
@@ -319,7 +329,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			`"name":{"type":"string","description":"The session's display name, e.g. Vinyasa Flow (CreateSession; required. ReassignSession; optional edit — non-empty when supplied, else carried forward unchanged)."},` +
 			`"startsAt":{"type":"string","description":"Session start, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with endsAt). Aligned to the 15-minute booking grid (:00/:15/:30/:45; SlotGridViolation otherwise)."},` +
 			`"endsAt":{"type":"string","description":"Session end, RFC3339 (CreateSession; required. ReassignSession; optional, must be paired with startsAt). Aligned to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong)."},` +
-			`"capacity":{"type":"integer","description":"Maximum concurrent bookings (CreateSession; required, 1..200). Bounds the seat-claim loop CreateBooking walks. ReassignSession; optional edit, re-validated 1..200, else carried forward unchanged."},` +
+			`"capacity":{"type":"integer","description":"Maximum concurrent bookings (CreateSession; required, 1..200). Bounds the seat-claim loop CreateBooking walks. ReassignSession; optional edit, re-validated 1..200, else carried forward unchanged; a shrink is refused CapacityBelowSeated when a seat above the new capacity is claimed (by the highest claimed seat index, since seats are never compacted)."},` +
 			`"priceCents":{"type":"integer","description":"Optional class price in integer cents (CreateSession; optional, must be >= 0 when supplied). 0 or omitted means a free class. Stored on the .schedule aspect; wellness-ledger's wellnessClassPriceSettlement lens reads it to auto-charge the booker's ledger account. ReassignSession; optional edit (re-validated >= 0), else carried forward unchanged."},` +
 			`"residentPriceCents":{"type":"integer","description":"Optional resident class price in integer cents (CreateSession; optional, must be >= 0 when supplied). Charged instead of priceCents to a booking whose .status.rate is resident; omitted means a resident pays priceCents same as a standard booker. Stored on the .schedule aspect. ReassignSession; optional edit (re-validated >= 0), else carried forward unchanged."},` +
 			`"instructor":{"type":"string","description":"Optional vtx.instructor.<NanoID> leading the session (CreateSession; validated alive + class=instructor; writes the ledBy link). Listed in ContextHint.Reads when supplied. On TombstoneSession/ReassignSession, required for an instructor (non-operator) caller acting on their OWN class — validated via ledBy + identifiedBy."},` +
@@ -336,7 +346,7 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 			"name":               "The session's display name (CreateSession; required. ReassignSession; optional edit — non-empty when supplied, else carried forward unchanged).",
 			"startsAt":           "Session start (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — moves the class, must be paired with endsAt). Must align to the 15-minute grid (SlotGridViolation).",
 			"endsAt":             "Session end (RFC3339, canonical UTC). Stored on the .schedule aspect (CreateSession; required. ReassignSession; optional — must be paired with startsAt). Must align to the 15-minute grid; span capped at 96 cells / 24h (SessionTooLong).",
-			"capacity":           "Maximum concurrent bookings, an integer 1..200 (CreateSession; required). Stored on the .schedule aspect; CreateBooking reads it to bound the seat-claim loop (SessionFull once exhausted). ReassignSession; optional edit, re-validated 1..200, else carried forward unchanged.",
+			"capacity":           "Maximum concurrent bookings, an integer 1..200 (CreateSession; required). Stored on the .schedule aspect; CreateBooking reads it to bound the seat-claim loop (SessionFull once exhausted). ReassignSession; optional edit, re-validated 1..200, else carried forward unchanged. A shrink below the current capacity is refused CapacityBelowSeated when any seat cell in the removed range is still claimed — judged by the HIGHEST claimed seat index, not the seated count (seat indexes are never compacted: seats 1 and 5 claimed on a class of five refuse a shrink to 3), and the refusal names that seat. A raise reads no seat cell.",
 			"priceCents":         "Optional class price in integer cents (CreateSession; must be >= 0 when supplied). Stored on the .schedule aspect; 0 or omitted means a free class. wellness-ledger's wellnessClassPriceSettlement lens reads it to auto-charge the booker's ledger account once one exists. ReassignSession; optional edit (re-validated >= 0), else carried forward unchanged, exactly like name/capacity.",
 			"residentPriceCents": "Optional resident class price in integer cents (CreateSession; must be >= 0 when supplied). Stored on the .schedule aspect; charged instead of priceCents to a booking whose .status.rate is resident. Omitted means a resident pays the same priceCents as a standard booker. ReassignSession; optional edit (re-validated >= 0), else carried forward unchanged, exactly like priceCents.",
 			"instructor":         "Optional full vtx.instructor.<NanoID> key leading the session. CreateSession validates it is alive + class=instructor and writes the ledBy link; MUST be listed in ContextHint.Reads when supplied. TombstoneSession's/ReassignSession's standing guard requires it (plus the caller's own identifiedBy binding to it) for a non-operator, instructor-role caller to act on their own class.",
@@ -446,6 +456,16 @@ func sessionVertexTypeDDL() pkgmgr.DDLSpec {
 					"needs TombstoneSession + recreate (which would strand every existing booking) just to add seats " +
 					"or fix a price. name/residentPriceCents/startsAt/endsAt/instructor/bookings/slot claims are " +
 					"untouched. Rejects InvalidArgument on capacity > 200 or a negative price. Returns primaryKey.",
+			},
+			{
+				Name:    "ReassignSession — shrink a class under a claimed seat",
+				Payload: map[string]any{"sessionKey": "vtx.session.<NanoID>", "studio": "vtx.studio.<NanoID>", "capacity": 3},
+				ExpectedOutcome: "On a class of five with seats 1 and 5 claimed: refused CapacityBelowSeated naming seat 5 " +
+					"(\"seat 5 is claimed; capacity cannot drop below 5\") — the removed range 4..5 is read from the top " +
+					"and the first claimed cell decides, so the rule is the highest claimed index, not the seated count " +
+					"(two members fit in three seats, but seat 5's holder would be orphaned; seats are never compacted). " +
+					"With seats 1 and 2 claimed instead, capacity 3 (and 2) is accepted and capacity 1 is refused naming " +
+					"seat 2. Nothing is written on a refusal.",
 			},
 			{
 				Name:    "ReassignSession — fix a typo'd class name",
@@ -917,14 +937,23 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"vtx.session.<s>.seat<n> for n in 1..capacity (SessionFull once every seat is claimed) — the SAME " +
 			"CreateOnly/expectedRevision write-path idiom studioSlotClaim uses, applied over an enumerated seat-" +
 			"index dimension instead of a time-cell dimension (Capability-KV §06). It then atomically mints the " +
-			"booking + the .status aspect {value: booked, rate, seat, className, classStartsAt} + the forSession " +
+			"booking + the .status aspect {value: booked, rate, seat, className, classStartsAt, bookedAt, priceCents} + the forSession " +
 			"link (booking→session) + the bookedBy link (booking→identity) — className/classStartsAt are a " +
 			"point-in-time snapshot of the session's own .schedule.name/.schedule.startsAt, taken here because the " +
-			"session can later be TombstoneSession'd (bookingStatusAspectTypeDDL above). JoinWaitlist shares every " +
+			"session can later be TombstoneSession'd (bookingStatusAspectTypeDDL above); bookedAt is the claim's own " +
+			"submittedAt; priceCents is the price this seat pays, snapshotted at the claim (residentPriceCents for a " +
+			"resident-rate booking on a class that declares one, else priceCents, else 0) so a later re-price never " +
+			"relabels what the seat is charged. Past-class guard (SessionInPast): on the self-service leg (the " +
+			"consumer scope=self grant, the validated target) the class must not have started — submittedAt before " +
+			".schedule.startsAt; on the desk leg (a staff or operator submission) a walk-in may be seated until the " +
+			"class ENDS — submittedAt before .schedule.endsAt — and is refused once it has ended, the refusal saying " +
+			"the class has ended. JoinWaitlist shares every " +
 			"one of those checks (factored into prepare_booking_common, ddls.go) but claims the SAME CreateOnly " +
 			"idiom over a SEPARATE vtx.session.<s>.wl<n> dimension instead (WaitlistFull once " +
 			"MAX_WAITLIST_SIZE=200 is exhausted) and mints .status {value: waitlisted, rate, waitlistSlot, " +
-			"className, classStartsAt} — a caller may hold at most one LIVE claim per " +
+			"className, classStartsAt, bookedAt} (no priceCents until seated) — its past-class guard is startsAt on " +
+			"EVERY leg, since a waitlist slot on a class already under way can never be promoted into (both promotion " +
+			"paths refuse SessionInPast past startsAt). A caller may hold at most one LIVE claim per " +
 			"session regardless of which state it is in, since both ops claim the identical sessionBookerClaim " +
 			"guard (DoubleBooked either way). Both refuse CreditHold when the booker's wellness-ledger account carries " +
 			"an arrears episode a reminder has gone out for (.arrears.sentAt present, class wellnessAccountArrears — " +
@@ -966,10 +995,12 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"no wellnessrefund marker is minted for it, so a settlesClassPrice charge that already posted stands " +
 			"unreversed — the same standing charge a no-show leaves — and a wellness.lateCancelForfeited event is " +
 			"emitted instead of wellness.classPriceRefundQueued. A booking that still owes stays: when the late " +
-			"window meets a positive effective class price for this booking (residentPriceCents for a resident-rate " +
-			"booking on a class that declares one, else priceCents — wellness-ledger's own settlement rule), the " +
+			"window meets a positive effective class price for this booking (the .status.priceCents snapshot taken " +
+			"at seating when present, else — a seat claimed before the snapshot existed — residentPriceCents for a " +
+			"resident-rate booking on a class that declares one, else priceCents — wellness-ledger's own settlement " +
+			"rule), the " +
 			"booking is NOT soft-deleted but kept live under the terminal status forfeited, carrying rate / booker / " +
-			"session / className / classStartsAt and no seat, so wellnessBookers keeps the guest reachable for the " +
+			"session / className / classStartsAt / promotedAt / bookedAt / priceCents and no seat, so wellnessBookers keeps the guest reachable for the " +
 			"desk that collects the standing charge; a free class (price absent or 0) has nothing to forfeit and " +
 			"is soft-deleted like an early cancel. Exactly on the two-hour mark forfeits (the same " +
 			"at-the-boundary-the-stricter-rule-wins inequality as SessionStarted). It forfeits the class price " +
@@ -981,7 +1012,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"CreateBooking inside the window is unchanged. A waitlisted booking is unaffected: it never carried a " +
 			"class-price charge to forfeit. " +
 			"SetBookingAttendance records who actually showed: it moves .status.value from booked to " +
-			"attended or noShow, carrying rate / seat / booker / session / className / classStartsAt forward " +
+			"attended or noShow, carrying rate / seat / booker / session / className / classStartsAt / promotedAt / bookedAt / priceCents forward " +
 			"unchanged (an OCC upsert on the aspect's own revision) — those fields now only matter for " +
 			"ReleaseOrphanedBooking (and, for className/classStartsAt, wellness-ledger's wellnessLedgerHistory " +
 			"lens), since a marked booking is " +
@@ -998,7 +1029,7 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"positive, wellness-ledger's wellnessNoShowSettlement lens reads it to post a DebitAccount charge " +
 			"against the booker's ledger account. It is re-markable — " +
 			"attended and noShow correct each other. noShowFeeCents itself is NOT in the carry-forward field set " +
-			"(only rate/seat/booker/session/className/classStartsAt are), so a re-mark to attended drops it — and, " +
+			"(only rate/seat/booker/session/className/classStartsAt/promotedAt/bookedAt/priceCents are), so a re-mark to attended drops it — and, " +
 			"if a no-show-fee charge already posted, reverses it too: the same settles-relation lookup " +
 			"ReleaseOrphanedBooking uses below mints a fresh wellnessrefund marker (memo \"No-show fee refund\"), " +
 			"guarded by an existing-reverses-link check so a later noShow<->attended cycle never double-credits. It also " +
@@ -1040,10 +1071,11 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 			"walk CancelBooking's promotion uses) and seats EVERY candidate the class has room for in ONE batch, " +
 			"lowest waitlistSlot first, into the free seat cells claim_free_seats reads — each promotion the exact " +
 			"CancelBooking footprint (seat cell claimed, .wl<n> released, .status OCC-upserted to booked with seat " +
-			"set and waitlistSlot dropped, wellness.waitlistPromoted emitted). All-in-one because Weaver holds a " +
+			"set, waitlistSlot dropped, promotedAt stamped and priceCents snapshotted at this seating, " +
+			"wellness.waitlistPromoted emitted). All-in-one because Weaver holds a " +
 			"dispatched gap for the lease: one seat per dispatch would seat one member per lease window on a class " +
-			"that just gained four. Rejects a class that has already begun (SessionInPast, the same inequality " +
-			"CreateBooking uses), declines NothingToPromote when a walk that reached the end of the session's " +
+			"that just gained four. Rejects a class that has already begun (SessionInPast, the same startsAt inequality " +
+			"CreateBooking's self-service leg uses), declines NothingToPromote when a walk that reached the end of the session's " +
 			"booking links finds no live waitlisted booking, or when no seat is free, and declines " +
 			"WaitlistWalkBound when the walk ran out of pages first, since an unfinished walk cannot say the " +
 			"waitlist is empty — a recorded decline in every case, never a silent empty commit. Dispatched by the " +
@@ -1063,23 +1095,35 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the operation wrote; vtx.session.<NanoID> for PromoteWaitlistedBookings, which writes across a whole class's waitlist rather than onto one booking."}}}`,
 		FieldDescription: map[string]string{
-			"session":        "Full vtx.session.<NanoID> key being booked or waitlisted. CreateBooking validates it is alive + class=session, reads its capacity, claims a free seat, and writes the forSession link; JoinWaitlist runs the identical validation but claims a waitlist slot instead — both now also store this key on the booking's own .status aspect (single anchor, not a relationship — the forSession link carries the relationship), the same idiom .status.booker already uses, so a later cleanup can find the session even after it is gone. CancelBooking also requires it (the booking's actual session, validated via the forSession link) to release the held seat. SetBookingAttendance requires it to resolve the class's start time and, for an instructor caller, the ledBy binding. PromoteWaitlistedBookings takes it ALONE: the class is the whole subject, since the condition it converges — free seats plus a live waitlist — is a fact about the class, not about any one booking, and naming a booking would be the queue-jump the op exists to prevent.",
+			"session":        "Full vtx.session.<NanoID> key being booked or waitlisted. CreateBooking validates it is alive + class=session, reads its capacity, claims a free seat, and writes the forSession link — refused SessionInPast once its .schedule.startsAt has passed on the self-service leg, and once its .schedule.endsAt has passed on the desk (staff/operator) leg, which may seat a walk-in while the class is under way; JoinWaitlist runs the identical validation but claims a waitlist slot instead and is refused SessionInPast past startsAt on every leg — both also store this key on the booking's own .status aspect (single anchor, not a relationship — the forSession link carries the relationship), the same idiom .status.booker already uses, so a later cleanup can find the session even after it is gone. CancelBooking also requires it (the booking's actual session, validated via the forSession link) to release the held seat. SetBookingAttendance requires it to resolve the class's start time and, for an instructor caller, the ledBy binding. PromoteWaitlistedBookings takes it ALONE: the class is the whole subject, since the condition it converges — free seats plus a live waitlist — is a fact about the class, not about any one booking, and naming a booking would be the queue-jump the op exists to prevent.",
 			"booker":         "Full vtx.identity.<NanoID> key of the person booking or waitlisting. CreateBooking / JoinWaitlist validate it is alive + class=identity and write the bookedBy link.",
 			"leaseAppKey":    "Optional full vtx.leaseapp.<NanoID> key the booker claims residency under (CreateBooking / JoinWaitlist). Verified via the lease's applicationFor link before granting rate=resident; a mismatch or absent lease silently falls back to rate=standard.",
 			"bookingId":      "Optional bare NanoID (no dots / key segments) for the new booking vertex. Absent → minted with nanoid.new().",
 			"bookingKey":     "Full vtx.booking.<NanoID> key of an existing booking to cancel (CancelBooking), record attendance on (SetBookingAttendance), or release (ReleaseOrphanedBooking, Weaver-dispatched only).",
 			"status":         "attended | noShow (SetBookingAttendance). Replaces .status.value; rate, seat and booker are carried forward unchanged.",
 			"instructor":     "Full vtx.instructor.<NanoID> key the caller claims to be. Required for a non-operator SetBookingAttendance caller: the script requires the caller's own identifiedBy binding to it AND the session's ledBy link to it, so a forged value only fails closed.",
-			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow). 0 is allowed and means no fee is charged — the automated pastDueBookings sweep sends this to signal a documentation lapse (nobody checked the member in) rather than a billable no-show, and the desk sends it to waive the fee; any other supplied value must be positive. When omitted the fee is resolved from the studio the session is at now: its .profile.noShowFeeCents policy when recorded (a policy of 0 bills nothing), else 2500 for a studio with no policy recorded. Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session/className/classStartsAt are).",
+			"noShowFeeCents": "Optional no-show fee in integer cents (SetBookingAttendance, only meaningful when status is noShow). 0 is allowed and means no fee is charged — the automated pastDueBookings sweep sends this to signal a documentation lapse (nobody checked the member in) rather than a billable no-show, and the desk sends it to waive the fee; any other supplied value must be positive. When omitted the fee is resolved from the studio the session is at now: its .profile.noShowFeeCents policy when recorded (a policy of 0 bills nothing), else 2500 for a studio with no policy recorded. Stored on the .status aspect; read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge. NOT carried forward on a later re-mark to attended (only rate/seat/booker/session/className/classStartsAt/promotedAt/bookedAt/priceCents are).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:    "CreateBooking — standard rate",
 				Payload: map[string]any{"session": "vtx.session.<NanoID>", "booker": "vtx.identity.<NanoID>"},
 				ExpectedOutcome: "Validates the session + booker are alive/typed, refuses CreditHold if the booker's wellness " +
-					"account carries a reminded arrears episode (.arrears.sentAt), claims the first free seat " +
+					"account carries a reminded arrears episode (.arrears.sentAt), refuses SessionInPast once the class has " +
+					"started (self-service leg) or ended (desk leg), claims the first free seat " +
 					"(SessionFull if none), and commits vtx.booking.<NanoID> (root {}) + .status {value: booked, " +
-					"rate: standard, seat, className, classStartsAt} + forSession + bookedBy links. Returns primaryKey.",
+					"rate: standard, seat, className, classStartsAt, bookedAt: the claim's submittedAt, priceCents: the " +
+					"class's price at this instant} + forSession + bookedBy links. Returns primaryKey.",
+			},
+			{
+				Name:    "CreateBooking — the desk seats a walk-in after the class has started",
+				Payload: map[string]any{"session": "vtx.session.<NanoID>", "booker": "vtx.identity.<NanoID>"},
+				ExpectedOutcome: "Submitted by front-of-house staff or an operator (never the consumer scope=self target) at " +
+					"09:10 on a class running 09:00–09:30: accepted — the desk leg admits until .schedule.endsAt — and " +
+					"committed exactly as above, .status.bookedAt = 09:10, so the roster can mark the walk-in attended at " +
+					"once and wellness-reminders never opens a reminder for a seat claimed after the class began. The same " +
+					"submission at 09:30 or later is refused SessionInPast (\"the class has ended\"); the same submission by " +
+					"the member themselves at 09:10 is refused SessionInPast (\"not in the future\").",
 			},
 			{
 				Name: "CreateBooking — resident rate",
@@ -1099,8 +1143,10 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 					"a reminded debtor may not queue for a seat either), but claims the first free " +
 					"vtx.session.<s>.wl<n> slot instead of a seat (WaitlistFull once MAX_WAITLIST_SIZE=200 is " +
 					"exhausted) and commits vtx.booking.<NanoID> (root {}) + .status {value: waitlisted, " +
-					"rate: standard, waitlistSlot, className, classStartsAt} + forSession + bookedBy links. Rejected DoubleBooked if the " +
-					"booker already holds a live booking OR waitlist slot on this session. Returns primaryKey.",
+					"rate: standard, waitlistSlot, className, classStartsAt, bookedAt} + forSession + bookedBy links (no " +
+					"priceCents until seated). Rejected DoubleBooked if the " +
+					"booker already holds a live booking OR waitlist slot on this session, and SessionInPast once the class " +
+					"has started, on every leg — the desk's until-endsAt admission is CreateBooking's alone. Returns primaryKey.",
 			},
 			{
 				Name:            "CancelBooking — release a seat",
@@ -1152,8 +1198,9 @@ func bookingVertexTypeDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Operator (Weaver) only. Walks the session's waitlist and its seat cells and " +
 					"promotes every live waitlisted booking the class has a free seat for, lowest waitlistSlot " +
 					"first, in ONE batch: per promotion a seat cell claimed, the booking's .wl<n> slot released, " +
-					"its .status OCC-upserted to {value: booked, seat, rate/booker/session/className/classStartsAt " +
-					"carried forward, waitlistSlot dropped}, and wellness.waitlistPromoted emitted. SessionInPast " +
+					"its .status OCC-upserted to {value: booked, seat, rate/booker/session/className/classStartsAt/bookedAt " +
+					"carried forward, waitlistSlot dropped, promotedAt: this dispatch's submittedAt, priceCents: the " +
+					"class's price at this seating}, and wellness.waitlistPromoted emitted. SessionInPast " +
 					"once the class has begun; NothingToPromote when the waitlist is empty or every seat is " +
 					"claimed; WaitlistWalkBound when the session carries more booking links than one walk " +
 					"covers. Returns primaryKey (the session).",
@@ -1305,7 +1352,7 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"charge against the booker's ledger account. Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"value":{"type":"string","enum":["booked","waitlisted","attended","noShow","forfeited"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"waitlistSlot":{"type":"integer"},"booker":{"type":"string"},"session":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"},"promotedAt":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
+			`{"value":{"type":"string","enum":["booked","waitlisted","attended","noShow","forfeited"]},"rate":{"type":"string","enum":["standard","resident"]},"seat":{"type":"integer"},"waitlistSlot":{"type":"integer"},"booker":{"type":"string"},"session":{"type":"string"},"className":{"type":"string"},"classStartsAt":{"type":"string"},"bookedAt":{"type":"string"},"priceCents":{"type":"number"},"promotedAt":{"type":"string"},"noShowFeeCents":{"type":"number"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":          "Booking status: booked at CreateBooking time, waitlisted at JoinWaitlist time; attended | noShow once SetBookingAttendance records who showed; forfeited when CancelBooking cancels a booked seat inside the late-cancel window (a seat handed from the waitlist inside that window — promotedAt at or after the cutoff — is exempt and is tombstoned with a refund instead) — the class price is forfeited, the seat is released, and the booking stays live under this terminal value carrying no seat (neither CancelBooking nor SetBookingAttendance accepts it afterwards); a waitlisted booking transitions straight to booked if CancelBooking or PromoteWaitlistedBookings promotes it (never through attended/noShow), promotedAt stamped.",
@@ -1316,28 +1363,30 @@ func bookingStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"session":        "The full vtx.session.<NanoID> key this booking is for (internal bookkeeping, the same single-anchor idiom as booker). The FAST PATH ReleaseOrphanedBooking reads to re-confirm the session's liveness after TombstoneSession has killed the vertex; when it is absent that op enumerates the forSession link instead, which is the source of truth — this field is not a relationship.",
 			"className":      "The session's .schedule.name at the moment this booking was created or waitlisted (a point-in-time snapshot, not a live relationship). Carried forward unchanged by CancelBooking's promotion upsert and SetBookingAttendance. wellness-ledger's wellnessLedgerHistory lens reads it so a member's billing history still names the class after TombstoneSession kills the session vertex.",
 			"classStartsAt":  "The session's .schedule.startsAt at the moment this booking was created or waitlisted, the same snapshot idiom as className, RFC3339 UTC. Carried forward and read by wellnessLedgerHistory alongside className.",
+			"bookedAt":       "The instant this booking's claim was made — CreateBooking's or JoinWaitlist's submittedAt, RFC3339 UTC — written at the claim and carried forward unchanged by every later writer (both promotion upserts, CancelBooking's forfeit upsert, SetBookingAttendance); never reset, gone with the booking's tombstone. wellness-reminders' wellnessBookingReminders lens reads it: a seat claimed at or after the class's startsAt (a walk-in the desk seated after the class began) is never reminded. The wellnessBookings lens projects it. Absent on a booking claimed before the stamp existed.",
+			"priceCents":     "The price this seat pays, in integer cents, snapshotted at the instant it was seated: by CreateBooking at its claim, by CancelBooking's promotion upsert or PromoteWaitlistedBookings at seating (a waitlisted booking carries none until it holds a seat). Resolved as the session's residentPriceCents when rate is resident and the schedule declares one, else the schedule's priceCents, else 0 — a seat booked free stays free. Carried forward unchanged by the forfeit upsert and the attendance mark. A class re-priced after the claim never changes it: wellness-ledger's wellnessClassPriceSettlement charges this first, CancelBooking's owes test reads it first, and the wellnessBookings lens projects it as the row's priceCents. Absent on a seat claimed before the snapshot existed, which falls back to the schedule's current price at each reader.",
 			"promotedAt":     "The instant a waitlisted booking was handed its seat — the promoting op's submittedAt, RFC3339 UTC — present only on a booking that CancelBooking or PromoteWaitlistedBookings promoted (never on a direct CreateBooking seat), carried forward unchanged by SetBookingAttendance and CancelBooking's forfeit upsert, and gone with the booking's tombstone. CancelBooking reads it to exempt a seat promoted at or after the two-hour cutoff from the late-cancel forfeit; the wellnessBookings lens projects it so the seating can be badged.",
 			"noShowFeeCents": "Optional no-show fee in integer cents, present only when value is noShow and the fee is positive (caller-supplied, else the studio's recorded .profile.noShowFeeCents policy, else a 2500 default for a studio with no policy). Read by wellness-ledger's wellnessNoShowSettlement lens to post a DebitAccount charge.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "booking status aspect — booked",
-				Payload:         map[string]any{"value": "booked", "rate": "resident", "seat": 3, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
-				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by CreateBooking.",
+				Payload:         map[string]any{"value": "booked", "rate": "resident", "seat": 3, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z", "bookedAt": "2026-07-07T12:00:00Z", "priceCents": 1000},
+				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by CreateBooking. bookedAt is the claim's submittedAt; priceCents is the resident price the class declared at that instant (1000, not its 1500 standard price) and stays 1000 however the class is re-priced afterwards.",
 			},
 			{
 				Name:            "booking status aspect — booked from the waitlist",
-				Payload:         map[string]any{"value": "booked", "rate": "standard", "seat": 1, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z", "promotedAt": "2026-07-08T07:57:00Z"},
-				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by CancelBooking's promotion upsert or PromoteWaitlistedBookings on a booking that was waitlisted. promotedAt is the promoting op's submittedAt; here it lands inside the two-hour window before the 09:00 start, so a CancelBooking on this booking before the class begins refunds rather than forfeits.",
+				Payload:         map[string]any{"value": "booked", "rate": "standard", "seat": 1, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z", "bookedAt": "2026-07-06T18:30:00Z", "promotedAt": "2026-07-08T07:57:00Z", "priceCents": 1500},
+				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by CancelBooking's promotion upsert or PromoteWaitlistedBookings on a booking that was waitlisted. bookedAt (the JoinWaitlist claim) is carried; promotedAt is the promoting op's submittedAt and priceCents is the class's price at that seating; here the promotion lands inside the two-hour window before the 09:00 start, so a CancelBooking on this booking before the class begins refunds rather than forfeits.",
 			},
 			{
 				Name:            "booking status aspect — waitlisted",
-				Payload:         map[string]any{"value": "waitlisted", "rate": "standard", "waitlistSlot": 2, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
-				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by JoinWaitlist. Flips to booked (seat set, waitlistSlot dropped) if CancelBooking's promotion walk later picks this booking.",
+				Payload:         map[string]any{"value": "waitlisted", "rate": "standard", "waitlistSlot": 2, "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z", "bookedAt": "2026-07-06T18:30:00Z"},
+				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by JoinWaitlist. No priceCents yet — a waitlisted booking pays nothing until it holds a seat. Flips to booked (seat set, waitlistSlot dropped, promotedAt stamped, priceCents snapshotted) if CancelBooking's promotion walk or PromoteWaitlistedBookings later picks this booking.",
 			},
 			{
 				Name:            "booking status aspect — forfeited",
-				Payload:         map[string]any{"value": "forfeited", "rate": "standard", "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z"},
+				Payload:         map[string]any{"value": "forfeited", "rate": "standard", "booker": "vtx.identity.MQsmTTAgNkngkdEjQz9L", "session": "vtx.session.QsmTTAgNkngkdEjQz9LM", "className": "Vinyasa Flow", "classStartsAt": "2026-07-08T09:00:00Z", "bookedAt": "2026-07-07T12:00:00Z", "priceCents": 1500},
 				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.status; written by CancelBooking on its own booking when the cancellation lands inside the late-cancel window. No seat (the cell is released or handed to the promoted waitlister), the class-price charge stands, and the booking stays live; terminal — CancelBooking and SetBookingAttendance both refuse it.",
 			},
 		},
@@ -4108,6 +4157,44 @@ def execute(state, op):
             for c in new_instr_cells:
                 mutations.append(claim_cell(new_instructor_final, slot_cellcode(c), "instructorSlotClaim", "InstructorConflict", "instructor"))
 
+        # A shrink is refused under a claimed seat. Seat cells are
+        # sessionSeatClaim aspects, alive while claimed and tombstoned on
+        # release (claim_free_seats), and a seat index is never compacted: a
+        # class of five with seats 1 and 5 claimed has TWO seated members and a
+        # highest claimed index of 5, so a capacity of 3 would orphan seat 5's
+        # holder even though the count fits. The refusal is therefore by the
+        # HIGHEST claimed index in the range the shrink would remove — the
+        # cells from new_capacity+1 up to the current capacity, walked from
+        # the top so the first live cell found is the one the message names —
+        # not by the seated count.
+        #
+        # The refusal is judged on the HYDRATED cells, and it is advisory
+        # against a concurrent claim: this op never writes a seat cell, and
+        # the commit is conditioned only on the keys it mutates (the
+        # schedule's own revision), so a shrink to 4 racing a CreateBooking
+        # that claims seat5 commits alongside it. That claim then sits one
+        # seat above capacity: invisible to claim_free_seats (which walks
+        # 1..capacity, so no later claim lands beside it), released by its
+        # own cancellation like any other seat, and counted by the card's
+        # seated count — which can read one above capacity for that seat's
+        # life. The window is accepted; nothing is orphaned by it.
+        #
+        # A raise reads nothing (there is nothing above the current capacity
+        # to check), and a shrink reads at most the delta, bounded by
+        # MAX_SESSION_CAPACITY (200). A dispatcher that declares none of the
+        # removed cells (the lattice CLI) pays that delta as live reads — up
+        # to 199 for a 200 -> 1 shrink.
+        cur_capacity = sched.data.get("capacity")
+        if new_capacity != None and cur_capacity != None and new_capacity < cur_capacity:
+            for n in range(cur_capacity, new_capacity, -1):
+                # read-posture: (d) declared optionalReads at ReassignSession
+                # dispatch — the seat cells between the new and the current
+                # capacity (cmd/wellness-app app.js reassignSession declares
+                # them on a shrink). An absent cell is a never-claimed seat.
+                seat_cell = kv.Read(sess_key + ".seat" + str(n))
+                if seat_cell != None and not seat_cell.isDeleted:
+                    fail("CapacityBelowSeated: seat " + str(n) + " is claimed; capacity cannot drop below " + str(n))
+
         # Re-derive remindAt = new_starts − 24h unconditionally: on a genuine
         # reschedule this moves the deadline (re-arming wellness-reminders'
         # gate, mirroring clinic-domain's RescheduleAppointment); when nothing
@@ -4484,6 +4571,7 @@ def collect_waitlist_candidates(session_key, max_pages):
                 "slot": slot,
                 "rate": cand_status.data.get("rate"),
                 "booker": cand_status.data.get("booker"),
+                "bookedAt": cand_status.data.get("bookedAt"),
                 "revision": cand_status.revision,
             })
         if cursor == None:
@@ -4503,9 +4591,25 @@ def find_promotion_candidate(session_key):
     # absorb — hence the soft page bound and the ignored end-of-walk flag.
     cands, _reached_end = collect_waitlist_candidates(session_key, MAX_WAITLIST_PROMOTION_PAGES)
     if len(cands) == 0:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     best = cands[0]
-    return best["key"], best["slot"], best["rate"], best["booker"], best["revision"]
+    return best["key"], best["slot"], best["rate"], best["booker"], best["revision"], best["bookedAt"]
+
+def promotion_status(rate, seat_n, booker, session, sched, starts_at, promoted_at, booked_at):
+    # The .status a promotion writes — CancelBooking's in-batch hand-over and
+    # PromoteWaitlistedBookings share it so the two seating paths can never
+    # drift: value booked, the seat, every field the waitlisted booking
+    # carried (rate, booker, session, className, classStartsAt, bookedAt),
+    # waitlistSlot dropped, promotedAt stamped with the promoting op's own
+    # submittedAt, and priceCents snapshotted at THIS instant by the rule
+    # CreateBooking applies at its own claim (effective_price_at_claim). A
+    # waitlisted booking carries no priceCents until it is seated. bookedAt
+    # is absent on a slot claimed before the stamp existed and is then
+    # simply not carried — never written as null.
+    promoted = {"value": "booked", "rate": rate, "seat": seat_n, "booker": booker, "session": session, "className": sched.data.get("name"), "classStartsAt": starts_at, "promotedAt": promoted_at, "priceCents": effective_price_at_claim(sched, rate)}
+    if booked_at != None:
+        promoted["bookedAt"] = booked_at
+    return promoted
 
 # --- workplace write confinement (facet-staff-worlds-design.md §3.5) ---------
 #
@@ -4906,16 +5010,39 @@ def require_no_credit_hold(booker_key):
     if sent_at != None:
         fail("CreditHold: this member owes a balance a reminder went out for on " + str(sent_at)[:10] + "; it must be paid or written off before a new class is booked")
 
-def prepare_booking_common(state, op, p):
+def effective_price_at_claim(sched, rate):
+    # The price a seat pays, resolved at the instant it is claimed: the
+    # session's residentPriceCents when the booking's rate is resident and
+    # the schedule declares one, else its priceCents, else 0 — the same
+    # resolution wellness-ledger's wellnessClassPriceSettlement charges by
+    # (wellness-ledger/lenses.go). It is SNAPSHOTTED onto .status.priceCents
+    # by every writer that seats a booking (CreateBooking, and both promotion
+    # upserts at seating time), so a class re-priced after the claim never
+    # relabels what the seat already paid: the ledger's settlement lens and
+    # the member's card both read the snapshot first. A class that carries
+    # no price at claim time snapshots 0 — a seat booked free stays free.
+    price = sched.data.get("priceCents")
+    if rate == "resident" and sched.data.get("residentPriceCents") != None:
+        price = sched.data.get("residentPriceCents")
+    if price == None:
+        return 0
+    return price
+
+def prepare_booking_common(state, op, p, ot):
     # Shared CreateBooking / JoinWaitlist validation + guard/rate computation
     # — both mint a booking vertex anchored to a session, differing only in
     # which claim dimension (seat vs waitlist slot) they occupy. Factored so
     # the self-scope check, workplace confinement, credit hold, past-class
     # guard, double-book guard and resident-rate lookup can never drift
-    # between the two entry points. Returns (session, sess_id, booker, booker_id, sched,
-    # rate, lease_key, booker_guard_mut) — capacity is deliberately NOT read
-    # here: only CreateBooking needs it (to bound claim_first_free_seat),
-    # JoinWaitlist's own claim dimension has no capacity ceiling.
+    # between the two entry points. ot names the calling op: the past-class
+    # guard below is the one rule the two ops apply differently, and it
+    # answers off ot rather than off anything a payload could carry. Returns
+    # (session, sess_id, booker, booker_id, sched, rate, lease_key,
+    # booker_guard_mut, booker_cell_muts, submitted) — submitted is the
+    # canonical-UTC op.submittedAt both ops record as .status.bookedAt.
+    # Capacity is deliberately NOT read here: only CreateBooking needs it (to
+    # bound claim_first_free_seat), JoinWaitlist's own claim dimension has no
+    # capacity ceiling.
     session = required_string(p, "session")
     _, sess_id = parts_of(session, "session", "session")
     require_live_typed(state, session, "session", "session")
@@ -4967,19 +5094,36 @@ def prepare_booking_common(state, op, p):
         fail("InvalidState: " + session + ".schedule is missing; cannot book")
 
     # Soft past-time guard (Capability-KV §06 — the op's own Starlark logic),
-    # mirroring clinic-domain's enforce_future: the session MUST start strictly
-    # after op.submittedAt, so a booking on an already-started or already-ended
-    # class is rejected. submittedAt is caller-supplied (the host clock is not
-    # exposed to Starlark), so this is a soft guard appropriate to the trusted
-    # single-identity model. Normalize submittedAt to canonical whole-second
-    # UTC (time.rfc3339_utc — pure, no clock read); startsAt is already stored
-    # canonical UTC (sessionSchedule), and canonical-UTC RFC3339 compares
-    # lexically == chronologically.
+    # mirroring clinic-domain's enforce_future. submittedAt is caller-supplied
+    # (the host clock is not exposed to Starlark), so this is a soft guard
+    # appropriate to the trusted single-identity model. Normalize submittedAt
+    # to canonical whole-second UTC (time.rfc3339_utc — pure, no clock read);
+    # startsAt / endsAt are already stored canonical UTC (sessionSchedule),
+    # and canonical-UTC RFC3339 compares lexically == chronologically.
+    #
+    # The deadline depends on WHO is booking and WHAT they are claiming. The
+    # self-service leg (op.authTargetValidated — the consumer scope=self
+    # grant, the only validated path) must claim before the class starts: a
+    # member cannot book themselves into a class already under way. The desk
+    # leg (a staff or operator submission, never target-validated) seating a
+    # walk-in at the door may CreateBooking until the class ENDS — the person
+    # is standing there, the seat is used, the charge and the attendance mark
+    # follow — and is refused once it has ended, with a message that says so.
+    # JoinWaitlist keeps the startsAt rule on every leg: a waitlist slot on a
+    # class already under way can never be promoted into (both promotion
+    # paths refuse SessionInPast past startsAt), so it is pointless whoever
+    # asks for it.
     starts_at = sched.data.get("startsAt")
     if starts_at == None:
         fail("InvalidState: " + session + ".schedule.startsAt is missing; cannot book")
+    ends_at = sched.data.get("endsAt")
+    if ends_at == None:
+        fail("InvalidState: " + session + ".schedule.endsAt is missing; cannot book")
     submitted = time.rfc3339_utc(op.submittedAt)
-    if not (submitted < starts_at):
+    if ot == "CreateBooking" and not op.authTargetValidated:
+        if not (submitted < ends_at):
+            fail("SessionInPast: session " + session + " ended at " + str(ends_at) + ", the class has ended (submitted " + submitted + ")")
+    elif not (submitted < starts_at):
         fail("SessionInPast: session " + session + " starts at " + str(starts_at) + ", not in the future (submitted " + submitted + ")")
 
     # Booker slot-claim (patientSlotClaim mirror, verticals.md): the
@@ -4990,9 +5134,6 @@ def prepare_booking_common(state, op, p):
     # 15-minute grid cell on the booker's OWN identity hub closes that gap;
     # the collision (BookerConflict) is what a probe found ("booked the same
     # member into both").
-    ends_at = sched.data.get("endsAt")
-    if ends_at == None:
-        fail("InvalidState: " + session + ".schedule.endsAt is missing; cannot book")
     booker_cell_muts = []
     for c in slot_cells(starts_at, ends_at):
         booker_cell_muts.append(claim_cell(booker, slot_cellcode(c), "bookerSlotClaim", "BookerConflict", "booker"))
@@ -5043,7 +5184,7 @@ def prepare_booking_common(state, op, p):
         if lease_alive and tenancy_present and link_live:
             rate = "resident"
 
-    return session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts
+    return session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts, submitted
 
 def execute(state, op):
     ot = op.operationType
@@ -5056,7 +5197,7 @@ def execute(state, op):
         # only validated one, and that compare binds the target to
         # payload.booker, the field that decides whose booking this is, so an
         # exempted caller is booking for itself.
-        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts = prepare_booking_common(state, op, p)
+        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts, submitted = prepare_booking_common(state, op, p, ot)
 
         capacity = sched.data.get("capacity")
         if capacity == None:
@@ -5071,7 +5212,7 @@ def execute(state, op):
 
         mutations = [
             make_vtx(book_key, "booking", {}),
-            make_aspect(book_key, "status", "bookingStatus", {"value": "booked", "rate": rate, "seat": seat_n, "booker": booker, "session": session, "className": sched.data.get("name"), "classStartsAt": sched.data.get("startsAt")}),
+            make_aspect(book_key, "status", "bookingStatus", {"value": "booked", "rate": rate, "seat": seat_n, "booker": booker, "session": session, "className": sched.data.get("name"), "classStartsAt": sched.data.get("startsAt"), "bookedAt": submitted, "priceCents": effective_price_at_claim(sched, rate)}),
             make_link(for_session_lnk, book_key, session, "forSession", "forSession", {}),
             make_link(booked_by_lnk, book_key, booker, "bookedBy", "bookedBy", {}),
             seat_mutation,
@@ -5093,7 +5234,7 @@ def execute(state, op):
         # above -- the consumer scope=self path is the only validated one,
         # and that compare binds the target to payload.booker, the field
         # that decides whose waitlist slot this is.
-        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts = prepare_booking_common(state, op, p)
+        session, sess_id, booker, booker_id, sched, rate, lease_key, booker_guard_mut, booker_cell_muts, submitted = prepare_booking_common(state, op, p, ot)
 
         slot_n, slot_mutation = claim_first_free_waitlist_slot(session)
 
@@ -5105,7 +5246,7 @@ def execute(state, op):
 
         mutations = [
             make_vtx(book_key, "booking", {}),
-            make_aspect(book_key, "status", "bookingStatus", {"value": "waitlisted", "rate": rate, "waitlistSlot": slot_n, "booker": booker, "session": session, "className": sched.data.get("name"), "classStartsAt": sched.data.get("startsAt")}),
+            make_aspect(book_key, "status", "bookingStatus", {"value": "waitlisted", "rate": rate, "waitlistSlot": slot_n, "booker": booker, "session": session, "className": sched.data.get("name"), "classStartsAt": sched.data.get("startsAt"), "bookedAt": submitted}),
             make_link(for_session_lnk, book_key, session, "forSession", "forSession", {}),
             make_link(booked_by_lnk, book_key, booker, "bookedBy", "bookedBy", {}),
             slot_mutation,
@@ -5262,7 +5403,7 @@ def execute(state, op):
             # the seat-claim aspect is a pure existence marker with no owner
             # field, so reassigning ownership is just flipping the winning
             # booking's own .status.
-            promo_book_key, promo_slot, promo_rate, promo_booker, promo_revision = find_promotion_candidate(session)
+            promo_book_key, promo_slot, promo_rate, promo_booker, promo_revision, promo_booked_at = find_promotion_candidate(session)
 
             # A booking that still owes stays. Inside the late window the
             # class price is forfeited (the refund branch below mints
@@ -5281,25 +5422,27 @@ def execute(state, op):
             # "Still owes" is the late window AND a positive class price for
             # THIS booking. The price is the one wellness-ledger's
             # wellnessClassPriceSettlement charges (wellness-ledger/lenses.go):
-            # residentPriceCents when the booking's rate is resident and the
-            # schedule declares one, else priceCents; absent or 0 means the
-            # class charges this booker nothing, so a late cancel of a free
-            # seat has nothing to forfeit and is tombstoned like an early one
-            # — the member's app warns of a forfeit only on a priced class,
-            # and no card should say "class price forfeited" where none was.
-            # A charge that already posted is owed regardless of what the
-            # schedule says now (the class may have been re-priced since).
+            # the .status.priceCents snapshot the seating writer recorded at
+            # claim time when present, else — for a seat claimed before the
+            # snapshot existed — the schedule's current price by the same
+            # rate rule (effective_price_at_claim); 0 means the class charges
+            # this booker nothing, so a late cancel of a free seat has nothing
+            # to forfeit and is tombstoned like an early one — the member's
+            # app warns of a forfeit only on a priced class, and no card
+            # should say "class price forfeited" where none was. A charge
+            # that already posted is owed regardless of what either says now.
             # Outside the window nothing is owed either, so the booking is
-            # tombstoned outright. promotedAt rides along with the other
-            # carried fields: how the seat was obtained stays on the record
-            # for as long as the booking lives.
-            effective_price = sched.data.get("priceCents")
-            if status.data.get("rate") == "resident" and sched.data.get("residentPriceCents") != None:
-                effective_price = sched.data.get("residentPriceCents")
-            owes_class_price = (effective_price != None and effective_price > 0) or has_live_charge
+            # tombstoned outright. promotedAt, bookedAt and priceCents ride
+            # along with the other carried fields: how and when the seat was
+            # obtained, and what it paid, stay on the record for as long as
+            # the booking lives.
+            effective_price = status.data.get("priceCents")
+            if effective_price == None:
+                effective_price = effective_price_at_claim(sched, status.data.get("rate"))
+            owes_class_price = effective_price > 0 or has_live_charge
             if is_late_cancel and owes_class_price:
                 forfeited = {"value": "forfeited"}
-                for field in ["rate", "booker", "session", "className", "classStartsAt", "promotedAt"]:
+                for field in ["rate", "booker", "session", "className", "classStartsAt", "promotedAt", "bookedAt", "priceCents"]:
                     carried = status.data.get(field)
                     if carried != None:
                         forfeited[field] = carried
@@ -5310,11 +5453,16 @@ def execute(state, op):
             # promotedAt records the instant the seat was handed over, in the
             # same canonical UTC form as submitted: it is what the late-cancel
             # rule above reads when THIS promoted booking later cancels, and
-            # what the member's app badges the seating with.
+            # what the member's app badges the seating with. priceCents is
+            # snapshotted HERE, at seating, by the same rule CreateBooking
+            # applies (effective_price_at_claim): a waitlisted booking pays
+            # nothing until it holds a seat, and what it pays is the price at
+            # the instant it got one. bookedAt (the instant the waitlist was
+            # joined) rides along unchanged.
             if promo_book_key != None:
                 mutations.append(make_tombstone(session + ".wl" + str(promo_slot)))
                 mutations.append(make_aspect_upsert_occ(promo_book_key, "status", "bookingStatus",
-                    {"value": "booked", "rate": promo_rate, "seat": seat_n, "booker": promo_booker, "session": session, "className": sched.data.get("name"), "classStartsAt": starts_at, "promotedAt": submitted},
+                    promotion_status(promo_rate, seat_n, promo_booker, session, sched, starts_at, submitted, promo_booked_at),
                     promo_revision))
                 events.append({"class": "wellness.waitlistPromoted", "data": {"bookingKey": promo_book_key, "session": session, "seat": seat_n}})
             else:
@@ -5562,7 +5710,7 @@ def execute(state, op):
             fail("InvalidState: " + book_key + " is forfeited, its seat was released at cancellation; nothing to record attendance for")
 
         merged = {"value": value}
-        for field in ["rate", "seat", "booker", "session", "className", "classStartsAt", "promotedAt"]:
+        for field in ["rate", "seat", "booker", "session", "className", "classStartsAt", "promotedAt", "bookedAt", "priceCents"]:
             carried = status.data.get(field)
             if carried != None:
                 merged[field] = carried
@@ -6053,20 +6201,22 @@ def execute(state, op):
         for i in range(promo_take):
             cand = promo_cands[i]
             seat_n = promo_seats[i][0]
-            # The promotion write is CancelBooking's block: claim the seat
-            # cell, release the candidate's own .wl<n> slot, and OCC-upsert its
-            # .status from waitlisted to booked -- seat set, waitlistSlot
-            # dropped, every other field (rate, booker, session, className,
-            # classStartsAt) carried forward, and promotedAt stamped with this
-            # dispatch's own submittedAt (the instant CancelBooking's late-cancel
-            # rule measures the window against when this booking later
-            # cancels). The OCC revision is the one the candidate walk read, so
-            # a booking that cancelled or was promoted between the walk and the
-            # commit loses the batch rather than being seated twice.
+            # The promotion write is CancelBooking's block (promotion_status):
+            # claim the seat cell, release the candidate's own .wl<n> slot, and
+            # OCC-upsert its .status from waitlisted to booked -- seat set,
+            # waitlistSlot dropped, every other field (rate, booker, session,
+            # className, classStartsAt, bookedAt) carried forward, promotedAt
+            # stamped with this dispatch's own submittedAt (the instant
+            # CancelBooking's late-cancel rule measures the window against
+            # when this booking later cancels), and priceCents snapshotted at
+            # this seating. The OCC revision is the one the candidate walk
+            # read, so a booking that cancelled or was promoted between the
+            # walk and the commit loses the batch rather than being seated
+            # twice.
             mutations.append(promo_seats[i][1])
             mutations.append(make_tombstone(session + ".wl" + str(cand["slot"])))
             mutations.append(make_aspect_upsert_occ(cand["key"], "status", "bookingStatus",
-                {"value": "booked", "rate": cand["rate"], "seat": seat_n, "booker": cand["booker"], "session": session, "className": promo_sched.data.get("name"), "classStartsAt": promo_starts_at, "promotedAt": promo_submitted},
+                promotion_status(cand["rate"], seat_n, cand["booker"], session, promo_sched, promo_starts_at, promo_submitted, cand["bookedAt"]),
                 cand["revision"]))
             events.append({"class": "wellness.waitlistPromoted", "data": {"bookingKey": cand["key"], "session": session, "seat": seat_n}})
 

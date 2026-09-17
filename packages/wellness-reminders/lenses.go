@@ -136,6 +136,23 @@ func Lenses() []pkgmgr.LensSpec {
 // function (reconciler.go:568, :792, :1237). So the standing ISSUE is bounded
 // by the class, and the DISPATCHES are bounded by the budget.
 //
+// A seat claimed AFTER the class began is never reminded. The desk may seat a
+// walk-in at the door until the class ends (wellness-domain's CreateBooking
+// admits a staff or operator submission until .schedule.endsAt), and that
+// booking's remindAt is a day in the past at the instant it is written: with
+// no such term the row would arm an already-overdue @at, the fire would open
+// missing_reminder, RecordBookingReminder would refuse ClassAlreadyStarted
+// on every dispatch, and the retry budget would leave a GapBudgetExhausted
+// warning standing until the class ended — all for a member who is already
+// in the room. So freshUntil and both gap columns carry
+// NOT (b.status.data.bookedAt >= se.schedule.data.startsAt): bookedAt is the
+// claim stamp CreateBooking/JoinWaitlist write on .status and every later
+// writer carries (wellness-domain ddls.go), and a claim at or after the start
+// arms nothing and opens nothing. The comparison is two-valued like every
+// other here — `null >= x` is false, so a legacy seat that carries no
+// bookedAt reads NOT(false) and keeps today's behaviour, reminded exactly as
+// before the stamp existed.
+//
 // Both booking lenses gate on status = 'booked', so — unlike the appointment
 // pair, which must agree on a terminal-status EXCLUSION list — the coupling here
 // is an equality on one value and cannot drift apart into a status this lens
@@ -166,9 +183,9 @@ RETURN
   b.reminder.data.remindedFor AS remindedFor,
   b.status.data.value AS status,
   id.key AS bookerKey,
-  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt) AND NOT (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_reminder,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS violating`,
+  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt) AND NOT (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
+  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_reminder,
+  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS violating`,
 	PastDueBookingsTarget, WellnessBookingRemindersTarget)
 
 // wellnessBookingChangeNoticesSpec is the one-row-per-booking change-notice

@@ -25,13 +25,16 @@ func mapGetter(rows map[string]any) kvGetter {
 	}
 }
 
-// TestComputeBookings_ResidentRateChargesResidentPrice proves a resident-rate
-// booking's row carries the session's residentPriceCents, not priceCents — the
-// "never seen" half of verticals.md's "a wellness class's resident price can
-// be charged but never set or seen": before this, My Classes always showed
-// the standard price even for a booking the settlement lens actually charges
-// at the resident rate.
-func TestComputeBookings_ResidentRateChargesResidentPrice(t *testing.T) {
+// TestComputeBookings_PriceCentsIsTheLensEffectiveColumn proves the row's
+// PriceCents is exactly the wellnessBookings projection's own priceCents — the
+// lens's one effective column (the seat's .status.priceCents snapshot, else
+// the session's current price by the booking's rate,
+// packages/wellness-domain/lenses.go) — and that computeBookings applies no
+// resident override of its own on top of it. A row still carrying a stray
+// residentPriceCents field (an older projection shape) must not change the
+// answer: the resolution lives in the lens, so My Classes and the ledger's
+// charge read the same number.
+func TestComputeBookings_PriceCentsIsTheLensEffectiveColumn(t *testing.T) {
 	get := mapGetter(map[string]any{
 		"vtx.booking.b1": map[string]any{
 			"bookingKey":         "vtx.booking.b1",
@@ -39,57 +42,38 @@ func TestComputeBookings_ResidentRateChargesResidentPrice(t *testing.T) {
 			"rate":               "resident",
 			"sessionKey":         "vtx.session.s1",
 			"sessionName":        "Vinyasa Flow",
-			"priceCents":         1500.0,
-			"residentPriceCents": 1000.0,
+			"priceCents":         1000.0,
+			"residentPriceCents": 900.0,
 			"bookerKey":          "vtx.identity.alice",
 		},
-	})
-	rows := computeBookings([]string{"vtx.booking.b1"}, get, "", "")
-	require.Len(t, rows, 1)
-	require.Equal(t, int64(1000), rows[0].PriceCents, "a resident-rate booking must show the resident price, not the standard price")
-}
-
-// TestComputeBookings_StandardRateChargesStandardPrice proves a standard-rate
-// booking is unaffected by a session's residentPriceCents — the sibling case
-// to the resident-rate proof above.
-func TestComputeBookings_StandardRateChargesStandardPrice(t *testing.T) {
-	get := mapGetter(map[string]any{
 		"vtx.booking.b2": map[string]any{
-			"bookingKey":         "vtx.booking.b2",
-			"status":             "booked",
-			"rate":               "standard",
-			"sessionKey":         "vtx.session.s1",
-			"sessionName":        "Vinyasa Flow",
-			"priceCents":         1500.0,
-			"residentPriceCents": 1000.0,
-			"bookerKey":          "vtx.identity.bob",
+			"bookingKey":  "vtx.booking.b2",
+			"status":      "booked",
+			"rate":        "standard",
+			"sessionKey":  "vtx.session.s1",
+			"sessionName": "Vinyasa Flow",
+			"priceCents":  1500.0,
+			"bookerKey":   "vtx.identity.bob",
 		},
-	})
-	rows := computeBookings([]string{"vtx.booking.b2"}, get, "", "")
-	require.Len(t, rows, 1)
-	require.Equal(t, int64(1500), rows[0].PriceCents, "a standard-rate booking must not accidentally receive the resident discount")
-}
-
-// TestComputeBookings_ResidentRateNoOverrideFallsBackToStandard proves a
-// resident-rate booking on a session with no residentPriceCents falls back to
-// the standard price — mirrors wellnessClassPriceSettlement's own CASE WHEN
-// fallback (packages/wellness-ledger/lenses.go), so My Classes never diverges
-// from what the member is actually charged.
-func TestComputeBookings_ResidentRateNoOverrideFallsBackToStandard(t *testing.T) {
-	get := mapGetter(map[string]any{
 		"vtx.booking.b3": map[string]any{
 			"bookingKey":  "vtx.booking.b3",
 			"status":      "booked",
-			"rate":        "resident",
-			"sessionKey":  "vtx.session.s2",
-			"sessionName": "Power Vinyasa",
-			"priceCents":  1800.0,
+			"rate":        "standard",
+			"sessionKey":  "vtx.session.s1",
+			"sessionName": "Vinyasa Flow",
+			"priceCents":  0.0,
 			"bookerKey":   "vtx.identity.carol",
 		},
 	})
-	rows := computeBookings([]string{"vtx.booking.b3"}, get, "", "")
-	require.Len(t, rows, 1)
-	require.Equal(t, int64(1800), rows[0].PriceCents)
+	rows := computeBookings([]string{"vtx.booking.b1", "vtx.booking.b2", "vtx.booking.b3"}, get, "", "")
+	require.Len(t, rows, 3)
+	byKey := map[string]bookingRow{}
+	for _, r := range rows {
+		byKey[r.BookingKey] = r
+	}
+	require.Equal(t, int64(1000), byKey["vtx.booking.b1"].PriceCents, "a resident-rate row shows the lens's priceCents as-is; no app-side override")
+	require.Equal(t, int64(1500), byKey["vtx.booking.b2"].PriceCents)
+	require.Equal(t, int64(0), byKey["vtx.booking.b3"].PriceCents, "a seat booked free is free")
 }
 
 // TestComputeBookings_ReminderSentAtThreadsThroughUnchanged proves the row's

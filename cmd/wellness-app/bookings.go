@@ -24,14 +24,15 @@ type bookingProjection struct {
 	SessionName  string   `json:"sessionName"`
 	StartsAt     string   `json:"startsAt"`
 	EndsAt       string   `json:"endsAt"`
-	PriceCents   *float64 `json:"priceCents"`
-	// ResidentPriceCents is read here only to resolve computeBookings' single
-	// effective PriceCents on the row it emits (Rate == "resident" charges
-	// this instead, mirroring wellness-ledger's wellnessClassPriceSettlement
-	// CASE WHEN) — it is not itself part of bookingRow's JSON shape.
-	ResidentPriceCents *float64 `json:"residentPriceCents"`
-	StudioKey          string   `json:"studioKey"`
-	StudioName         string   `json:"studioName"`
+	// PriceCents is the price THIS SEAT pays — the lens's one effective
+	// column: the .status.priceCents snapshot taken at seating when present,
+	// else the session's current price by the booking's rate (resident
+	// price for a resident-rate seat on a class that declares one). The
+	// resident resolution lives in the lens, not here, so the card and the
+	// ledger's charge read the same number.
+	PriceCents *float64 `json:"priceCents"`
+	StudioKey  string   `json:"studioKey"`
+	StudioName string   `json:"studioName"`
 	// MissingStudio mirrors sessionProjection's own column (sessions.go): the
 	// booking's session lost its studio to a TombstoneStudio call after the
 	// booking was made.
@@ -114,14 +115,6 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 		var priceCents int64
 		if p.PriceCents != nil {
 			priceCents = int64(*p.PriceCents)
-		}
-		// A resident-rate booking is charged ResidentPriceCents instead, when
-		// the session declares one — same fallback as an absent
-		// ResidentPriceCents (standard price), mirroring
-		// wellnessClassPriceSettlement's CASE WHEN exactly, so My Classes shows
-		// the price the member will actually be charged, not the sticker price.
-		if p.Rate == "resident" && p.ResidentPriceCents != nil {
-			priceCents = int64(*p.ResidentPriceCents)
 		}
 		rows = append(rows, bookingRow{
 			BookingKey:         p.BookingKey,

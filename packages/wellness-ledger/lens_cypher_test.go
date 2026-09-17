@@ -421,6 +421,37 @@ func TestWellnessClassPriceSettlement_StandardRateWithResidentPrice_ChargedStand
 	require.Equal(t, 1500.0, v["priceCents"], "a standard booking is unaffected by a session's residentPriceCents — must not accidentally receive the discount")
 }
 
+// TestWellnessClassPriceSettlement_SnapshotWinsOverCurrentPrice pins the
+// charge on the seat's own .status.priceCents snapshot — the price
+// wellness-domain recorded at the instant the seat was claimed — so a class
+// re-priced between the claim and the charge never changes what is charged;
+// a snapshot of 0 (a seat booked while the class was free) charges nothing
+// even once the class is priced; and a seat claimed before the snapshot
+// existed falls back to the session's current price by the rate rule.
+func TestWellnessClassPriceSettlement_SnapshotWinsOverCurrentPrice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWlFixture(t)
+	f.mkResidentPricedBooking(t, "snapbkg", 1400.0, 1200.0, "resident")
+	f.aspect(t, "snapbkg", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "resident", "priceCents": 1000.0})
+	f.mkResidentPricedBooking(t, "freesnapbkg", 1400.0, nil, "standard")
+	f.aspect(t, "freesnapbkg", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "standard", "priceCents": 0.0})
+	f.mkResidentPricedBooking(t, "legacybkg", 1400.0, 1200.0, "resident")
+
+	v := f.projectClassPriceAt(t, "snapbkg")[0].Values
+	require.Equal(t, 1000.0, v["priceCents"], "the seat's snapshot is charged, not the class's since-repriced 1200 resident price")
+	require.Equal(t, true, v["missing_account"])
+
+	v = f.projectClassPriceAt(t, "freesnapbkg")[0].Values
+	require.Equal(t, 0.0, v["priceCents"], "a seat booked free stays free however the class is priced later")
+	require.Equal(t, false, v["missing_account"])
+	require.Equal(t, false, v["violating"])
+
+	v = f.projectClassPriceAt(t, "legacybkg")[0].Values
+	require.Equal(t, 1200.0, v["priceCents"], "no snapshot — the session's current price by the rate rule")
+}
+
 // TestWellnessClassPriceSettlement_NoShowSettlesLinkDoesNotConverge proves
 // the two settlement gaps are genuinely independent: a `settles` link (the
 // no-show fee's relation) does NOT satisfy classPriceSettlementSpec's

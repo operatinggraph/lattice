@@ -422,15 +422,22 @@ RETURN
 //     transaction and vice versa), so once posted the gap converges and
 //     stays converged.
 //
-//   - `priceCents` — the EFFECTIVE price this booking owes, not the session's
-//     raw priceCents: a booking whose own .status.rate is "resident" charges
-//     the session's residentPriceCents when the session declares one, else
-//     falls back to priceCents exactly like a standard booking (verticals.md
-//     "a verified resident is charged the same class price as a walk-in" —
-//     CreateBooking stamps rate at booking time; the session's
-//     residentPriceCents is CreateSession/ReassignSession-owned, see
-//     wellness-domain/ddls.go). The CASE WHEN idiom mirrors
-//     orchestration-base's unroutedTasksSpec (lenses.go).
+//   - `priceCents` — the EFFECTIVE price this booking owes: FIRST the
+//     booking's own .status.priceCents, the snapshot wellness-domain's
+//     seating writers record at the instant the seat is claimed (CreateBooking
+//     at its claim, either promotion upsert at seating — ddls.go), so a class
+//     re-priced between the claim and this charge never changes what is
+//     charged; ELSE — a seat claimed before the snapshot existed — the
+//     session's current price by the same rate rule: a booking whose own
+//     .status.rate is "resident" charges the session's residentPriceCents when
+//     the session declares one, else falls back to priceCents exactly like a
+//     standard booking (verticals.md "a verified resident is charged the same
+//     class price as a walk-in" — CreateBooking stamps rate at booking time;
+//     the session's residentPriceCents is CreateSession/ReassignSession-owned,
+//     see wellness-domain/ddls.go). coalesce takes the first non-null
+//     argument, so a snapshot of 0 (a seat booked while the class was free)
+//     is honoured as 0 and never falls through to a later price. The CASE
+//     WHEN idiom mirrors orchestration-base's unroutedTasksSpec (lenses.go).
 //
 // Once missing_account converges (WellnessCreateAccount writes the identity's
 // .wellnessLedgerAccount guard aspect), the next lens tick reads the now-real
@@ -456,7 +463,7 @@ OPTIONAL MATCH (bk)<-[:settlesClassPrice]-(tx:wellnesstransaction)
 WITH
   bk.key AS entityKey,
   bk.status.data.value AS status,
-  (CASE WHEN (bk.status.data.rate = 'resident') AND (se.schedule.data.residentPriceCents <> null) THEN se.schedule.data.residentPriceCents ELSE se.schedule.data.priceCents END) AS priceCents,
+  coalesce(bk.status.data.priceCents, (CASE WHEN (bk.status.data.rate = 'resident') AND (se.schedule.data.residentPriceCents <> null) THEN se.schedule.data.residentPriceCents ELSE se.schedule.data.priceCents END)) AS priceCents,
   se.schedule.data.name AS sessionName,
   id.key AS identityKey,
   a.key AS accountKey,

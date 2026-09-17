@@ -505,6 +505,22 @@ RETURN
 // mirrors CancelBooking's late-cancel exemption off it (a seat promoted at or
 // after the two-hour cutoff cancels free until the class begins).
 //
+// bookedAt is .status's claim stamp — the CreateBooking / JoinWaitlist
+// submittedAt, carried by every later writer — null on a booking claimed
+// before the stamp existed.
+//
+// priceCents is the price THIS SEAT pays, one effective column: the
+// .status.priceCents snapshot the seating writer recorded (CreateBooking at
+// its claim, either promotion upsert at seating — the price the ledger's
+// wellnessClassPriceSettlement charges) when present, else — a seat claimed
+// before the snapshot existed, or a still-waitlisted booking, which carries
+// none — the session's CURRENT price by the same rate rule (residentPriceCents
+// for a resident-rate booking on a class that declares one, else priceCents).
+// A class re-priced after the claim therefore never relabels a seated
+// booking's card; cmd/wellness-app renders this column as-is
+// (bookings.go). The session's own residentPriceCents is not projected here:
+// nothing reads it off a booking row once the effective price is one column.
+//
 // changeNoticeSentAt / movedFor read the booking's own .changeNotice aspect —
 // the same cross-package aspect-read pattern reminderSentAt above uses,
 // against a marker written by wellness-reminders' own booking-change-notice
@@ -526,14 +542,14 @@ RETURN
   se.schedule.data.name AS sessionName,
   se.schedule.data.startsAt AS startsAt,
   se.schedule.data.endsAt AS endsAt,
-  se.schedule.data.priceCents AS priceCents,
-  se.schedule.data.residentPriceCents AS residentPriceCents,
+  coalesce(b.status.data.priceCents, (CASE WHEN (b.status.data.rate = 'resident') AND (se.schedule.data.residentPriceCents <> null) THEN se.schedule.data.residentPriceCents ELSE se.schedule.data.priceCents END)) AS priceCents,
   s.key AS studioKey,
   s.profile.data.name AS studioName,
   ((se.key <> null) AND (s.key = null)) AS missingStudio,
   id.key AS bookerKey,
   b.reminder.data.sentAt AS reminderSentAt,
   b.status.data.promotedAt AS promotedAt,
+  b.status.data.bookedAt AS bookedAt,
   b.changeNotice.data.sentAt AS changeNoticeSentAt,
   b.changeNotice.data.movedFor AS movedFor`
 

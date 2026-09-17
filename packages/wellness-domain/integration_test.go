@@ -1760,6 +1760,17 @@ func reassignSessionEnv(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	newStudio, _ := payload["newStudio"].(string)
 	newInstructor, _ := payload["newInstructor"].(string)
 	clearInstructor, _ := payload["clearInstructor"].(bool)
+	// A shrink declares the seat cells it would remove (new capacity+1 .. the
+	// current capacity), the (d)-declared optionalReads app.js's
+	// reassignSession sends on a shrink so the script can refuse
+	// CapacityBelowSeated on a claimed one; a raise declares none.
+	if newCapacity, ok := payload["capacity"].(int); ok {
+		curSched := readDoc(t, ctx, conn, sessionKey+".schedule")
+		curData, _ := curSched["data"].(map[string]any)
+		if curCapacity, _ := curData["capacity"].(float64); newCapacity < int(curCapacity) {
+			optionalReads = append(optionalReads, wdSeatKeys(sessionKey, int(curCapacity))[newCapacity:]...)
+		}
+	}
 	if newStudio != "" {
 		reads = append(reads, newStudio)
 		// make_link_create_or_revive's own idempotency read on the NEW

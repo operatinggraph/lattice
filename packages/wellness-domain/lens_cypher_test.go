@@ -392,32 +392,62 @@ func TestWellnessBookings_JoinsSessionAndBooker(t *testing.T) {
 	require.Equal(t, bookerKey, v["bookerKey"])
 }
 
-// TestWellnessBookings_ProjectsPriceCents proves priceCents is projected off
-// the joined session's .schedule aspect, same as sessionName/startsAt/endsAt.
+// TestWellnessBookings_ProjectsPriceCents proves priceCents is the ONE
+// effective column: the seat's own .status.priceCents snapshot when present
+// (a seated booking, priced at its claim — a class re-priced since never
+// relabels it, and a snapshot of 0 is honoured as 0, never a fall-through),
+// else — a seat claimed before the snapshot existed, or a booking still
+// waitlisted, which carries none — the session's CURRENT price by the
+// booking's rate: residentPriceCents for a resident-rate booking on a class
+// that declares one, priceCents otherwise. cmd/wellness-app renders the
+// column as-is (bookings.go); the ledger's wellnessClassPriceSettlement
+// charges by the same rule.
 func TestWellnessBookings_ProjectsPriceCents(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
 	f := newWdFixture(t)
-	f.vtx(t, "booking2", "booking")
-	f.vtx(t, "priced2", "session")
-	f.aspect(t, "priced2", "schedule", "sessionSchedule", map[string]any{
-		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0, "priceCents": 1500.0,
+	f.vtx(t, "repriced", "session")
+	f.aspect(t, "repriced", "schedule", "sessionSchedule", map[string]any{
+		"name": "Vinyasa Flow", "startsAt": "2026-07-08T09:00:00Z", "endsAt": "2026-07-08T09:30:00Z", "capacity": 20.0,
+		"priceCents": 1400.0, "residentPriceCents": 1200.0,
 	})
-	f.aspect(t, "booking2", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0})
-	f.edge(t, "forSession", "booking2", "priced2")
+	cases := []struct {
+		name   string
+		status map[string]any
+		want   any
+	}{
+		{"snapshot wins over the current price", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0, "priceCents": 1000.0}, 1000.0},
+		{"a snapshot of 0 is a free seat, not a fall-through", map[string]any{"value": "booked", "rate": "standard", "seat": 2.0, "priceCents": 0.0}, 0.0},
+		{"legacy standard seat reads the current price", map[string]any{"value": "booked", "rate": "standard", "seat": 3.0}, 1400.0},
+		{"legacy resident seat reads the current resident price", map[string]any{"value": "booked", "rate": "resident", "seat": 4.0}, 1200.0},
+		{"a waitlisted booking carries no snapshot and reads the current price", map[string]any{"value": "waitlisted", "rate": "resident", "waitlistSlot": 1.0}, 1200.0},
+	}
+	keys := make([]string, len(cases))
+	for i, tc := range cases {
+		name := "pricebk" + string(rune('a'+i))
+		keys[i] = f.vtx(t, name, "booking")
+		f.aspect(t, name, "status", "bookingStatus", tc.status)
+		f.edge(t, "forSession", name, "repriced")
+	}
 
 	rows := f.project(t, wellnessBookingsSpec)
-	require.Len(t, rows, 1)
-	require.Equal(t, 1500.0, rows[0].Values["priceCents"])
+	require.Len(t, rows, len(cases))
+	byKey := map[string]ruleengine.ProjectionResult{}
+	for _, r := range rows {
+		byKey[r.Values["key"].(string)] = r
+	}
+	for i, tc := range cases {
+		require.Equal(t, tc.want, byKey[keys[i]].Values["priceCents"], tc.name)
+	}
 }
 
-// TestWellnessBookings_ProjectsResidentPriceCents proves residentPriceCents
-// is projected off the joined session's .schedule aspect too — cmd/wellness-app's
-// computeBookings resolves this against the booking's own rate to show the
-// member the price they'll actually be charged (bookings.go), the same
-// resolution wellnessClassPriceSettlement's CASE WHEN performs server-side.
-func TestWellnessBookings_ProjectsResidentPriceCents(t *testing.T) {
+// TestWellnessBookings_ResidentPriceCentsIsNotAColumn proves the session's
+// residentPriceCents is not a column of a booking row: the resident
+// resolution happens inside priceCents (above), and nothing reads the raw
+// override off a booking — a client that did would be second-guessing the
+// one effective column.
+func TestWellnessBookings_ResidentPriceCentsIsNotAColumn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")
 	}
@@ -433,7 +463,34 @@ func TestWellnessBookings_ProjectsResidentPriceCents(t *testing.T) {
 
 	rows := f.project(t, wellnessBookingsSpec)
 	require.Len(t, rows, 1)
-	require.Equal(t, 1000.0, rows[0].Values["residentPriceCents"])
+	_, projected := rows[0].Values["residentPriceCents"]
+	require.False(t, projected, "residentPriceCents is folded into the effective priceCents column")
+	require.Equal(t, 1000.0, rows[0].Values["priceCents"])
+}
+
+// TestWellnessBookings_ProjectsBookedAt proves bookedAt reads the booking's
+// own .status claim stamp (CreateBooking / JoinWaitlist's submittedAt,
+// carried by every later writer, ddls.go) and is null on a booking claimed
+// before the stamp existed.
+func TestWellnessBookings_ProjectsBookedAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newWdFixture(t)
+	stampedKey := f.vtx(t, "stamped1", "booking")
+	f.aspect(t, "stamped1", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "standard", "seat": 1.0, "bookedAt": "2026-07-08T09:10:00Z"})
+
+	legacyKey := f.vtx(t, "legacy1", "booking")
+	f.aspect(t, "legacy1", "status", "bookingStatus", map[string]any{"value": "booked", "rate": "standard", "seat": 2.0})
+
+	rows := f.project(t, wellnessBookingsSpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]ruleengine.ProjectionResult{}
+	for _, r := range rows {
+		byKey[r.Values["key"].(string)] = r
+	}
+	require.Equal(t, "2026-07-08T09:10:00Z", byKey[stampedKey].Values["bookedAt"])
+	require.Nil(t, byKey[legacyKey].Values["bookedAt"])
 }
 
 // TestWellnessBookings_ProjectsReminderSentAt proves reminderSentAt reads

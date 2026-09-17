@@ -1146,6 +1146,22 @@ func TestCancelBooking_LateCancelPromotesWaitlisterAndKeepsForfeitedBooking(t *t
 	if _, hasStamp := forfeited["promotedAt"]; hasStamp {
 		t.Fatalf("cancelled booking status.promotedAt = %v, want absent — a direct CreateBooking seat was never promoted", forfeited["promotedAt"])
 	}
+	// The claim stamp and the price snapshot outlive the forfeit: both are
+	// carried by the forfeit upsert (createBooking's submittedAt, the 1500
+	// the class charged at the claim). The promoted booking keeps its own
+	// JoinWaitlist claim stamp and gains its price snapshot at THIS seating.
+	if got, _ := forfeited["bookedAt"].(string); got != "2026-07-07T12:00:00Z" {
+		t.Fatalf("forfeited booking status.bookedAt = %q, want the CreateBooking claim's submittedAt carried forward", got)
+	}
+	if got, _ := forfeited["priceCents"].(float64); got != 1500 {
+		t.Fatalf("forfeited booking status.priceCents = %v, want the 1500 snapshot carried forward", forfeited["priceCents"])
+	}
+	if got, _ := promoted["bookedAt"].(string); got != "2026-07-07T12:00:00Z" {
+		t.Fatalf("promoted booking status.bookedAt = %q, want the JoinWaitlist claim's submittedAt carried forward", got)
+	}
+	if got, _ := promoted["priceCents"].(float64); got != 1500 {
+		t.Fatalf("promoted booking status.priceCents = %v, want 1500 snapshotted at seating", promoted["priceCents"])
+	}
 	if keyExists(t, ctx, conn, sessionKey+".wl1") {
 		t.Fatalf("wl1 must be released once the waitlisted booking is promoted")
 	}
@@ -1650,5 +1666,14 @@ func TestSetBookingAttendance_CarriesPromotedAtForward(t *testing.T) {
 	}
 	if got, _ := after["promotedAt"].(string); got != "2026-07-08T07:57:00Z" {
 		t.Fatalf("status.promotedAt = %q after marking, want 2026-07-08T07:57:00Z carried forward", got)
+	}
+	// The claim stamp and the price snapshot ride the same carry-forward
+	// loop: written at the claim (createBooking's submittedAt; the 1500 the
+	// class charged then), untouched by the mark.
+	if got, _ := after["bookedAt"].(string); got != "2026-07-07T12:00:00Z" {
+		t.Fatalf("status.bookedAt = %q after marking, want the claim's submittedAt carried forward", got)
+	}
+	if got, _ := after["priceCents"].(float64); got != 1500 {
+		t.Fatalf("status.priceCents = %v after marking, want the 1500 snapshot carried forward", after["priceCents"])
 	}
 }
