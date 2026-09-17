@@ -47,9 +47,11 @@ import (
 // one Core-KV point-read per traversed edge. A lens acquiring `data` is a lens
 // whose read surface grew, and this is where that shows up.
 var corpusRelBindings = map[string]string{
+	"leaseApplicationComplete":      "res:residesIn[key]",
 	"objectAttachments":             "r:*[data type]",
 	"objectIdentityAttachmentsRead": "r:*[data type]",
 	"supersededBackgroundChecks":    "own:instanceOf[key]",
+	"tenancyEnd":                    "res:residesIn[key]",
 }
 
 // corpusRelBindingVerdicts derives the verdict for every executable cypher the
@@ -119,9 +121,11 @@ func TestCorpusRelBindings_BindingLensesAreTheKnownPopulation(t *testing.T) {
 	}
 	sort.Strings(binders)
 	require.Equal(t, []string{
+		"leaseApplicationComplete",
 		"objectAttachments",
 		"objectIdentityAttachmentsRead",
 		"supersededBackgroundChecks",
+		"tenancyEnd",
 	}, binders,
 		"the population of lenses that bind a relationship variable has changed. A lens joining this list "+
 			"projects off a relationship — price what it reads (a `data` read is a point-read per "+

@@ -16,9 +16,13 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Architectural rules (binding — same known-key discipline as location-domain /
 // service-domain):
 //
-//   - The script reads ONLY by known key. No prefix scans, no adjacency
-//     lookups, no lens-output reads. Each wire op validates its link endpoints
-//     by reading each by the key the caller lists in ContextHint.Reads.
+//   - The script reads by known key. No prefix scans, no lens-output reads.
+//     Each wire op validates its link endpoints by reading each by the key
+//     the caller lists in ContextHint.Reads. The one adjacency read is
+//     WireResidesIn's bounded `# read-posture: (e)` walk over the identity's
+//     own residesIn links (RESIDES_IN_MAX_PAGES pages of
+//     RESIDES_IN_PAGE_LIMIT), which serves the link's state whenever the
+//     snapshot does not carry the link key.
 //   - Endpoint validation is AT THE OP (not the lens's untyped match):
 //     residesIn and worksAt targets MUST be keyed with an admitted location
 //     type segment (unit / building / property — the key is the authority, not
@@ -54,13 +58,39 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //   - the Unwire* ops: the deterministic link key (computed from the endpoints
 //     by the caller — see the key shapes above).
 //
-// Every Wire* op ADDITIONALLY requires its deterministic link key in
-// ContextHint.OptionalReads (Contract #2 §2.5) — optional, not required,
-// because a first wire legitimately finds it absent. It is what lets the
-// script tell a tombstoned link apart from an absent one and revive the
-// former with an update; a caller that omits it can wire a link once and,
-// after an Unwire*, never re-wire it (the script would emit a create against
-// a key that already exists at a later revision → RevisionConflict).
+// Every WireResidesIn dispatcher ALSO declares the walk the script runs, in
+// ContextHint.Enumerations: `{hub: <identity>, relation: residesIn, direction:
+// out}` (Contract #2 §2.5.1) — the seeds included, because a first wire always
+// walks (below).
+//
+// Every Wire* op reads its deterministic link key from ContextHint.OptionalReads
+// (Contract #2 §2.5) — optional, not required, because a first wire
+// legitimately finds it absent. A snapshot that carries the key shows the
+// script the link's state directly (alive → no-op, tombstoned → revive with an
+// update). For WireWorksAt / WireAvailableAt / WireUnavailableAt /
+// WirePermitsOperation the declaration is what tells a tombstoned link apart
+// from an absent one: a caller that omits it can wire a link once and, after an
+// Unwire*, never re-wire it (the script would emit a create against a key that
+// already exists at a later revision → RevisionConflict). WireResidesIn does
+// not depend on the declaration: whenever its snapshot lacks the link key — the
+// key undeclared, or declared and absent (a known-absent optional read is never
+// in the snapshot) — it walks the identity's own residesIn links, paged to a
+// bound, and finds the same three states there, reviving a tombstone pinned to
+// the page entry's revision. So a first wire always walks (normally one page,
+// limit+1 budget units) and only a declared re-wire of an existing or
+// tombstoned link is answered by the snapshot alone. The walk is bounded at
+// RESIDES_IN_MAX_PAGES × RESIDES_IN_PAGE_LIMIT subjects; past that it falls
+// back to the create, which is create-once: an absent target still commits
+// (a declared submitter's additionally absence-conditioned), and a tombstoned
+// target the bounded walk never reached rejects RevisionConflict — an outcome
+// confined to identities carrying more residesIn subjects than the bound, and
+// never a silent overwrite. A convergence dispatcher composes no link keys, so
+// this is what lets a lease's approval re-wire a residence its earlier end
+// unwired.
+//
+// A ReassignLeaseUnit of an approved lease is an operator repair verb that
+// leaves the OLD unit's residence wired; the operator releases it by hand with
+// UnwireResidesIn (the new unit's residence is wired by the lease's own gap).
 func DDLs() []pkgmgr.DDLSpec {
 	return []pkgmgr.DDLSpec{serviceLocationDDL()}
 }
@@ -114,8 +144,14 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 					"lnk.identity.<idNanoID>.residesIn.unit.<unitNanoID> (class=residesIn, source=identity, target=location). " +
 					"Returns primaryKey (the link key). Idempotent: a replay where the link already exists alive commits " +
 					"nothing and omits primaryKey. A link previously tombstoned by UnwireResidesIn is REVIVED (a resident who " +
-					"moved out can move back into the same unit). residesIn cardinality is multiple (an identity may reside in " +
-					"many locations).",
+					"moved out can move back into the same unit) whether or not the submitter listed the link key in " +
+					"contextHint.optionalReads: a snapshot without it is served by a bounded walk of the identity's own " +
+					"residesIn links, the revive pinned to the tombstone's revision. The walk is bounded (RESIDES_IN_MAX_PAGES " +
+					"pages of RESIDES_IN_PAGE_LIMIT); an identity carrying more residesIn subjects than that falls back to a " +
+					"create-once create — an absent link still commits, a tombstoned one past the bound rejects RevisionConflict. " +
+					"residesIn cardinality is multiple (an " +
+					"identity may reside in many locations). An operator who moves an approved lease to another unit with " +
+					"ReassignLeaseUnit releases the old unit's residence by hand with UnwireResidesIn; nothing automates it.",
 			},
 			{
 				Name:    "WireWorksAt — place a staff member at their workplace",
@@ -167,6 +203,19 @@ func serviceLocationDDL() pkgmgr.DDLSpec {
 // op-meta. The links carry empty data {} — they are pure topology the cap.svc
 // lens walks.
 const serviceLocationDDLScript = `
+# The walk WireResidesIn makes over an identity's own residesIn links when its
+# snapshot does not carry the link key: at most RESIDES_IN_MAX_PAGES pages of
+# RESIDES_IN_PAGE_LIMIT subjects each, tombstones included. residesIn
+# cardinality is multiple, but an identity resides in a handful of units, so
+# the first page is normally the whole walk; each page is charged limit+1
+# units of the live-read budget whatever it holds. Past the bound the walk
+# stops answering and the wire falls back to a create: create-once, so an
+# absent target still commits and a tombstoned target past the bound rejects
+# RevisionConflict — the outcome is confined to identities carrying more
+# residesIn subjects than the bound.
+RESIDES_IN_PAGE_LIMIT = 50
+RESIDES_IN_MAX_PAGES = 4
+
 def link_document(source, target, cls, local_name, data):
     return {"class": cls, "isDeleted": False,
             "sourceVertex": source, "targetVertex": target,
@@ -183,14 +232,26 @@ def revive_link(key, source, target, cls, local_name, data):
     # asserts the revision the key was hydrated at, which is what a revive
     # actually means — resurrect this document from the state we just read.
     #
-    # An update writes the whole document and step 8 re-stamps only the
-    # lastModified* triplet, so the revived link carries no createdAt /
-    # createdBy / createdByOp: a script cannot carry them forward because the
-    # hydrated document does not expose them (VertexDoc). Its birth is
-    # therefore readable only from lastModified* until scripts can see create
-    # provenance — the general gap, shared by every script-authored update.
+    # An update writes the whole document; step 8 carries the createdAt /
+    # createdBy / createdByOp triplet over from the stored tombstone (the
+    # script cannot supply them — the hydrated document does not expose them)
+    # and re-stamps the lastModified* triplet, so the revived link keeps its
+    # birth and records the revive.
     return {"op": "update", "key": key,
             "document": link_document(source, target, cls, local_name, data)}
+
+def revive_link_at(key, source, target, cls, local_name, data, expected_revision):
+    # revive_link for a tombstone the script found on a kv.Links page rather
+    # than in its hydrated snapshot. The document is the same; the difference
+    # is the condition. A page entry carries no step-4 revision, so a bare
+    # update on its key would land unconditioned — whatever the page observed,
+    # regardless of what changed in between — and the pin is the entry's own
+    # revision: a racing writer of the same link (a concurrent UnwireResidesIn,
+    # a second WireResidesIn) moves the revision and this update fails
+    # RevisionConflict instead of overwriting it.
+    return {"op": "update", "key": key,
+            "document": link_document(source, target, cls, local_name, data),
+            "expectedRevision": expected_revision}
 
 def make_tombstone(key):
     return {"op": "tombstone", "key": key}
@@ -321,24 +382,64 @@ def require_live_opmeta(state, key, name):
     if not hasattr(doc, "data") or doc.data == None or "operationType" not in doc.data:
         fail("NotAnOpMeta: " + name + ": " + key + " carries no data.operationType")
 
+def link_key_of(src_type, src_id, relation, tgt_type, tgt_id):
+    return "lnk." + src_type + "." + src_id + "." + relation + "." + tgt_type + "." + tgt_id
+
 def wire(state, src, target, relation, src_type, src_id, tgt_type, tgt_id):
-    # The link key is deterministic and declared by the caller as an OPTIONAL
-    # read (it is legitimately absent on a first wire), so all three states are
-    # visible in the step-4 snapshot and each gets its own mutation shape:
+    # The three-state table every Wire* op resolves, read from the step-4
+    # snapshot. The link key is deterministic and the caller declares it as an
+    # OPTIONAL read (it is legitimately absent on a first wire), so each state
+    # gets its own mutation shape:
     #
     #   alive      → idempotent no-op (nothing committed → no primaryKey)
     #   absent     → create (conditioned on absence)
-    #   tombstoned → revive as an update (conditioned on the current revision)
+    #   tombstoned → revive as a bare update (step 8 conditions it on the
+    #                revision the key was hydrated at)
     #
-    # A caller that declares neither read sees an absent key in every state and
-    # would emit a create for a tombstoned link, which cannot commit.
-    lnk_key = "lnk." + src_type + "." + src_id + "." + relation + "." + tgt_type + "." + tgt_id
+    # A snapshot that does not carry the key reads as absent whether the link
+    # is absent or tombstoned; for a tombstone that create is a create-once
+    # collision that never commits. WireResidesIn is the one op that serves
+    # such a snapshot from a second source (wire_resides_in); the other four
+    # Wire* ops rely on the declaration.
+    lnk_key = link_key_of(src_type, src_id, relation, tgt_type, tgt_id)
     existing = state[lnk_key] if lnk_key in state else None
     if existing == None:
         return lnk_key, [make_link(lnk_key, src, target, relation, relation, {})]
     if not (hasattr(existing, "isDeleted") and existing.isDeleted):
         return lnk_key, []
     return lnk_key, [revive_link(lnk_key, src, target, relation, relation, {})]
+
+def wire_resides_in(state, identity, location, id_type, id_id, loc_type, loc_id):
+    # The same three-state table as wire(), with a second source. The snapshot
+    # carries the link key only when the submitter listed it in optionalReads
+    # AND the link exists (alive or tombstoned) — a declared re-wire — and then
+    # it is the whole answer. Every other snapshot lacks the key: undeclared (a
+    # convergence dispatcher composes no link keys), or declared and absent (a
+    # known-absent optional read is never in state). So a first wire always
+    # walks, and the walk is the identity's own residesIn links, paged to a
+    # bound, where a tombstone is visible with its revision: the matching entry
+    # alive → no-op, dead → revive pinned to the entry's revision, no entry on
+    # any page → create as on a first wire. A walk that reaches its bound with
+    # subjects still unread falls back to that same create-once: an absent
+    # target commits, a tombstoned target past the bound rejects
+    # RevisionConflict — never a blind overwrite, and never a refusal that
+    # would also stop a declared submitter wiring a fresh residence.
+    lnk_key = link_key_of(id_type, id_id, "residesIn", loc_type, loc_id)
+    if lnk_key in state:
+        return wire(state, identity, location, "residesIn", id_type, id_id, loc_type, loc_id)
+    cursor = None
+    for _page in range(RESIDES_IN_MAX_PAGES):
+        # read-posture: (e) relation=residesIn epoch=none -- an identity resides in a handful of units, so the first page is normally the whole walk; a writer racing this walk on the same link moves the revision the revive is pinned to and the revive fails RevisionConflict rather than overwriting it; the create the walk falls back to (every page read, or the bound reached) is create-once, so a tombstone it did not see rejects RevisionConflict rather than being overwritten.
+        page, cursor = kv.Links(identity, "residesIn", "out", cursor, RESIDES_IN_PAGE_LIMIT)
+        for lk in page:
+            if lk.key != lnk_key:
+                continue
+            if not lk.isDeleted:
+                return lnk_key, []
+            return lnk_key, [revive_link_at(lk.key, identity, location, "residesIn", "residesIn", {}, lk.revision)]
+        if cursor == None:
+            break
+    return lnk_key, [make_link(lnk_key, identity, location, "residesIn", "residesIn", {})]
 
 def unwire(state, lnk_key):
     existing = state[lnk_key] if lnk_key in state else None
@@ -358,7 +459,7 @@ def execute(state, op):
         if not vertex_alive(state, identity):
             fail("UnknownIdentity: identity: " + identity + " is absent or tombstoned")
         require_live_location(state, location, "location")
-        lnk_key, mutations = wire(state, identity, location, "residesIn", id_type, id_id, loc_type, loc_id)
+        lnk_key, mutations = wire_resides_in(state, identity, location, id_type, id_id, loc_type, loc_id)
         if len(mutations) == 0:
             return {"mutations": [], "events": []}
         events = [{"class": "serviceLocation.residesInWired",

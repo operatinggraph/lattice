@@ -212,13 +212,15 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"renewalComplete":               {narrow, "identity leaseapp renewal service unit", modeLabel},
 	"renewalsRead":                  {narrow, "identity leaseapp renewal unit", modeLabel},
 	"retentionClassKeyEnvelope":     {narrow, "retentionclass", modeRelation},
-	// tenancyEnd: three labels over two relations (appliesToUnit, renews) is
-	// 3×(1+2×2)=15 subjects, inside the relation-narrowed budget
-	// (pipeline/filter.go: labels×(1+2×relations) ≤
-	// subjects.MaxNarrowedFilterSubjects); leaseExpiry's extra identity/manages
-	// hop makes it 4×(1+2×3)=28, which is what lands that sibling on the label
-	// filter.
-	"tenancyEnd": {narrow, "leaseapp renewal unit", modeRelation},
+	// tenancyEnd's residence-spine hop (applicationFor to the applicant + the
+	// applicant's own residesIn to the unit, tenancy_end_lenses.go) takes it
+	// from three labels over two relations (appliesToUnit, renews) — 3×(1+2×2)
+	// =15 subjects, inside the relation-narrowed budget (pipeline/filter.go:
+	// labels×(1+2×relations) ≤ subjects.MaxNarrowedFilterSubjects) — to four
+	// labels over four relations (+applicationFor, +residesIn): 4×(1+2×4)=36,
+	// over budget, the same shape that already lands leaseExpiry's own extra
+	// identity/manages hop (4×(1+2×3)=28) on the label filter.
+	"tenancyEnd": {narrow, "identity leaseapp renewal unit", modeLabel},
 	// retentionKeyStatus narrows to the holder type alone, and that single
 	// label is what makes the lens self-updating: a shred writes
 	// vtx.retentionclass.<H>.piiKey, which matches the one subject this

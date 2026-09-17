@@ -66,6 +66,7 @@ import (
 	privacybase "github.com/operatinggraph/lattice/packages/privacy-base"
 	rbacdomain "github.com/operatinggraph/lattice/packages/rbac-domain"
 	servicedomain "github.com/operatinggraph/lattice/packages/service-domain"
+	servicelocation "github.com/operatinggraph/lattice/packages/service-location"
 )
 
 const replyInboxHeader = "Lattice-Reply-Inbox"
@@ -379,8 +380,12 @@ func newHarness(t *testing.T, opts ...harnessOpt) *harness {
 }
 
 // installChain installs rbac → identity → orchestration-base → service-domain →
-// lease-signing via the real InstallPackage op path (the installer publishes to
-// ops.meta; the meta-lane Processor commits each atomic batch). Any extra
+// service-location → lease-signing via the real InstallPackage op path (the
+// installer publishes to ops.meta; the meta-lane Processor commits each atomic
+// batch). service-location owns WireResidesIn/UnwireResidesIn, the ops
+// lease-signing's leaseApplicationComplete/tenancyEnd targets dispatch
+// cross-package (the SetListingStatus precedent: a chain that installs a
+// target dispatching an op installs the package that owns the op). Any extra
 // package is installed last, on top of the full chain.
 func (h *harness) installChain(extra ...pkgmgr.Definition) {
 	installer := testutil.NewInstaller(h.conn, bootstrap.BootstrapIdentityKey)
@@ -394,6 +399,7 @@ func (h *harness) installChain(extra ...pkgmgr.Definition) {
 		objectsbase.Package,
 		orchestrationbase.Package,
 		servicedomain.Package,
+		servicelocation.Package,
 		leasesigning.Package,
 	}, extra...) {
 		res, err := installer.Install(h.ctx, pkg)

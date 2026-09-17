@@ -661,19 +661,22 @@ verify-package-augur:
 
 ## verify-package-lease-signing — Co-install lease-signing's full dependency
 ## chain (rbac-domain for the operator role, identity-domain, orchestration-base,
-## service-domain — the verify-package-service-location precedent) in dependency
-## order, then assert lease-signing's KV state: the leaseapp vertexType DDL, the
+## location-domain, service-domain, service-location — the
+## verify-package-service-location precedent) in dependency order, then assert
+## lease-signing's KV state: the leaseapp vertexType DDL, the
 ## profile/underwritingParties/applicationSignals three-way split aspect DDLs,
 ## the underwritingRecord retention-class custody chain, the externalTask/docGen
 ## wrapper DDLs, the renewal vertexType DDL, and the package manifest.
 verify-package-lease-signing:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
-	@echo "==> Installing dependency chain (rbac-domain, identity-domain, orchestration-base, service-domain)..."
+	@echo "==> Installing dependency chain (rbac-domain, identity-domain, orchestration-base, location-domain, service-domain, service-location)..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/rbac-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/identity-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/orchestration-base
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/location-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/service-domain
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/service-location
 	@echo "==> Installing lease-signing..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/lease-signing
 	@echo "==> Running lease-signing package assertions..."
@@ -1268,9 +1271,12 @@ install-packages:
 ## install-loftspace — Install the LoftSpace lease-application vertical onto a
 ## running full stack (make up-full first), in dependency order:
 ## orchestration-base → location-domain → loftspace-domain → service-domain →
-## lease-signing. up-full ships only the
+## service-location → lease-signing. up-full ships only the
 ## core packages; the vertical is an opt-in so demos / the PO loop can drive the
-## real lease flow without hand-installing each package.
+## real lease flow without hand-installing each package. service-location owns
+## WireResidesIn/UnwireResidesIn, the ops lease-signing's leaseApplicationComplete/
+## tenancyEnd targets dispatch cross-package to wire/unwire an approved
+## applicant's residence.
 install-loftspace:
 	@echo "==> Building lattice-pkg..."
 	go build -o bin/lattice-pkg ./cmd/lattice-pkg
@@ -1282,6 +1288,8 @@ install-loftspace:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/loftspace-domain
 	@echo "==> Installing service-domain..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/service-domain
+	@echo "==> Installing service-location..."
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/service-location
 	@echo "==> Installing lease-signing..."
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install packages/lease-signing
 	@echo "==> Installing loftspace-ledger..."
@@ -1749,6 +1757,7 @@ refresh-loftspace:
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/location-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/loftspace-domain
 	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-domain
+	NATS_URL=$(NATS_URL) NATS_NKEY=$(NKEY_LATTICE_PKG) BOOTSTRAP_JSON_PATH=$(BOOTSTRAP_JSON) ./bin/lattice-pkg install --force packages/service-location
 	# identity-domain owns RecordIdentityPII and its descriptor; lease-signing
 	# resolves the onboarding userTask through it, so refresh it in dependency
 	# order or an upgraded lease-signing can leave that op with no op-meta.

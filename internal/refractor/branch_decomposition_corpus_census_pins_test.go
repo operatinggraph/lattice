@@ -1,9 +1,9 @@
 package refractor_test
 
 // corpusBranchVerdicts pins every executable cypher the installed corpus ships.
-// Nineteen lenses decompose; every other row records a cypher this mechanism
-// leaves on the product path, which is the half of the census an eye-reading
-// gets wrong.
+// Twenty-eight lenses decompose (decomposingCorpusLenses below); every other
+// row records a cypher this mechanism leaves on the product path, which is
+// the half of the census an eye-reading gets wrong.
 var corpusBranchVerdicts = map[string]branchVerdict{
 	"applicantRosterRead":            {"g0/o0!no-aggregating-item", 0, 0},
 	"appointmentReminders":           {"g2/o2!no-aggregating-item", 0, 2},
@@ -87,46 +87,70 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"landlordLeaseApplicationsRead":  {"g3/o3[inst] g0/o0!no-aggregating-item", 1, 3},
 	"landlordUnitsRead":              {"g0/o0!no-aggregating-item", 0, 0},
 	"leaseAccounts":                  {"g1/o1!no-aggregating-item", 0, 1},
-	"leaseApplicationComplete":       {"g5/o10[docInst;inst;leaseDocObj;mgr;onbOp,onbTask;sigOp,sigTask] g0/o0!no-aggregating-item", 6, 5},
-	"leaseApplicationsRead":          {"g5/o5[inst;prop] g0/o0!no-aggregating-item", 2, 5},
-	"leaseExpiry":                    {"g2/o3[landlord;rn] g0/o0!no-aggregating-item", 2, 2},
-	"leaseRentSettlement":            {"g1/o1[c] g0/o0!no-aggregating-item", 1, 1},
-	"ledgerHistory":                  {"g1/o1!no-aggregating-item", 0, 1},
-	"loftspaceArrearsReminders":      {"g0/o0!no-aggregating-item", 0, 0},
-	"menuCatalog":                    {"g1/o1!no-aggregating-item", 0, 1},
-	"myTasks":                        {"g2/o6[op,task,tgt;qop,qtask,qtgt,role]", 2, 2},
-	"objectAttachments":              {"g1/o1[owner,r] g0/o0!no-aggregating-item", 1, 1},
-	"objectIdentityAttachmentsRead":  {"g0/o0!no-aggregating-item", 0, 0},
-	"objectLiveness":                 {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0}, // No aggregating item in either stage.
-	"oneBillCafeEntries":             {"g0/o0!no-aggregating-item", 0, 0},
-	"oneBillClinicEntries":           {"g0/o0!no-aggregating-item", 0, 0},
-	"oneBillRentEntries":             {"g1/o1!no-aggregating-item", 0, 1},
-	"oneBillWellnessEntries":         {"g0/o0!no-aggregating-item", 0, 0},
-	"opCatalog":                      {"g1/o1[perm,role]", 1, 1},
-	"orphanedTaskGrants":             {"g1/o1!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
-	"pastDueAppointments":            {"g2/o2!no-aggregating-item", 0, 2},
-	"pastDueBookings":                {"g2/o2!no-aggregating-item", 0, 2},
-	"patientIdentityReadGrants":      {"g0/o0!no-aggregating-item", 0, 0},
-	"piiKeyEnvelope":                 {"g0/o0!no-aggregating-item", 0, 0},
-	"providerAppointmentsRead":       {"g2/o3!no-aggregating-item", 0, 2},
-	"providerIdentityReadGrants":     {"g0/o0!no-aggregating-item", 0, 0},
-	"providerSites":                  {"g0/o0!no-aggregating-item", 0, 0},
-	"renewalComplete":                {"g1/o5[inst;landlord,u] g0/o0!no-aggregating-item", 2, 1},
-	"renewalsRead":                   {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
-	"retentionClassKeyEnvelope":      {"g0/o0!no-aggregating-item", 0, 0},
-	"retentionKeyStatus":             {"g0/o0!no-aggregating-item", 0, 0},
-	"shredStatus":                    {"g0/o0!no-aggregating-item", 0, 0},
-	"staffReadGrants":                {"g0/o0!no-aggregating-item", 0, 0},
-	"staleAssignedTasks":             {"g0/o0!no-aggregating-item", 0, 0},
+	// The applicant's own residesIn link (WireResidesIn's wire, decision 2 of
+	// loftspace-residence-spine-2026-09-16.md) is walked as ITS OWN closed
+	// subtree rooted at the anchor — OPTIONAL MATCH
+	// (app)-[:applicationFor]->(resId:identity)-[res:residesIn]->(resU:unit)
+	// <-[:appliesToUnit]-(app), fresh variables never touching the `id`/`u`
+	// the onbOp/onbTask and mgr fans hang off. A clause naming both `id` and
+	// `u` — the shape `(id)-[res:residesIn]->(u)` would take — spans two
+	// sibling subtrees and is refused for the WHOLE stage's decomposition
+	// (clause-spans-sibling-subtrees). Closing on the anchor instead roots a
+	// brand-new independent group (a base variable carries no group ownership
+	// to cross into), so the stage folds: seven subtrees across six groups —
+	// the residence walk is a fourth base-rooted subtree alongside
+	// docInst/leaseDocObj/sigTask→sigOp.
+	"leaseApplicationComplete":      {"g6/o11[docInst;inst;leaseDocObj;mgr;onbOp,onbTask;res,resId,resU;sigOp,sigTask] g0/o0!no-aggregating-item", 7, 6},
+	"leaseApplicationsRead":         {"g5/o5[inst;prop] g0/o0!no-aggregating-item", 2, 5},
+	"leaseExpiry":                   {"g2/o3[landlord;rn] g0/o0!no-aggregating-item", 2, 2},
+	"leaseRentSettlement":           {"g1/o1[c] g0/o0!no-aggregating-item", 1, 1},
+	"ledgerHistory":                 {"g1/o1!no-aggregating-item", 0, 1},
+	"loftspaceArrearsReminders":     {"g0/o0!no-aggregating-item", 0, 0},
+	"menuCatalog":                   {"g1/o1!no-aggregating-item", 0, 1},
+	"myTasks":                       {"g2/o6[op,task,tgt;qop,qtask,qtgt,role]", 2, 2},
+	"objectAttachments":             {"g1/o1[owner,r] g0/o0!no-aggregating-item", 1, 1},
+	"objectIdentityAttachmentsRead": {"g0/o0!no-aggregating-item", 0, 0},
+	"objectLiveness":                {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0}, // No aggregating item in either stage.
+	"oneBillCafeEntries":            {"g0/o0!no-aggregating-item", 0, 0},
+	"oneBillClinicEntries":          {"g0/o0!no-aggregating-item", 0, 0},
+	"oneBillRentEntries":            {"g1/o1!no-aggregating-item", 0, 1},
+	"oneBillWellnessEntries":        {"g0/o0!no-aggregating-item", 0, 0},
+	"opCatalog":                     {"g1/o1[perm,role]", 1, 1},
+	"orphanedTaskGrants":            {"g1/o1!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
+	"pastDueAppointments":           {"g2/o2!no-aggregating-item", 0, 2},
+	"pastDueBookings":               {"g2/o2!no-aggregating-item", 0, 2},
+	"patientIdentityReadGrants":     {"g0/o0!no-aggregating-item", 0, 0},
+	"piiKeyEnvelope":                {"g0/o0!no-aggregating-item", 0, 0},
+	"providerAppointmentsRead":      {"g2/o3!no-aggregating-item", 0, 2},
+	"providerIdentityReadGrants":    {"g0/o0!no-aggregating-item", 0, 0},
+	"providerSites":                 {"g0/o0!no-aggregating-item", 0, 0},
+	"renewalComplete":               {"g1/o5[inst;landlord,u] g0/o0!no-aggregating-item", 2, 1},
+	"renewalsRead":                  {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
+	"retentionClassKeyEnvelope":     {"g0/o0!no-aggregating-item", 0, 0},
+	"retentionKeyStatus":            {"g0/o0!no-aggregating-item", 0, 0},
+	"shredStatus":                   {"g0/o0!no-aggregating-item", 0, 0},
+	"staffReadGrants":               {"g0/o0!no-aggregating-item", 0, 0},
+	"staleAssignedTasks":            {"g0/o0!no-aggregating-item", 0, 0},
 	// Four sibling OPTIONAL MATCHes off the anchor (op, onbIdentity, sigApp,
 	// termsRenewal) plus the renews hop hanging below termsRenewal
 	// (renewedApp), none of them aggregating anything — the stage's branch
 	// product IS the intended one-row-per-task output, so §4.2 refuses to fold
 	// it (no-aggregating-item), same shape as orphanedTaskGrants' own single
 	// forOperation branch.
-	"staleUserTasks":                    {"g4/o5!no-aggregating-item g0/o0!no-aggregating-item", 0, 4},
-	"supersededBackgroundChecks":        {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
-	"tenancyEnd":                        {"g2/o3[other;rn] g0/o0!no-aggregating-item", 2, 2}, // [other] hangs below the base-row unit hop; differential in ruleengine/full branch_decomposition_equivalence_test.go
+	"staleUserTasks":             {"g4/o5!no-aggregating-item g0/o0!no-aggregating-item", 0, 4},
+	"supersededBackgroundChecks": {"g0/o0!no-aggregating-item g0/o0!no-aggregating-item", 0, 0},
+	// residenceLinkKey's residence walk closes on the anchor exactly as
+	// leaseApplicationComplete's does above (its own res,resId,resU subtree,
+	// never touching `id`/`u`); sameApplicantLiveTenancyCount's `otherId`
+	// closes the SAME way, one hop further from the `other` fan back onto
+	// `app` (OPTIONAL MATCH (other)-[:applicationFor]->(otherId:identity)
+	// <-[:applicationFor]-(app)). Comparing to a separately-bound `id` would
+	// cross an aggregate into the applicationFor group and cost the `other`
+	// fold too (an aggregate spanning two groups cannot be attributed to
+	// either one's fold), so this cypher binds no standalone `id` variable at
+	// all. Differential in ruleengine/full
+	// branch_decomposition_equivalence_test.go.
+	"tenancyEnd":                        {"g3/o5[other,otherId;rn] g0/o0!no-aggregating-item", 2, 3},
 	"unroutedTasks":                     {"g0/o0!no-aggregating-item", 0, 0},
 	"visitSeriesDue":                    {"g2/o3[a,apr] g0/o0!no-aggregating-item", 1, 2},
 	"visitSeriesRead":                   {"g3/o3!no-aggregating-item", 0, 3},

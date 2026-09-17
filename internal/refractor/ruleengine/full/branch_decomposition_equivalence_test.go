@@ -949,10 +949,15 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 		{name: "leaseApplicationComplete", spec: corpusSpec(t, "leaseApplicationComplete"), anchor: c.leaseAppKey, rows: 1,
 			evidence: func(t *testing.T, row map[string]any) {
 				// One assertion per candidate subtree of the corpus's widest stage:
-				// two hang BELOW the pinned applicant and unit (inst, onbTask→onbOp,
-				// and mgr), three are rooted on the base (docInst, leaseDocObj,
-				// sigTask→sigOp). Each subtree's count reaches the RETURN only
-				// through a boolean, so the boolean is where the evidence lives.
+				// three hang BELOW the pinned applicant and unit (inst, onbTask→onbOp,
+				// and mgr), one is the residence closed-loop rooted at the anchor
+				// itself (res,resId,resU — bound or not, this fixture seeds no
+				// residesIn edge, so it folds empty on both sides identically; the
+				// residence walk's OWN differential is proven in
+				// packages/lease-signing's pin tests against the real cypher), three
+				// are rooted on the base (docInst, leaseDocObj, sigTask→sigOp). Each
+				// subtree's count reaches the RETURN only through a boolean, so the
+				// boolean is where the evidence lives.
 				boolEvidence(t, row, "missing_bgcheck", false, "background-check instance")
 				boolEvidence(t, row, "missing_payment", false, "payment instance")
 				boolEvidence(t, row, "inflight_onboarding", true, "onboarding-task")
@@ -1066,7 +1071,14 @@ func branchDifferentialSpecs(t testing.TB, c branchCorpus) []branchSpec {
 				// cycleEnd, so excluded by the CASE) and a unit branch that binds
 				// the seeded rival application (undecided, so excluded too): both
 				// folded subtrees are non-empty and the row's truth is the fold
-				// excluding them correctly.
+				// excluding them correctly. The rival carries no applicationFor
+				// edge, so the other/otherId subtree folds non-empty (rival
+				// bound, otherId null) without exercising the same-applicant
+				// case — that closed loop's own differential is proven in
+				// packages/lease-signing's pin tests against the real cypher.
+				// The residence closed-loop group (res,resId,resU) is unfolded
+				// (residenceLinkKey is a bare column, not an aggregate) so it is
+				// not this differential's concern either way.
 				boolEvidence(t, row, "missing_tenancyEnded", true, "renewal")
 				require.NotNil(t, row["unitKey"], "the unit hop below which the rival branch hangs must bind")
 			},

@@ -277,6 +277,18 @@ func TestLeaseConvergence_EndedTenancyRelistsTheUnit(t *testing.T) {
 
 	require.GreaterOrEqualf(t, marks.seen(), 1, "at least one MarkExpired must have recorded the overdue lapse for tenancyEnd")
 
+	// missing_residenceUnwired is a SEPARATE directOp (UnwireResidesIn) and
+	// reprojection from the relist's SetListingStatus flip above — the two
+	// close on their own schedules, so the steady-state loop below must not
+	// assume the residence gap has already closed just because the unit has
+	// already relisted.
+	require.Eventuallyf(t, func() bool {
+		row := h.readRow(appIDA)
+		tRow := h.weaverTargetRow(leasesigning.TenancyEndTarget, appIDA)
+		return row != nil && !rowBool(row, "violating") && tRow != nil && !rowBool(tRow, "violating")
+	}, 45*time.Second, 200*time.Millisecond,
+		"both the leaseApplicationComplete and tenancyEnd rows must converge (violating=false) before steady state")
+
 	// --- leg 3: steady state, no oscillation ---
 	cut := time.Now().Add(5 * time.Second)
 	for time.Now().Before(cut) {
@@ -314,6 +326,65 @@ func TestLeaseConvergence_EndedTenancyRelistsTheUnit(t *testing.T) {
 		require.Falsef(t, rowBool(tRow, "missing_relist"),
 			"the first (ended) row's missing_relist must never re-open once another tenant holds the unit (otherLiveTenancyCount); tenancyEnd row=%v", tRow)
 		require.Equal(t, "leased", h.unitListingStatus(unitKey), "the re-leased unit must not be flipped back to available")
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+// TestLeaseConvergence_ApprovalWiresResidenceThenTenancyEndUnwiresIt is the
+// residence-spine e2e proof (loftspace-residence-spine-2026-09-16.md decisions
+// 2+3), through the REAL Weaver: an approved, signed lease wires the
+// applicant's residesIn link to the unit the instant the term exists
+// (missing_residence → directOp WireResidesIn), and the ended term releases
+// it (missing_residenceUnwired → directOp UnwireResidesIn) — the mirror of
+// the relist proof above, on the same overdue-@at mechanism.
+func TestLeaseConvergence_ApprovalWiresResidenceThenTenancyEndUnwiresIt(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping the all-engines lease convergence e2e in -short mode")
+	}
+	h := newHarness(t)
+
+	const requestedRent = 2150.0
+	appKey, appID, applicantKey, unitKey, _ := h.seedTenancyEndApplication("Residence", requestedRent)
+	residesInKey := "lnk.identity." + applicantKey[len("vtx.identity."):] + ".residesIn.unit." + unitKey[len("vtx.unit."):]
+
+	require.False(t, h.linkLive(residesInKey), "no residence before the term is even approved")
+
+	// --- approval wires the residence link ---
+	h.approveAndDrain(appKey, applicantKey, unitKey)
+
+	require.True(t, h.linkLive(residesInKey), "an approved, live term must wire the applicant's residesIn link to the unit")
+	row := h.readRow(appID)
+	require.NotNil(t, row, "the leaseApplicationComplete row must remain present")
+	require.Falsef(t, rowBool(row, "missing_residence"), "missing_residence must close once WireResidesIn lands; row=%v", row)
+	require.Falsef(t, rowBool(row, "violating"), "violating must stay false once every gap — including the new residence one — has closed; row=%v", row)
+
+	// --- the seeded term is already over: activating tenancyEnd fires the
+	// overdue @at at once, ends the term, and must unwire the residence link ---
+	h.activateActorAggregateLensNow(h.ctx, leasesigning.TenancyEndTarget)
+
+	require.Eventuallyf(t, func() bool {
+		tenancy := h.aspectData(appKey, "tenancy")
+		return tenancy != nil && tenancy["endedAt"] != nil
+	}, 45*time.Second, 200*time.Millisecond, "EndTenancy must record .tenancy.endedAt once the overdue @at fires")
+
+	require.Eventuallyf(t, func() bool {
+		return !h.linkLive(residesInKey)
+	}, 45*time.Second, 200*time.Millisecond, "the ended term's residesIn link must be tombstoned by UnwireResidesIn")
+
+	require.Eventuallyf(t, func() bool {
+		tRow := h.weaverTargetRow(leasesigning.TenancyEndTarget, appID)
+		return tRow != nil && !rowBool(tRow, "missing_residenceUnwired") && !rowBool(tRow, "violating")
+	}, 45*time.Second, 200*time.Millisecond, "missing_residenceUnwired must close (and stay converged) once UnwireResidesIn lands")
+
+	// --- steady state: the tombstoned link never revives on its own, and the
+	// gap never re-opens on redelivery ---
+	cut := time.Now().Add(5 * time.Second)
+	for time.Now().Before(cut) {
+		require.Falsef(t, h.linkLive(residesInKey), "the residence link must stay tombstoned at steady state")
+		tRow := h.weaverTargetRow(leasesigning.TenancyEndTarget, appID)
+		require.NotNil(t, tRow, "the tenancyEnd row must remain present")
+		require.Falsef(t, rowBool(tRow, "missing_residenceUnwired"), "missing_residenceUnwired must not re-open; tenancyEnd row=%v", tRow)
 		time.Sleep(150 * time.Millisecond)
 	}
 }

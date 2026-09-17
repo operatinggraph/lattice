@@ -185,7 +185,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"followUpReminders":                 "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider",
 	"identityAnchors":                   "identity:identifiedBy,manages,residesIn,worksAt|any:containedIn,identifiedBy,manages,residesIn,worksAt",
 	"identityErasureResidue":            "identity:boundTo,duplicateOf,indexes|any:boundTo,duplicateOf,indexes",
-	"leaseApplicationComplete":          "identity:applicationFor,manages,providedTo,scopedTo|leaseapp:applicationFor,appliesToUnit,providedTo,scopedTo,signedLease|meta:forOperation|object:signedLease|service:providedTo|task:forOperation,scopedTo|unit:appliesToUnit,manages",
+	"leaseApplicationComplete":          "identity:applicationFor,manages,providedTo,residesIn,scopedTo|leaseapp:applicationFor,appliesToUnit,providedTo,scopedTo,signedLease|meta:forOperation|object:signedLease|service:providedTo|task:forOperation,scopedTo|unit:appliesToUnit,manages,residesIn",
 	"leaseExpiry":                       "identity:manages|leaseapp:appliesToUnit,renews|renewal:renews|unit:appliesToUnit,manages",
 	"leaseRentSettlement":               "clause:governs|leaseapp:governs",
 	"loftspaceArrearsReminders":         "none",
@@ -199,7 +199,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"staleAssignedTasks":                "identity:assignedTo|task:assignedTo",
 	"staleUserTasks":                    "identity:scopedTo|leaseapp:renews,scopedTo|meta:forOperation|renewal:renews,scopedTo|task:forOperation,scopedTo",
 	"supersededBackgroundChecks":        "identity:providedTo|meta:instanceOf|service:instanceOf,providedTo",
-	"tenancyEnd":                        "leaseapp:appliesToUnit,renews|renewal:renews|unit:appliesToUnit", // leaseExpiry's walk without the landlord hop; the unit's other applications ride the same appliesToUnit relation
+	"tenancyEnd":                        "identity:applicationFor,residesIn|leaseapp:applicationFor,appliesToUnit,renews|renewal:renews|unit:appliesToUnit,residesIn", // leaseExpiry's walk without the landlord hop, plus the applicant's own residesIn link; the unit's other applications ride the same appliesToUnit relation
 	"unroutedTasks":                     "role:queuedFor|task:queuedFor",
 	"visitSeriesDue":                    "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider|visitseries:forPatient,withProvider",
 	"visitSeriesSiteBackfill":           "building:atSite|provider:withProvider|visitseries:atSite,withProvider",

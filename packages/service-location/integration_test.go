@@ -25,11 +25,20 @@
 //  10. TestSL_WorksAt_WireUnwire           — staff spine link shape + direction + unwire
 //  11. TestSL_WorksAt_RejectsNonLocation   — worksAt target must be a location KEY TYPE
 //  12. TestSL_WorksAt_Multiple             — worksAt cardinality is multiple
+//  13. TestSL_ResidesIn_Rewire             — declared re-wire revives a tombstoned residesIn
+//     TestSL_ResidesIn_RewireUndeclared   — …and so does one that never declared the link key
+//     TestSL_ResidesIn_UndeclaredAliveIsNoOp / TestSL_ResidesIn_UndeclaredFirstWireCreates
+//     — the undeclared walk's other two arms
+//     TestSL_ResidesIn_RewireUndeclaredPastFirstPage — the walk pages
+//     TestSL_ResidesIn_PastBoundAbsentCreates / TestSL_ResidesIn_PastBoundTombstoneConflicts
+//     — past the walk's bound the wire is a create-once create
 package servicelocation_test
 
 import (
 	"context"
 	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,14 +201,28 @@ func linkKeyOf(source, relation, target string) string {
 
 // wireHint is the read declaration every Wire* op requires (ddls.go): both
 // endpoints fail-closed, plus the deterministic link key as an OPTIONAL read.
-// It is optional because a first wire legitimately finds it absent — and it is
-// required because without it the script cannot tell a tombstoned link from an
-// absent one, so a re-wire after an Unwire* emits a create over a live key.
+// It is optional because a first wire legitimately finds it absent. For
+// worksAt / availableAt / unavailableAt / permitsOperation it is what lets the
+// script tell a tombstoned link from an absent one, so a re-wire after an
+// Unwire* without it emits a create over a live key. residesIn also declares
+// the walk the script runs whenever its snapshot lacks the link — the
+// identity's own residesIn page — so the pipeline's read-drift guard sees it
+// declared exactly as the Weaver's dispatch declares it.
 func wireHint(source, relation, target string) *processor.ContextHint {
-	return &processor.ContextHint{
+	h := &processor.ContextHint{
 		Reads:         []string{source, target},
 		OptionalReads: []string{linkKeyOf(source, relation, target)},
 	}
+	if relation == "residesIn" {
+		h.Enumerations = residesInEnumeration(source)
+	}
+	return h
+}
+
+// residesInEnumeration is the contextHint.enumerations entry a WireResidesIn
+// dispatcher declares: the identity's own residesIn links, walked outward.
+func residesInEnumeration(identity string) []processor.EnumerationHint {
+	return []processor.EnumerationHint{{Hub: identity, Relation: "residesIn", Direction: "out"}}
 }
 
 func submit(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
@@ -398,6 +421,398 @@ func assertLinkRevived(t *testing.T, ctx context.Context, conn *substrate.Conn, 
 	}
 	if got, _ := doc["targetVertex"].(string); got != target {
 		t.Fatalf("re-wired targetVertex = %q, want %q", got, target)
+	}
+}
+
+// undeclaredWireHint is the read declaration a convergence dispatcher sends
+// WireResidesIn: both endpoints and the residesIn walk, and NO link key — the
+// Weaver composes no link keys, so the script's snapshot never carries the
+// link and every state of it has to come from the script's own residesIn
+// page.
+func undeclaredWireHint(source, target string) *processor.ContextHint {
+	return &processor.ContextHint{
+		Reads:        []string{source, target},
+		Enumerations: residesInEnumeration(source),
+	}
+}
+
+// submitWireResidesInReply submits WireResidesIn under hint and returns the
+// outcome plus the reply, so a test can read the primaryKey the script
+// surfaced (or its absence on an idempotent no-op).
+func submitWireResidesInReply(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer,
+	label, idKey, unitKey string, hint *processor.ContextHint) (processor.MessageOutcome, *processor.OperationReply) {
+	t.Helper()
+	pb, _ := json.Marshal(map[string]any{"identity": idKey, "location": unitKey})
+	env := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "WireResidesIn",
+		Actor:         slStaffActorKey,
+		SubmittedAt:   time.Now().UTC().Format(time.RFC3339),
+		Class:         "serviceLocation",
+		Payload:       json.RawMessage(pb),
+		ContextHint:   hint,
+	}
+	return testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+}
+
+// TestSL_ResidesIn_RewireUndeclared proves WireResidesIn revives a tombstoned
+// residesIn link for a submitter that did NOT list the link key in
+// contextHint.optionalReads — the convergence dispatch that re-wires a
+// residence a lease's end unwired. The snapshot reads the key as absent, so
+// the script lists the identity's own residesIn page, finds the tombstone
+// there and revives it pinned to the page entry's revision. The revived
+// document is compared field-for-field with the one a DECLARED revive writes
+// for the same identity: the two paths differ only in where the tombstone was
+// read from, never in what they write.
+func TestSL_ResidesIn_RewireUndeclared(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "resrewireundecl")
+
+	idID := "SLundecidnQRHJKMNPQR"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	declUnitID := "SLundecdecQRHJKMNPQR"
+	declUnitKey := seedLocation(t, ctx, conn, "unit", declUnitID)
+	undeclUnitID := "SLundecundQRHJKMNPQR"
+	undeclUnitKey := seedLocation(t, ctx, conn, "unit", undeclUnitID)
+
+	// The reference: wire → unwire → declared re-wire on the first unit.
+	declLnk := linkKeyOf(idKey, "residesIn", declUnitKey)
+	submitHint(t, ctx, conn, cp, cons, "slUndeclRef1", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": declUnitKey},
+		wireHint(idKey, "residesIn", declUnitKey), processor.OutcomeAccepted)
+	submit(t, ctx, conn, cp, cons, "slUndeclRef2", "UnwireResidesIn",
+		map[string]any{"linkKey": declLnk}, []string{declLnk}, processor.OutcomeAccepted)
+	submitHint(t, ctx, conn, cp, cons, "slUndeclRef3", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": declUnitKey},
+		wireHint(idKey, "residesIn", declUnitKey), processor.OutcomeAccepted)
+	assertLinkRevived(t, ctx, conn, declLnk, "residesIn", idKey, declUnitKey)
+
+	// The vector: wire → unwire → UNDECLARED re-wire on the second unit. The
+	// identity now carries two residesIn entries on its page (one alive, one
+	// tombstoned), so the walk has to pick the matching one, not the first.
+	undeclLnk := linkKeyOf(idKey, "residesIn", undeclUnitKey)
+	submitHint(t, ctx, conn, cp, cons, "slUndeclVec1", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": undeclUnitKey},
+		wireHint(idKey, "residesIn", undeclUnitKey), processor.OutcomeAccepted)
+	submit(t, ctx, conn, cp, cons, "slUndeclVec2", "UnwireResidesIn",
+		map[string]any{"linkKey": undeclLnk}, []string{undeclLnk}, processor.OutcomeAccepted)
+	if doc := readDoc(t, ctx, conn, undeclLnk); doc["isDeleted"] != true {
+		t.Fatalf("precondition: %s should be tombstoned before the undeclared re-wire; got %v", undeclLnk, doc["isDeleted"])
+	}
+	outcome, reply := submitWireResidesInReply(t, ctx, conn, cp, cons, "slUndeclVec3", idKey, undeclUnitKey,
+		undeclaredWireHint(idKey, undeclUnitKey))
+	if outcome != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("undeclared re-wire of a tombstoned residesIn: outcome %q (%s), want accepted", outcome, msg)
+	}
+	if reply == nil || reply.PrimaryKey != undeclLnk {
+		t.Fatalf("undeclared re-wire primaryKey = %+v, want %s", reply, undeclLnk)
+	}
+	assertLinkRevived(t, ctx, conn, undeclLnk, "residesIn", idKey, undeclUnitKey)
+
+	// The two revived documents are the same document, up to the fields that
+	// name the link or the operation that wrote it.
+	perLink := map[string]bool{"key": true, "targetVertex": true, "createdAt": true, "createdByOp": true, "lastModifiedAt": true, "lastModifiedByOp": true}
+	declDoc := readDoc(t, ctx, conn, declLnk)
+	undeclDoc := readDoc(t, ctx, conn, undeclLnk)
+	if len(declDoc) != len(undeclDoc) {
+		t.Fatalf("revived document field sets differ: declared %v, undeclared %v", declDoc, undeclDoc)
+	}
+	for field, want := range declDoc {
+		got, ok := undeclDoc[field]
+		if !ok {
+			t.Fatalf("undeclared revive dropped field %q (declared revive wrote %v)", field, want)
+		}
+		if perLink[field] {
+			continue
+		}
+		wantJSON, _ := json.Marshal(want)
+		gotJSON, _ := json.Marshal(got)
+		if string(wantJSON) != string(gotJSON) {
+			t.Fatalf("revived document field %q differs: declared %s, undeclared %s", field, wantJSON, gotJSON)
+		}
+	}
+	if undeclDoc["targetVertex"] != undeclUnitKey {
+		t.Fatalf("undeclared revive targetVertex = %v, want %s", undeclDoc["targetVertex"], undeclUnitKey)
+	}
+}
+
+// TestSL_ResidesIn_UndeclaredAliveIsNoOp proves the walk's alive arm: a
+// WireResidesIn that does not declare the link key, over a link that is
+// alive, commits nothing and returns no primaryKey — the same idempotent
+// replay a declared submitter gets from its snapshot.
+func TestSL_ResidesIn_UndeclaredAliveIsNoOp(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "resundeclalive")
+
+	idID := "SLundecaidQRHJKMNPQR"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	unitID := "SLundecaunQRHJKMNPQR"
+	unitKey := seedLocation(t, ctx, conn, "unit", unitID)
+	lnk := linkKeyOf(idKey, "residesIn", unitKey)
+
+	submitHint(t, ctx, conn, cp, cons, "slUndeclAlive1", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": unitKey},
+		wireHint(idKey, "residesIn", unitKey), processor.OutcomeAccepted)
+	before := readDoc(t, ctx, conn, lnk)
+
+	outcome, reply := submitWireResidesInReply(t, ctx, conn, cp, cons, "slUndeclAlive2", idKey, unitKey,
+		undeclaredWireHint(idKey, unitKey))
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("undeclared re-wire of an alive residesIn: outcome %q, want accepted (idempotent no-op)", outcome)
+	}
+	if reply == nil || reply.PrimaryKey != "" {
+		t.Fatalf("undeclared re-wire of an alive link surfaced primaryKey %+v, want none (nothing committed)", reply)
+	}
+	if len(reply.Revisions) != 0 {
+		t.Fatalf("undeclared re-wire of an alive link committed keys %v, want none", reply.Revisions)
+	}
+	after := readDoc(t, ctx, conn, lnk)
+	beforeJSON, _ := json.Marshal(before)
+	afterJSON, _ := json.Marshal(after)
+	if string(beforeJSON) != string(afterJSON) {
+		t.Fatalf("undeclared re-wire of an alive link rewrote it: before %s, after %s", beforeJSON, afterJSON)
+	}
+}
+
+// TestSL_ResidesIn_UndeclaredFirstWireCreates proves the walk's absent arm: a
+// WireResidesIn that does not declare the link key, for an identity that has
+// never resided anywhere, creates the link exactly as a declared first wire
+// does.
+func TestSL_ResidesIn_UndeclaredFirstWireCreates(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "resundeclfirst")
+
+	idID := "SLundecfidQRHJKMNPQR"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	unitID := "SLundecfunQRHJKMNPQR"
+	unitKey := seedLocation(t, ctx, conn, "unit", unitID)
+	lnk := linkKeyOf(idKey, "residesIn", unitKey)
+
+	outcome, reply := submitWireResidesInReply(t, ctx, conn, cp, cons, "slUndeclFirst1", idKey, unitKey,
+		undeclaredWireHint(idKey, unitKey))
+	if outcome != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("undeclared first wire: outcome %q (%s), want accepted", outcome, msg)
+	}
+	if reply == nil || reply.PrimaryKey != lnk {
+		t.Fatalf("undeclared first wire primaryKey = %+v, want %s", reply, lnk)
+	}
+	doc := readDoc(t, ctx, conn, lnk)
+	if del, _ := doc["isDeleted"].(bool); del {
+		t.Fatalf("undeclared first wire should create the link alive; got isDeleted=true")
+	}
+	if doc["class"] != "residesIn" {
+		t.Fatalf("created link class = %v, want residesIn", doc["class"])
+	}
+	if got, _ := doc["sourceVertex"].(string); got != idKey {
+		t.Fatalf("created sourceVertex = %q, want %q", got, idKey)
+	}
+	if got, _ := doc["targetVertex"].(string); got != unitKey {
+		t.Fatalf("created targetVertex = %q, want %q", got, unitKey)
+	}
+	if _, ok := doc["createdAt"]; !ok {
+		t.Fatalf("created link carries no createdAt — the walk's absent arm must be a create, not an update: %v", doc)
+	}
+}
+
+// scriptIntConstant reads a module-level `NAME = <int>` binding out of the
+// shipped serviceLocation script, so a fixture sized against the walk's bound
+// tracks the constant the script actually runs with.
+func scriptIntConstant(t *testing.T, name string) int {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `\s*=\s*([0-9]+)\s*$`)
+	m := re.FindStringSubmatch(servicelocation.Package.DDLs[0].Script)
+	if m == nil {
+		t.Fatalf("serviceLocation script defines no integer constant %s", name)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("serviceLocation script constant %s = %q is not an integer: %v", name, m[1], err)
+	}
+	return n
+}
+
+// seedTombstonedResidences writes n tombstoned residesIn links from idKey into
+// Core KV directly, on filler units whose keys sort BEFORE any unit id
+// starting "SLpgt": kv.Links pages an identity's links in key order, so these
+// are the pages a later target has to sit behind.
+func seedTombstonedResidences(t *testing.T, ctx context.Context, conn *substrate.Conn, idKey string, n int) {
+	t.Helper()
+	if n > 26*26 {
+		t.Fatalf("seedTombstonedResidences: %d exceeds the two-letter fixture space", n)
+	}
+	for i := 0; i < n; i++ {
+		unitID := "SLpgfill" + fillerLetter(i/26) + fillerLetter(i%26) + "HJKMNPQRST"
+		unitKey := "vtx.unit." + unitID
+		lnk := linkKeyOf(idKey, "residesIn", unitKey)
+		doc := map[string]any{"class": "residesIn", "isDeleted": true, "sourceVertex": idKey, "targetVertex": unitKey,
+			"localName": "residesIn", "data": map[string]any{}}
+		b, _ := json.Marshal(doc)
+		if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, lnk, b); err != nil {
+			t.Fatalf("seed tombstoned residesIn %s: %v", lnk, err)
+		}
+	}
+}
+
+// fillerLetter maps 0..25 onto NanoID-alphabet characters (keys.Alphabet
+// excludes l and o; those two indexes become 1 and 2 instead), every one of
+// which sorts below the 't' of the target unit ids.
+func fillerLetter(i int) string {
+	c := string(rune('a' + i))
+	switch c {
+	case "l":
+		return "1"
+	case "o":
+		return "2"
+	}
+	return c
+}
+
+// TestSL_ResidesIn_RewireUndeclaredPastFirstPage proves the walk pages: an
+// identity with more residesIn subjects than one page holds — every filler a
+// tombstone, sorting ahead of the target — still gets its target tombstone
+// revived by an undeclared re-wire. Without paging the target sits past the
+// first page, the walk sees no entry, and the create is a create-once
+// collision on every redelivery.
+func TestSL_ResidesIn_RewireUndeclaredPastFirstPage(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "resundeclpaged")
+	pageLimit := scriptIntConstant(t, "RESIDES_IN_PAGE_LIMIT")
+
+	idID := "SLpgidentQRHJKMNPQRS"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	unitID := "SLpgtargetQRHJKMNPQR"
+	unitKey := seedLocation(t, ctx, conn, "unit", unitID)
+	lnk := linkKeyOf(idKey, "residesIn", unitKey)
+
+	seedTombstonedResidences(t, ctx, conn, idKey, pageLimit+1)
+	submitHint(t, ctx, conn, cp, cons, "slPaged1", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": unitKey},
+		wireHint(idKey, "residesIn", unitKey), processor.OutcomeAccepted)
+	submit(t, ctx, conn, cp, cons, "slPaged2", "UnwireResidesIn",
+		map[string]any{"linkKey": lnk}, []string{lnk}, processor.OutcomeAccepted)
+
+	outcome, reply := submitWireResidesInReply(t, ctx, conn, cp, cons, "slPaged3", idKey, unitKey,
+		undeclaredWireHint(idKey, unitKey))
+	if outcome != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("undeclared re-wire with the tombstone past page 1 (%d fillers): outcome %q (%s), want accepted", pageLimit+1, outcome, msg)
+	}
+	if reply == nil || reply.PrimaryKey != lnk {
+		t.Fatalf("paged undeclared re-wire primaryKey = %+v, want %s", reply, lnk)
+	}
+	assertLinkRevived(t, ctx, conn, lnk, "residesIn", idKey, unitKey)
+}
+
+// TestSL_ResidesIn_PastBoundAbsentCreates proves the walk's fallback past its
+// bound is a create: an identity whose residesIn subjects exceed
+// RESIDES_IN_MAX_PAGES pages, wired to a unit it has NEVER resided in, gets
+// the link created — the bound is never a ceiling on a fresh residence.
+func TestSL_ResidesIn_PastBoundAbsentCreates(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "respastboundabsent")
+	bound := scriptIntConstant(t, "RESIDES_IN_PAGE_LIMIT") * scriptIntConstant(t, "RESIDES_IN_MAX_PAGES")
+
+	idID := "SLpgabsentQRHJKMNPQR"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	unitID := "SLpgtargetQRHJKMNPQS"
+	unitKey := seedLocation(t, ctx, conn, "unit", unitID)
+	lnk := linkKeyOf(idKey, "residesIn", unitKey)
+
+	// bound subjects exactly fill the last page and the walk answers
+	// "absent"; one more puts the answer past the bound.
+	seedTombstonedResidences(t, ctx, conn, idKey, bound+1)
+	outcome, reply := submitWireResidesInReply(t, ctx, conn, cp, cons, "slPastBoundAbsent1", idKey, unitKey,
+		undeclaredWireHint(idKey, unitKey))
+	if outcome != processor.OutcomeAccepted {
+		msg := ""
+		if reply != nil && reply.Error != nil {
+			msg = reply.Error.Message
+		}
+		t.Fatalf("wire of an absent residence past the walk's bound (%d subjects): outcome %q (%s), want accepted", bound+1, outcome, msg)
+	}
+	if reply == nil || reply.PrimaryKey != lnk {
+		t.Fatalf("wire past the bound primaryKey = %+v, want %s", reply, lnk)
+	}
+	doc := readDoc(t, ctx, conn, lnk)
+	if del, _ := doc["isDeleted"].(bool); del {
+		t.Fatalf("wire past the bound should create the link alive; got isDeleted=true")
+	}
+	if _, ok := doc["createdAt"]; !ok {
+		t.Fatalf("wire past the bound must be a create, not an update: %v", doc)
+	}
+}
+
+// TestSL_ResidesIn_PastBoundTombstoneConflicts pins the fallback's other
+// outcome: a tombstoned target the bounded walk never reached is re-wired as
+// a create, and the create is create-once, so the commit path rejects
+// RevisionConflict and the link stays dead — never a blind overwrite, and
+// confined to identities carrying more residesIn subjects than the bound.
+func TestSL_ResidesIn_PastBoundTombstoneConflicts(t *testing.T) {
+	ctx, conn := setupSLEnv(t)
+	cp, cons := newSLPipeline(t, ctx, conn, "respastboundtomb")
+	bound := scriptIntConstant(t, "RESIDES_IN_PAGE_LIMIT") * scriptIntConstant(t, "RESIDES_IN_MAX_PAGES")
+
+	idID := "SLpgtombstQRHJKMNPQR"
+	idKey := "vtx.identity." + idID
+	seedVertex(t, ctx, conn, idKey, "identity", map[string]any{"state": "claimed"})
+	unitID := "SLpgtargetQRHJKMNPQT"
+	unitKey := seedLocation(t, ctx, conn, "unit", unitID)
+	lnk := linkKeyOf(idKey, "residesIn", unitKey)
+
+	// The target is tombstoned through the ops (a real unwire, at a real
+	// revision) BEFORE the fillers push it past the bound.
+	submitHint(t, ctx, conn, cp, cons, "slPastBoundTomb1", "WireResidesIn",
+		map[string]any{"identity": idKey, "location": unitKey},
+		wireHint(idKey, "residesIn", unitKey), processor.OutcomeAccepted)
+	submit(t, ctx, conn, cp, cons, "slPastBoundTomb2", "UnwireResidesIn",
+		map[string]any{"linkKey": lnk}, []string{lnk}, processor.OutcomeAccepted)
+	before := readDoc(t, ctx, conn, lnk)
+	seedTombstonedResidences(t, ctx, conn, idKey, bound)
+
+	outcome, reply := submitWireResidesInReply(t, ctx, conn, cp, cons, "slPastBoundTomb3", idKey, unitKey,
+		undeclaredWireHint(idKey, unitKey))
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("undeclared re-wire of a tombstone past the walk's bound: outcome %q, want rejected", outcome)
+	}
+	if reply == nil || reply.Error == nil {
+		t.Fatalf("undeclared re-wire of a tombstone past the bound: no error in the reply %+v", reply)
+	}
+	if reply.Error.Code != processor.ErrCodeRevisionConflict {
+		t.Fatalf("undeclared re-wire of a tombstone past the bound: error code %q (%s), want %q",
+			reply.Error.Code, reply.Error.Message, processor.ErrCodeRevisionConflict)
+	}
+	// The conflict is the create's own assertion (revision 0 against a key
+	// already at a later one): step8_commit.go's ConflictError renders it as
+	// `expected=0`. The substrate does not name the key for this shape, so
+	// the reply's conflictingKey detail is best-effort empty and not pinned.
+	if !strings.Contains(reply.Error.Message, "expected=0") {
+		t.Fatalf("conflict reply %q should carry the create-once assertion (expected=0)", reply.Error.Message)
+	}
+	after := readDoc(t, ctx, conn, lnk)
+	if del, _ := after["isDeleted"].(bool); !del {
+		t.Fatalf("a create-once collision must leave the tombstone dead; got isDeleted=false")
+	}
+	beforeJSON, _ := json.Marshal(before)
+	afterJSON, _ := json.Marshal(after)
+	if string(beforeJSON) != string(afterJSON) {
+		t.Fatalf("a rejected re-wire rewrote the tombstone: before %s, after %s", beforeJSON, afterJSON)
 	}
 }
 

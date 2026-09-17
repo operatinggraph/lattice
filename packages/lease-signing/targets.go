@@ -87,6 +87,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     resolution routes object-class mutations to objects-base's DDL). Closes
 //     when the signedLease link lands and the lens reprojects; a detached
 //     executed lease re-opens it (self-healing re-attach).
+//   - missing_residence → directOp WireResidesIn{identity: row.applicant,
+//     location: row.unitKey} — a cross-package directOp into
+//     service-location (the SetListingStatus precedent), granted to operator
+//     (Weaver's service actor). Opens the instant a landlord approves a
+//     signed application whose term has not ended and whose applicant carries
+//     no live residesIn link to the leased unit (lenses.go); closes when
+//     WireResidesIn commits the link and the lens reprojects (the applicant
+//     identity's own residesIn edge is a lens-adjacent constituent). The
+//     Enumerations entry declares the script's own `(e)` bounded walk of the
+//     applicant's residesIn links — the read a lens cannot project (a dead
+//     link's key never survives a live read), which is how WireResidesIn
+//     finds and revives an undeclared tombstoned link on a move-back-in
+//     (service-location's own decision).
 //
 // applicantOnboarding — one gap, one remediation:
 //   - missing_onboarding → triggerLoom(onboarding) over the applicant identity
@@ -113,9 +126,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 	targets := []pkgmgr.WeaverTargetSpec{{
 		TargetID: "leaseApplicationComplete",
-		Description: "A lease application reaches a signed, executed lease with its document attached, and an " +
-			"approved application's unit is marked leased. Outstanding steps are requested from the " +
-			"applicant or the vendor.",
+		Description: "A lease application reaches a signed, executed lease with its document attached, an " +
+			"approved application's unit is marked leased, and its applicant is wired to reside there. " +
+			"Outstanding steps are requested from the applicant or the vendor.",
 		LensRef: "leaseApplicationComplete",
 		// Admission (Contract #10 §10.8 "Admission control", Fire 8) paces this
 		// target's two vendor-backed gaps independently: a spike of applicants
@@ -137,6 +150,15 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 			"missing_payment":       {Action: "triggerLoom", Pattern: "collectPayment", Subject: "row.applicant", Adapter: "stripe"},
 			"missing_signature":     {Action: "assignTask", Operation: "SignLease", Assignee: "row.applicant", Target: "row.entityKey"},
 			"missing_listingLeased": {Action: "directOp", Operation: "SetListingStatus", Params: map[string]string{"unit": "row.unitKey", "status": "leased"}, Reads: []string{"row.unitKey", "row.unitKey.listing"}},
+			"missing_residence": {
+				Action:    "directOp",
+				Operation: "WireResidesIn",
+				Params:    map[string]string{"identity": "row.applicant", "location": "row.unitKey"},
+				Reads:     []string{"row.applicant", "row.unitKey"},
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "row.applicant", Relation: "residesIn", Direction: "out"},
+				},
+			},
 			"missing_lossRecorded": {
 				Action:        "directOp",
 				Operation:     "RecordApplicationLoss",

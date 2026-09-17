@@ -36,8 +36,8 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: TenancyEndTarget + ".{actorSuffix}",
 				BodyColumns: []string{
-					"violating", "missing_tenancyEnded", "missing_relist", "entityKey", "unitKey", "freshUntil",
-					"leaseEnd", "termEnd", "moveOutAt", "endedAt", "unitStatus",
+					"violating", "missing_tenancyEnded", "missing_relist", "missing_residenceUnwired", "entityKey", "unitKey", "freshUntil",
+					"leaseEnd", "termEnd", "moveOutAt", "endedAt", "unitStatus", "residenceLinkKey",
 				},
 				EmptyBehavior: "delete",
 				KeyColumn:     "entityId",
@@ -48,8 +48,8 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 }
 
 // tenancyEndSpec anchors on EVERY leaseapp (a required MATCH — actorAggregate
-// re-executes per anchor) and projects two gaps, one per half of "a lease that
-// ends frees its unit":
+// re-executes per anchor) and projects three gaps, the third split from the
+// second half of "a lease that ends frees its unit AND releases its resident":
 //
 //   - missing_tenancyEnded — the term has ended and nothing has recorded it:
 //     the application is decided approved AND signed (the tenancy is a real
@@ -64,7 +64,13 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 //     appliesToUnit unit is live (unitKey <> null), its .listing.status is
 //     'leased', and no OTHER approved application on that unit holds a live
 //     (not-ended) tenancy. → directOp SetListingStatus{unit, status: available}.
-//   - violating is the explicit OR of the two (Contract #10 §10.2 — Weaver
+//   - missing_residenceUnwired — the term is recorded as ended, the applicant
+//     still carries a live residesIn link to the unit this application named,
+//     and no OTHER live tenancy of the SAME applicant on the SAME unit needs
+//     that link kept: endedAt is set, residenceLinkKey names a live link, and
+//     sameApplicantLiveTenancyCount is zero. → directOp
+//     UnwireResidesIn{linkKey: row.residenceLinkKey}.
+//   - violating is the explicit OR of the three (Contract #10 §10.2 — Weaver
 //     dispatches only violating rows).
 //
 // termEnd is the term's EFFECTIVE end, carried in both languages (this cypher
@@ -152,6 +158,80 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 // dispatch refusal, not a no-op (the missing_listingLeased precedent in
 // leaseApplicationCompleteSpec conjoins the same unitKey <> null).
 //
+// residenceLinkKey is res.key, projected UNAGGREGATED — the instanceOfLink
+// precedent (own.key AS instanceOfLink, lenses.go:1079) — over the applicant's
+// own residesIn link to THIS application's unit, walked as its OWN CLOSED
+// SUBTREE rooted at the anchor: OPTIONAL MATCH
+// (app)-[:applicationFor]->(resId:identity)-[res:residesIn]->(resU:unit)
+// <-[:appliesToUnit]-(app). resId/resU are fresh variables the query never
+// otherwise reads — the walk closes back on `app` itself (already bound by
+// the required MATCH) rather than naming the `id`/`u` variables the
+// applicationFor/appliesToUnit branches below separately bind: a clause
+// naming variables owned by TWO DIFFERENT sibling OPTIONAL MATCH groups
+// spans two sibling subtrees and is refused for the WHOLE stage
+// (clause-spans-sibling-subtrees, ruleengine/full/branchgroups.go) — the
+// shape `(id)-[res:residesIn]->(u)` would take, since id belongs to the
+// applicationFor group and u to the appliesToUnit group. A clause whose only
+// already-bound reference is the ANCHOR itself roots a brand-new independent
+// group instead (a base variable is bound on every row and carries no group
+// ownership, branchgroups.go's parent computation), so this walk folds on
+// its own — structurally equivalent to naming `id`/`u` directly, because app
+// carries exactly one live applicationFor target and one live appliesToUnit
+// target, so resId/resU can only bind to id/u respectively, but the query
+// never has to say so.
+//
+// res.key is projected bare rather than through max(): the rel-binding gate
+// (relbinding.go exprYieldsAValue, ~386-391) recognises only
+// count()/collect()/type() (and a few string functions) as always yielding a
+// scalar off a relationship operand; max()/min() are not on that list, so
+// wrapping a relationship's `.key` in max() reads as CARRYING the
+// relationship binding forward under the new alias, and a later bare RETURN
+// of that alias trips the "relationship variable used as a value" refusal.
+// Projecting res.key directly needs no such recognition (PropertyAccess
+// itself yields a value): resId/resU are fixed per anchor group (bound off
+// this same closed walk, never off the `other`/`rn` fans the WITH also
+// aggregates over), and Contract #1's deterministic link key means there is
+// at most one live residesIn link between a given identity and unit — so
+// res.key is functionally invariant across the whole cross product this WITH
+// groups, whatever `other` or `rn` row it is paired with. Only a LIVE link's
+// key can be named this way (the full engine filters dead links on every
+// read, executor.go:1094), so a null residenceLinkKey means either no link
+// or a tombstoned one — either way there is nothing left to unwire.
+//
+// sameApplicantLiveTenancyCount is otherLiveTenancyCount's own CASE, conjoined
+// with `otherId.key <> null` — the SAME `other` fan's own applicant, closed
+// back on the anchor exactly as the residence walk above is: OPTIONAL MATCH
+// (other)-[:applicationFor]->(otherId:identity)<-[:applicationFor]-(app),
+// still a SEPARATE OPTIONAL MATCH from the `other` fan's own single-hop
+// clause (rather than one connected pattern off `u`), so a sibling missing
+// its applicant hop still binds `other` for otherLiveTenancyCount — the
+// relist guard must not depend on the residence guard's own walk. `otherId`
+// only binds when the SAME identity is reachable both from `other` and from
+// `app` via applicationFor, which is exactly "same applicant" with no
+// comparison to a separately-bound `id` needed: such a comparison would
+// cross an aggregate into the applicationFor group from inside the `other`
+// subtree's own fold, and an aggregate spanning two groups cannot be
+// attributed to either one's fold (stageAggregatorCalls) — forcing `other`
+// onto the base row set too. Closing the loop on `app` keeps the comparison
+// inside the `other` subtree's own group — `app` is the anchor, base on
+// every row, and carries no group ownership to cross into (branchgroups.go's
+// parent computation skips it). No standalone `id` variable is bound in this
+// cypher. Every leaseapp carries exactly one applicationFor, required at
+// CreateLeaseApplication, so in a real graph otherId is never null where
+// other is non-null and its own applicant matches; the separate clause is
+// belt-and-braces for that invariant, not a workaround for it. It answers a
+// narrower question than the relist guard: not "does anyone else's live
+// tenancy justify keeping the unit leased" but "does the SAME applicant hold
+// another live tenancy on the SAME unit that still needs this residence
+// link" — an ended application on a unit the same person re-leases (a new
+// leaseapp, a fresh approval) must not have its residence unwired out from
+// under the person's own re-approved tenancy, even though the OLD
+// application's own row is the one that just ended. A DIFFERENT applicant's
+// live tenancy on the unit does not hold this guard: the ended application's
+// own resident has moved on regardless of who moved in next, so the link is
+// unwired and the new application's own missing_residence wires the new
+// resident independently.
+//
 // '= null' / '<> null' are the full engine's null tests (ruleengine/full
 // values.go equalsAny: null = null is true, any value = null is false; `<>`
 // is its negation). compareAny answers FALSE when either side of an ordering
@@ -170,8 +250,10 @@ func TenancyEndLenses() []pkgmgr.LensSpec {
 var tenancyEndSpec = fmt.Sprintf(`
 MATCH (app:leaseapp {key: $actorKey})
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
+OPTIONAL MATCH (app)-[:applicationFor]->(resId:identity)-[res:residesIn]->(resU:unit)<-[:appliesToUnit]-(app)
 OPTIONAL MATCH (app)<-[:renews]-(rn:renewal)
 OPTIONAL MATCH (u)<-[:appliesToUnit]-(other:leaseapp)
+OPTIONAL MATCH (other)-[:applicationFor]->(otherId:identity)<-[:applicationFor]-(app)
 WITH
   app.key                          AS entityKey,
   app.tenancy.data.leaseEnd        AS leaseEnd,
@@ -184,7 +266,9 @@ WITH
   u.listing.data.status            AS unitStatus,
   app.freshnessExpiry.data.byTarget.%[1]s AS lapsedAt,
   count(DISTINCT CASE WHEN rn.data.status = 'open' AND rn.data.cycleEnd = app.tenancy.data.leaseEnd THEN rn.key ELSE null END) AS openRenewalCount,
-  count(DISTINCT CASE WHEN other.key <> app.key AND other.decision.data.value = 'approved' AND other.tenancy.data.endedAt = null THEN other.key ELSE null END) AS otherLiveTenancyCount
+  count(DISTINCT CASE WHEN other.key <> app.key AND other.decision.data.value = 'approved' AND other.tenancy.data.endedAt = null THEN other.key ELSE null END) AS otherLiveTenancyCount,
+  count(DISTINCT CASE WHEN other.key <> app.key AND other.decision.data.value = 'approved' AND other.tenancy.data.endedAt = null AND otherId.key <> null THEN other.key ELSE null END) AS sameApplicantLiveTenancyCount,
+  res.key AS residenceLinkKey
 RETURN
   entityKey AS actorKey,
   entityKey,
@@ -194,8 +278,10 @@ RETURN
   moveOutAt,
   endedAt,
   unitStatus,
+  residenceLinkKey,
   CASE WHEN (endedAt <> null) OR (lapsedAt >= termEnd) THEN null ELSE termEnd END AS freshUntil,
   ((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))) AS missing_tenancyEnded,
   ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0)) AS missing_relist,
-  (((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))) OR ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0))) AS violating
+  ((endedAt <> null) AND (residenceLinkKey <> null) AND (sameApplicantLiveTenancyCount = 0)) AS missing_residenceUnwired,
+  (((landlordDecision = 'approved') AND (signedAt <> null) AND (leaseEnd <> null) AND (endedAt = null) AND (lapsedAt >= termEnd) AND ((openRenewalCount = 0) OR (moveOutAt <> null))) OR ((endedAt <> null) AND (unitKey <> null) AND (unitStatus = 'leased') AND (otherLiveTenancyCount = 0)) OR ((endedAt <> null) AND (residenceLinkKey <> null) AND (sameApplicantLiveTenancyCount = 0))) AS violating
 `, TenancyEndTarget)
