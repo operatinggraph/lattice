@@ -136,7 +136,7 @@ func TestClinicAppointments_JoinsPatientAndProvider(t *testing.T) {
 	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
 	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z", "reason": "Annual checkup"})
-	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "scheduled"})
+	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "scheduled", "at": "2026-06-30T09:00:00Z", "by": "staff"})
 	// The clinic-reminders .reminder aspect (sibling package) — clinicAppointments
 	// surfaces its sentAt null-safely so the FE can show "reminder sent".
 	f.aspect(t, "appt", "reminder", "appointmentReminder", map[string]any{"sentAt": "2026-06-30T15:00:00Z"})
@@ -152,6 +152,9 @@ func TestClinicAppointments_JoinsPatientAndProvider(t *testing.T) {
 	require.Equal(t, "2026-07-01T15:30:00Z", v["endsAt"])
 	require.Equal(t, "Annual checkup", v["reason"])
 	require.Equal(t, "scheduled", v["status"])
+	require.Equal(t, "2026-06-30T09:00:00Z", v["statusAt"], "anchor aspect-hop a.status.data.at")
+	require.Equal(t, "staff", v["statusBy"], "anchor aspect-hop a.status.data.by")
+	require.Nil(t, v["changeNoticeSentAt"], "no .changeNotice aspect → null changeNoticeSentAt (null-safe)")
 	require.Equal(t, patientKey, v["patientKey"])
 	_, hasPatientName := v["patientName"]
 	require.False(t, hasPatientName, "patient name is PHI — never projected into the open (unauthenticated) clinicAppointments lens; names live only in Protected clinicAppointmentsRead")
@@ -184,6 +187,37 @@ func TestClinicAppointments_StatusTransitionProjects(t *testing.T) {
 	require.Equal(t, "confirmed", rows[0].Values["status"])
 	require.Nil(t, rows[0].Values["reason"], "absent optional reason → null column")
 	require.Nil(t, rows[0].Values["reminderSentAt"], "no .reminder aspect → null reminderSentAt (null-safe)")
+	// A legacy .status carrying no at/by (written before this build) projects
+	// null for both — no backfill, no fabricated proxy.
+	require.Nil(t, rows[0].Values["statusAt"], "no at on .status → null statusAt")
+	require.Nil(t, rows[0].Values["statusBy"], "no by on .status → null statusBy")
+}
+
+// TestClinicAppointments_ProjectsChangeNoticeSentAt proves the null-safe read
+// off the appointment's .changeNotice aspect — written by clinic-reminders'
+// RecordAppointmentChangeNotice (a sibling package's op this Increment does
+// not build), not clinic-domain itself. The column exists so a fixture that
+// DOES carry the aspect (this test) or does not (every other fixture in this
+// file) both project correctly, ahead of that op landing.
+func TestClinicAppointments_ProjectsChangeNoticeSentAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "appt", "appointment")
+	f.vtx(t, "alice", "patient")
+	f.vtx(t, "drsam", "provider")
+	f.aspect(t, "alice", "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
+	f.aspect(t, "drsam", "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
+	f.aspect(t, "appt", "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z"})
+	f.aspect(t, "appt", "status", "appointmentStatus", map[string]any{"value": "cancelled", "at": "2026-06-25T09:00:00Z", "by": "staff"})
+	f.aspect(t, "appt", "changeNotice", "appointmentChangeNotice", map[string]any{"cancelledFor": "2026-06-25T09:00:00Z", "sentAt": "2026-06-25T09:05:00Z"})
+	f.edge(t, "forPatient", "appt", "alice")
+	f.edge(t, "withProvider", "appt", "drsam")
+
+	rows := f.project(t, clinicAppointmentsSpec)
+	require.Len(t, rows, 1)
+	require.Equal(t, "2026-06-25T09:05:00Z", rows[0].Values["changeNoticeSentAt"])
 }
 
 // TestClinicAppointments_ProjectsEncounterOperationalSignalsOnly proves the

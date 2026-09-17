@@ -1099,11 +1099,17 @@ func TestClinic_SetAppointmentStatus(t *testing.T) {
 		`{"appointmentKey":"`+apptKey+`","status":"confirmed"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeAccepted)
 
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
-	if st, _ := status["data"].(map[string]any); st["value"] != "confirmed" {
+	st, _ := status["data"].(map[string]any)
+	if st["value"] != "confirmed" {
 		t.Fatalf("after SetAppointmentStatus, status = %v, want confirmed", st["value"])
 	}
 	if del, _ := status["isDeleted"].(bool); del {
 		t.Fatalf("status aspect should be alive after upsert; got isDeleted=%v", del)
+	}
+	// A staff transition (scheduled→confirmed) stamps fresh: at = the op's own
+	// submittedAt, by = staff.
+	if st["at"] != clSubmittedAnchor || st["by"] != "staff" {
+		t.Fatalf("after SetAppointmentStatus, at/by = %v/%v, want %s/staff", st["at"], st["by"], clSubmittedAnchor)
 	}
 }
 
@@ -1125,9 +1131,11 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
-	// checkedIn is a valid status (the new active state).
-	clSubmitOpt(t, ctx, conn, cp, cons, "setchkin001", "SetAppointmentStatus", "appointment",
-		`{"appointmentKey":"`+apptKey+`","status":"checkedIn"}`, []string{apptKey}, []string{apptKey + ".status"}, processor.OutcomeAccepted)
+	// checkedIn is a valid status (the new active state), submitted at a
+	// distinct instant so a later same-value carry is observable against it.
+	reads, optionalReads := clStatusReads(apptKey, false, providerKey, patientKey)
+	clSubmitAt(t, ctx, conn, cp, cons, "setchkin001", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"checkedIn"}`, "2026-07-09T08:50:00Z", reads, optionalReads, processor.OutcomeAccepted)
 	status := clReadDoc(t, ctx, conn, apptKey+".status")
 	st, _ := status["data"].(map[string]any)
 	if st["value"] != "checkedIn" {
@@ -1135,6 +1143,23 @@ func TestClinic_StatusCheckedInAndNote(t *testing.T) {
 	}
 	if _, hasNote := st["note"]; hasNote {
 		t.Fatalf("a noteless transition must carry no note; got %v", st["note"])
+	}
+	// The transition stamps fresh: at = its own submittedAt, by = staff.
+	if st["at"] != "2026-07-09T08:50:00Z" || st["by"] != "staff" {
+		t.Fatalf("checkedIn transition at/by = %v/%v, want 2026-07-09T08:50:00Z/staff", st["at"], st["by"])
+	}
+
+	// A SAME-VALUE re-set (checkedIn→checkedIn, staff adding a note) at a
+	// LATER submittedAt carries the FIRST checkedIn's at/by forward unchanged
+	// — "checked in N min ago" must not reset just because the desk added a
+	// note.
+	clSubmitAt(t, ctx, conn, cp, cons, "setchkin002", "SetAppointmentStatus", "appointment",
+		`{"appointmentKey":"`+apptKey+`","status":"checkedIn","note":"still waiting"}`, "2026-07-09T09:10:00Z", reads, optionalReads, processor.OutcomeAccepted)
+	if st = clStatusData(t, ctx, conn, apptKey); st["value"] != "checkedIn" || st["note"] != "still waiting" {
+		t.Fatalf("checkedIn re-set = %v, want checkedIn + the new note", st)
+	}
+	if st["at"] != "2026-07-09T08:50:00Z" || st["by"] != "staff" {
+		t.Fatalf("checkedIn re-set must carry at/by forward from the first checkedIn, got %v", st)
 	}
 
 	// A transition with an audit note records the note on .status (a non-terminal
@@ -1320,6 +1345,11 @@ func TestClinic_MarkPastDueNoShow(t *testing.T) {
 	}
 	if st["note"] != "Auto no-show: appointment ended without a status update" {
 		t.Fatalf("note = %v, want the auto no-show note", st["note"])
+	}
+	// The sweep's own author label: by = sweep, never staff/patient, at the
+	// dispatch's own submittedAt.
+	if st["at"] != "2026-07-20T09:30:00Z" || st["by"] != "sweep" {
+		t.Fatalf("MarkPastDueNoShow status at/by = %v/%v, want 2026-07-20T09:30:00Z/sweep", st["at"], st["by"])
 	}
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-20T09:00:00Z")
 	clAssertSlotClaimReleased(t, ctx, conn, patientKey, "2026-07-20T09:00:00Z")
@@ -1652,6 +1682,12 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 		[]string{patientKey, providerKey}, processor.OutcomeAccepted)
 	apptKey := "vtx.appointment." + apptID
 
+	// CreateAppointment's own .schedule carries neither field — a move is
+	// recorded only when one actually happens.
+	if createdSd, _ := clReadDoc(t, ctx, conn, apptKey+".schedule")["data"].(map[string]any); createdSd["movedAt"] != nil || createdSd["movedBy"] != nil {
+		t.Fatalf("CreateAppointment must write neither movedAt nor movedBy, got %v", createdSd)
+	}
+
 	// Reschedule to a new day, re-supplying the reason (the FE round-trips it). The
 	// startsAt is given with a +02:00 offset to prove canonical-UTC normalization.
 	// provider + patient are supplied and validated (WrongProvider/WrongPatient) so
@@ -1674,6 +1710,11 @@ func TestClinic_RescheduleAppointment(t *testing.T) {
 	}
 	if sd["reason"] != "Annual checkup" {
 		t.Fatalf("after reschedule, reason = %v, want preserved Annual checkup", sd["reason"])
+	}
+	// movedAt/movedBy are stamped fresh on every RescheduleAppointment call —
+	// this one submitted at clSubmittedAnchor by the staff actor.
+	if sd["movedAt"] != clSubmittedAnchor || sd["movedBy"] != "staff" {
+		t.Fatalf("after reschedule, movedAt/movedBy = %v/%v, want %s/staff", sd["movedAt"], sd["movedBy"], clSubmittedAnchor)
 	}
 	if del, _ := sched["isDeleted"].(bool); del {
 		t.Fatalf("schedule aspect should be alive after reschedule; got isDeleted=%v", del)
@@ -3261,6 +3302,10 @@ func TestClinic_CreateAppointmentConsumerSelfScope_Allowed(t *testing.T) {
 	if adoc := clReadDoc(t, ctx, conn, apptKey); adoc["class"] != "appointment" {
 		t.Fatalf("appointment class = %v, want appointment", adoc["class"])
 	}
+	// A self-booked visit stamps its initial .status by: patient.
+	if st := clStatusData(t, ctx, conn, apptKey); st["value"] != "scheduled" || st["at"] != clSubmittedAnchor || st["by"] != "patient" {
+		t.Fatalf("self-booked initial status = %v, want scheduled at %s by patient", st, clSubmittedAnchor)
+	}
 }
 
 // TestClinic_CreateAppointmentConsumerSelfScope_AllowedWithoutDeclaredRead proves
@@ -3393,6 +3438,10 @@ func TestClinic_RescheduleAppointmentConsumerSelfScope_Allowed(t *testing.T) {
 	sd, _ := sched["data"].(map[string]any)
 	if sd["startsAt"] != "2026-07-12T16:00:00Z" {
 		t.Fatalf("after self-reschedule, startsAt = %v, want 2026-07-12T16:00:00Z", sd["startsAt"])
+	}
+	// A move on the consumer self path stamps movedBy: patient.
+	if sd["movedAt"] != clSubmittedAnchor || sd["movedBy"] != "patient" {
+		t.Fatalf("after self-reschedule, movedAt/movedBy = %v/%v, want %s/patient", sd["movedAt"], sd["movedBy"], clSubmittedAnchor)
 	}
 	clAssertSlotClaimReleased(t, ctx, conn, providerKey, "2026-07-10T15:00:00Z")
 	clAssertSlotClaimLive(t, ctx, conn, providerKey, "2026-07-12T16:00:00Z")

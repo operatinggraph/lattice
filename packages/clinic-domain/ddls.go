@@ -944,18 +944,21 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateAppointment", "RescheduleAppointment"},
 		Description: "Appointment schedule aspect (clinic). Stored as vtx.appointment.<NanoID>.schedule (class " +
-			"appointmentSchedule) = {startsAt, endsAt, remindAt, reason?, selfBooked?}. Non-sensitive. Written by CreateAppointment " +
-			"(initial) and RescheduleAppointment (new times; selfBooked carried forward) — whose appointment vertexType DDL owns the script; this " +
+			"appointmentSchedule) = {startsAt, endsAt, remindAt, reason?, selfBooked?, movedAt?, movedBy?}. Non-sensitive. Written by CreateAppointment " +
+			"(initial; movedAt/movedBy absent) and RescheduleAppointment (new times; selfBooked carried forward; movedAt/movedBy stamped fresh on every call) — whose appointment vertexType DDL owns the script; this " +
 			"aspect-type DDL is the step-6 write gate. Declaration-only: no op handler. remindAt = startsAt − 24h is a " +
 			"precomputed reminder deadline the " +
 			"clinic-reminders package's convergence lens reads (it is not a caller input). CreateAppointment " +
 			"conflict-checks the booking by claiming a slot-claim aspect per covered 15-minute cell on the provider and " +
 			"patient hubs (double-book rejection) and the provider's opt-in .hours availability windows (OutsideHours " +
 			"rejection). selfBooked = true records that the visit was booked on the consumer scope=self path (the " +
-			"patient themselves, never the desk) — the fact the patientSelfDayClaim lock and its release are keyed on.",
+			"patient themselves, never the desk) — the fact the patientSelfDayClaim lock and its release are keyed on. " +
+			"movedAt/movedBy record WHEN a move happened and WHO made it (movedBy ∈ staff|patient) — a recorded fact " +
+			"on the entity, never inferred from the reminder's own remindedFor marker.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"startsAt":{"type":"string"},"endsAt":{"type":"string"},"remindAt":{"type":"string"},"reason":{"type":"string"},"selfBooked":{"type":"boolean"}}}`,
+			`{"startsAt":{"type":"string"},"endsAt":{"type":"string"},"remindAt":{"type":"string"},"reason":{"type":"string"},"selfBooked":{"type":"boolean"},` +
+			`"movedAt":{"type":"string"},"movedBy":{"type":"string","enum":["staff","patient"]}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"startsAt":   "Appointment start (RFC3339).",
@@ -963,6 +966,8 @@ func scheduleAspectTypeDDL() pkgmgr.DDLSpec {
 			"remindAt":   "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateAppointment, not a caller input; the clinic-reminders convergence lens projects it as freshUntil to arm the @at reminder timer.",
 			"reason":     "Visit reason / chief complaint.",
 			"selfBooked": "true when the visit was booked on the consumer scope=self path (the patient's own login, self-scoped); absent on a front-desk / operator booking. Recorded by CreateAppointment, carried unchanged by RescheduleAppointment; it selects whether the visit holds a patientSelfDayClaim for its provider + UTC day.",
+			"movedAt":    "When this move was made (RFC3339, canonical UTC) = op.submittedAt. Stamped fresh by RescheduleAppointment on every call; absent until the first move (CreateAppointment writes neither field).",
+			"movedBy":    "Who made this move: staff (front desk / operator) or patient (the consumer self-service path). Stamped fresh by RescheduleAppointment on every call, alongside movedAt.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -986,7 +991,7 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 		PermittedCommands: []string{"CreateAppointment", "SetAppointmentStatus", "CorrectAppointmentStatus", "MarkPastDueNoShow", "RescheduleAppointment"},
 		Description: "Appointment status aspect (clinic). Stored as vtx.appointment.<NanoID>.status (class " +
 			"appointmentStatus) = {value ∈ scheduled|confirmed|checkedIn|completed|cancelled|noShow, note?, " +
-			"noShowFeeCents?, lateCancel?, correctedFrom?}. Non-sensitive. Written by CreateAppointment (initial scheduled), SetAppointmentStatus " +
+			"noShowFeeCents?, lateCancel?, correctedFrom?, at?, by?}. Non-sensitive. Written by CreateAppointment (initial scheduled), SetAppointmentStatus " +
 			"(transitions, with an optional audit note — a cancel / no-show reason, distinct from the .schedule visit " +
 			"reason — and a noShowFeeCents amount when transitioning to noShow (caller-supplied or a 2500 default) or " +
 			"when a patient cancels their own visit inside the 24-hour late-cancel window (lateCancel: true, the 2500 " +
@@ -1001,11 +1006,17 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 			"is dropped with the transition it belonged to) — whose appointment vertexType DDL " +
 			"owns every script here; this aspect-type DDL is the step-6 write gate. The fee's PRESENCE on the current " +
 			"value is what clinic-ledger's clinicNoShowSettlement bills, whichever writer set it, and its absence on a " +
-			"charged appointment is what it reverses. Declaration-only: no op handler.",
+			"charged appointment is what it reverses. at/by record WHEN a value CHANGE landed and WHO made it (by ∈ " +
+			"staff|patient|sweep): every writer stamps them fresh on a transition and carries the CURRENT value's " +
+			"at/by forward unchanged on a same-value re-write (a note added to a cancelled visit, a scheduled " +
+			"re-stamp on a reschedule, an idempotent re-set) — so \"checked in N min ago\" never resets and a change " +
+			"notice keyed on at is never re-sent. A .status carrying neither field records no moment. " +
+			"Declaration-only: no op handler.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"value":{"type":"string","enum":["scheduled","confirmed","checkedIn","completed","cancelled","noShow"]},"note":{"type":"string"},"noShowFeeCents":{"type":"number"},` +
-			`"lateCancel":{"type":"boolean"},"correctedFrom":{"type":"string","enum":["cancelled","completed","noShow"]}}}`,
+			`"lateCancel":{"type":"boolean"},"correctedFrom":{"type":"string","enum":["cancelled","completed","noShow"]},` +
+			`"at":{"type":"string"},"by":{"type":"string","enum":["staff","patient","sweep"]}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"value":          "Appointment status: scheduled | confirmed | checkedIn | completed | cancelled | noShow.",
@@ -1013,6 +1024,8 @@ func statusAspectTypeDDL() pkgmgr.DDLSpec {
 			"noShowFeeCents": "Optional no-show fee in integer cents, present when value is noShow (staff-set or a correction: caller-supplied positive number, or a 2500 default when omitted) or cancelled by the patient inside the 24-hour late-cancel window (lateCancel: true, the 2500 default). Its presence on the current value is what clinic-ledger bills; its absence on a charged appointment (a correction to completed / cancelled) is what it reverses.",
 			"lateCancel":     "true when the patient cancelled their own visit inside the 24-hour late-cancel window (submitted at or after startsAt − 24h) — the cancel carries the no-show fee. Absent otherwise; a same-value cancelled re-set carries it forward.",
 			"correctedFrom":  "The terminal status this correction overwrote, present only on a CorrectAppointmentStatus write — the only trace of the wrong call once the upsert lands.",
+			"at":             "When the current value last CHANGED (RFC3339, canonical UTC) = the writing op's submittedAt. Stamped fresh on every value change; carried forward unchanged by a same-value re-write. Optional: a .status carrying no at records no moment.",
+			"by":             "Who made the current value's last change: staff (front desk / operator), patient (the consumer self-service path), or sweep (MarkPastDueNoShow's automated dispatch). Stamped fresh alongside at on every value change; carried forward unchanged by a same-value re-write.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -3179,6 +3192,40 @@ def normalize_follow_up_date(s):
         s = s + "T09:00:00Z"
     return time.rfc3339_utc(s)
 
+def status_author(op):
+    # by ∈ staff|patient|sweep — patient on the consumer self-service path,
+    # staff otherwise (the caller's own op decides when "otherwise" means the
+    # automated sweep instead, by passing "sweep" to stamp_status directly
+    # rather than calling this).
+    # authcontext-target: (selector) every call site has already proven
+    # ownership of the acted-on appointment/patient before writing .status —
+    # this only picks which LABEL the write's author field carries, never a
+    # security decision of its own.
+    if op.authContextTarget != "":
+        return "patient"
+    return "staff"
+
+def stamp_status(status_data, cur_status, changed, op, by):
+    # Every .status write carries WHEN it happened and WHO made it — a
+    # transition (changed=True) stamps THIS write's moment + author; a
+    # same-value re-write (changed=False, e.g. a note added to a cancelled
+    # visit, a scheduled re-stamp on a reschedule, an idempotent re-set)
+    # carries the CURRENT aspect's own at/by forward unchanged, so "checked
+    # in 12 min ago" does not reset and a change notice keyed on at is not
+    # re-sent. A .status with no at/by carries nothing forward — there is no
+    # moment to carry, and a fabricated proxy would be a clock in disguise.
+    if changed:
+        status_data["at"] = time.rfc3339_utc(op.submittedAt)
+        status_data["by"] = by
+    elif cur_status != None and not cur_status.isDeleted:
+        cur_at = cur_status.data.get("at")
+        cur_by = cur_status.data.get("by")
+        if cur_at != None:
+            status_data["at"] = cur_at
+        if cur_by != None:
+            status_data["by"] = cur_by
+    return status_data
+
 APPOINTMENT_STATUSES = ["scheduled", "confirmed", "checkedIn", "completed", "cancelled", "noShow"]
 TERMINAL_STATUSES = ["cancelled", "completed", "noShow"]
 
@@ -3676,10 +3723,14 @@ def execute(state, op):
         # schedule + status are aspects. One providerSlotClaim + one patientSlotClaim
         # per covered cell IS the double-book lock (write-path CreateOnly/
         # expectedRevision, not a read-time enumeration + serialization epoch).
+        # workplace-exempt: (per-call-site) status_author() only labels the
+        # initial .status write's by field from the authContextTarget the
+        # ownership binding above already proved (or its absence, the staff
+        # path) — it carries no confinement exemption of its own.
         mutations = [
             make_vtx(appt_key, "appointment", {}),
             make_aspect(appt_key, "schedule", "appointmentSchedule", sched),
-            make_aspect(appt_key, "status", "appointmentStatus", {"value": "scheduled"}),
+            make_aspect(appt_key, "status", "appointmentStatus", stamp_status({"value": "scheduled"}, None, True, op, status_author(op))),
             make_link(for_patient_lnk, appt_key, patient, "forPatient", "forPatient", {}),
             make_link(with_provider_lnk, appt_key, provider, "withProvider", "withProvider", {}),
         ]
@@ -3871,8 +3922,18 @@ def execute(state, op):
         # lens re-projects a fresh freshUntil and the @at temporal lane re-arms for
         # the NEW time (for a not-yet-sent reminder; the remindedFor term re-arms an
         # already-sent one).
+        # movedAt / movedBy record THIS move as a fact on the entity: every
+        # RescheduleAppointment call is itself a move, so both are stamped
+        # fresh on every call (never carried) — unlike .status, there is no
+        # same-value case to distinguish. movedBy follows the same
+        # patient/staff rule status_author applies to .status.
+        # workplace-exempt: (per-call-site) status_author() only labels
+        # movedBy from the ownership binding already proved above (or its
+        # absence, the staff path) — no confinement exemption of its own.
         sched = {"startsAt": starts_at, "endsAt": ends_at,
-                 "remindAt": time.rfc3339_add(starts_at, "-24h")}
+                 "remindAt": time.rfc3339_add(starts_at, "-24h"),
+                 "movedAt": time.rfc3339_utc(op.submittedAt),
+                 "movedBy": status_author(op)}
         if reason != None:
             sched["reason"] = reason
 
@@ -3905,7 +3966,14 @@ def execute(state, op):
         # intact (design §2.5).
         mutations = [make_aspect_upsert(appt_key, "schedule", "appointmentSchedule", sched)]
         if write_status:
-            mutations.append(make_aspect_upsert(appt_key, "status", "appointmentStatus", {"value": "scheduled"}))
+            # status_reset IS the changed flag here: confirmed/checkedIn→scheduled
+            # is a real transition (stamp fresh); scheduled→scheduled is the
+            # same-value re-stamp (carry the current at/by forward).
+            # workplace-exempt: (per-call-site) status_author() only labels
+            # the reset write's by from the ownership binding already
+            # proved above (or its absence, the staff path).
+            reset_status_data = stamp_status({"value": "scheduled"}, cur_status, status_reset, op, status_author(op))
+            mutations.append(make_aspect_upsert(appt_key, "status", "appointmentStatus", reset_status_data))
         for c in to_release:
             cc = slot_cellcode(c)
             mutations.append(make_tombstone(provider + ".slot" + cc))
@@ -4013,9 +4081,10 @@ def execute(state, op):
         # toward another building's records), and a visit cannot be confirmed
         # once it has begun — self_visit_clock's "started"; "late" is fine,
         # confirming inside 24 h is exactly what the reminder invites. The
-        # write is exactly {value: confirmed}: the payload's note is IGNORED
-        # on this path (the audit note is a staff record — a patient's own
-        # confirm never carries one). No fee, no cells move.
+        # write is {value: confirmed, at, by: patient} — a real transition,
+        # so it always stamps fresh (never a carry): the payload's note is
+        # IGNORED on this path (the audit note is a staff record — a
+        # patient's own confirm never carries one). No fee, no cells move.
         # authcontext-target: (selector) its presence selects the patient-self
         # gates — a stricter branch, never an exemption; ownership was proven
         # by the identifiedBy binding + require_matching_patient above.
@@ -4030,7 +4099,11 @@ def execute(state, op):
             self_sched = kv.Read(appt_key + ".schedule")
             if self_visit_clock(appt_key, self_sched, op.submittedAt) == "started":
                 fail("VisitStarted: appointment " + appt_key + " started at " + self_sched.data.get("startsAt") + " (submitted " + time.rfc3339_utc(op.submittedAt) + "); a visit cannot be confirmed once it has begun — the front desk records the outcome")
-            mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", {"value": "confirmed"})]
+            # workplace-exempt: (per-call-site) status_author() only labels
+            # by from the ownership binding already proved above — this
+            # branch only ever reaches "patient".
+            confirm_data = stamp_status({"value": "confirmed"}, cur_status, True, op, status_author(op))
+            mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", confirm_data)]
             events = [{"class": "clinic.appointmentStatusSet",
                        "data": {"appointmentKey": appt_key, "status": "confirmed"}}]
             return {"mutations": mutations, "events": events,
@@ -4101,6 +4174,14 @@ def execute(state, op):
             for carried in ["lateCancel", "noShowFeeCents"]:
                 if cur_status.data.get(carried) != None:
                     status_data[carried] = cur_status.data.get(carried)
+        # at/by: a value CHANGE (including the first terminal transition above)
+        # stamps this write fresh; a same-value re-set (the cancelled carry
+        # above, or any other same-value re-write, e.g. a note added to an
+        # unchanged checkedIn) carries the current .status's at/by forward.
+        # workplace-exempt: (per-call-site) status_author() only labels by
+        # from the ownership binding already proved above (or its absence,
+        # the staff path).
+        status_data = stamp_status(status_data, cur_status, status != cur_val, op, status_author(op))
         mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)] + release
         events = [{"class": "clinic.appointmentStatusSet",
                    "data": {"appointmentKey": appt_key, "status": status}}]
@@ -4176,6 +4257,10 @@ def execute(state, op):
         # same lens reverses a charge whose status no longer carries one.
         if status == "noShow":
             status_data["noShowFeeCents"] = no_show_fee_cents(p)
+        # Staff-only op: by is always staff. A value CHANGE (a correction
+        # onto a DIFFERENT terminal value) stamps fresh; a same-value
+        # correction (accepted — see above) carries the current at/by forward.
+        status_data = stamp_status(status_data, cur_status, status != cur_val, op, "staff")
         mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
         events = [{"class": "clinic.appointmentStatusCorrected",
                    "data": {"appointmentKey": appt_key, "from": cur_val, "to": status}}]
@@ -4273,6 +4358,10 @@ def execute(state, op):
         # None value here simply never converges a charge — no downstream
         # change needed.
         status_data = {"value": "noShow", "note": "Auto no-show: appointment ended without a status update"}
+        # Always a real transition (the terminal/checkedIn no-ops above already
+        # returned) — by: sweep, never staff/patient, names the automated
+        # dispatch as the write's author.
+        status_data = stamp_status(status_data, cur_status, True, op, "sweep")
         mutations = [make_aspect_upsert(appt_key, "status", "appointmentStatus", status_data)]
         mutations = mutations + release_cells_mutations(provider, patient, schedule)
         events = [{"class": "clinic.appointmentStatusSet",

@@ -184,6 +184,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "reason", Type: "text"},
 				{Name: "status", Type: "text"},
 				{Name: "status_note", Type: "text"},
+				{Name: "status_at", Type: "text"},
+				{Name: "status_by", Type: "text"},
+				{Name: "change_notice_sent_at", Type: "text"},
 				{Name: "patient_key", Type: "text"},
 				{Name: "patient_name", Type: "text"},
 				{Name: "unlinked_patient_name", Type: "text"},
@@ -242,6 +245,9 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "reason", Type: "text"},
 				{Name: "status", Type: "text"},
 				{Name: "status_note", Type: "text"},
+				{Name: "status_at", Type: "text"},
+				{Name: "status_by", Type: "text"},
+				{Name: "change_notice_sent_at", Type: "text"},
 				{Name: "patient_key", Type: "text"},
 				{Name: "patient_name", Type: "text"},
 				{Name: "unlinked_patient_name", Type: "text"},
@@ -662,6 +668,15 @@ func Lenses() []pkgmgr.LensSpec {
 // is amended and then says when the current text was recorded; followUpDate is
 // null unless a follow-up was requested. All null until a visit is documented (and
 // whenever no .documentation aspect exists), null-safe by key-shape.
+//
+// statusAt / statusBy are the .status aspect's own clock: null until a writer
+// stamps them (a .status carrying no at/by records no moment), then WHEN the current value last changed and WHO changed it
+// (staff | patient | sweep) — a same-value re-write carries both forward
+// unchanged, so "checked in N min ago" never resets. changeNoticeSentAt is the
+// same null-safe soft read as reminderSentAt, off the appointment's
+// .changeNotice aspect (written by clinic-reminders' RecordAppointmentChangeNotice,
+// a sibling package's op, not this one) — null until a desk cancel/move notice is
+// sent.
 const clinicAppointmentsSpec = `MATCH (a:appointment)
 OPTIONAL MATCH (a)-[:forPatient]->(p:patient)
 OPTIONAL MATCH (a)-[:withProvider]->(pr:provider)
@@ -674,6 +689,9 @@ RETURN
   a.schedule.data.reason AS reason,
   a.status.data.value AS status,
   a.status.data.note AS statusNote,
+  a.status.data.at AS statusAt,
+  a.status.data.by AS statusBy,
+  a.changeNotice.data.sentAt AS changeNoticeSentAt,
   p.key AS patientKey,
   pr.key AS providerKey,
   pr.profile.data.fullName AS providerName,
@@ -1019,6 +1037,9 @@ RETURN
   a.schedule.data.reason                 AS reason,
   a.status.data.value                    AS status,
   a.status.data.note                     AS status_note,
+  a.status.data.at                       AS status_at,
+  a.status.data.by                       AS status_by,
+  a.changeNotice.data.sentAt             AS change_notice_sent_at,
   p.key                                  AS patient_key,
   pid.name.data                          AS patient_name,
   p.demographics.data.fullName           AS unlinked_patient_name,
@@ -1060,6 +1081,9 @@ RETURN
   a.schedule.data.reason                 AS reason,
   a.status.data.value                    AS status,
   a.status.data.note                     AS status_note,
+  a.status.data.at                       AS status_at,
+  a.status.data.by                       AS status_by,
+  a.changeNotice.data.sentAt             AS change_notice_sent_at,
   p.key                                  AS patient_key,
   pid.name.data                          AS patient_name,
   p.demographics.data.fullName           AS unlinked_patient_name,

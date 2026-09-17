@@ -54,7 +54,7 @@ func (f *lensFixture) seedAppointment(t *testing.T, apptName, patientName, provi
 	f.aspect(t, patientName, "demographics", "patientDemographics", map[string]any{"registeredAt": "2026-06-01T09:00:00Z", "fullName": "Alice Rivera"})
 	f.aspect(t, providerName, "profile", "providerProfile", map[string]any{"fullName": "Dr. Sam Okafor", "specialty": "Cardiology"})
 	f.aspect(t, apptName, "schedule", "appointmentSchedule", map[string]any{"startsAt": "2026-07-01T15:00:00Z", "endsAt": "2026-07-01T15:30:00Z", "reason": "Annual checkup"})
-	f.aspect(t, apptName, "status", "appointmentStatus", map[string]any{"value": "scheduled"})
+	f.aspect(t, apptName, "status", "appointmentStatus", map[string]any{"value": "scheduled", "at": "2026-06-30T09:00:00Z", "by": "staff"})
 	f.aspect(t, apptName, "documentation", "appointmentDocumentation", map[string]any{"documentedAt": "2026-07-01T15:35:00Z", "amendedAt": "2026-07-02T09:10:00Z", "followUpRequested": true, "followUpDate": "2026-08-01"})
 	f.edge(t, "forPatient", apptName, patientName)
 	f.edge(t, "withProvider", apptName, providerName)
@@ -121,6 +121,9 @@ func TestClinicAppointmentsRead_ProjectsPatientSelfAnchor(t *testing.T) {
 	require.Equal(t, "2026-07-02T09:10:00Z", v["amended_at"])
 	require.Equal(t, true, v["follow_up_requested"])
 	require.Equal(t, "2026-08-01", v["follow_up_date"])
+	require.Equal(t, "2026-06-30T09:00:00Z", v["status_at"])
+	require.Equal(t, "staff", v["status_by"])
+	require.Nil(t, v["change_notice_sent_at"], "no .changeNotice aspect on this fixture → null change_notice_sent_at")
 
 	// The headline: authz_anchors is exactly [alice's bare NanoID].
 	require.Equal(t, []string{f.ids["alice"]}, anchorStrings(t, v["authz_anchors"]),
@@ -391,6 +394,9 @@ func TestProviderAppointmentsRead_ProjectsProviderSelfAnchor(t *testing.T) {
 	require.Equal(t, "2026-07-02T09:10:00Z", v["amended_at"])
 	require.Equal(t, true, v["follow_up_requested"])
 	require.Equal(t, "2026-08-01", v["follow_up_date"])
+	require.Equal(t, "2026-06-30T09:00:00Z", v["status_at"])
+	require.Equal(t, "staff", v["status_by"])
+	require.Nil(t, v["change_notice_sent_at"], "no .changeNotice aspect on this fixture → null change_notice_sent_at")
 
 	// The headline: authz_anchors is exactly [the provider's bare NanoID], NOT
 	// the patient's — the anchor axis flips relative to clinicAppointmentsRead.
@@ -1128,6 +1134,34 @@ func TestProtectedAppointmentReads_EncounterWithoutDocumentationProjectsNull(t *
 		require.Nil(t, v["amended_at"], "%s: no .documentation aspect → null amended_at", name)
 		require.Nil(t, v["follow_up_requested"], "%s: no .documentation aspect → null follow_up_requested", name)
 		require.Nil(t, v["follow_up_date"], "%s: no .documentation aspect → null follow_up_date", name)
+		// This fixture's .status carries no at/by (a legacy pre-build shape) and
+		// no .changeNotice aspect exists — both project null, null-safe.
+		require.Nil(t, v["status_at"], "%s: no at on .status → null status_at", name)
+		require.Nil(t, v["status_by"], "%s: no by on .status → null status_by", name)
+		require.Nil(t, v["change_notice_sent_at"], "%s: no .changeNotice aspect → null change_notice_sent_at", name)
+	}
+}
+
+// TestProtectedAppointmentReads_ProjectsChangeNoticeSentAt proves the present
+// case on both patient- and provider-anchored protected read models: an
+// appointment carrying the .changeNotice aspect (written by clinic-reminders'
+// RecordAppointmentChangeNotice, a sibling package's op this Increment does
+// not build) projects its sentAt.
+func TestProtectedAppointmentReads_ProjectsChangeNoticeSentAt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedAppointment(t, "appt", "alice", "drsam")
+	f.aspect(t, "appt", "changeNotice", "appointmentChangeNotice", map[string]any{"cancelledFor": "2026-06-25T09:00:00Z", "sentAt": "2026-06-25T09:05:00Z"})
+
+	for name, spec := range map[string]string{
+		"clinicAppointmentsReadSpec":   clinicAppointmentsReadSpec,
+		"providerAppointmentsReadSpec": providerAppointmentsReadSpec,
+	} {
+		rows := f.project(t, spec)
+		require.Len(t, rows, 1, "%s: exactly one row per appointment", name)
+		require.Equal(t, "2026-06-25T09:05:00Z", rows[0].Values["change_notice_sent_at"], "%s: change_notice_sent_at projects", name)
 	}
 }
 
