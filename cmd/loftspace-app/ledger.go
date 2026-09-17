@@ -37,6 +37,11 @@ type ledgerEntryProjection struct {
 	// "deposit" for a security-deposit charge or its return, empty for rent
 	// and for any clause that records no purpose.
 	ClausePurpose string `json:"clausePurpose"`
+	// Kind is the entry's own recorded provenance (loftspace-ledger's
+	// PayOutBalance stamps kind:"payout" on the debit that pays a credit
+	// balance out — no clause authorizes it, so no other column would tell
+	// it apart); empty on every other entry.
+	Kind string `json:"kind"`
 }
 
 // ledgerEntryRow is the payment-history row the FE renders.
@@ -52,6 +57,7 @@ type ledgerEntryRow struct {
 	ClauseKey      string `json:"clauseKey,omitempty"`
 	ClauseProse    string `json:"clauseProse,omitempty"`
 	ClausePurpose  string `json:"clausePurpose,omitempty"`
+	Kind           string `json:"kind,omitempty"`
 }
 
 // computeLedgerHistory filters the ledgerHistory lens rows to one lease, sorts
@@ -90,6 +96,7 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 			ClauseKey:      p.ClauseKey,
 			ClauseProse:    p.ClauseProse,
 			ClausePurpose:  p.ClausePurpose,
+			Kind:           p.Kind,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -120,18 +127,27 @@ type depositSummary struct {
 	DepositHeldCents    int64  `json:"depositHeldCents"`
 	DepositChargedCents int64  `json:"depositChargedCents,omitempty"`
 	DepositChargedAt    string `json:"depositChargedAt,omitempty"`
-	DepositReturnedAt   string `json:"depositReturnedAt,omitempty"`
+	// DepositDeductedCents is the running total taken off the deposit by
+	// RecordDepositDeduction ("deduction" rows) — never counted in the
+	// balance a rent payment could retire (post_entry's own type test skips
+	// it identically).
+	DepositDeductedCents int64 `json:"depositDeductedCents,omitempty"`
+	// DepositClauseKey is the deposit charge row's own authorizing clause —
+	// the key RecordDepositDeduction's payload needs, so the FE's "Deduct
+	// from deposit" form can name it without a second lens read.
+	DepositClauseKey  string `json:"depositClauseKey,omitempty"`
+	DepositReturnedAt string `json:"depositReturnedAt,omitempty"`
 }
 
 // computeDepositSummary folds a lease's own ledgerHistory rows (already
 // filtered to the lease and sorted chronologically by computeLedgerHistory)
 // down to the deposit's own figures — every row whose ClausePurpose is
 // anything other than "deposit" (rent, a plain human charge, a non-deposit
-// one-time fee) is ignored entirely. A deposit clause posts exactly two
-// entries across its whole lifetime (DebitAccount's one charge,
-// ReturnDeposit's one credit), so the first debit/credit each name IS the
-// deposit's own charge/return — DepositChargedCents is the charge's own
-// amount (not the net), so a returned deposit still names what it was.
+// one-time fee) is ignored entirely. A deposit clause posts the charge, zero
+// or more deductions and (usually) one credit across its whole lifetime;
+// DepositChargedCents is the charge's own amount (not the net), so a
+// returned deposit still names what it was, and DepositHeldCents nets
+// charged − deducted − returned — custody, never an unpaid figure.
 func computeDepositSummary(rows []ledgerEntryRow) depositSummary {
 	var s depositSummary
 	for _, r := range rows {
@@ -144,7 +160,11 @@ func computeDepositSummary(rows []ledgerEntryRow) depositSummary {
 			if s.DepositChargedAt == "" {
 				s.DepositChargedAt = r.PostedAt
 				s.DepositChargedCents = r.AmountCents
+				s.DepositClauseKey = r.ClauseKey
 			}
+		case "deduction":
+			s.DepositHeldCents -= r.AmountCents
+			s.DepositDeductedCents += r.AmountCents
 		case "credit":
 			s.DepositHeldCents -= r.AmountCents
 			if s.DepositReturnedAt == "" {
@@ -492,18 +512,20 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	arrears := deriveRentArrears(rows, acctRow.ArrearsDueAt, acctRow.ArrearsReminderSentAt, time.Now().UTC())
 	deposit := computeDepositSummary(rows)
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"leaseAppKey":         leaseAppKey,
-		"accountKey":          accountKey,
-		"transactions":        rows,
-		"balanceCents":        balance,
-		"dueDate":             arrears.DueDate,
-		"isOverdue":           arrears.IsOverdue,
-		"daysOverdue":         arrears.DaysOverdue,
-		"daysUntilDue":        arrears.DaysUntilDue,
-		"reminderSentAt":      arrears.ReminderSentAt,
-		"depositHeldCents":    deposit.DepositHeldCents,
-		"depositChargedCents": deposit.DepositChargedCents,
-		"depositChargedAt":    deposit.DepositChargedAt,
-		"depositReturnedAt":   deposit.DepositReturnedAt,
+		"leaseAppKey":          leaseAppKey,
+		"accountKey":           accountKey,
+		"transactions":         rows,
+		"balanceCents":         balance,
+		"dueDate":              arrears.DueDate,
+		"isOverdue":            arrears.IsOverdue,
+		"daysOverdue":          arrears.DaysOverdue,
+		"daysUntilDue":         arrears.DaysUntilDue,
+		"reminderSentAt":       arrears.ReminderSentAt,
+		"depositHeldCents":     deposit.DepositHeldCents,
+		"depositChargedCents":  deposit.DepositChargedCents,
+		"depositChargedAt":     deposit.DepositChargedAt,
+		"depositDeductedCents": deposit.DepositDeductedCents,
+		"depositClauseKey":     deposit.DepositClauseKey,
+		"depositReturnedAt":    deposit.DepositReturnedAt,
 	})
 }

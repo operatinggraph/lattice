@@ -33,6 +33,10 @@ type oneBillEntryProjection struct {
 	// (including on every café/clinic/wellness row, which never authorizes
 	// off a semantic-contracts clause at all).
 	ClausePurpose string `json:"clausePurpose"`
+	// Kind is the entry's own recorded provenance (loftspace-ledger's
+	// PayOutBalance stamps kind:"payout"); empty on every other entry and on
+	// every non-rent source.
+	Kind string `json:"kind"`
 }
 
 // oneBillEntryRow is the statement row the FE renders.
@@ -47,6 +51,7 @@ type oneBillEntryRow struct {
 	DueAt          string `json:"dueAt,omitempty"`
 	Source         string `json:"source"`
 	ClausePurpose  string `json:"clausePurpose,omitempty"`
+	Kind           string `json:"kind,omitempty"`
 }
 
 // computeOneBillHistory filters the one-bill-history lens rows to one lease,
@@ -83,6 +88,7 @@ func computeOneBillHistory(keys []string, get kvGetter, leaseAppKey string) ([]o
 			DueAt:          p.DueAt,
 			Source:         p.Source,
 			ClausePurpose:  p.ClausePurpose,
+			Kind:           p.Kind,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -229,18 +235,20 @@ func (s *server) handleOneBillStatement(w http.ResponseWriter, r *http.Request) 
 	deposit := computeDepositSummary(rentRows)
 
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"leaseAppKey":         leaseAppKey,
-		"entries":             rows,
-		"balanceCents":        balance,
-		"rentBalanceCents":    rentBalance,
-		"dueDate":             arrears.DueDate,
-		"isOverdue":           arrears.IsOverdue,
-		"daysOverdue":         arrears.DaysOverdue,
-		"daysUntilDue":        arrears.DaysUntilDue,
-		"reminderSentAt":      arrears.ReminderSentAt,
-		"depositHeldCents":    deposit.DepositHeldCents,
-		"depositChargedCents": deposit.DepositChargedCents,
-		"depositChargedAt":    deposit.DepositChargedAt,
-		"depositReturnedAt":   deposit.DepositReturnedAt,
+		"leaseAppKey":          leaseAppKey,
+		"entries":              rows,
+		"balanceCents":         balance,
+		"rentBalanceCents":     rentBalance,
+		"dueDate":              arrears.DueDate,
+		"isOverdue":            arrears.IsOverdue,
+		"daysOverdue":          arrears.DaysOverdue,
+		"daysUntilDue":         arrears.DaysUntilDue,
+		"reminderSentAt":       arrears.ReminderSentAt,
+		"depositHeldCents":     deposit.DepositHeldCents,
+		"depositChargedCents":  deposit.DepositChargedCents,
+		"depositChargedAt":     deposit.DepositChargedAt,
+		"depositDeductedCents": deposit.DepositDeductedCents,
+		"depositClauseKey":     deposit.DepositClauseKey,
+		"depositReturnedAt":    deposit.DepositReturnedAt,
 	})
 }

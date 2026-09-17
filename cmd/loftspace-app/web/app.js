@@ -1533,29 +1533,53 @@ function entryPeriodLabel(e) {
   return label;
 }
 
+// entrySignAndClass names a transaction row's display sign ("+"/"−"/"") and
+// its CSS type modifier ("debit"/"credit"/"") — shared by the landlord
+// ledger, the tenant statement and the combined one-bill statement, so all
+// three read a deduction the same way. A "debit" or "credit" row (RENT,
+// a plain charge/payment, or a kind:"payout" debit — PayOutBalance's own
+// debit renders exactly like any other debit) gets the ordinary +/− sign and
+// class. A "deduction" row gets NEITHER: it moves CUSTODY off the deposit
+// already paid, never money charged or paid, so a +/− sign or a debit/credit
+// class would misstate it as a new charge or a payment.
+function entrySignAndClass(t) {
+  if (!t || t.type === "deduction") return { sign: "", cls: "" };
+  return { sign: t.type === "debit" ? "+" : "−", cls: t.type };
+}
+
 // depositRowTag stands in for entryPeriodLabel on a deposit clause's own
 // transaction row — a one-time clause carries no period at all, so
 // entryPeriodLabel already reads "" for it, and a bare "" would leave the
 // row looking like an unexplained charge. "Security deposit" for the
-// charge, "Security deposit returned" for the credit (t.clausePurpose ===
-// "deposit", the ledgerHistory lens's own authorizedBy hop). Any other row
-// — rent, a plain human charge, a row whose source carries no
-// clausePurpose at all — falls straight through to entryPeriodLabel
-// unchanged.
+// charge, "Security deposit returned" for the credit, "Deposit deduction"
+// for a deduction (t.clausePurpose === "deposit", the ledgerHistory lens's
+// own authorizedBy hop). A kind:"payout" row (PayOutBalance's debit, no
+// clause at all) tags "Balance paid out" regardless of clausePurpose — it is
+// the one row shape this ledger posts with no authorizing clause and no
+// deposit purpose, so it is checked first. Any other row — rent, a plain
+// human charge, a row whose source carries no clausePurpose at all — falls
+// straight through to entryPeriodLabel unchanged.
 function depositRowTag(e) {
+  if (e && e.kind === "payout") return " · Balance paid out";
   if (!e || e.clausePurpose !== "deposit") return entryPeriodLabel(e);
-  return e.type === "credit" ? " · Security deposit returned" : " · Security deposit";
+  if (e.type === "credit") return " · Security deposit returned";
+  if (e.type === "deduction") return " · Deposit deduction";
+  return " · Security deposit";
 }
 
-// entryMemoSuffix renders a transaction row's own " — <memo>" suffix,
-// EXCEPT on a deposit row (clausePurpose === "deposit"): DebitAccount's
-// charge carries no memo of its own, but ReturnDeposit posts a fixed
-// "Security deposit returned" memo — the exact phrase depositRowTag already
-// renders as the row's tag, so appending the memo too would state it twice.
-// The tag wins; the memo is dropped entirely for a deposit row, whatever it
-// says.
+// entryMemoSuffix renders a transaction row's own " — <memo>" suffix, with
+// two exceptions: a kind:"payout" row's memo is fixed text ("Balance paid
+// out to the tenant") the tag above already states, so it is dropped; and a
+// deposit CHARGE or RETURN row's memo (clausePurpose === "deposit", but NOT
+// a deduction) is dropped the same way — DebitAccount's charge carries no
+// memo of its own, but ReturnDeposit posts a fixed "Security deposit
+// returned" memo, the exact phrase depositRowTag already renders as the
+// row's tag. A DEDUCTION row is the opposite: its memo IS the reason the
+// landlord gave, the one thing the tag does not say, so it is kept.
 function entryMemoSuffix(e) {
-  if (!e || !e.memo || e.clausePurpose === "deposit") return "";
+  if (!e || !e.memo) return "";
+  if (e.kind === "payout") return "";
+  if (e.clausePurpose === "deposit" && e.type !== "deduction") return "";
   return " — " + customerMemo(e.memo);
 }
 
@@ -1642,21 +1666,33 @@ function rentBalanceLine(data) {
 
 // depositLine renders the security-deposit strip a statement shows apart
 // from the rent balance above — "Security deposit $D · held since <date>"
-// once a deposit clause has charged, "Security deposit $D · returned
-// <date>" once ReturnDeposit has credited it back, or "" when the lease's
-// ledger carries no deposit row at all (a deposit-less unit, or one whose
-// deposit hasn't billed yet) — the depositHeldCents/depositChargedCents/
-// depositChargedAt/depositReturnedAt fields ledger.go's computeDepositSummary
-// threads onto both /api/ledger and /api/one-bill. D is always the
-// CHARGED figure (depositChargedCents), even once returned — a returned
-// deposit nets to zero held, but the line still names what it was. Every
-// date renders through fmtUTCDate, matching rentBalanceLine.
+// once a deposit clause has charged, then "· $X deducted" once any deduction
+// has posted, then either "· $R returned <date>" once ReturnDeposit has
+// credited the net back or "· fully deducted, nothing to return" once the
+// deposit nets to zero with no return row — or "" when the lease's ledger
+// carries no deposit row at all (a deposit-less unit, or one whose deposit
+// hasn't billed yet). D is always the CHARGED figure (depositChargedCents),
+// even once returned — a returned deposit nets to zero held, but the line
+// still names what it was; R is derived client-side as charged − deducted
+// (the exact net ReturnDeposit's own credit posts, or, on a zero-net return
+// that mints NO transaction at all, the same figure a live read would ever
+// show — see the design's rejected alternative to project returnedAt for
+// that case). Every date renders through fmtUTCDate, matching
+// rentBalanceLine.
 function depositLine(data) {
   if (!data || !data.depositChargedAt) return "";
-  const fig = moneyAmount(Number(data.depositChargedCents) / 100);
-  return data.depositReturnedAt
-    ? "Security deposit " + fig + " · returned " + fmtUTCDate(data.depositReturnedAt)
-    : "Security deposit " + fig + " · held since " + fmtUTCDate(data.depositChargedAt);
+  const charged = Number(data.depositChargedCents) || 0;
+  const deducted = Number(data.depositDeductedCents) || 0;
+  let line = "Security deposit " + moneyAmount(charged / 100) + " · held since " + fmtUTCDate(data.depositChargedAt);
+  if (deducted > 0) {
+    line += " · " + moneyAmount(deducted / 100) + " deducted";
+  }
+  if (data.depositReturnedAt) {
+    line += " · " + moneyAmount((charged - deducted) / 100) + " returned " + fmtUTCDate(data.depositReturnedAt);
+  } else if (Number(data.depositHeldCents) <= 0) {
+    line += " · fully deducted, nothing to return";
+  }
+  return line;
 }
 
 // rentAgeText renders one portfolio-pulse lease-balance row's rent age —
@@ -3932,8 +3968,12 @@ async function openLedgerAccount(leaseAppKey) {
 // renderLedgerPanel builds a collapsible ledger section for a signed/leased
 // application: a toggle reveals the transaction history + running balance.
 // When canRecord is true (the landlord's console) it also offers inline
-// "Record charge"/"Record payment" controls.
-function renderLedgerPanel(leaseAppKey, canRecord) {
+// "Record charge"/"Record payment" controls, plus — once the tenancy has
+// ended (tenancyEndedAt, the landlord applications row's own recorded end) —
+// the "Pay out" control PayOutBalance itself gates on the same fact
+// (TenancyNotEnded), so the button is never offered a submit that can only
+// refuse.
+function renderLedgerPanel(leaseAppKey, canRecord, tenancyEndedAt) {
   const wrap = document.createElement("div");
   wrap.className = "ledger-panel";
 
@@ -3948,7 +3988,7 @@ function renderLedgerPanel(leaseAppKey, canRecord) {
     body.hidden = !body.hidden;
     if (body.hidden || body.dataset.loaded) return;
     body.dataset.loaded = "1";
-    refreshLedgerBody(body, leaseAppKey, canRecord);
+    refreshLedgerBody(body, leaseAppKey, canRecord, tenancyEndedAt);
   });
 
   wrap.append(toggle, body);
@@ -3957,8 +3997,8 @@ function renderLedgerPanel(leaseAppKey, canRecord) {
 
 // refreshLedgerBody (re)loads and renders one ledger panel's contents: the
 // running balance, the transaction list (oldest first), and — for the
-// landlord — the record-charge/record-payment form.
-async function refreshLedgerBody(body, leaseAppKey, canRecord) {
+// landlord — the record-charge/record-payment/deduct/pay-out forms.
+async function refreshLedgerBody(body, leaseAppKey, canRecord, tenancyEndedAt) {
   body.textContent = "Loading…";
   let data;
   try {
@@ -3993,8 +4033,8 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
     list.className = "ledger-list";
     for (const t of txs) {
       const li = document.createElement("li");
-      li.className = "ledger-entry " + t.type;
-      const sign = t.type === "debit" ? "+" : "−";
+      const { sign, cls } = entrySignAndClass(t);
+      li.className = "ledger-entry" + (cls ? " " + cls : "");
       li.textContent =
         fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + depositRowTag(t) +
         entryMemoSuffix(t);
@@ -4018,7 +4058,7 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord) {
     body.append(list);
   }
 
-  if (canRecord) body.append(renderLedgerRecordForm(leaseAppKey, data.accountKey, body, canRecord));
+  if (canRecord) body.append(renderLedgerRecordForm(leaseAppKey, data.accountKey, body, canRecord, data, tenancyEndedAt));
 }
 
 // ---- One-bill statement (read-only, combined rent + café + clinic + wellness) ----
@@ -4076,7 +4116,11 @@ function groupOneBillEntriesByPeriod(entries) {
     if (!byKey.has(key)) byKey.set(key, { key, entries: [], netCents: 0 });
     const g = byKey.get(key);
     g.entries.push(e);
-    g.netCents += e.type === "debit" ? e.amountCents : -e.amountCents;
+    // A deduction moves custody off an already-paid deposit, never money
+    // newly charged or paid — it must not move the period's net (Decision
+    // 1: every balance reader ignores it, the same rule this FE mirrors).
+    if (e.type === "debit") g.netCents += e.amountCents;
+    else if (e.type === "credit") g.netCents -= e.amountCents;
   }
   return Array.from(byKey.values()).sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
 }
@@ -4145,8 +4189,8 @@ async function refreshStatementBody(body, leaseAppKey, noticeMoveOutAt) {
       list.className = "ledger-list";
       for (const e of g.entries) {
         const li = document.createElement("li");
-        li.className = "ledger-entry " + e.type;
-        const sign = e.type === "debit" ? "+" : "−";
+        const { sign, cls } = entrySignAndClass(e);
+        li.className = "ledger-entry" + (cls ? " " + cls : "");
         const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
         li.textContent =
           fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) + depositRowTag(e) +
@@ -4179,7 +4223,16 @@ async function refreshStatementBody(body, leaseAppKey, noticeMoveOutAt) {
 // refusal-courtesy: LoftspaceRecordCharge/InvalidState: none — the same wrong-class .arrears fault post_entry refuses for CreditAccount above; not a lens-projected column, so no form can pre-check it, and the toast shows the refusal.
 // refusal-courtesy: CreditAccount/NoBalanceToPay, PaymentExceedsBalance: none — reachable only when the acting landlord is ALSO the lease's applicant (the script's resident proof answers first and caps the credit at the balance); the landlord branch has no cap, and the toast names the balance the resident branch reports.
 // refusal-courtesy: LoftspaceRecordCharge/NoBalanceToPay, PaymentExceedsBalance: unreachable — a debit never enters the balance block: the resident branch refuses it AuthDenied before the block, the landlord branch has no cap.
-function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
+// refusal-courtesy: RecordDepositDeduction/ClauseAccountMismatch: none — accountKey and clauseKey are both auto-filled from the row's own data (data.accountKey, data.depositClauseKey), never picked from an unrelated list; a mismatch here is a data-integrity fault, not a bindable input.
+// refusal-courtesy: RecordDepositDeduction/DepositNotHeld: hide — the "Deduct from deposit" control only renders while depositHeldCents > 0 and depositClauseKey is set, so the clause is charged and not yet returned whenever the form is offered.
+// refusal-courtesy: RecordDepositDeduction/DeductionExceedsDeposit: cap — deductAmount.max is set to (depositHeldCents/100).toFixed(2), and the click handler refuses client-side (a bare input's max attribute enforces nothing on its own).
+// refusal-courtesy: RecordDepositDeduction/InvalidState: none — CreateClause writes the deposit clause's .status unconditionally, so its absence is a data-integrity fault (record_deposit_deduction, loftspace-ledger/scripts.go), never a state this form could pre-check.
+// refusal-courtesy: PayOutBalance/AccountLeaseMismatch: none — accountKey and leaseAppKey are both auto-filled from the row being viewed, never picked from an unrelated list.
+// refusal-courtesy: PayOutBalance/TenancyNotEnded: hide — the "Pay out" button only renders while tenancyEndedAt is set (the landlord applications row's own recorded end).
+// refusal-courtesy: PayOutBalance/NoCreditBalance: hide — the button only renders while balanceCents < 0.
+// refusal-courtesy: PayOutBalance/HistoryTooLong: none — an account history long enough to exhaust the replay budget is an operator-visible edge case no client-side check can pre-empt; the toast shows the refusal.
+// refusal-courtesy: PayOutBalance/InvalidState: none — the same wrong-class .arrears fault post_entry's arrears_stale_mark refuses for CreditAccount above; not a lens-projected column, so no form can pre-check it, and the toast shows the refusal.
+function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord, data, tenancyEndedAt) {
   const form = document.createElement("div");
   form.className = "ledger-record-form";
 
@@ -4220,7 +4273,7 @@ function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
       );
       toast(what.charAt(0).toUpperCase() + what.slice(1) + " recorded.", "ok");
       body.dataset.loaded = "";
-      await refreshLedgerBody(body, leaseAppKey, canRecord);
+      await refreshLedgerBody(body, leaseAppKey, canRecord, tenancyEndedAt);
     } catch (e) {
       toast(e.message, "err");
     } finally {
@@ -4231,6 +4284,109 @@ function renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord) {
   payment.addEventListener("click", () => submit("CreditAccount", "record the payment"));
 
   form.append(amount, memo, charge, payment);
+
+  // "Deduct from deposit" — offered only while the deposit is actually held
+  // (depositHeldCents > 0) and its charged clause is known (depositClauseKey,
+  // ledger.go's computeDepositSummary — only resolves once a deposit has
+  // actually posted a charge). amount.max bounds the bare input, but a `max`
+  // attribute on an input outside a <form> enforces nothing on its own — the
+  // click handler below ALSO checks cents against depositHeldCents and
+  // refuses client-side before ever dispatching, which is what makes the
+  // opmetas.go refusal-courtesy(facet) "cap" declaration for
+  // DeductionExceedsDeposit true rather than aspirational.
+  if (data && Number(data.depositHeldCents) > 0 && data.depositClauseKey) {
+    const deductWrap = document.createElement("div");
+    deductWrap.className = "ledger-record-form";
+    const deductAmount = document.createElement("input");
+    deductAmount.type = "number";
+    deductAmount.step = "0.01";
+    deductAmount.min = "0.01";
+    deductAmount.max = (Number(data.depositHeldCents) / 100).toFixed(2);
+    deductAmount.placeholder = "Amount ($)";
+    const reason = document.createElement("input");
+    reason.type = "text";
+    reason.placeholder = "Reason (required)";
+    const deductBtn = document.createElement("button");
+    deductBtn.className = "ghost";
+    deductBtn.textContent = "Deduct from deposit";
+    deductBtn.addEventListener("click", async () => {
+      const dollars = Number(deductAmount.value);
+      if (!(dollars > 0)) {
+        toast("Enter an amount greater than zero.", "err");
+        return;
+      }
+      const reasonText = reason.value.trim();
+      if (!reasonText) {
+        toast("Enter a reason for the deduction.", "err");
+        return;
+      }
+      const cents = Math.round(dollars * 100);
+      if (cents > Number(data.depositHeldCents)) {
+        toast("The deduction cannot exceed the " + moneyAmount(Number(data.depositHeldCents) / 100) + " still held.", "err");
+        return;
+      }
+      if (!confirm("Deduct " + moneyAmount(dollars) + " from the security deposit for \"" + reasonText + "\"?")) return;
+      deductBtn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "RecordDepositDeduction",
+            class: "transaction",
+            reads: [accountKey, data.depositClauseKey],
+            payload: { accountKey, clauseKey: data.depositClauseKey, amountCents: cents, reason: reasonText },
+          },
+          "record the deduction",
+          landlordSubmit()
+        );
+        toast("Deduction recorded.", "ok");
+        body.dataset.loaded = "";
+        await refreshLedgerBody(body, leaseAppKey, canRecord, tenancyEndedAt);
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        deductBtn.disabled = false;
+      }
+    });
+    deductWrap.append(deductAmount, reason, deductBtn);
+    form.append(deductWrap);
+  }
+
+  // "Pay out $X to tenant" — offered only once the tenancy has ended
+  // (tenancyEndedAt) and a credit balance is actually owed back
+  // (balanceCents < 0); PayOutBalance itself computes the amount from the
+  // account's own history, never from this client, so the button names it
+  // only for the confirm prompt.
+  if (data && Number(data.balanceCents) < 0 && tenancyEndedAt) {
+    const owedCents = -Number(data.balanceCents);
+    const payoutBtn = document.createElement("button");
+    payoutBtn.className = "ghost";
+    payoutBtn.textContent = "Pay out " + moneyAmount(owedCents / 100) + " to tenant";
+    payoutBtn.addEventListener("click", async () => {
+      if (!confirm("Pay out " + moneyAmount(owedCents / 100) + " to the tenant?")) return;
+      payoutBtn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "PayOutBalance",
+            class: "transaction",
+            reads: [accountKey, leaseAppKey],
+            payload: { accountKey, leaseAppKey },
+          },
+          "pay out the balance",
+          landlordSubmit()
+        );
+        toast("Balance paid out.", "ok");
+        body.dataset.loaded = "";
+        await refreshLedgerBody(body, leaseAppKey, canRecord, tenancyEndedAt);
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        payoutBtn.disabled = false;
+      }
+    });
+    form.append(payoutBtn);
+  }
+
   return form;
 }
 
@@ -5522,7 +5678,7 @@ function renderApplicantRow(a, unit, isTopMatch) {
   // Payment ledger — recordable once the lease is executed (the tenant is the
   // one who owes/pays; a not-yet-leased applicant has no ledger account yet).
   if (unitLeased && a.status === "leased" && a.leaseAppKey) {
-    row.append(renderLedgerPanel(a.leaseAppKey, true));
+    row.append(renderLedgerPanel(a.leaseAppKey, true, a.tenancyEndedAt));
   }
   // Echo a landlord's decline reason back on the by-unit row so the landlord sees
   // the rationale they recorded (declineReason is set only on a landlord decline).

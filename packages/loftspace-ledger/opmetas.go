@@ -63,6 +63,20 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // the payload. Its reads need no static declaration here: the transaction
 // DDL's own derive_reads supplies the whole set from the payload keys.
 //
+// RecordDepositDeduction and PayOutBalance both grant a consumer scope=self
+// (the landlord — permissions.go), so each needs a full descriptor exactly
+// like LoftspaceRecordCharge/CreditAccount: Presentation + a Dispatch
+// (Class "transaction", AuthContext "self", TargetField/TargetType
+// "accountKey"/"account", the same idiom). Facet's generic renderer becomes a
+// SITE for both (any op with a non-nil Dispatch is), so each carries
+// `(facet)` refusal-courtesy declarations for its governed codes: the
+// generic renderer has no entity-lens column for a clause's own custody,
+// status or remaining balance, or an account's live-computed balance, so
+// every declaration is `none`. Their reads still come from the transaction
+// DDL's own derive_reads (the Dispatch's own Reads/OptionalReads document
+// the same set; they do not need to supply it — Contract #2 §2.5's
+// derivation guarantees it whatever a caller declares).
+//
 // EvaluateLoftspaceArrears and the arrears notification replyOp carry a bare
 // OpMetaSpec — no Presentation, no Dispatch — for discoverability alone, parity
 // with wellness-ledger's own evaluate + replyOp metas. Neither has a form to
@@ -180,6 +194,73 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"clauseKey":   "The deposit clause: .terms.purpose must be deposit on a oneTime computational clause (NotADeposit otherwise) and .status must be completed, the state DebitAccount's charge leaves (DepositNotCharged while still active). A clause already returned is a no-op once the lease and account it names check out.",
 				"accountKey":  "The lease's ledger account the credit posts to; the clause's chargesTo link must name it (ClauseAccountMismatch otherwise).",
 			},
+		},
+		{
+			OperationType: "RecordDepositDeduction",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Deduct from deposit",
+				Description: "Deduct damage or a fee from a tenant's held security deposit.",
+				Icon:        "wallet",
+				Tone:        "primary",
+				SubmitLabel: "Deduct",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"accountKey":{"type":"string","x-entityRef":"account","description":"vtx.account.<NanoID> the deduction posts to — auto-filled from the lease's own ledger account."},` +
+				`"clauseKey":{"type":"string","x-entityRef":"clause","description":"vtx.clause.<NanoID> of the charged purpose=deposit clause the deduction is taken from."},` +
+				`"amountCents":{"type":"integer","description":"Deduction amount in integer cents; required, must be a positive number, and the running total may not exceed the clause's own amountCents."},` +
+				`"reason":{"type":"string","description":"Required, 1-200 characters — why the deduction was taken; recorded as the transaction's own memo."}},` +
+				`"required":["accountKey","clauseKey","amountCents","reason"]}`,
+			FieldDescriptions: map[string]string{
+				"accountKey":  "The lease's ledger account the deduction posts to — auto-filled by the client (dispatch.targetField), not user-entered.",
+				"clauseKey":   "The charged security deposit clause: .terms.purpose must be deposit on a oneTime computational clause (NotADeposit otherwise) and .status.state must be completed (DepositNotHeld otherwise).",
+				"amountCents": "The deduction amount in integer cents, required and positive. Refused DeductionExceedsDeposit once the clause's own .deductions.totalCents + amountCents would exceed its .terms.amountCents.",
+				"reason":      "Required, 1-200 characters. Recorded as the transaction's own memo — the line the statement shows for this deduction.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "transaction",
+				AuthContext: "self",
+				TargetField: "accountKey",
+				TargetType:  "account",
+				Reads:       []string{"{payload.accountKey}", "{payload.clauseKey}"},
+			},
+			// refusal-courtesy(facet): ClauseAccountMismatch: none — no entity lens projects which account a clause's chargesTo link names; the generic renderer offers this op on every account row regardless of which clause is picked.
+			// refusal-courtesy(facet): DepositNotHeld: none — no entity lens column reports a deposit clause's own .status.state for the generic form to pre-filter on.
+			// refusal-courtesy(facet): DeductionExceedsDeposit: none — the clause's own remaining balance is not a column any entity lens projects, so the generic form's InputSchema minimum/maximum cannot bound amountCents against it.
+			// refusal-courtesy(facet): InvalidState: none — CreateClause writes the deposit clause's .status unconditionally, so its absence is a data-integrity fault, never a lens-projected state.
+		},
+		{
+			OperationType: "PayOutBalance",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Pay out balance",
+				Description: "Pay an ended tenancy's whole credit balance out to the tenant.",
+				Icon:        "wallet",
+				Tone:        "primary",
+				SubmitLabel: "Pay out",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"accountKey":{"type":"string","x-entityRef":"account","description":"vtx.account.<NanoID> the payout debits — auto-filled from the lease's own ledger account; the amount is computed from its own postedTo history, never trusted from the payload."},` +
+				`"leaseAppKey":{"type":"string","x-entityRef":"leaseapp","description":"vtx.leaseapp.<NanoID> of the lease the account is held for (AccountLeaseMismatch otherwise); its .tenancy must record endedAt (TenancyNotEnded otherwise)."}},` +
+				`"required":["accountKey","leaseAppKey"]}`,
+			FieldDescriptions: map[string]string{
+				"accountKey":  "The lease's ledger account to pay out — auto-filled by the client (dispatch.targetField), not user-entered. The amount is computed from its own postedTo history and refuses NoCreditBalance when nothing is owed back.",
+				"leaseAppKey": "The lease the account is held for (AccountLeaseMismatch otherwise); its .tenancy.endedAt must be recorded (TenancyNotEnded otherwise).",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "transaction",
+				AuthContext: "self",
+				TargetField: "accountKey",
+				TargetType:  "account",
+				Reads:       []string{"{payload.accountKey}", "{payload.leaseAppKey}"},
+				// The account's own arrears episode state post_entry-style
+				// marks stale (absence-tolerant: absent until the first
+				// evaluation) — PayOutBalance is an ordinary debit.
+				OptionalReads: []string{"{payload.accountKey}.arrears"},
+			},
+			// refusal-courtesy(facet): AccountLeaseMismatch: none — no entity lens projects the lease an account is held for, so the generic form cannot pre-filter the leaseAppKey picker against it.
+			// refusal-courtesy(facet): TenancyNotEnded: none — no entity lens column projects .tenancy.endedAt for the generic form to gate on.
+			// refusal-courtesy(facet): NoCreditBalance: none — the account's live balance is computed from its own history at dispatch time, not a lens-projected column the generic form could read ahead of submit.
+			// refusal-courtesy(facet): HistoryTooLong: none — an account history long enough to exhaust the replay budget is an operator-visible edge case; no lens column reports it.
+			// refusal-courtesy(facet): InvalidState: none — the account's .arrears aspect carrying a class other than loftspaceAccountArrears is a data-integrity fault (post_entry's arrears_stale_mark), never a lens-projected column.
 		},
 		{OperationType: arrearsOp},
 	}, notificationOpMetas()...)

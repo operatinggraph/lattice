@@ -10,10 +10,11 @@ import (
 )
 
 // rentArrearsUIDecls lifts the shipped UTC_MONTH_ABBR/fmtUTCDate/moneyAmount/
-// rentBalanceLine/rentAgeText/depositLine/listingDepositLine declarations out
-// of the embedded app.js — the rotate_offer_test.go / renewal_ready_test.go /
+// rentBalanceLine/rentAgeText/depositLine/listingDepositLine/
+// entrySignAndClass/groupOneBillEntriesByPeriod declarations out of the
+// embedded app.js — the rotate_offer_test.go / renewal_ready_test.go /
 // lease_term_ui_test.go pattern: the REAL shipped source runs here, not a
-// copy, so these pins are a statement about what ships. All seven are
+// copy, so these pins are a statement about what ships. All nine are
 // self-contained (no DOM/state), so goja can evaluate them directly.
 var rentArrearsUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nconst UTC_MONTH_ABBR = \[.*?\];\n`),
@@ -23,6 +24,8 @@ var rentArrearsUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nfunction rentAgeText\(row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction depositLine\(data\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction listingDepositLine\(listing\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction entrySignAndClass\(t\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction groupOneBillEntriesByPeriod\(entries\) \{\n.*?\n\}\n`),
 }
 
 // rentArrearsUIVM evaluates the declarations WEST OF GREENWICH — goja's Date
@@ -96,6 +99,37 @@ func callDepositLine(t *testing.T, vm *goja.Runtime, data map[string]interface{}
 		t.Fatalf("depositLine(%v) threw: %v", data, err)
 	}
 	return res.String()
+}
+
+func callEntrySignAndClass(t *testing.T, vm *goja.Runtime, entry map[string]interface{}) (sign, cls string) {
+	t.Helper()
+	fn, ok := goja.AssertFunction(vm.Get("entrySignAndClass"))
+	if !ok {
+		t.Fatal("entrySignAndClass is not a function after evaluating its declaration")
+	}
+	res, err := fn(goja.Undefined(), vm.ToValue(entry))
+	if err != nil {
+		t.Fatalf("entrySignAndClass(%v) threw: %v", entry, err)
+	}
+	obj := res.ToObject(vm)
+	return obj.Get("sign").String(), obj.Get("cls").String()
+}
+
+func callGroupOneBillEntriesByPeriod(t *testing.T, vm *goja.Runtime, entries []map[string]interface{}) []map[string]interface{} {
+	t.Helper()
+	fn, ok := goja.AssertFunction(vm.Get("groupOneBillEntriesByPeriod"))
+	if !ok {
+		t.Fatal("groupOneBillEntriesByPeriod is not a function after evaluating its declaration")
+	}
+	res, err := fn(goja.Undefined(), vm.ToValue(entries))
+	if err != nil {
+		t.Fatalf("groupOneBillEntriesByPeriod(%v) threw: %v", entries, err)
+	}
+	var groups []map[string]interface{}
+	if err := vm.ExportTo(res, &groups); err != nil {
+		t.Fatalf("export groupOneBillEntriesByPeriod result: %v", err)
+	}
+	return groups
 }
 
 func callListingDepositLine(t *testing.T, vm *goja.Runtime, listing map[string]interface{}) string {
@@ -243,11 +277,14 @@ func TestRentAgeText_EveryBranch(t *testing.T) {
 	}
 }
 
-// TestDepositLine_HeldReturnedNone pins depositLine's three branches — held
-// (the charged figure, "held since" the charge date), returned (the SAME
-// charged figure, not the net-zero held amount, "returned" the credit
-// date), and none at all (empty string — a deposit-less unit, or a lease
-// whose deposit has not yet billed) — against the ledger.go
+// TestDepositLine_HeldReturnedNone pins depositLine's branches — held (the
+// charged figure, "held since" the charge date), held-with-a-deduction ("·
+// $X deducted" inserted before any return clause), returned (the NET figure
+// — charged less any deduction — "returned" the credit date), fully
+// deducted with no return row yet ("· fully deducted, nothing to return",
+// the zero-net ReturnDeposit shape that mints no transaction to read a
+// returnedAt off), and none at all (empty string — a deposit-less unit, or a
+// lease whose deposit has not yet billed) — against the ledger.go
 // computeDepositSummary shapes /api/ledger and /api/one-bill actually send.
 func TestDepositLine_HeldReturnedNone(t *testing.T) {
 	vm := rentArrearsUIVM(t)
@@ -262,9 +299,24 @@ func TestDepositLine_HeldReturnedNone(t *testing.T) {
 			"Security deposit $1500 · held since Jun 1, 2026",
 		},
 		{
-			"returned",
+			"held with a deduction",
+			map[string]interface{}{"depositHeldCents": 100000.0, "depositChargedCents": 150000.0, "depositChargedAt": "2026-06-01T00:00:00Z", "depositDeductedCents": 50000.0},
+			"Security deposit $1500 · held since Jun 1, 2026 · $500 deducted",
+		},
+		{
+			"returned, no deduction",
 			map[string]interface{}{"depositHeldCents": 0.0, "depositChargedCents": 150000.0, "depositChargedAt": "2026-06-01T00:00:00Z", "depositReturnedAt": "2027-06-01T00:00:00Z"},
-			"Security deposit $1500 · returned Jun 1, 2027",
+			"Security deposit $1500 · held since Jun 1, 2026 · $1500 returned Jun 1, 2027",
+		},
+		{
+			"returned net of a deduction",
+			map[string]interface{}{"depositHeldCents": 0.0, "depositChargedCents": 150000.0, "depositChargedAt": "2026-06-01T00:00:00Z", "depositDeductedCents": 50000.0, "depositReturnedAt": "2027-06-01T00:00:00Z"},
+			"Security deposit $1500 · held since Jun 1, 2026 · $500 deducted · $1000 returned Jun 1, 2027",
+		},
+		{
+			"fully deducted, not yet returned (or a zero-net return that minted no transaction)",
+			map[string]interface{}{"depositHeldCents": 0.0, "depositChargedCents": 150000.0, "depositChargedAt": "2026-06-01T00:00:00Z", "depositDeductedCents": 150000.0},
+			"Security deposit $1500 · held since Jun 1, 2026 · $1500 deducted · fully deducted, nothing to return",
 		},
 		{
 			"no deposit row at all",
@@ -406,5 +458,139 @@ func TestRenderUnitCard_RentAndDepositAreCurrencyAware(t *testing.T) {
 	}
 	if strings.Contains(body, "moneyAmount(u.listing.depositAmount)") {
 		t.Error("renderUnitCard: the deposit span still calls the USD-only moneyAmount(u.listing.depositAmount)")
+	}
+}
+
+// TestRenderLedgerRecordForm_DeductAndPayoutGates is a grep-style pin
+// (renderLedgerRecordForm builds real DOM elements, so it cannot run
+// headless in goja the way the pure formatters above do; the source text
+// itself is what ships — the renderUnitCard precedent above). It checks
+// that "Deduct from deposit" is offered only while depositHeldCents > 0 AND
+// depositClauseKey is known (RecordDepositDeduction's own custody proof
+// needs the clause key the form supplies), and "Pay out" only while a
+// credit balance is owed (balanceCents < 0) AND the tenancy has ended
+// (tenancyEndedAt) — PayOutBalance's own TenancyNotEnded/NoCreditBalance
+// refusals — so the reachable-code census in each op's opmetas.go
+// refusal-courtesy(hide) declaration stays true. Both controls use native
+// confirm() before submitting, matching the withdraw/detach/remove-photo
+// precedent for an irreversible financial action.
+func TestRenderLedgerRecordForm_DeductAndPayoutGates(t *testing.T) {
+	src, err := webFS.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatalf("read embedded app.js: %v", err)
+	}
+	text := string(src)
+
+	fnRe := regexp.MustCompile(`(?s)\nfunction renderLedgerRecordForm\(leaseAppKey, accountKey, body, canRecord, data, tenancyEndedAt\) \{\n.*?\n\}\n`)
+	body := fnRe.FindString(text)
+	if body == "" {
+		t.Fatal("app.js: no top-level renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord, data, tenancyEndedAt) declaration found — the extraction regex no longer matches this file")
+	}
+
+	for _, want := range []string{
+		`data && Number(data.depositHeldCents) > 0 && data.depositClauseKey`,
+		`operationType: "RecordDepositDeduction"`,
+		`data && Number(data.balanceCents) < 0 && tenancyEndedAt`,
+		`operationType: "PayOutBalance"`,
+		`if (cents > Number(data.depositHeldCents)) {`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renderLedgerRecordForm: want %q, not found", want)
+		}
+	}
+	if n := strings.Count(body, "confirm("); n < 2 {
+		t.Errorf("renderLedgerRecordForm: want a native confirm() before both the deduction and the payout submit, found %d confirm( call(s)", n)
+	}
+}
+
+// TestRenderLedgerRecordForm_DeductionCapEnforcedInClickHandler pins the
+// RecordDepositDeduction/DeductionExceedsDeposit refusal-courtesy's actual
+// mechanism: deductAmount.max is a bare <input> attribute outside a <form>,
+// which the DOM never enforces on its own (no submit event validates it), so
+// the real cap has to be the click handler's own comparison against
+// data.depositHeldCents, checked and toasted BEFORE the native confirm() —
+// never relying on the input's max alone.
+func TestRenderLedgerRecordForm_DeductionCapEnforcedInClickHandler(t *testing.T) {
+	src, err := webFS.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatalf("read embedded app.js: %v", err)
+	}
+	text := string(src)
+
+	fnRe := regexp.MustCompile(`(?s)\nfunction renderLedgerRecordForm\(leaseAppKey, accountKey, body, canRecord, data, tenancyEndedAt\) \{\n.*?\n\}\n`)
+	body := fnRe.FindString(text)
+	if body == "" {
+		t.Fatal("app.js: no top-level renderLedgerRecordForm(leaseAppKey, accountKey, body, canRecord, data, tenancyEndedAt) declaration found — the extraction regex no longer matches this file")
+	}
+
+	capIdx := strings.Index(body, "if (cents > Number(data.depositHeldCents)) {")
+	if capIdx < 0 {
+		t.Fatal(`renderLedgerRecordForm: want "if (cents > Number(data.depositHeldCents)) {", not found`)
+	}
+	toastIdx := strings.Index(body[capIdx:], `toast("The deduction cannot exceed the `)
+	if toastIdx < 0 || toastIdx > 200 {
+		t.Error(`renderLedgerRecordForm: the deposit-cap check's body must toast "The deduction cannot exceed the ..." immediately`)
+	}
+	confirmIdx := strings.Index(body, `confirm("Deduct " + moneyAmount(dollars)`)
+	if confirmIdx < 0 {
+		t.Fatal("renderLedgerRecordForm: no deduction confirm() call found")
+	}
+	if confirmIdx < capIdx {
+		t.Error("renderLedgerRecordForm: the deposit-cap check must run BEFORE the native confirm(), so an over-cap deduction never reaches the confirmation dialog")
+	}
+}
+
+// TestEntrySignAndClass_DeductionGetsNoSignNoClass pins entrySignAndClass —
+// the shared helper the landlord ledger, the tenant statement and the
+// combined one-bill statement all call to render a transaction row — proving
+// a "deduction" row (custody moved off an already-paid deposit, never money
+// charged or paid) renders with NEITHER a +/− sign NOR a debit/credit CSS
+// class, unlike an ordinary debit or credit.
+func TestEntrySignAndClass_DeductionGetsNoSignNoClass(t *testing.T) {
+	vm := rentArrearsUIVM(t)
+
+	sign, cls := callEntrySignAndClass(t, vm, map[string]interface{}{"type": "deduction", "amountCents": 5000})
+	if sign != "" || cls != "" {
+		t.Errorf("entrySignAndClass(deduction) = (%q, %q), want (\"\", \"\") — a deduction moves custody, it is not a payment", sign, cls)
+	}
+
+	if sign, cls := callEntrySignAndClass(t, vm, map[string]interface{}{"type": "debit", "amountCents": 5000}); sign != "+" || cls != "debit" {
+		t.Errorf("entrySignAndClass(debit) = (%q, %q), want (\"+\", \"debit\")", sign, cls)
+	}
+	if sign, cls := callEntrySignAndClass(t, vm, map[string]interface{}{"type": "credit", "amountCents": 5000}); sign != "−" || cls != "credit" {
+		t.Errorf("entrySignAndClass(credit) = (%q, %q), want (\"−\", \"credit\")", sign, cls)
+	}
+}
+
+// TestGroupOneBillEntriesByPeriod_DeductionDoesNotMoveNet pins the one-bill
+// statement's per-period net computation: a "deduction" row sitting in the
+// same calendar month as a debit and a credit must not move netCents in
+// either direction (Decision 1 — every balance reader ignores a deduction —
+// mirrored client-side). Removing the type-guard and falling through to an
+// else-branch that folds a deduction in as a credit (or an if that folds it
+// in as a debit) would move this number; this test fails either way.
+func TestGroupOneBillEntriesByPeriod_DeductionDoesNotMoveNet(t *testing.T) {
+	vm := rentArrearsUIVM(t)
+
+	entries := []map[string]interface{}{
+		{"type": "debit", "amountCents": 100000, "postedAt": "2027-03-10T12:00:00Z"},
+		{"type": "credit", "amountCents": 30000, "postedAt": "2027-03-15T12:00:00Z"},
+		{"type": "deduction", "amountCents": 999999999, "postedAt": "2027-03-20T12:00:00Z"},
+	}
+	groups := callGroupOneBillEntriesByPeriod(t, vm, entries)
+	if len(groups) != 1 {
+		t.Fatalf("groupOneBillEntriesByPeriod: got %d period group(s), want 1 (all three entries fall in March 2027)", len(groups))
+	}
+	net, _ := groups[0]["netCents"].(int64)
+	if net == 0 {
+		if netF, ok := groups[0]["netCents"].(float64); ok {
+			net = int64(netF)
+		}
+	}
+	if want := int64(70000); net != want {
+		t.Errorf("groupOneBillEntriesByPeriod: netCents = %v, want %v (100000 debit − 30000 credit; the 999999999 deduction must not move it)", net, want)
+	}
+	if entryCount := len(groups[0]["entries"].([]interface{})); entryCount != 3 {
+		t.Errorf("groupOneBillEntriesByPeriod: period carries %d entries, want 3 — the deduction is still LISTED, only excluded from netCents", entryCount)
 	}
 }

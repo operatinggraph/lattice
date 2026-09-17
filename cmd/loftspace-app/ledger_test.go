@@ -57,6 +57,28 @@ func TestComputeLedgerHistory_FiltersSumsAndOrders(t *testing.T) {
 	}
 }
 
+// TestComputeLedgerHistory_BalanceIgnoresDeduction is the negative vector for
+// Decision 1 ("every balance reader ignores a deduction"): a "deduction" row
+// moves custody off an already-paid deposit, never what the tenant owes, so
+// it must not move computeLedgerHistory's own running balance in EITHER
+// direction — counting it as a debit would inflate what is owed, counting it
+// as a credit would understate it.
+func TestComputeLedgerHistory_BalanceIgnoresDeduction(t *testing.T) {
+	entries := map[string]string{
+		"vtx.transaction.1": `{"transactionKey":"vtx.transaction.1","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":150000,"postedAt":"2026-06-01T00:00:00Z"}`,
+		"vtx.transaction.2": `{"transactionKey":"vtx.transaction.2","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"deduction","amountCents":999999999,"clausePurpose":"deposit","postedAt":"2026-06-02T00:00:00Z"}`,
+	}
+	get := fakeKV(entries)
+
+	rows, balance := computeLedgerHistory(keysOf(entries), get, "vtx.leaseapp.lll")
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows (the deduction still RENDERS, it just doesn't move the balance), got %d", len(rows))
+	}
+	if balance != 150000 {
+		t.Errorf("balance = %d, want 150000 — the deduction's 999999999 must not move it in either direction", balance)
+	}
+}
+
 // TestComputeLedgerHistory_PeriodRidesThrough — a recurring charge's recorded
 // periodStart/periodEnd/dueAt pass through unchanged; a payment or one-time
 // charge without them stays empty (omitempty).
@@ -179,6 +201,61 @@ func TestComputeDepositSummary_HeldReturnedNoneIgnoresOther(t *testing.T) {
 			t.Errorf("want an entirely empty summary (no deposit clause at all), got %+v", s)
 		}
 	})
+	t.Run("deducted, still held", func(t *testing.T) {
+		rows := []ledgerEntryRow{
+			{Type: "debit", AmountCents: 150000, PostedAt: "2026-06-01T00:00:00Z", ClauseKey: "vtx.clause.BBDEPCLAUSEQNEHJKMNP", ClausePurpose: "deposit"},
+			{Type: "deduction", AmountCents: 40000, PostedAt: "2026-08-01T00:00:00Z", ClausePurpose: "deposit"},
+		}
+		s := computeDepositSummary(rows)
+		if s.DepositHeldCents != 110000 {
+			t.Errorf("held = %d, want 110000 (150000 charged - 40000 deducted)", s.DepositHeldCents)
+		}
+		if s.DepositDeductedCents != 40000 {
+			t.Errorf("deductedCents = %d, want 40000", s.DepositDeductedCents)
+		}
+		if s.DepositClauseKey != "vtx.clause.BBDEPCLAUSEQNEHJKMNP" {
+			t.Errorf("clauseKey = %q, want the charge row's own clause key", s.DepositClauseKey)
+		}
+		if s.DepositReturnedAt != "" {
+			t.Errorf("returnedAt = %q, want empty — not yet returned", s.DepositReturnedAt)
+		}
+	})
+	t.Run("zero net: fully deducted, no credit row at all", func(t *testing.T) {
+		rows := []ledgerEntryRow{
+			{Type: "debit", AmountCents: 150000, PostedAt: "2026-06-01T00:00:00Z", ClausePurpose: "deposit"},
+			{Type: "deduction", AmountCents: 150000, PostedAt: "2026-08-01T00:00:00Z", ClausePurpose: "deposit"},
+		}
+		s := computeDepositSummary(rows)
+		if s.DepositHeldCents != 0 {
+			t.Errorf("held = %d, want 0 (fully deducted)", s.DepositHeldCents)
+		}
+		if s.DepositDeductedCents != 150000 {
+			t.Errorf("deductedCents = %d, want 150000", s.DepositDeductedCents)
+		}
+		if s.DepositReturnedAt != "" {
+			t.Errorf("returnedAt = %q, want empty — a zero-net return mints no transaction to read a returnedAt off", s.DepositReturnedAt)
+		}
+	})
+	t.Run("deducted then returned nets the running total", func(t *testing.T) {
+		rows := []ledgerEntryRow{
+			{Type: "debit", AmountCents: 150000, PostedAt: "2026-06-01T00:00:00Z", ClausePurpose: "deposit"},
+			{Type: "deduction", AmountCents: 40000, PostedAt: "2026-08-01T00:00:00Z", ClausePurpose: "deposit"},
+			{Type: "credit", AmountCents: 110000, PostedAt: "2027-06-01T00:00:00Z", ClausePurpose: "deposit"},
+		}
+		s := computeDepositSummary(rows)
+		if s.DepositHeldCents != 0 {
+			t.Errorf("held = %d, want 0 once returned", s.DepositHeldCents)
+		}
+		if s.DepositChargedCents != 150000 {
+			t.Errorf("chargedCents = %d, want the original charge kept", s.DepositChargedCents)
+		}
+		if s.DepositDeductedCents != 40000 {
+			t.Errorf("deductedCents = %d, want 40000", s.DepositDeductedCents)
+		}
+		if s.DepositReturnedAt != "2027-06-01T00:00:00Z" {
+			t.Errorf("returnedAt = %q, want the recorded return", s.DepositReturnedAt)
+		}
+	})
 }
 
 func TestResolveLeaseAccount_FindsMatchOrEmpty(t *testing.T) {
@@ -225,6 +302,28 @@ func TestDeriveRentArrears_NoRecorded_UsesHeadDueAt(t *testing.T) {
 	got := deriveRentArrears(rows, "", "", now)
 	if got.DueDate != "2026-09-06T00:00:00Z" {
 		t.Errorf("DueDate = %q, want the head's own recorded dueAt", got.DueDate)
+	}
+}
+
+// TestDeriveRentArrears_IgnoresDeduction is the negative vector for
+// Decision 1: a "deduction" row sitting in the FIFO walk must neither open
+// nor retire a debit — deriveRentArrears's own type switch has no case for
+// it at all, so it is invisible to the walk, exactly like a rent charge that
+// was never billed. A version that opened it as a debit would report the
+// deduction itself as the overdue head; one that retired the real debit with
+// it would report the account as paid in full.
+func TestDeriveRentArrears_IgnoresDeduction(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "t1", Type: "debit", AmountCents: 100000, PostedAt: "2026-09-01T00:00:00Z", DueAt: "2026-09-01T00:00:00Z"},
+		{TransactionKey: "t2", Type: "deduction", AmountCents: 999999999, PostedAt: "2026-09-02T00:00:00Z"},
+	}
+	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	got := deriveRentArrears(rows, "", "", now)
+	if got.DueDate != "2026-09-01T00:00:00Z" {
+		t.Errorf("DueDate = %q, want the real debit's own dueAt — the deduction must not become a new head or pay the real one off", got.DueDate)
+	}
+	if !got.IsOverdue {
+		t.Errorf("IsOverdue = false, want true — the deduction must not read as having settled the debit")
 	}
 }
 

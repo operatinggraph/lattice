@@ -1948,3 +1948,71 @@ func TestArrearsNotification_ForgedExternalRefRefused(t *testing.T) {
 		t.Fatalf("status = %q, want the later episode's verdict", got)
 	}
 }
+
+// TestArrears_ReplayCheckpointExcludesDeductions is the negative vector for
+// Decision 1 ("every balance reader ignores a deduction"): arrears_entries'
+// own type test (a deduction is neither a debit nor a credit — scripts.go)
+// keeps a deduction OUT of the replay checkpoint's own entries map, whose
+// documented shape (ddls.go's accountArrearsAspectTypeDDL) is "every debit
+// and credit read so far." A history one page longer than
+// ArrearsPageLimit, seeded with FIVE deduction-type entries mixed into the
+// first page, checkpoints after page 1 with an entries map carrying only
+// the 25 debit/credit rows — never all 30 raw postedTo links the page
+// actually read. Removing arrears_entries' type skip would carry all 30
+// into the checkpoint and this test would fail.
+func TestArrears_ReplayCheckpointExcludesDeductions(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsdeductreplay")
+
+	leaseKey := seedLease(t, ctx, conn, "BBARREARSDEDLEASEHJK")
+	acctKey := seedAccountHeldFor(t, ctx, conn, "BBARREARSDEDACCTHJKM", leaseKey)
+
+	const pageLimit = loftspaceledger.ArrearsPageLimit                             // 30
+	deductionSlots := map[int]bool{2: true, 8: true, 14: true, 20: true, 26: true} // 5 of the 30 first-page ids
+	day := 0
+	for i := 0; i < pageLimit; i++ {
+		if deductionSlots[i] {
+			seedEntryAt(t, ctx, conn, acctKey, replayTxID('D', i), "deduction", 100, "2026-05-01T09:00:00Z", "")
+			continue
+		}
+		postedAt := time.Date(2026, 5, 1+day, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('D', i), "debit", 100, postedAt, "")
+		day++
+	}
+	// One more entry (id 30) pushes the enumeration to a second page, so the
+	// first dispatch below consumes EXACTLY the 30 ids seeded above and
+	// leaves a checkpoint rather than finalizing.
+	seedEntryAt(t, ctx, conn, acctKey, replayTxID('D', pageLimit), "credit", 100, "2026-05-01T09:00:00Z", "")
+	if day != 25 {
+		t.Fatalf("fixture: %d debits seeded, want 25 (30 first-page ids − 5 deductions)", day)
+	}
+
+	_, req1 := evaluateArrears(t, ctx, conn, cp, cons, "bbarrdedeval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	if notif := arrearsNotification(t, ctx, conn, req1); notif != nil {
+		t.Fatalf("a page is not an evaluation: %+v", notif)
+	}
+	replay := arrearsReplay(t, arrearsData(t, ctx, conn, acctKey))
+	if replay == nil {
+		t.Fatalf("a 31-entry history must checkpoint after the first page")
+	}
+	entries, _ := replay["entries"].(map[string]any)
+	if len(entries) != 25 {
+		t.Fatalf("replay.entries carries %d rows, want 25 — the page read 30 postedTo links but only 25 were debit/credit; the 5 deductions must never enter the checkpoint", len(entries))
+	}
+	for i := range deductionSlots {
+		id := "D" + "LFREPLAYTXAHJKMN" + replayTxIDSuffix(i)
+		if _, ok := entries[id]; ok {
+			t.Fatalf("deduction tx id %s must not appear in the checkpoint's entries map: %+v", id, entries)
+		}
+	}
+}
+
+// replayTxIDSuffix reproduces replayTxID's own trailing 3-char suffix so the
+// deduction-exclusion test can name the exact ids it must NOT find in the
+// checkpoint.
+func replayTxIDSuffix(i int) string {
+	const safe = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
+	n := len(safe)
+	return string([]byte{safe[i/(n*n)%n], safe[(i/n)%n], safe[i%n]})
+}

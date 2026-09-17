@@ -11,6 +11,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	LoftspaceRecordCharge  → operator, consumer (scope=self — landlord only, see below)
 //	CreditAccount          → operator, consumer (scope=self — resident or landlord, see below)
 //	ReturnDeposit          → operator (Weaver's leaseRentSettlement dispatch)
+//	RecordDepositDeduction  → operator, consumer (scope=self — landlord only, see below)
+//	PayOutBalance           → operator, consumer (scope=self — landlord only, see below)
 //	EvaluateLoftspaceArrears                   → operator (Weaver's dispatch actor; the script refuses every other)
 //	RecordLoftspaceArrearsReminderNotification → operator (the bridge's service actor)
 //
@@ -165,6 +167,30 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit ReturnDeposit (credits a charged security deposit back on the lease's ledger account once the tenancy has ended, marking the deposit clause returned). Dispatched by WEAVER's leaseRentSettlement playbook (packages/semantic-contracts, missing_depositReturn); not a console verb — no consoleOperator or frontOfHouse grant is minted for it.",
 			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "RecordDepositDeduction",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit RecordDepositDeduction (takes a deduction off a charged, still-held security deposit clause).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "RecordDepositDeduction",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to deduct from a deposit clause on a lease of a unit they MANAGE — the same self_scope_standing proof post_entry runs (heldFor→appliesToUnit→manages); a resident standing is refused AuthDenied by the script.",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "PayOutBalance",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit PayOutBalance (pays an ended tenancy's whole credit balance out to the tenant, computed from the account's own history).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "PayOutBalance",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to pay out the balance of a lease's account on a unit they MANAGE — the same self_scope_standing proof; a resident standing is refused AuthDenied by the script.",
+			GrantsTo:      []string{"consumer"},
 		},
 		{
 			OperationType: arrearsOp,

@@ -53,10 +53,16 @@ type depositSeed struct {
 	governsLease     string
 	chargesToDeleted bool
 	arrears          map[string]any
+	deductedCents    int
 }
 
 func withPeriod(p string) depositOption { return func(s *depositSeed) { s.period = p } }
 func withKind(k string) depositOption   { return func(s *depositSeed) { s.kind = k } }
+
+// withDeductedCents seeds a running RecordDepositDeduction total on the
+// clause's OWN .deductions aspect (depositDeductions DDL) — never on
+// .status, which semantic-contracts owns.
+func withDeductedCents(n int) depositOption { return func(s *depositSeed) { s.deductedCents = n } }
 func withChargesToTombstoned() depositOption {
 	return func(s *depositSeed) { s.chargesToDeleted = true }
 }
@@ -105,6 +111,13 @@ func seedDepositFixture(t *testing.T, ctx context.Context, conn *substrate.Conn,
 	}
 	seedAspect(t, ctx, conn, clauseKey, "terms", "clauseTerms", terms)
 	seedAspect(t, ctx, conn, clauseKey, "status", "clauseStatus", seed.status)
+	// The running deduction total lives on THIS package's own .deductions
+	// aspect (depositDeductions DDL, ddls.go) — never on .status, which
+	// semantic-contracts owns.
+	if seed.deductedCents > 0 {
+		seedAspect(t, ctx, conn, clauseKey, "deductions", "depositDeductions",
+			map[string]any{"totalCents": seed.deductedCents, "count": 1, "lastRecordedAt": depositChargedAt})
+	}
 
 	chargesTo := acctKey
 	if seed.chargesToAcct != "" {
@@ -141,7 +154,7 @@ func seedDepositFixture(t *testing.T, ctx context.Context, conn *substrate.Conn,
 func returnDepositHint(f depositFixture) *processor.ContextHint {
 	return &processor.ContextHint{
 		Reads:         []string{f.acctKey, f.leaseKey + ".tenancy", f.clauseKey, f.clauseKey + ".terms", f.clauseKey + ".status"},
-		OptionalReads: []string{f.acctKey + ".arrears"},
+		OptionalReads: []string{f.acctKey + ".arrears", f.clauseKey + ".deductions"},
 	}
 }
 
@@ -290,6 +303,122 @@ func TestReturnDeposit_MarksArrearsStale(t *testing.T) {
 	if _, ok := arrears["historyTooLong"]; ok {
 		t.Fatalf("historyTooLong is dropped by every posted entry, buying one more evaluation: %+v", arrears)
 	}
+}
+
+// TestReturnDeposit_NetsPriorDeduction proves the return credits the clause's
+// full amount LESS a recorded RecordDepositDeduction total — a positive net,
+// so a transaction still posts, but for the smaller figure.
+func TestReturnDeposit_NetsPriorDeduction(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "returndepositnet")
+
+	f := seedDepositFixture(t, ctx, conn, cp, cons, "bbretdepnetacct00001", "BBRETDEPNETLEASEHJKM", "BBRETDEPNETCLAUSEHJK",
+		withDeductedCents(60000))
+	_, txKey := submitReturnDeposit(t, ctx, conn, cp, cons, "bbretdepnet000000001", f.leaseKey, f.clauseKey, f.acctKey,
+		returnDepositHint(f), processor.OutcomeAccepted)
+	if !keyExists(t, ctx, conn, txKey) {
+		t.Fatalf("a positive net return must still mint a transaction")
+	}
+	entry, _ := readDoc(t, ctx, conn, txKey+".entry")["data"].(map[string]any)
+	if got, _ := entry["amountCents"].(float64); got != depositAmountCents-60000 {
+		t.Fatalf("entry.amountCents = %v, want %d (the clause's full amount less the recorded deduction)", entry["amountCents"], depositAmountCents-60000)
+	}
+	status, _ := readDoc(t, ctx, conn, f.clauseKey+".status")["data"].(map[string]any)
+	if got, _ := status["state"].(string); got != "returned" {
+		t.Fatalf("status.state = %q, want returned", got)
+	}
+	if _, ok := status["deductedCents"]; ok {
+		t.Fatalf("status must never carry deductedCents — the running total lives on the clause's OWN .deductions aspect, never semantic-contracts' clauseStatus: %+v", status)
+	}
+	deductions, _ := readDoc(t, ctx, conn, f.clauseKey+".deductions")["data"].(map[string]any)
+	if got, _ := deductions["totalCents"].(float64); got != 60000 {
+		t.Fatalf(".deductions.totalCents must be kept across the return, got %v", got)
+	}
+}
+
+// TestReturnDeposit_ZeroNet_MintsNoTransaction proves the fully-deducted
+// shape: net == 0 posts NO transaction and no links at all — a zero-amount
+// entry is not a transaction — yet the clause still moves to returned, and
+// the event carries amountCents 0 with no transactionKey.
+func TestReturnDeposit_ZeroNet_MintsNoTransaction(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "returndepositzero")
+
+	f := seedDepositFixture(t, ctx, conn, cp, cons, "bbretdepzeroacct0001", "BBRETDEPZERQLEASEHJK", "BBRETDEPZERQCLAUSEHJ",
+		withDeductedCents(depositAmountCents))
+	reply, txKey := submitReturnDeposit(t, ctx, conn, cp, cons, "bbretdepzero00000001", f.leaseKey, f.clauseKey, f.acctKey,
+		returnDepositHint(f), processor.OutcomeAccepted)
+	if reply.Error != nil {
+		t.Fatalf("a zero-net return is accepted, not refused: %+v", reply.Error)
+	}
+	if reply.PrimaryKey != "" {
+		t.Fatalf("a zero-net return's response must carry no primaryKey, got %q", reply.PrimaryKey)
+	}
+	if keyExists(t, ctx, conn, txKey) {
+		t.Fatalf("a zero-net return must mint no transaction at all")
+	}
+	status, _ := readDoc(t, ctx, conn, f.clauseKey+".status")["data"].(map[string]any)
+	if got, _ := status["state"].(string); got != "returned" {
+		t.Fatalf("status.state = %q, want returned even on a zero net", got)
+	}
+	if got, _ := status["returnedAt"].(string); got != depositReturnAt {
+		t.Fatalf("status.returnedAt = %q, want %s", got, depositReturnAt)
+	}
+
+	event := depositReturnedEvent(t, ctx, conn, reply.RequestID)
+	if event == nil {
+		t.Fatalf("a zero-net return must still emit loftspace.depositReturned")
+	}
+	if got, _ := event["amountCents"].(float64); got != 0 {
+		t.Fatalf("event amountCents = %v, want 0", got)
+	}
+	if _, ok := event["transactionKey"]; ok {
+		t.Fatalf("a zero-net event must carry no transactionKey at all: %+v", event)
+	}
+}
+
+// TestReturnDeposit_NegativeNet_Refused proves a recorded deduction total
+// exceeding the clause's own amountCents — a torn record, since
+// RecordDepositDeduction's own DeductionExceedsDeposit cap refuses this at
+// write time — fails closed rather than crediting a negative amount.
+func TestReturnDeposit_NegativeNet_Refused(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "returndepositnegnet")
+
+	f := seedDepositFixture(t, ctx, conn, cp, cons, "bbretdepnegacct00001", "BBRETDEPNEGLEASEHJKM", "BBRETDEPNEGCLAUSEHJK",
+		withDeductedCents(depositAmountCents+1))
+	reply, txKey := submitReturnDeposit(t, ctx, conn, cp, cons, "bbretdepneg000000001", f.leaseKey, f.clauseKey, f.acctKey,
+		returnDepositHint(f), processor.OutcomeRejected)
+	requireRefusal(t, reply, "InvalidState")
+	if keyExists(t, ctx, conn, txKey) {
+		t.Fatalf("a refused negative-net return must mint nothing")
+	}
+	status, _ := readDoc(t, ctx, conn, f.clauseKey+".status")["data"].(map[string]any)
+	if got, _ := status["state"].(string); got != "completed" {
+		t.Fatalf("a refused return must not move the clause off completed, got %q", got)
+	}
+}
+
+// depositReturnedEvent returns the loftspace.depositReturned event this
+// request's own transactional outbox carries, or nil when it emitted none —
+// the arrearsNotification idiom (arrears_test.go) applied to ReturnDeposit's
+// own event.
+func depositReturnedEvent(t *testing.T, ctx context.Context, conn *substrate.Conn, requestID string) map[string]any {
+	t.Helper()
+	entry, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(requestID))
+	if err != nil {
+		t.Fatalf("read outbox aspect for %s: %v", requestID, err)
+	}
+	ob, err := processor.ParseOutboxAspect(entry.Value)
+	if err != nil {
+		t.Fatalf("parse outbox aspect for %s: %v", requestID, err)
+	}
+	for _, e := range ob.Data.Events {
+		if e.EventType == "loftspace.depositReturned" {
+			return e.Payload
+		}
+	}
+	return nil
 }
 
 // TestReturnDeposit_UndeclaredSubmitter_StillReturns is the derive_reads

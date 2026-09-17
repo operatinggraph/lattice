@@ -279,7 +279,18 @@ var appOpCeilings = map[string]int{
 	// static minimum/maximum (the op-meta's own comment, permissions.go). The
 	// SAME hand-built-form-for-a-described-op shape withdrawApplication and
 	// decideApplication already established, not a new descriptor-catalog gap.
-	"cmd/loftspace-app": 19,
+	// 20/21: RecordDepositDeduction/PayOutBalance
+	// (docs/reviews/loftspace-security-deposit-2026-09-15.md §"Deductions and
+	// the payout") — the landlord ledger's own "Deduct from deposit"/"Pay
+	// out" controls (renderLedgerRecordForm, app.js). Both are
+	// described ops (full OpMetaSpec, opmetas.go) with a Dispatch, but each
+	// carries a field a static InputSchema minimum/maximum cannot bound
+	// (DeductionExceedsDeposit needs the clause's own live remaining balance;
+	// PayOutBalance's amount is computed server-side, off the payload
+	// entirely) — the same hand-built-form-for-a-described-op shape
+	// GiveNotice already established one line above, not a new
+	// descriptor-catalog gap.
+	"cmd/loftspace-app": 21,
 	// 13: CreateUnclaimedIdentity backs the new-guest modal's submit
 	// (submitNewGuest, app.js), reusing loftspace-app's/clinic-app's own
 	// hand-built new-identity ceremony for the same op — a hardcoded literal

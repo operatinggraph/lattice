@@ -78,7 +78,10 @@ func Lenses() []pkgmgr.LensSpec {
 // every clause minted without one): the combined statement's own entry-row
 // deposit tag reads it, apart from rent by this column, never by the memo.
 // Café/clinic/wellness never authorizedBy a semantic-contracts clause, so
-// only the rent source carries it.
+// only the rent source carries it. kind is the entry's own recorded
+// provenance (loftspace-ledger's PayOutBalance stamps kind:"payout" on the
+// debit that pays a credit balance out — no clause authorizes it, so no
+// other column would tell it apart); null on every other entry.
 const rentEntriesSpec = `MATCH (t:transaction)
 MATCH (t)-[:postedTo]->(a:account)
 MATCH (a)-[:heldFor]->(l:leaseapp)
@@ -89,6 +92,7 @@ RETURN
   a.key AS accountKey,
   l.key AS leaseAppKey,
   t.entry.data.type AS type,
+  t.entry.data.kind AS kind,
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
   t.entry.data.postedAt AS postedAt,
