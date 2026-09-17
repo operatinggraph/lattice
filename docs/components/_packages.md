@@ -677,6 +677,9 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   (charged − returned, custody) read as "unpaid" on the balance line — the ledger attributes no payment to a clause.
   Sighting (clinic `RecordEncounter`, 2026-09-16, caught cold): `amendedAt` = "when the current TEXT was recorded" was
   stamped on a follow-up-only change — name the fact a stamp records and stamp it only when that fact changed.
+  Sighting (service-location `WireResidesIn`, 2026-09-17, caught cold ×3): a walk gated on `key not in state` runs for a
+  DECLARED-absent key too — the snapshot carries no declared/undeclared distinction — so a design claim "declaring submitters
+  skip it" is false; state what a first wire costs and declare the walk at every dispatcher.
 - **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from** — `mint_clause` wrote
   `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires; the inbound walk bound fine, a
   clause-anchored `(c)-[:governs]->(l:leaseapp)` never could (`adjacency/store.go` `OtherType: dstType`). Check: a

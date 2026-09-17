@@ -47,18 +47,24 @@ under the service actor, the `tenancyEnd` gap shape, the `(e)` enumeration + exp
 1. **Two leaseapp-anchored gaps, not an identity-anchored sweep.** The fact is the APPLICATION's: its approval confers the
    residence at its unit, its end releases it. An identity-anchored "release every residence with no live lease" would strip
    `seed-edge-demo`'s residents (wired with no leaseapp) and the showcase residents between `seedTenant` and
-   `seedResidentTenancies` — residence is also an operator-provisioned fact, and only the lease-side one is the lease's to undo.
+   `seedResidentTenancies` — residence is also an operator-provisioned fact. The two are one link on one key, so the
+   lease's end releases the residence at ITS unit whoever wired it (Riley and Sam's seed-wired links go when their
+   backfilled leases end; a reseed re-wires them) — accepted: a residence at a leased unit is the lease's.
 2. **`missing_residence` on `leaseApplicationComplete`** — `(unitKey <> null) AND (applicant <> null) AND
    (landlordDecision = 'approved') AND (leaseEnd <> null) AND (tenancyEndedAt = null) AND (residenceCount = 0)`, where
-   `residenceCount = count(DISTINCT res.key)` over `OPTIONAL MATCH (id)-[res:residesIn]->(u)`; joins `violating`. Dispatch:
+   `residenceCount = count(DISTINCT res.key)` over the closed loop
+   `OPTIONAL MATCH (app)-[:applicationFor]->(resId:identity)-[res:residesIn]->(resU:unit)<-[:appliesToUnit]-(app)` (fresh
+   variables: a clause naming both `id` and `u` spans two sibling subtrees and the branch decomposer refuses the whole
+   stage; the loop is its own group); joins `violating`. Dispatch:
    `directOp WireResidesIn{identity: row.applicant, location: row.unitKey}`, `Reads: [row.applicant, row.unitKey]`,
    `Enumerations: [{Hub: row.applicant, Relation: residesIn, Direction: out}]`. "At approval" is the PO's ask verbatim —
    a future-dated lease confers service access from approval, the same instant the listing flips to leased.
 3. **`missing_residenceUnwired` on `tenancyEnd`** — `(endedAt <> null) AND (residenceLinkKey <> null) AND
-   (sameApplicantLiveTenancyCount = 0)`, with `residenceLinkKey = max(res.key)` over
-   `OPTIONAL MATCH (app)-[:applicationFor]->(id:identity)` + `OPTIONAL MATCH (id)-[res:residesIn]->(u)`, and
-   `sameApplicantLiveTenancyCount` the existing `otherLiveTenancyCount` CASE conjoined with `otherId.key = id.key` over the
-   `other` fan extended `-[:applicationFor]->(otherId:identity)`. Dispatch: `directOp UnwireResidesIn{linkKey:
+   (sameApplicantLiveTenancyCount = 0)`, with `residenceLinkKey = res.key` (bare — the rel-binding gate does not
+   recognise `max()`; one live link per (identity, unit) by the deterministic key) over the same closed loop as decision 2,
+   and `sameApplicantLiveTenancyCount` the existing `otherLiveTenancyCount` CASE conjoined with `otherId.key <> null` over
+   `OPTIONAL MATCH (other)-[:applicationFor]->(otherId:identity)<-[:applicationFor]-(app)` — `otherId` binds iff the other
+   application's applicant is this one's. Dispatch: `directOp UnwireResidesIn{linkKey:
    row.residenceLinkKey}`, `Reads: [row.residenceLinkKey]`. The same-applicant guard is load-bearing exactly as the relist
    guard is: an ended application on a unit the same person re-leases would otherwise unwire what the new application's
    `missing_residence` re-wires, forever.
@@ -67,14 +73,23 @@ under the service actor, the `tenancyEnd` gap shape, the `(e)` enumeration + exp
    `RESIDES_IN_PAGE_LIMIT`), and a matching entry that is alive → no-op, dead → revive with `expectedRevision: lk.revision`;
    no entry → create as today. Why here: no lens can project a dead link's key (grounding), the Weaver composes no link
    keys, and a move-back-in to the same unit is the documented revive case — without this, the second approval's dispatch
-   is a create-once collision on every redelivery. A declaring submitter (the seeds) never runs the enumeration.
+   is a create-once collision on every redelivery. The page is listed whenever the snapshot lacks the key — undeclared
+   OR declared-and-absent (a known-absent optional read is never in `state`) — so every first wire walks one page (≈51
+   budget units of 60,000) and only a declared re-wire skips it; the walk is bounded at `RESIDES_IN_MAX_PAGES × RESIDES_IN_PAGE_LIMIT` (200)
+   subjects; past it the script emits the create (an absent target commits, a tombstoned one conflicts by name) — a
+   declared first wire is never refused by the walk. Every dispatcher declares the walk
+   (`Enumerations` on the target; the seeds' and the verify script's `wireHint` for `residesIn`).
 5. **service-location joins the LoftSpace chains** — `install-loftspace`, `refresh-loftspace`, `verify-package-lease-signing`
    (after service-domain, before lease-signing) and the e2e harness's `installChain`. A chain that installs a target
    dispatching an op installs the package that owns the op; the precedent (`SetListingStatus`) declares no `Depends` edge and
-   neither does this.
+   neither does this. `install-cafe` / `install-wellness` install lease-signing without loftspace-domain or service-location
+   today — the same dangling shape for `SetListingStatus`, left as is.
 6. **Non-goals.** `ReassignLeaseUnit` of an approved lease leaves the OLD unit's residence wired (the new unit's opens
    `missing_residence`); it is an operator repair verb and the operator's `UnwireResidesIn` is the release — stated in the
-   op's DDL prose, not automated (an identity-anchored release is decision 1's rejected shape). No FE: whoami anchors and
+   op's DDL prose, not automated (an identity-anchored release is decision 1's rejected shape); the mirror corner — an
+   ENDED lease reassigned onto a unit the applicant is operator-wired to projects that link as `residenceLinkKey` and
+   releases it — is the same accepted rule as decision 1's. `UnwireResidesIn` keeps its `UnknownLink` refusal on a dead
+   link: in the projection-lag window a reclaim re-dispatch burns one refusal, then converges. No FE: whoami anchors and
    the service list render the spine from the identity-domain / service-location lenses already. No change to who may
    submit `WireResidesIn` by hand (operator only).
 
@@ -111,6 +126,31 @@ tombstoned → the OPTIONAL MATCH misses → `missing_residenceUnwired` false; a
 *A lens MATCH edit is a corpus edit* — run the refractor corpus census. *A mirror that drops a precedent's branch drops its
 invariant* — the revive keeps `wire()`'s three-state table; the enumeration adds a fourth source of the same table, never a
 new branch. Standing checklist items 1–6 (`agents/fire-brief-template.md`) walked.
+
+**Build note (2026-09-17).** Two shape substitutions the engine forced, both provably equivalent: the residence walk
+is a closed loop on the anchor, `(app)-[:applicationFor]->(resId:identity)-[res:residesIn]->(resU:unit)<-[:appliesToUnit]-(app)`
+(a clause naming both `id` and `u` spans two sibling subtrees and the branch decomposer refuses the whole stage —
+leaseApplicationComplete folded 6 → 0 until the loop rooted the walk as its own group: now 7); `residenceLinkKey` is
+`res.key` bare (the rel-binding gate does not recognise `max()`), one live link per (identity, unit) by the deterministic
+key; the same-applicant guard closes `(other)-[:applicationFor]->(otherId)<-[:applicationFor]-(app)`. Priced: `tenancyEnd`'s
+CDC filter drops from relation-narrowed to label-narrowed (36 subjects > the budget; `leaseExpiry`'s posture). Found and
+not this fire's: the `(applicant, unit)` guard link is freed only by withdraw and reassign, so a declined, lost or ended
+applicant can never re-apply to that unit — `sameApplicantLiveTenancyCount` is reachable only through `ReassignLeaseUnit`
+today; filed as its own row. `TestRenewalConvergence_ExternalLegReclaimsAfterAFailedCheck` reddened twice under the two
+builders' concurrent suites, green alone (third sighting; 2026-09-13 was the second).
+
+**Shipped `a8299552` (merge of `f8c52ba1`), live 2026-09-17.** `reinstall-package` both packages (service-location
+0.5.4 → 0.6.0, lease-signing 0.41.2 → 0.42.0, no restart); the reactivation re-evaluated every retained row and Weaver wired
+the five missing residences within a minute (Jordan Ellis's link `createdBy` Weaver's service actor at 07:24:55Z, 55 s
+after the upgrade); the one un-wired approved application is tombstoned (withdrawn). `cap.svc.identity.<jordan>` now
+lists the same five services as seed-wired Riley Chen. `lattice lens reproject Yn698BZWmaqJuBHuYn69 --actor-key …` takes
+the lens's bare NanoID (a 5-token control subject), not its canonical name or `vtx.meta.` key. **Review classification
+(three cold layers, no BLOCKING):** convention ×3 (prior-attempt narration in comments; README approved bullet; a test
+comment's wrong mechanism), brief-gap ×2 (wrong-unit and tombstoned-link vectors; the relist e2e's steady-state leg
+ungated on the new dispatch — a new gap column joins `violating`, so every e2e that waits on that row's convergence now
+waits on the new dispatch), design-gap ×2 (decision 4's "declaring submitters skip the walk" — a snapshot cannot tell
+declared-absent from undeclared, now a `_packages.md` dossier sighting; the unwire strips a seed-wired residence at a leased
+unit — accepted into decision 1), implementation ×1 (single-page walk → bounded paging with the create fallback).
 
 **Scope-diff.** Every touch traces to the scope sentence; the service-location revive is the one addition the ask does
 not name, and it is what makes the wire re-runnable (decision 4) — an increment of the same mechanism, not an adjacent one.

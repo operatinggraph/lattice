@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-15 · `7507be53` · A wellness debtor is reminded once per arrears episode and claims no new seat — `.arrears` + CreditHold on both booking ops; 3 reminded live ([design](../../../docs/reviews/wellness-arrears-reminder-2026-09-15.md)).
 - 2026-09-15 · `56deea3e` · A studio with an upcoming class cannot be retired; the desk may retire one at its own building — `HasUpcomingClasses`, frontOfHouse granted + confined, the card holds Retire; live as the desk.
 - 2026-09-15 · `3dfd1b38` · A seat handed from the waitlist inside the late-cancel window cancels free — `promotedAt` stamped, CancelBooking exempts it, badged; live ([design](../../../docs/reviews/wellness-late-promotion-2026-09-15.md)).
 - 2026-09-15 · `5cb0aa03` · A full class offers Join waitlist, not Book, in Facet — `edgeEntitySessions.full` + `VisibleWhen`; the `📐` picker-filter row dissolved ([triage](../../../docs/reviews/verticals-designer-triage-2026-09-15.md)).
