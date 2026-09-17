@@ -156,13 +156,18 @@ func (h *harness) ledgerEntriesForClause(clauseKey, entryType string) []ledgerHi
 //     the oneTime archetype bills it at once through clauseSatisfaction →
 //     DebitAccount — exactly one debit, authorizedBy the deposit clause,
 //     which reads .status.state = completed.
-//  3. A same-day GiveNotice (the tenancy-notice vector's same-day shape —
+//  3. A landlord's RecordDepositDeduction takes 300 off the still-held
+//     deposit — exactly one "deduction" entry, loftspace-ledger's OWN
+//     .deductions aspect on the clause (never semantic-contracts' .status)
+//     accumulates it, and the clause stays completed (not yet returned).
+//  4. A same-day GiveNotice (the tenancy-notice vector's same-day shape —
 //     admitted, and its re-armed @at is overdue the instant it exists)
 //     ends the tenancy; EndTenancy records .tenancy.endedAt.
-//  4. missing_depositReturn dispatches ReturnDeposit — exactly one credit,
-//     authorizedBy the SAME deposit clause, which moves to
-//     .status.state = returned; missing_depositReturn itself reads false
-//     once closed, and no second return credit ever posts.
+//  5. missing_depositReturn dispatches ReturnDeposit — exactly one credit,
+//     for the NET of the charge less the recorded deduction, authorizedBy
+//     the SAME deposit clause, which moves to .status.state = returned;
+//     missing_depositReturn itself reads false once closed, and no second
+//     return credit ever posts.
 func TestLeaseConvergence_DepositChargedAndReturned(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -227,7 +232,42 @@ func TestLeaseConvergence_DepositChargedAndReturned(t *testing.T) {
 	require.Equal(t, depositCents, debits[0].AmountCents)
 	require.Equal(t, "deposit", debits[0].ClausePurpose)
 
-	// --- leg 3: a same-day notice ends the tenancy quickly (the tenancy-
+	// --- leg 3: a landlord deduction, taken while the deposit is still
+	// held — RecordDepositDeduction records the running total on
+	// loftspace-ledger's OWN .deductions aspect (never semantic-contracts'
+	// .status), and the return two legs down credits the NET. ---
+	rentSettlementRow := h.weaverTargetRow(semanticcontracts.LeaseRentSettlementTarget, appID)
+	require.NotNil(t, rentSettlementRow)
+	accountKey, _ := rentSettlementRow["accountKey"].(string)
+	require.NotEmptyf(t, accountKey, "leaseRentSettlement row must carry the account key: %+v", rentSettlementRow)
+	const deductedCents = 30000.0
+	deductReply := h.submitOp("RecordDepositDeduction", "transaction", "default", bootstrap.BootstrapIdentityKey, map[string]any{
+		"accountKey": accountKey, "clauseKey": depositClauseKey, "amountCents": deductedCents, "reason": "Carpet cleaning",
+	}, &processor.ContextHint{
+		Reads:         []string{accountKey, depositClauseKey, depositClauseKey + ".terms", depositClauseKey + ".status"},
+		OptionalReads: []string{depositClauseKey + ".deductions"},
+	})
+	require.Equalf(t, processor.ReplyStatusAccepted, deductReply.Status, "RecordDepositDeduction: %+v", deductReply.Error)
+
+	statusAfterDeduction := h.aspectData(depositClauseKey, "status")
+	require.NotNil(t, statusAfterDeduction)
+	require.Equal(t, "completed", statusAfterDeduction["state"], "a deduction must not move the clause off completed")
+	require.NotContainsf(t, statusAfterDeduction, "deductedCents", ".status must never carry deductedCents — that lives on loftspace-ledger's OWN .deductions aspect: %+v", statusAfterDeduction)
+
+	deductionsAspect := h.aspectData(depositClauseKey, "deductions")
+	require.NotNil(t, deductionsAspect)
+	require.Equal(t, deductedCents, deductionsAspect["totalCents"])
+	require.Equal(t, 1.0, deductionsAspect["count"])
+
+	var deductions []ledgerHistoryRow
+	require.Eventuallyf(t, func() bool {
+		deductions = h.ledgerEntriesForClause(depositClauseKey, "deduction")
+		return len(deductions) == 1
+	}, 30*time.Second, 200*time.Millisecond, "exactly one deduction must post; last seen %+v", deductions)
+	require.Equal(t, deductedCents, deductions[0].AmountCents)
+	require.Equal(t, "deposit", deductions[0].ClausePurpose)
+
+	// --- leg 4: a same-day notice ends the tenancy quickly (the tenancy-
 	// notice vector's shape: midnight UTC has already passed, so the
 	// re-armed @at is overdue the instant GiveNotice records it) ---
 	today := time.Now().UTC().Format("2006-01-02")
@@ -244,7 +284,7 @@ func TestLeaseConvergence_DepositChargedAndReturned(t *testing.T) {
 		return tn != nil && tn["endedAt"] != nil
 	}, 45*time.Second, 200*time.Millisecond, "EndTenancy must record .tenancy.endedAt once the re-armed @at fires")
 
-	// --- leg 4: missing_depositReturn dispatches ReturnDeposit — one
+	// --- leg 5: missing_depositReturn dispatches ReturnDeposit — one
 	// credit, the clause moves to returned, the gap closes ---
 	require.Eventuallyf(t, func() bool {
 		st := h.aspectData(depositClauseKey, "status")
@@ -256,7 +296,7 @@ func TestLeaseConvergence_DepositChargedAndReturned(t *testing.T) {
 		credits = h.ledgerEntriesForClause(depositClauseKey, "credit")
 		return len(credits) == 1
 	}, 30*time.Second, 200*time.Millisecond, "exactly one deposit credit must post; last seen %+v", credits)
-	require.Equal(t, depositCents, credits[0].AmountCents)
+	require.Equal(t, depositCents-deductedCents, credits[0].AmountCents, "the return must credit the NET of the charge less the recorded deduction")
 	require.Equal(t, "deposit", credits[0].ClausePurpose)
 
 	require.Eventuallyf(t, func() bool {

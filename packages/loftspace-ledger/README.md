@@ -14,18 +14,20 @@ account). Install: `lattice-pkg install packages/loftspace-ledger` (after both; 
 | Kind | Canonical names |
 |---|---|
 | **Vertex types** (3) | `account` (root `{}`, D5) · `transaction` (root `{}`, D5, `.entry` aspect) · `loftspaceArrearsNotificationOp` (the bridge's replyOp handler, no vertex of its own) |
-| **Aspect types** (3) | `ledgerAccountGuard` — `vtx.leaseapp.<id>.ledgerAccount`, the per-lease create-only uniqueness guard · `loftspaceAccountArrears` — `vtx.account.<id>.arrears`, the arrears-episode state · `loftspaceAccountArrearsNotification` — `vtx.account.<id>.arrearsNotification`, the reminder's delivery outcome |
-| **Links** (3) | `heldFor` (account → leaseapp) · `postedTo` (transaction → account) · `authorizedBy` (transaction → clause, written by `DebitAccount` with a `clauseRef` and by `ReturnDeposit`) |
-| **Operations** (7) | `LoftspaceCreateAccount` · `DebitAccount` · `LoftspaceRecordCharge` · `CreditAccount` · `ReturnDeposit` (Weaver-dispatched) · `EvaluateLoftspaceArrears` (Weaver-dispatched) · `RecordLoftspaceArrearsReminderNotification` (bridge replyOp) |
-| **Projection lenses** (2) | `ledgerHistory` (one row per transaction) → `loftspace-ledger-history` · `leaseAccounts` (lease → account key lookup + the account's `arrearsDueAt` / `arrearsRemindedFor` / `arrearsReminderSentAt`) → `loftspace-lease-accounts` (both `nats-kv`, `full` engine) |
+| **Aspect types** (4) | `ledgerAccountGuard` — `vtx.leaseapp.<id>.ledgerAccount`, the per-lease create-only uniqueness guard · `loftspaceAccountArrears` — `vtx.account.<id>.arrears`, the arrears-episode state · `loftspaceAccountArrearsNotification` — `vtx.account.<id>.arrearsNotification`, the reminder's delivery outcome · `depositDeductions` — `vtx.clause.<id>.deductions`, this package's own running-deduction-total aspect on a `semantic-contracts` clause |
+| **Links** (3) | `heldFor` (account → leaseapp) · `postedTo` (transaction → account) · `authorizedBy` (transaction → clause, written by `DebitAccount` with a `clauseRef`, by `ReturnDeposit` and by `RecordDepositDeduction`) |
+| **Operations** (9) | `LoftspaceCreateAccount` · `DebitAccount` · `LoftspaceRecordCharge` · `CreditAccount` · `ReturnDeposit` (Weaver-dispatched) · `RecordDepositDeduction` · `PayOutBalance` · `EvaluateLoftspaceArrears` (Weaver-dispatched) · `RecordLoftspaceArrearsReminderNotification` (bridge replyOp) |
+| **Projection lenses** (2) | `ledgerHistory` (one row per transaction, incl. `kind`) → `loftspace-ledger-history` · `leaseAccounts` (lease → account key lookup + the account's `arrearsDueAt` / `arrearsRemindedFor` / `arrearsReminderSentAt`) → `loftspace-lease-accounts` (both `nats-kv`, `full` engine) |
 | **Weaver targets** (1) | `loftspaceArrearsReminders` (one row per account) → `weaver-targets`; playbook `missing_evaluation → directOp EvaluateLoftspaceArrears` |
 
 `DebitAccount` — the clause-authorized charge Weaver's `clauseSatisfaction` playbook dispatches — is
 granted to `operator` only at `scope: any`; `LoftspaceRecordCharge` (a person's manual charge, never
-clause-authorized) and `CreditAccount` additionally grant `consumer` at `scope: self`, proven in
-`scripts.go` off the account's own `heldFor` topology: the lease's `applicationFor` holder (the resident)
-may credit only, capped at the outstanding balance; the holder of a `manages` link to the lease's
-`appliesToUnit` unit (the landlord) may charge and credit, uncapped — the operationType is a global
+clause-authorized), `CreditAccount`, `RecordDepositDeduction` and `PayOutBalance` additionally grant
+`consumer` at `scope: self`, proven in `scripts.go`'s shared `self_scope_standing` helper off the
+account's own `heldFor` topology: the lease's `applicationFor` holder (the resident) may credit only,
+capped at the outstanding balance (`CreditAccount`), and is refused outright on the other three; the
+holder of a `manages` link to the lease's `appliesToUnit` unit (the landlord) may charge and credit
+uncapped, deduct from a held deposit, and pay a credit balance out — the operationType is a global
 namespace, so the landlord's charge carries a vertical-unique name rather than a self grant on the
 `DebitAccount` name `cafe-ledger` also admits (`permissions.go`). `LoftspaceCreateAccount` also grants `frontOfHouse`,
 **workplace-confined** to the lease's own building (`scripts.go`'s `require_workplace` on the
@@ -38,10 +40,11 @@ directly from the browser.
 ```
 vtx.account.<id>                    class=account       root {} (D5 — balance is lens-derived)
 vtx.transaction.<id>                class=transaction   root {} (D5)
-vtx.transaction.<id>.entry          class=entry          {type ∈ debit|credit, amountCents, memo?, postedAt}
+vtx.transaction.<id>.entry          class=entry          {type ∈ debit|credit|deduction, kind?, amountCents, memo?, postedAt, periodStart?, periodEnd?, dueAt?}
 vtx.leaseapp.<id>.ledgerAccount     class=ledgerAccountGuard  {accountKey}  (the uniqueness guard)
 vtx.account.<id>.arrears            class=loftspaceAccountArrears  {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?, stale?, historyTooLong?, historyBudget?, replay?}
 vtx.account.<id>.arrearsNotification class=loftspaceAccountArrearsNotification  {status, remindedFor, sentAt}
+vtx.clause.<id>.deductions          class=depositDeductions  {totalCents, count, lastRecordedAt}  (this package's own aspect on a semantic-contracts clause)
 
 lnk.account.<id>.heldFor.leaseapp.<id>        (account → leaseapp; account is the later-arriving vertex)
 lnk.transaction.<id>.postedTo.account.<id>    (transaction → account; transaction is the later-arriving vertex)
@@ -61,10 +64,20 @@ for why the account carries its own id rather than the lease's.
 
 ## Append-only ledger + the clause seam
 
-`DebitAccount`/`LoftspaceRecordCharge`/`CreditAccount`/`ReturnDeposit` each mint a fresh `vtx.transaction.<id>` with a `.entry` aspect and
-the `postedTo` link back to the account — no balance field is ever written or mutated; the
-`ledgerHistory` lens derives a balance by summing `amountCents` (positive for debit, negative for
-credit) client-side, so concurrent debits/credits never race a read-modify-write.
+`DebitAccount`/`LoftspaceRecordCharge`/`CreditAccount`/`ReturnDeposit`/`RecordDepositDeduction`/`PayOutBalance`
+each mint a fresh `vtx.transaction.<id>` with a `.entry` aspect and the `postedTo` link back to the
+account — no balance field is ever written or mutated; the `ledgerHistory` lens derives a balance by
+summing `amountCents` (positive for debit, negative for credit; a `deduction` entry contributes to
+neither direction) client-side, so concurrent debits/credits never race a read-modify-write.
+
+`CreditAccount`'s resident branch and `PayOutBalance` additionally carry a bare, content-unchanged
+update of the account **root** vertex alongside their transaction mint: the balance/payout amount
+each computes is derived from the account's `postedTo` history, not stored anywhere, so two concurrent
+submits against the same account otherwise share no written key and both commit independently. The
+root update gives them one — a lost race re-hydrates and re-executes against the winner's now-committed
+history (Contract #3 §3.2) rather than a second self-credit or payout landing on stale numbers.
+`LoftspaceRecordCharge` and the landlord's uncapped `CreditAccount` branch skip it: the landlord is the
+sole creditor on that path, so there is no concurrent write it needs to serialize against.
 
 `DebitAccount`'s optional `clauseRef` additionally writes the `authorizedBy` audit link
 (transaction → clause) and updates the clause's `.status` — `completed` for a one-time clause, or
@@ -113,24 +126,65 @@ reverses) over the whole set, and writes `vtx.account.<id>.arrears`:
   to owing — not necessarily the head, which a partial payment can move past it) is dropped as a
   finished episode's.
 
+## The deposit: deduction and return
+
+`RecordDepositDeduction{accountKey, clauseKey, amountCents, reason}` (operator, or the landlord's
+`consumer scope: self`, the same `self_scope_standing` proof `CreditAccount`/`PayOutBalance` run — a
+resident submit is refused `AuthDenied`) takes a deduction off a charged, still-held deposit clause
+before it is returned. It proves the clause's own custody (`chargesTo` / `purpose: deposit` / one-time
+computational — `ClauseAccountMismatch` / `NotADeposit`) and `.status: completed` (`DepositNotHeld`
+otherwise — `active` means not yet charged, `returned` means already gone), refuses
+`DeductionExceedsDeposit` once the running total on the clause's own `.deductions` aspect plus this
+amount would exceed the clause's own `amountCents`, and mints a transaction with `.entry {type:
+deduction, amountCents, postedAt, memo: reason}` plus the `postedTo` and `authorizedBy` links. It then
+creates (first deduction) or bare-updates (later ones) the clause's own `.deductions` aspect
+(`{totalCents, count, lastRecordedAt}`) — never `expectedRevision`-pinned, so two concurrent deductions
+both land under the §3.2 re-hydrate retry. A deduction moves no FIFO and marks no `.arrears` stale; a
+deduction is neither a debit nor a credit, so every balance reader that tests the type explicitly (the
+resident self-credit walk, the arrears FIFO, `ledgerHistory`'s summed balance) ignores it.
+
 `ReturnDeposit{leaseAppKey, clauseKey, accountKey}` is the deposit's way back — `semantic-contracts`'
 `leaseRentSettlement` playbook dispatches it (`missing_depositReturn`) once the lease's `.tenancy`
 records `endedAt` and its `purpose: deposit` clause is `completed` (charged). It reads everything from
 the graph's own record: the clause's `.terms` (`NotADeposit` without the purpose token; the amount is
 the clause's own), its `.status` (`DepositNotCharged` while still `active`; a `returned` clause is an
 idempotent no-op), the lease's `.tenancy` (`TenancyNotEnded` without `endedAt`) and the clause's own
-`chargesTo` / `governs` links (`ClauseAccountMismatch` / `ClauseLeaseMismatch`). It posts one credit
-`authorizedBy` the clause and moves the clause's `.status` to `returned` under OCC — an ordinary credit
-that nets against whatever the tenant still owes; `ledgerHistory` projects `clausePurpose` so a statement
-holds the deposit apart from rent. Operator-only, no self grant, no screen; the DDL's `derive_reads`
-hydrates its whole read set from the payload keys.
+`chargesTo` / `governs` links (`ClauseAccountMismatch` / `ClauseLeaseMismatch`). It credits the NET of
+the clause's full amount less whatever `RecordDepositDeduction` has already taken off it, read from the
+clause's own `.deductions` aspect (absent = never deducted) — a net below zero (deductions exceeding the
+clause's own amount) is refused `InvalidState`, never a negative posting. A positive net posts one
+credit `authorizedBy` the clause; a net of exactly zero mints no transaction at all (a zero-amount entry
+is not a transaction) but still emits the event, with `amountCents: 0` and no `transactionKey`. Either
+way it also writes the clause's own `.deductions` aspect — a bare update carrying the hydrated total
+unchanged where one exists, or a `{totalCents: 0, count: 0, lastRecordedAt: postedAt}` create where none
+does — purely as a serialization anchor: since a deduction reads `.status` but writes `.deductions`,
+and a return reads `.deductions` but writes `.status`, the two ops would otherwise share no written key
+and a boundary-time deduction could land on an already-returned clause. Writing `.deductions` from both
+sides means a lost race re-hydrates and re-executes against the other's now-committed state instead of
+committing blind. `ledgerHistory` projects `clausePurpose` so a statement holds the deposit apart from
+rent. Operator-only, no self grant, no screen; the DDL's `derive_reads` hydrates its whole read set,
+including `.deductions`, from the payload keys.
 
-Every posted entry (`DebitAccount` / `LoftspaceRecordCharge` / `CreditAccount` / `ReturnDeposit`) carries the existing
-`.arrears` forward and marks it `stale` (dropping `historyTooLong`, `historyBudget` and `replay` — a
-posted entry changes the set a live checkpoint's cursor pages over), minting nothing when absent; both
-scripts' `derive_reads` hydrate `[account, account.arrears]` so the upsert stays OCC for a submitter
-that declared nothing. `leaseAccounts` projects `arrearsDueAt` / `arrearsRemindedFor` /
-`arrearsReminderSentAt` for the landlord ledger, the tenant statement and the portfolio list.
+`PayOutBalance{accountKey, leaseAppKey}` (operator, or the landlord's `consumer scope: self`, same
+proof) pays an ended tenancy's whole credit balance out to the tenant: the amount is computed op-side
+from the account's own `postedTo` history (the same recomputation the resident self-credit cap uses),
+never trusted from the payload. It proves the account's own `heldFor` link names the payload lease
+(`AccountLeaseMismatch` otherwise), the lease's `.tenancy` records `endedAt` (`TenancyNotEnded`
+otherwise), and refuses `NoCreditBalance` once the recomputed balance is not negative. It mints a
+transaction with `.entry {type: debit, kind: payout, amountCents: the credit balance's magnitude,
+postedAt}` and the `postedTo` link (no `authorizedBy` — no clause authorizes it). `kind` is the
+recorded provenance of a debit no clause authorizes; `ledgerHistory` and the one-bill `rentEntries`
+lens project it so a statement labels the row by this recorded fact, never by its memo.
+
+Every posted entry (`DebitAccount` / `LoftspaceRecordCharge` / `CreditAccount` / `ReturnDeposit` /
+`PayOutBalance`) carries the existing `.arrears` forward and marks it `stale` (dropping
+`historyTooLong`, `historyBudget` and `replay` — a posted entry changes the set a live checkpoint's
+cursor pages over), minting nothing when absent; every script's `derive_reads` hydrates `[account,
+account.arrears]` so the upsert stays OCC for a submitter that declared nothing. `RecordDepositDeduction`
+is the one op that posts an entry without touching `.arrears` at all — a deduction moves no FIFO, so
+there is nothing for an arrears episode to react to. `leaseAccounts` projects `arrearsDueAt` /
+`arrearsRemindedFor` / `arrearsReminderSentAt` for the landlord ledger, the tenant statement and the
+portfolio list.
 
 ## Where the ledger is surfaced
 

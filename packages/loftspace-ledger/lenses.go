@@ -288,6 +288,7 @@ RETURN
   a.key AS accountKey,
   l.key AS leaseAppKey,
   t.entry.data.type AS type,
+  t.entry.data.kind AS kind,
   t.entry.data.amountCents AS amountCents,
   t.entry.data.memo AS memo,
   t.entry.data.postedAt AS postedAt,

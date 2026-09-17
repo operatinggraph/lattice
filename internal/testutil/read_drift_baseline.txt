@@ -155,6 +155,12 @@ read	MergeIdentity	vtx.credentialindex.<id>
 read	OpenTab	lnk.identity.<id>.worksAt.building.<id>
 read	OpenTab	lnk.identity.<id>.worksAt.unit.<id>
 read	PauseVisitSeries	lnk.identity.<id>.worksAt.building.<id>
+# PayOutBalance's self-scope proof (self_scope_standing, loftspace-ledger):
+# the same two link-shaped follow-ups CreditAccount's rows below carry, off
+# the same account-owned heldFor walk RecordDepositDeduction's proof below
+# also shares.
+read	PayOutBalance	lnk.identity.<id>.manages.unit.<id>
+read	PayOutBalance	lnk.leaseapp.<id>.applicationFor.identity.<id>
 # PayoutCafeCredit runs CreditCafeAccount's workplace confinement verbatim (the
 # same post_entry require_workplace site RefundCafeCharge shares), so it
 # inherits the same two undeclarable follow-ups: each worksAt key is built from
@@ -205,6 +211,11 @@ read	ReassignSessionSeries	lnk.identity.<id>.worksAt.building.<id>
 read	ReassignSessionSeries	vtx.studio.<id>.slot<t>
 read	RecordApplicationLoss	lnk.identity.<id>.appliedToUnit.unit.<id>
 read	RecordCapabilityProposal	vtx.capabilityproposal.<id>.request
+# RecordDepositDeduction's self-scope proof (self_scope_standing,
+# loftspace-ledger): the same two link-shaped follow-ups CreditAccount's rows
+# above carry, off the same heldFor walk.
+read	RecordDepositDeduction	lnk.identity.<id>.manages.unit.<id>
+read	RecordDepositDeduction	lnk.leaseapp.<id>.applicationFor.identity.<id>
 # RecordEncounter's workplace fallback (its ONLY non-operator grant is
 # `provider`; frontOfHouse is not among its grantees) reuses SetAppointmentStatus's
 # staff-standing confinement and bound-provider binder, same fixture under-
@@ -470,6 +481,16 @@ walk	OpenTab	vtx.leaseapp.<id> appliesToUnit out
 walk	OpenTab	vtx.property.<id> containedIn out
 walk	OpenTab	vtx.unit.<id> containedIn out
 walk	PauseVisitSeries	vtx.building.<id> containedIn out
+# PayOutBalance's self-scope proof + its own account_balance_cents replay
+# (self_scope_standing / account_balance_cents, loftspace-ledger): the
+# account's own heldFor walk resolves the lease (appliesToUnit resolves the
+# unit for the landlord's manages proof), and the postedTo walk is the SAME
+# bounded, read-posture-(e)-annotated budget CreditAccount's own resident
+# self-credit cap runs (see its rows above) -- here it runs on every accepted
+# submission, not only a resident's.
+walk	PayOutBalance	vtx.account.<id> heldFor out
+walk	PayOutBalance	vtx.account.<id> postedTo in
+walk	PayOutBalance	vtx.leaseapp.<id> appliesToUnit out
 # PayoutCafeCredit's share of CreditCafeAccount's confinement walk (see the read
 # rows above), on RefundCafeCharge's terms: the heldFor and appliesToUnit hubs
 # are payload-reachable and the descriptor could name them, but the containedIn
@@ -493,6 +514,11 @@ walk	ReassignSessionSeries	vtx.building.<id> containedIn out
 # TombstoneSessionSeries's row below, off the same declared partOf walk.
 walk	ReassignSessionSeries	vtx.session.<id> ledBy out
 walk	ReassignSessionSeries	vtx.studio.<id> locatedAt out
+# RecordDepositDeduction's self-scope proof (self_scope_standing,
+# loftspace-ledger): the same two walks CreditAccount's/LoftspaceRecordCharge's
+# landlord self-scope proofs share, off the same account-owned heldFor walk.
+walk	RecordDepositDeduction	vtx.account.<id> heldFor out
+walk	RecordDepositDeduction	vtx.leaseapp.<id> appliesToUnit out
 # RecordEncounter's staff-standing confinement resolves the appointment's
 # bound provider's site(s) the same way SetAppointmentStatus's rows do
 # (appointment_sites: withProvider -> practicesAt -> containedIn).

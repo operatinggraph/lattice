@@ -87,19 +87,22 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "loftspace-ledger",
-	Version: "0.9.1",
+	Version: "0.10.0",
 	Description: "Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount, independently-minted " +
 		"id, one per lease via a .ledgerAccount guard aspect on the leaseapp) + the transaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo; DebitAccount's " +
 		"optional clauseRef writes the authorizedBy audit link + updates the clause status: completed one-time, " +
-		"or chargeValidUntil re-armed if period=monthly, Fire V3; ReturnDeposit credits a charged purpose=deposit " +
-		"clause back once the lease's tenancy has ended and marks it returned — Weaver's leaseRentSettlement " +
-		"dispatch; LoftspaceRecordCharge is a person's manual " +
-		"charge, never clause-authorized; it and CreditAccount also grant a consumer scope=self, " +
+		"or chargeValidUntil re-armed if period=monthly, Fire V3; ReturnDeposit credits the NET of a charged " +
+		"purpose=deposit clause less any recorded deduction once the lease's tenancy has ended and marks it " +
+		"returned — Weaver's leaseRentSettlement dispatch; RecordDepositDeduction takes a landlord's deduction off " +
+		"a charged, still-held deposit clause (a third entry type, neither debit nor credit, so no balance reader " +
+		"ages it); PayOutBalance pays an ended tenancy's whole credit balance out, computed from the account's own " +
+		"history; LoftspaceRecordCharge is a person's manual " +
+		"charge, never clause-authorized; it, CreditAccount, RecordDepositDeduction and PayOutBalance also grant a consumer scope=self, " +
 		"ownership-checked off the account's own heldFor topology — a resident paying down their own " +
 		"balance, credit only and amount-capped at the account's own recomputed outstanding balance, or a " +
-		"landlord recording a charge or a payment on a lease of a unit they manage, uncapped) + the " +
-		"ledgerHistory read-model lens (one row per transaction) + the leaseAccounts lens (lease -> account " +
+		"landlord recording a charge, a payment, a deduction or a payout on a lease of a unit they manage, uncapped) + the " +
+		"ledgerHistory read-model lens (one row per transaction, incl. kind) + the leaseAccounts lens (lease -> account " +
 		"key lookup, plus the account's arrears due date and reminder timestamps). " +
 		"Also ships the rent-arrears reminder: the account's .arrears episode aspect (minted by evaluation; every " +
 		"posted entry marks it stale, since no balance is stored) + the loftspaceArrearsReminders weaver-target " +

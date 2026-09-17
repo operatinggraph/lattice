@@ -32,10 +32,10 @@ func TestPackage_ManifestMatchesDefinition(t *testing.T) {
 // this test rather than reaching an install, where the same change is a silent
 // capability or read-model shift.
 func TestPackage_StructurePins(t *testing.T) {
-	if got, want := len(Package.DDLs), 6; got != want {
+	if got, want := len(Package.DDLs), 7; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Permissions), 10; got != want {
+	if got, want := len(Package.Permissions), 14; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.Lenses), 3; got != want {
@@ -47,18 +47,18 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.LoomPatterns), 0; got != want {
 		t.Errorf("LoomPatterns: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.OpMetas), 6; got != want {
+	if got, want := len(Package.OpMetas), 8; got != want {
 		t.Errorf("OpMetas: got %d, want %d", got, want)
 	}
 
-	wantDDLs := []string{"account", "ledgerAccountGuard", "loftspaceAccountArrears", "transaction", "loftspaceArrearsNotificationOp", "loftspaceAccountArrearsNotification"}
+	wantDDLs := []string{"account", "ledgerAccountGuard", "loftspaceAccountArrears", "transaction", "depositDeductions", "loftspaceArrearsNotificationOp", "loftspaceAccountArrearsNotification"}
 	for i, d := range Package.DDLs {
 		if i < len(wantDDLs) && d.CanonicalName != wantDDLs[i] {
 			t.Errorf("DDLs[%d]: got %q, want %q", i, d.CanonicalName, wantDDLs[i])
 		}
 	}
 
-	wantPerms := []struct{ op, scope string }{{"LoftspaceCreateAccount", "any"}, {"LoftspaceCreateAccount", "self"}, {"DebitAccount", "any"}, {"CreditAccount", "any"}, {"CreditAccount", "self"}, {"LoftspaceRecordCharge", "any"}, {"LoftspaceRecordCharge", "self"}, {"ReturnDeposit", "any"}, {"EvaluateLoftspaceArrears", "any"}, {"RecordLoftspaceArrearsReminderNotification", "any"}}
+	wantPerms := []struct{ op, scope string }{{"LoftspaceCreateAccount", "any"}, {"LoftspaceCreateAccount", "self"}, {"DebitAccount", "any"}, {"CreditAccount", "any"}, {"CreditAccount", "self"}, {"LoftspaceRecordCharge", "any"}, {"LoftspaceRecordCharge", "self"}, {"ReturnDeposit", "any"}, {"RecordDepositDeduction", "any"}, {"RecordDepositDeduction", "self"}, {"PayOutBalance", "any"}, {"PayOutBalance", "self"}, {"EvaluateLoftspaceArrears", "any"}, {"RecordLoftspaceArrearsReminderNotification", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break

@@ -493,6 +493,13 @@ def arrears_entries(acct_key, cursor, agg):
         tx_type = tx_entry.data.get("type")
         if tx_amount == None or tx_posted_at == None or tx_type == None:
             continue
+        # A deduction moves custody (what comes back), never what is OWED —
+        # it is neither a debit nor a credit, so the FIFO this replay feeds
+        # must not see it at all: capturing it here would have arrears_head
+        # age a "charge" nothing ever billed, or retire an open debit nothing
+        # ever paid.
+        if tx_type != "debit" and tx_type != "credit":
+            continue
         _, tx_id = parts_of(lk.sourceVertex, "postedTo source", "transaction")
         agg["entries"][tx_id] = {"postedAt": tx_posted_at, "type": tx_type,
                                  "amountCents": tx_amount, "dueAt": tx_entry.data.get("dueAt")}
@@ -1185,6 +1192,19 @@ def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
 
+def make_vtx_update(key, cls, data):
+    # The make_aspect_update idiom applied to a VERTEX ROOT (no vertexKey/
+    # localName on a root document, unlike an aspect's). Deliberately NO
+    # expectedRevision — a bare update on a key the op declared is
+    # auto-conditioned on the step-4 hydrated revision (Contract #3 §3.2)
+    # and retry-eligible, so a lost race re-hydrates and re-executes against
+    # the winner's now-committed write instead of silently coexisting with
+    # it. Callers pass the root's OWN data unchanged: this is a pure
+    # CAS/idempotency anchor between two ops that would otherwise share no
+    # written key, never a real content change.
+    return {"op": "update", "key": key,
+            "document": {"class": cls, "isDeleted": False, "data": data}}
+
 def make_aspect(vtx_key, local_name, cls, data):
     return {"op": "create", "key": vtx_key + "." + local_name,
             "document": {"class": cls, "isDeleted": False,
@@ -1440,6 +1460,123 @@ def period_index(valid_from, due):
         k = 0
     return k
 
+def self_scope_standing(op, acct_key):
+    # The self-scope ownership proof shared by post_entry (DebitAccount is
+    # never self-scoped, so only the two person-facing entry ops actually
+    # reach it), RecordDepositDeduction and PayOutBalance: which of the two
+    # populations a self-scoped submit's authContextTarget stands behind,
+    # off the account's OWN heldFor->leaseapp topology, never the payload.
+    # Returns (lease_key, standing) with standing in {"resident","landlord"},
+    # or (None, None) when authContextTarget is absent (a scope=any
+    # operator submit — no self-scope claim at all, so no proof runs). Every
+    # caller narrows what the claimed standing may then DO differently (a
+    # resident may only credit and only up to what is owed; a landlord's
+    # RecordDepositDeduction/PayOutBalance refuse a resident outright) — but
+    # the proof itself, and its resident-first order, is identical for all
+    # three, since each binds the SAME claimed identity to the SAME
+    # account-owned lease.
+    #
+    # authcontext-target: (selector) a branch selector, not a confinement
+    # exemption -- so it reads the raw target (did the caller declare a self
+    # target at all) rather than authTargetValidated. Safe because presence
+    # only pushes the caller onto the STRICTER branch below (the ownership
+    # proofs), never grants anything a scope=any submit would not already.
+    if op.authContextTarget == "":
+        return None, None
+    # authcontext-target: (ownership) the value derives an identity whose
+    # standing behind the account's own lease is then proven by a link
+    # read below -- applicationFor (resident) or manages on the lease's
+    # unit (landlord); a forged target only fails closed. The lease is
+    # recovered from the account's OWN heldFor topology, never the
+    # payload, so a forged claim only fails closed.
+    _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
+    # read-posture: (e) relation=heldFor epoch=none -- an account carries
+    # exactly one heldFor link, so this is never a keyspace scan. A page of
+    # one is exact here, unlike the LIVE_LINK paging appliesToUnit needs:
+    # heldFor is written once at LoftspaceCreateAccount and never
+    # repointed or tombstoned, so no tombstone can sort ahead of it.
+    held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
+    lease_key = None
+    for lk in held_for_page:
+        if not lk.isDeleted:
+            lease_key = lk.targetVertex
+    if lease_key == None:
+        fail("AuthDenied: account " + acct_key + " carries no live lease")
+    # The lease VERTEX itself: WithdrawLeaseApplication tombstones the
+    # leaseapp without cascading to its links, so applicationFor and
+    # appliesToUnit dangle live off a dead lease -- neither proof below
+    # may transit one (lease-signing's leaseapp_unit live-checks the
+    # application first for the same reason).
+    # read-posture: (e) per-candidate follow-up read off the heldFor
+    # enumeration above (data-derived key, via vertex_live).
+    if not vertex_live(lease_key):
+        fail("AuthDenied: account " + acct_key + " carries no live lease")
+    _, lease_id = parts_of(lease_key, "heldFor target", "leaseapp")
+    # read-posture: (e) per-candidate follow-up read off the enumeration
+    # above -- the lease id is data-derived, unknowable client-side.
+    application_for = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id)
+    if application_for != None and not application_for.isDeleted:
+        # RESIDENT.
+        return lease_key, "resident"
+    # LANDLORD: the lease's unit resolves from the lease's own
+    # appliesToUnit link (paged, live-checked), and the caller must
+    # manage it.
+    unit_key = lease_unit(lease_key)
+    manages = None
+    if unit_key != None:
+        _, unit_id = parts_of(unit_key, "unit", "unit")
+        # read-posture: (e) per-candidate follow-up read off the
+        # appliesToUnit enumeration in lease_unit (data-derived key --
+        # the unit is not knowable until the lease's own link
+        # resolves, so it cannot be pre-declared).
+        manages = kv.Read("lnk.identity." + target_identity_id + ".manages.unit." + unit_id)
+    if manages == None or manages.isDeleted:
+        # The unit key is deliberately NOT named: the caller reached
+        # here with an account key it already holds, and echoing the
+        # unit that account's lease sits on would turn a denial into
+        # a lookup for a resource it does not own.
+        fail("AuthDenied: " + op.actor + " neither holds nor manages the lease this account is held for; a self-scoped entry is the resident's payment or the landlord's charge or payment on a unit they manage")
+    return lease_key, "landlord"
+
+def account_balance_cents(acct_key):
+    # The account's own outstanding balance (positive = owed, negative = a
+    # credit balance), recomputed from its OWN postedTo transaction history —
+    # never trusted from the payload — paginated + bounded exactly like the
+    # workplace-confinement walks in this file's account DDL. Shared by
+    # post_entry's resident self-credit cap and PayOutBalance's payout
+    # figure: both need the SAME trustworthy sum, deductions excluded (a
+    # deduction is neither a debit nor a credit — see the type test below —
+    # so it moves custody without moving what is owed). Returns
+    # (owed_cents, budget_exhausted); an exhausted budget is the caller's own
+    # fail-closed signal, never a partial sum.
+    owed_cents = 0
+    cursor = None
+    budget_exhausted = True
+    for _page in range(SELF_CREDIT_MAX_PAGES):
+        # read-posture: (e) relation=postedTo epoch=none -- bounded by the
+        # page budget; exhausting it below fails closed.
+        page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            # read-posture: (e) per-candidate follow-up read off the
+            # enumeration above -- each transaction's own .entry aspect,
+            # data-derived and unknowable client-side.
+            tx_entry = kv.Read(lk.sourceVertex + ".entry")
+            if tx_entry == None or tx_entry.isDeleted:
+                continue
+            tx_amount = tx_entry.data.get("amountCents")
+            if tx_amount == None:
+                continue
+            if tx_entry.data.get("type") == "debit":
+                owed_cents += tx_amount
+            elif tx_entry.data.get("type") == "credit":
+                owed_cents -= tx_amount
+        if cursor == None:
+            budget_exhausted = False
+            break
+    return owed_cents, budget_exhausted
+
 def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -1474,106 +1611,43 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     # only pushes the caller onto the STRICTER branch below (the ownership
     # proofs, and the resident's amount proof), never grants anything a
     # scope=any submit would not already.
-    if op.authContextTarget != "":
-        # authcontext-target: (ownership) the value derives an identity whose
-        # standing behind the account's own lease is then proven by a link
-        # read below -- applicationFor (resident) or manages on the lease's
-        # unit (landlord); a forged target only fails closed. The lease is
-        # recovered from the account's OWN heldFor topology, never the
-        # payload, so a forged claim only fails closed.
-        _, target_identity_id = parts_of(op.authContextTarget, "authContextTarget", "identity")
-        # read-posture: (e) relation=heldFor epoch=none -- an account carries
-        # exactly one heldFor link, so this is never a keyspace scan. A page of
-        # one is exact here, unlike the LIVE_LINK paging appliesToUnit needs:
-        # heldFor is written once at LoftspaceCreateAccount and never
-        # repointed or tombstoned, so no tombstone can sort ahead of it.
-        held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
-        lease_key = None
-        for lk in held_for_page:
-            if not lk.isDeleted:
-                lease_key = lk.targetVertex
-        if lease_key == None:
-            fail("AuthDenied: account " + acct_key + " carries no live lease")
-        # The lease VERTEX itself: WithdrawLeaseApplication tombstones the
-        # leaseapp without cascading to its links, so applicationFor and
-        # appliesToUnit dangle live off a dead lease -- neither proof below
-        # may transit one (lease-signing's leaseapp_unit live-checks the
-        # application first for the same reason).
-        # read-posture: (e) per-candidate follow-up read off the heldFor
-        # enumeration above (data-derived key, via vertex_live).
-        if not vertex_live(lease_key):
-            fail("AuthDenied: account " + acct_key + " carries no live lease")
-        _, lease_id = parts_of(lease_key, "heldFor target", "leaseapp")
-        # read-posture: (e) per-candidate follow-up read off the enumeration
-        # above -- the lease id is data-derived, unknowable client-side.
-        application_for = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id)
-        if application_for != None and not application_for.isDeleted:
-            # RESIDENT: credit only, never a charge on their own lease.
-            if entry_type != "credit":
-                fail("AuthDenied: a resident may only credit (pay down) their own account, not charge it")
+    # workplace-exempt: (ownership-bound) self_scope_standing IS the
+    # ownership proof for both consumer scope=self grants (permissions.go):
+    # it resolves the account's own heldFor lease and requires the claimed
+    # target to hold either the lease's applicationFor link (resident) or a
+    # manages link on the lease's own appliesToUnit unit (landlord), so the
+    # validated self path never reaches a write unconfined. DebitAccount
+    # declares no self grant and no task is ever minted forOperation it, so
+    # only the two person-facing entry ops (LoftspaceRecordCharge,
+    # CreditAccount) can ever carry a validated target here.
+    _, standing = self_scope_standing(op, acct_key)
+    if standing == "resident":
+        # RESIDENT: credit only, never a charge on their own lease.
+        if entry_type != "credit":
+            fail("AuthDenied: a resident may only credit (pay down) their own account, not charge it")
 
-            # Amount trust: nothing on this platform verifies a self-submitted
-            # payment actually happened (no payment-rail integration -- out of
-            # scope for a reference vertical, package doc), so an unbounded
-            # self-credit would let a resident forgive their own debt for free.
-            # The outstanding balance is recomputed from the account's OWN
-            # postedTo transaction history (never trusted from the payload),
-            # paginated + bounded exactly like the workplace-confinement walks
-            # in this file's account DDL (worksAt_covers): an account whose
-            # history exhausts the page budget fails closed (denies) rather
-            # than trusts a partial sum. A self-credit may never exceed what is
-            # actually owed.
-            owed_cents = 0
-            cursor = None
-            budget_exhausted = True
-            for _page in range(SELF_CREDIT_MAX_PAGES):
-                # read-posture: (e) relation=postedTo epoch=none -- bounded by the
-                # page budget; exhausting it below fails closed.
-                page, cursor = kv.Links(acct_key, "postedTo", "in", cursor, SELF_CREDIT_PAGE_LIMIT)
-                for lk in page:
-                    if lk.isDeleted:
-                        continue
-                    # read-posture: (e) per-candidate follow-up read off the
-                    # enumeration above -- each transaction's own .entry aspect,
-                    # data-derived and unknowable client-side.
-                    tx_entry = kv.Read(lk.sourceVertex + ".entry")
-                    if tx_entry == None or tx_entry.isDeleted:
-                        continue
-                    tx_amount = tx_entry.data.get("amountCents")
-                    if tx_amount == None:
-                        continue
-                    if tx_entry.data.get("type") == "debit":
-                        owed_cents += tx_amount
-                    elif tx_entry.data.get("type") == "credit":
-                        owed_cents -= tx_amount
-                if cursor == None:
-                    budget_exhausted = False
-                    break
-            if budget_exhausted:
-                fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
-            if owed_cents <= 0:
-                fail("NoBalanceToPay: account " + acct_key + " has no outstanding balance to pay")
-            if amount_cents > owed_cents:
-                fail("PaymentExceedsBalance: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
-        else:
-            # LANDLORD: the lease's unit resolves from the lease's own
-            # appliesToUnit link (paged, live-checked), and the caller must
-            # manage it. Both directions are allowed and neither is capped.
-            unit_key = lease_unit(lease_key)
-            manages = None
-            if unit_key != None:
-                _, unit_id = parts_of(unit_key, "unit", "unit")
-                # read-posture: (e) per-candidate follow-up read off the
-                # appliesToUnit enumeration in lease_unit (data-derived key --
-                # the unit is not knowable until the lease's own link
-                # resolves, so it cannot be pre-declared).
-                manages = kv.Read("lnk.identity." + target_identity_id + ".manages.unit." + unit_id)
-            if manages == None or manages.isDeleted:
-                # The unit key is deliberately NOT named: the caller reached
-                # here with an account key it already holds, and echoing the
-                # unit that account's lease sits on would turn a denial into
-                # a lookup for a resource it does not own.
-                fail("AuthDenied: " + op.actor + " neither holds nor manages the lease this account is held for; a self-scoped entry is the resident's payment or the landlord's charge or payment on a unit they manage")
+        # Amount trust: nothing on this platform verifies a self-submitted
+        # payment actually happened (no payment-rail integration -- out of
+        # scope for a reference vertical, package doc), so an unbounded
+        # self-credit would let a resident forgive their own debt for free.
+        # The outstanding balance is recomputed from the account's OWN
+        # postedTo transaction history (never trusted from the payload) via
+        # account_balance_cents (paginated + bounded exactly like the
+        # workplace-confinement walks in this file's account DDL,
+        # worksAt_covers): an account whose history exhausts the page budget
+        # fails closed (denies) rather than trusts a partial sum. A
+        # self-credit may never exceed what is actually owed.
+        owed_cents, budget_exhausted = account_balance_cents(acct_key)
+        if budget_exhausted:
+            fail("AuthDenied: could not verify account " + acct_key + "'s balance (too much transaction history)")
+        if owed_cents <= 0:
+            fail("NoBalanceToPay: account " + acct_key + " has no outstanding balance to pay")
+        if amount_cents > owed_cents:
+            fail("PaymentExceedsBalance: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
+    # LANDLORD standing needs no further proof here: self_scope_standing
+    # already confirmed the manages link before returning it. Both
+    # directions are allowed and neither is capped -- the landlord is the
+    # creditor.
 
     # clauseRef (DebitAccount only — the semantic-contracts Executable Paper
     # consumer, Contract #10 §10.8): the clause this charge is authorized by.
@@ -1699,12 +1773,28 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
 
     # Root data minimal (D5): {} on root. The charge/payment fact is the
-    # .entry aspect; the account itself is untouched (append-only ledger).
+    # .entry aspect; the account root is otherwise untouched (append-only
+    # ledger) — EXCEPT on the resident's own capped self-credit, where a bare
+    # update of the account root's own unchanged data is the CAS anchor two
+    # concurrent self-credits need: each mints an independent transaction
+    # (a fresh nanoid, never colliding with the other), so without a shared
+    # conditioned key both could compute the SAME owed_cents from the same
+    # stale postedTo read and both land, each individually capped but jointly
+    # exceeding what is owed — the exact race PayOutBalance later makes
+    # cashable. The bare update (make_vtx_update) is auto-conditioned on the
+    # revision this op's own declared read of acct_key hydrated (Contract #3
+    # §3.2), so the loser re-hydrates, re-executes account_balance_cents
+    # against the winner's now-posted credit, and is capped or refused on the
+    # fresh total instead of landing independently. The landlord/operator
+    # paths are uncapped and stay untouched — nothing they compute depends on
+    # a stale read racing another writer the same way.
     mutations = [
         make_vtx(tx_key, "transaction", {}),
         make_aspect(tx_key, "entry", "transactionEntry", entry_data),
         make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
     ]
+    if standing == "resident":
+        mutations.append(make_vtx_update(acct_key, "account", state[acct_key].data))
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]
 
@@ -1859,52 +1949,330 @@ def return_deposit(state, op):
         # uncharged deposit would credit money never collected.
         fail("DepositNotCharged: " + clause_key + " is " + str(status_state) + ", not completed; a deposit is returned only once DebitAccount has charged it")
 
-    tx_id = nanoid.new()
-    tx_key = "vtx.transaction." + tx_id
-    posted_at = time.rfc3339_utc(op.submittedAt)
-    entry_data = {"type": "credit", "amountCents": amount_cents, "postedAt": posted_at,
-                  "memo": "Security deposit returned"}
+    # The NET returned to the tenant: the clause's own full amount, less
+    # whatever RecordDepositDeduction has already taken off it — the running
+    # total on THIS package's own .deductions aspect (ddls.go's
+    # depositDeductions; absent = never deducted). Zero net (fully deducted)
+    # posts no transaction at all: a zero-amount entry is not a transaction,
+    # so the clause still moves to returned but nothing is minted or linked
+    # (Decision 4).
+    deducted_cents = 0
+    deductions_key = clause_key + ".deductions"
+    deductions_doc = None
+    if deductions_key in state and vertex_alive(state, deductions_key):
+        deductions_doc = state[deductions_key]
+        deducted_cents = deductions_doc.data.get("totalCents")
+        if deducted_cents == None:
+            deducted_cents = 0
+    net_cents = amount_cents - deducted_cents
+    if net_cents < 0:
+        # A recorded deduction total exceeding the clause's own amount is a
+        # torn record (RecordDepositDeduction's own cap refuses this at
+        # write time) — fail closed rather than credit a negative amount.
+        fail("InvalidState: " + clause_key + "'s recorded deductions (" + str(deducted_cents) + ") exceed its own amountCents (" + str(amount_cents) + ")")
 
-    # postedTo / authorizedBy: the transaction (later-arriving) is the source
-    # of both (Contract #1 §1.1) — the same chain of custody DebitAccount
-    # recorded for the charge, so the statement tells the return from a
-    # payment by the clause it names.
-    posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
-    authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
+    posted_at = time.rfc3339_utc(op.submittedAt)
 
     # The clause's .status moves to returned, keeping every field DebitAccount
     # left (completedAt, chargeValidUntil) and pinned to the revision the
     # dispatch hydrated: a concurrent writer of .status must conflict rather
     # than be overwritten by a return computed from a stale state, and a
-    # second return racing this one conflicts here instead of crediting twice.
-    # The trade of an EXPLICIT pin: commit_path.go's applyHydratedRevisions
-    # (:682-683) skips a mutation that carries its own expectedRevision, so it
-    # is not in the defaulted set the §3.2 re-hydrate retry replays — a
-    # conflict here is a terminal rejection, not a retry. Chosen on purpose:
-    # the loser of the race is a second credit of the same deposit, and must
-    # never be replayed as a second write; Weaver re-evaluates the row instead.
+    # second return racing this one conflicts here instead of crediting
+    # twice. The EXPLICIT pin keeps this write itself out of the defaulted
+    # set the §3.2 re-hydrate retry replays (commit_path.go's
+    # applyHydratedRevisions skips a mutation that carries its own
+    # expectedRevision) — a loser is never replayed as a second credit. The
+    # .deductions write below IS retry-eligible, so a return-vs-return loser
+    # re-hydrates, re-executes, and lands on the returned no-op branch above;
+    # a loser whose only conflict is this pin is rejected and Weaver
+    # re-evaluates the row.
     status_data = {}
     for k, v in status_doc.data.items():
         status_data[k] = v
     status_data["state"] = "returned"
     status_data["returnedAt"] = posted_at
 
+    # .deductions is the SERIALIZATION ANCHOR against RecordDepositDeduction:
+    # that op reads .status and writes .deductions, this one reads
+    # .deductions and writes .status, and two writers conditioned on keys
+    # the OTHER never touches never serialize — a boundary-time deduction
+    # would land on an already-returned clause, or a return would compute
+    # its net from a total a concurrent deduction was about to change.
+    # Writing .deductions here too — a BARE update carrying the
+    # hydrated data unchanged when present (Contract #3 §3.2: auto-
+    # conditioned on the revision this op's own derive_reads hydrated, so a
+    # deduction that lands first conflicts this write and the platform
+    # re-hydrates/re-executes/re-commits with the fresh total), or a CREATE
+    # of {totalCents: 0, count: 0, lastRecordedAt: posted_at} when absent
+    # (Contract #2 §2.5's absentConditionedCreates: a create on a key step 4
+    # observed as known-absent is retry-eligible the same way, so a
+    # concurrent first deduction's own create conflicts and re-hydrates
+    # rather than silently coexisting) — gives the two ops a shared key
+    # every race between them must serialize through.
+    if deductions_doc != None:
+        deductions_mutation = make_aspect_update(clause_key, "deductions", "depositDeductions", deductions_doc.data)
+    else:
+        deductions_mutation = make_aspect(clause_key, "deductions", "depositDeductions",
+                                           {"totalCents": 0, "count": 0, "lastRecordedAt": posted_at})
+
+    mutations = [
+        {"op": "update", "key": status_key, "expectedRevision": status_doc.revision,
+         "document": {"class": "clauseStatus", "isDeleted": False,
+                      "vertexKey": clause_key, "localName": "status", "data": status_data}},
+        deductions_mutation,
+    ]
+    response = {}
+    tx_key = None
+    if net_cents > 0:
+        tx_id = nanoid.new()
+        tx_key = "vtx.transaction." + tx_id
+        entry_data = {"type": "credit", "amountCents": net_cents, "postedAt": posted_at,
+                      "memo": "Security deposit returned"}
+
+        # postedTo / authorizedBy: the transaction (later-arriving) is the
+        # source of both (Contract #1 §1.1) — the same chain of custody
+        # DebitAccount recorded for the charge, so the statement tells the
+        # return from a payment by the clause it names.
+        posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
+        authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
+
+        mutations += [
+            make_vtx(tx_key, "transaction", {}),
+            make_aspect(tx_key, "entry", "transactionEntry", entry_data),
+            make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
+            make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}),
+        ]
+        # A credit moves the FIFO the arrears evaluation ages, exactly as
+        # every post_entry credit does. A zero-net return posts no
+        # transaction, so it moves no FIFO and needs no mark.
+        mutations += arrears_stale_mark(acct_key)
+        response = {"primaryKey": tx_key}
+
+    event_data = {"accountKey": acct_key, "clauseKey": clause_key,
+                  "leaseAppKey": lease_key, "amountCents": net_cents}
+    if tx_key != None:
+        event_data["transactionKey"] = tx_key
+    events = [{"class": "loftspace.depositReturned", "data": event_data}]
+    return {"mutations": mutations, "events": events, "response": response}
+
+def record_deposit_deduction(state, op):
+    # A landlord deduction taken from a charged, still-held security
+    # deposit. It MOVES CUSTODY — what eventually comes back to the tenant —
+    # never what the tenant OWES: the entry's own type ("deduction") is
+    # neither "debit" nor "credit", so every balance reader that tests the
+    # type explicitly (the arrears FIFO's arrears_entries, the resident
+    # self-credit walk / account_balance_cents above) ignores it outright —
+    # a damage deduction never ages into arrears and never blocks a
+    # self-credit. Custody on the statement is charged − deducted − returned
+    # (cmd/loftspace-app's computeDepositSummary). The running deducted total
+    # lives on THIS PACKAGE'S OWN .deductions aspect on the clause (class
+    # depositDeductions, ddls.go) — never on the clause's .status, which
+    # semantic-contracts owns: PermittedCommands is a REAL commit-time gate
+    # (step6_validate.go), not documentation, so writing a foreign package's
+    # aspect class would need this op admitted there, reaching a script that
+    # was never meant to authorize it (the S9 hazard). This op still READS
+    # .status (the completed gate), it just never writes it.
+    p = op.payload
+    acct_key = required_string(p, "accountKey")
+    _, acct_id = parts_of(acct_key, "accountKey", "account")
+    clause_key = required_string(p, "clauseKey")
+    _, clause_id = parts_of(clause_key, "clauseKey", "clause")
+    amount_cents = require_number(p, "amountCents")
+    if amount_cents <= 0:
+        fail("InvalidArgument: amountCents: required positive number")
+    reason = required_string(p, "reason")
+    if len(reason) > 200:
+        fail("InvalidArgument: reason: must be 200 characters or fewer")
+
+    if not vertex_alive(state, acct_key):
+        fail("UnknownAccount: " + acct_key)
+    if not vertex_alive(state, clause_key):
+        fail("UnknownClause: " + clause_key)
+
+    # Who: the landlord's self-scope path (the account's own heldFor lease,
+    # its appliesToUnit unit, the caller's manages link) or the operator with
+    # no target. self_scope_standing's resident branch answers first and is
+    # refused here — a deduction is the landlord's own act, never the
+    # tenant's.
+    # workplace-exempt: (ownership-bound) self_scope_standing IS the
+    # ownership proof for this op's consumer scope=self grant
+    # (permissions.go): a resident standing is refused outright below, and a
+    # landlord standing already required the manages link on the lease's own
+    # unit before returning here.
+    _, standing = self_scope_standing(op, acct_key)
+    if standing == "resident":
+        fail("AuthDenied: a resident may not deduct from their own deposit")
+
+    # Custody: the clause must charge THIS account, off its own deterministic
+    # link key (mint_clause writes it once, with the clause as source).
+    charges_lnk = "lnk.clause." + clause_id + ".chargesTo.account." + acct_id
+    if not vertex_alive(state, charges_lnk):
+        fail("ClauseAccountMismatch: " + clause_key + " does not charge " + acct_key)
+
+    terms_key = clause_key + ".terms"
+    if not vertex_alive(state, terms_key):
+        fail("UnknownClause: " + clause_key + " has no live .terms aspect")
+    terms = state[terms_key].data
+    if terms.get("purpose") != "deposit" or terms.get("period") != "oneTime" or terms.get("kind") != "computational":
+        fail("NotADeposit: " + clause_key + " is not a oneTime computational purpose=deposit clause")
+    deposit_amount = terms.get("amountCents")
+    if deposit_amount == None or deposit_amount <= 0:
+        fail("NotADeposit: " + clause_key + " carries no positive amountCents to deduct from")
+
+    status_key = clause_key + ".status"
+    if not (status_key in state and vertex_alive(state, status_key)):
+        fail("InvalidState: " + clause_key + " has no live .status aspect")
+    status_doc = state[status_key]
+    status_state = status_doc.data.get("state")
+    # completed = charged and still held; active = not charged yet (nothing
+    # to deduct from); returned = the deposit is gone.
+    if status_state != "completed":
+        fail("DepositNotHeld: " + clause_key + " is " + str(status_state) + ", not completed; a deduction is only taken from a charged, still-held deposit")
+
+    # The running total lives on THIS package's own .deductions aspect
+    # (depositDeductions, ddls.go) — absent on a clause never deducted from.
+    deductions_key = clause_key + ".deductions"
+    deductions_doc = None
+    if deductions_key in state and vertex_alive(state, deductions_key):
+        deductions_doc = state[deductions_key]
+    total_so_far = 0
+    count_so_far = 0
+    if deductions_doc != None:
+        total_so_far = deductions_doc.data.get("totalCents")
+        if total_so_far == None:
+            total_so_far = 0
+        count_so_far = deductions_doc.data.get("count")
+        if count_so_far == None:
+            count_so_far = 0
+    if total_so_far + amount_cents > deposit_amount:
+        fail("DeductionExceedsDeposit: " + clause_key + "'s deposit of " + str(deposit_amount) +
+             " already carries " + str(total_so_far) + " deducted; " + str(amount_cents) + " more would exceed it")
+
+    tx_id = nanoid.new()
+    tx_key = "vtx.transaction." + tx_id
+    posted_at = time.rfc3339_utc(op.submittedAt)
+    entry_data = {"type": "deduction", "amountCents": amount_cents, "postedAt": posted_at, "memo": reason}
+
+    # postedTo / authorizedBy: the transaction (later-arriving) is the source
+    # of both (Contract #1 §1.1) — the same chain of custody DebitAccount and
+    # ReturnDeposit record.
+    posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
+    authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
+
+    deductions_data = {"totalCents": total_so_far + amount_cents, "count": count_so_far + 1, "lastRecordedAt": posted_at}
+    if deductions_doc == None:
+        # First deduction on this clause: CREATE. make_aspect's own create-only
+        # write conflicts a genuine race instead of silently overwriting it.
+        deductions_mutation = make_aspect(clause_key, "deductions", "depositDeductions", deductions_data)
+    else:
+        # A later deduction: a BARE update (make_aspect_update), auto-
+        # conditioned on the revision this op's own derive_reads hydrated
+        # (.deductions is declared optionalReads, never expectedRevision-
+        # pinned): the Contract #3 §3.2 re-hydrate retry replays it against
+        # the latest revision on a conflict, so two concurrent deductions
+        # both land and the running total stays exact.
+        deductions_mutation = make_aspect_update(clause_key, "deductions", "depositDeductions", deductions_data)
+
     mutations = [
         make_vtx(tx_key, "transaction", {}),
         make_aspect(tx_key, "entry", "transactionEntry", entry_data),
         make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
         make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}),
-        {"op": "update", "key": status_key, "expectedRevision": status_doc.revision,
-         "document": {"class": "clauseStatus", "isDeleted": False,
-                      "vertexKey": clause_key, "localName": "status", "data": status_data}},
+        deductions_mutation,
     ]
-    # A credit moves the FIFO the arrears evaluation ages, exactly as every
-    # post_entry credit does.
+    # No .arrears stale mark: a deduction moves no FIFO at all (it is neither
+    # a debit nor a credit — see arrears_entries' own type test), so the
+    # replay checkpoint's "every debit and credit" aggregate stays exact
+    # without one.
+    events = [{"class": "loftspace.depositDeducted",
+               "data": {"accountKey": acct_key, "transactionKey": tx_key, "clauseKey": clause_key, "amountCents": amount_cents}}]
+    return {"mutations": mutations, "events": events,
+            "response": {"primaryKey": tx_key}}
+
+def pay_out_balance(state, op):
+    # Pays the account's WHOLE credit balance out to the tenant once the
+    # tenancy has ended — the landlord's own act (or the operator's), never
+    # the resident's, computed op-side from the account's own postedTo
+    # history exactly as account_balance_cents computes what a resident
+    # owes: never trusted from the payload, so there is nothing here to cap
+    # or under/over-trust. A negative recomputed balance is a credit; paying
+    # it out debits the account back to zero.
+    p = op.payload
+    acct_key = required_string(p, "accountKey")
+    _, acct_id = parts_of(acct_key, "accountKey", "account")
+    lease_key = required_string(p, "leaseAppKey")
+    _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
+
+    if not vertex_alive(state, acct_key):
+        fail("UnknownAccount: " + acct_key)
+    if not vertex_alive(state, lease_key):
+        fail("UnknownLeaseApplication: " + lease_key)
+
+    # Who: the landlord's self-scope path or the operator with no target —
+    # the same standing self_scope_standing proves for RecordDepositDeduction.
+    # workplace-exempt: (ownership-bound) self_scope_standing IS the
+    # ownership proof for this op's consumer scope=self grant
+    # (permissions.go): a resident standing is refused outright below, and a
+    # landlord standing already required the manages link on the lease's own
+    # unit before returning here.
+    _, standing = self_scope_standing(op, acct_key)
+    if standing == "resident":
+        fail("AuthDenied: a resident may not pay out their own account's balance")
+
+    # Custody: the account must actually be held for THIS lease, off the
+    # account's own deterministic heldFor link (the account is the source —
+    # Contract #1 §1.1).
+    held_for_lnk = "lnk.account." + acct_id + ".heldFor.leaseapp." + lease_id
+    if not vertex_alive(state, held_for_lnk):
+        fail("AccountLeaseMismatch: " + acct_key + " is not held for " + lease_key)
+
+    tenancy_key = lease_key + ".tenancy"
+    ended_at = None
+    if tenancy_key in state and vertex_alive(state, tenancy_key):
+        ended_at = state[tenancy_key].data.get("endedAt")
+    if ended_at == None:
+        fail("TenancyNotEnded: " + lease_key + " records no endedAt; a balance is paid out once the tenancy has ended")
+
+    owed_cents, budget_exhausted = account_balance_cents(acct_key)
+    if budget_exhausted:
+        fail("HistoryTooLong: could not verify account " + acct_key + "'s balance (too much transaction history)")
+    if owed_cents >= 0:
+        fail("NoCreditBalance: account " + acct_key + " carries no credit balance to pay out")
+    payout_cents = -owed_cents
+
+    tx_id = nanoid.new()
+    tx_key = "vtx.transaction." + tx_id
+    posted_at = time.rfc3339_utc(op.submittedAt)
+    # kind records this debit's PROVENANCE — no clause authorizes it, so the
+    # statement labels it by this recorded fact, never by its memo (memo is
+    # free text an operator could edit the wording of in a client; kind is
+    # not).
+    entry_data = {"type": "debit", "kind": "payout", "amountCents": payout_cents,
+                  "postedAt": posted_at, "memo": "Balance paid out to the tenant"}
+    posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
+
+    # The account root's own bare update (unchanged data) is the CAS anchor:
+    # two concurrent PayOutBalance submissions on a never-evaluated account
+    # (no .arrears aspect to serialize through — arrears_stale_mark mints
+    # nothing where absent) each mint an independent transaction and would
+    # otherwise both land, each paying out the SAME computed owed_cents. The
+    # bare update (make_vtx_update) is auto-conditioned on the revision this
+    # op's own declared read of acct_key hydrated (Contract #3 §3.2), so the
+    # loser re-hydrates, re-executes account_balance_cents against the
+    # winner's now-posted payout debit, and finds NoCreditBalance instead of
+    # paying the same credit out twice.
+    mutations = [
+        make_vtx(tx_key, "transaction", {}),
+        make_aspect(tx_key, "entry", "transactionEntry", entry_data),
+        make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
+        make_vtx_update(acct_key, "account", state[acct_key].data),
+    ]
+    # A debit moves the FIFO the arrears evaluation ages, exactly as every
+    # post_entry debit does.
     mutations += arrears_stale_mark(acct_key)
 
-    events = [{"class": "loftspace.depositReturned",
-               "data": {"accountKey": acct_key, "transactionKey": tx_key, "clauseKey": clause_key,
-                        "leaseAppKey": lease_key, "amountCents": amount_cents}}]
+    events = [{"class": "loftspace.balancePaidOut",
+               "data": {"accountKey": acct_key, "transactionKey": tx_key, "leaseAppKey": lease_key, "amountCents": payout_cents}}]
     return {"mutations": mutations, "events": events,
             "response": {"primaryKey": tx_key}}
 
@@ -1941,8 +2309,9 @@ def derive_reads(op):
     if ot == "ReturnDeposit":
         # ReturnDeposit's whole read set, derived from the three payload keys:
         # the account root and its .arrears (the same two as every entry op),
-        # the clause root, its .terms and .status, the lease root and its
-        # .tenancy, and the two deterministic custody links — which no dispatcher can
+        # the clause root, its .terms, .status and .deductions (this
+        # package's own running-total aspect, ddls.go), the lease root and
+        # its .tenancy, and the two deterministic custody links — which no dispatcher can
         # template (a link key spans two payload fields), so this is the one
         # channel that hydrates them. All optionalReads, so the handler's own
         # refusals (UnknownAccount, UnknownClause, UnknownLeaseApplication,
@@ -1964,7 +2333,7 @@ def derive_reads(op):
         if has_acct:
             keys += [acct_key, acct_key + ".arrears"]
         if has_clause:
-            keys += [clause_key, clause_key + ".terms", clause_key + ".status"]
+            keys += [clause_key, clause_key + ".terms", clause_key + ".status", clause_key + ".deductions"]
             clause_id = clause_key.split(".")[2]
             if has_acct:
                 keys.append("lnk.clause." + clause_id + ".chargesTo.account." + acct_key.split(".")[2])
@@ -1972,6 +2341,45 @@ def derive_reads(op):
                 keys.append("lnk.clause." + clause_id + ".governs.leaseapp." + lease_key.split(".")[2])
         if has_lease:
             keys += [lease_key, lease_key + ".tenancy"]
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
+    if ot == "RecordDepositDeduction":
+        # The account root, the clause root, its .terms, .status and
+        # .deductions (this package's own running-total aspect, ddls.go),
+        # and the chargesTo custody link — the same shape as ReturnDeposit's
+        # branch, minus the lease (this op never reads .tenancy).
+        keys = []
+        acct_key = optional_string(op.payload, "accountKey")
+        clause_key = optional_string(op.payload, "clauseKey")
+        has_acct = is_account_key(acct_key)
+        has_clause = is_vertex_key(clause_key, "clause")
+        if has_acct:
+            keys.append(acct_key)
+        if has_clause:
+            keys += [clause_key, clause_key + ".terms", clause_key + ".status", clause_key + ".deductions"]
+            clause_id = clause_key.split(".")[2]
+            if has_acct:
+                keys.append("lnk.clause." + clause_id + ".chargesTo.account." + acct_key.split(".")[2])
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
+    if ot == "PayOutBalance":
+        # The account root and its .arrears (the payout is an ordinary
+        # debit), the lease root and its .tenancy, and the deterministic
+        # heldFor custody link — spanning both payload keys, so no
+        # dispatcher can template it.
+        keys = []
+        acct_key = optional_string(op.payload, "accountKey")
+        lease_key = optional_string(op.payload, "leaseAppKey")
+        has_acct = is_account_key(acct_key)
+        has_lease = is_vertex_key(lease_key, "leaseapp")
+        if has_acct:
+            keys += [acct_key, acct_key + ".arrears"]
+        if has_lease:
+            keys += [lease_key, lease_key + ".tenancy"]
+        if has_acct and has_lease:
+            keys.append("lnk.account." + acct_key.split(".")[2] + ".heldFor.leaseapp." + lease_key.split(".")[2])
         if len(keys) == 0:
             return {}
         return {"optionalReads": keys}
@@ -2020,6 +2428,16 @@ def execute(state, op):
         # authContext target ever reaches this branch; the custody it proves
         # is the clause's own (chargesTo / governs), off the graph's record.
         return return_deposit(state, op)
+
+    if ot == "RecordDepositDeduction":
+        # workplace-exempt: (per-call-site) record_deposit_deduction's own
+        # self_scope_standing call carries the discharge.
+        return record_deposit_deduction(state, op)
+
+    if ot == "PayOutBalance":
+        # workplace-exempt: (per-call-site) pay_out_balance's own
+        # self_scope_standing call carries the discharge.
+        return pay_out_balance(state, op)
 
     fail("transaction DDL: unknown operationType: " + ot)
 `, RecurringChargePeriod)

@@ -57,6 +57,8 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "LoftspaceRecordCharge", Scope: "any"},
 			{OperationType: "CreditAccount", Scope: "any"},
 			{OperationType: "ReturnDeposit", Scope: "any"},
+			{OperationType: "RecordDepositDeduction", Scope: "any"},
+			{OperationType: "PayOutBalance", Scope: "any"},
 			// Deliberately the SAME grant Weaver holds for EvaluateLoftspaceArrears
 			// (arrearsWeaverCapDoc, arrears_test.go). That is what makes the
 			// forged-send vector attributable: the refusal can only come from the
@@ -410,6 +412,8 @@ func ledgerSelfConsumerCapDoc() *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "CreditAccount", Scope: "self"},
 			{OperationType: "LoftspaceRecordCharge", Scope: "self"},
+			{OperationType: "RecordDepositDeduction", Scope: "self"},
+			{OperationType: "PayOutBalance", Scope: "self"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
@@ -442,6 +446,8 @@ func ledgerLandlordCapDoc() *processor.CapabilityDoc {
 		PlatformPermissions: []processor.PlatformPermission{
 			{OperationType: "LoftspaceRecordCharge", Scope: "self"},
 			{OperationType: "CreditAccount", Scope: "self"},
+			{OperationType: "RecordDepositDeduction", Scope: "self"},
+			{OperationType: "PayOutBalance", Scope: "self"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},
