@@ -165,7 +165,15 @@ def split_external_ref(ref):
     idx = ref.find(":")
     if idx <= 0:
         fail("InvalidArgument: externalRef: required <appointmentKey>:<remindedFor>; got " + ref)
-    return ref[:idx], ref[idx+1:]
+    appt_key = ref[:idx]
+    # Only a vtx.appointment.<NanoID> is a place this op may write: the bridge
+    # echoes externalRef verbatim, so the key it recovers is shaped by whoever
+    # minted the token, and an aspect on any other vertex type would be an
+    # unguarded cross-type write under the operator grant.
+    parts = appt_key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "appointment" or parts[2] == "":
+        fail("InvalidArgument: externalRef: required vtx.appointment.<NanoID>:<remindedFor>; got " + ref)
+    return appt_key, ref[idx+1:]
 
 def execute(state, op):
     ot = op.operationType
@@ -284,7 +292,15 @@ def split_external_ref(ref):
     idx = ref.find(":")
     if idx <= 0:
         fail("InvalidArgument: externalRef: required <appointmentKey>:<remindedFor>; got " + ref)
-    return ref[:idx], ref[idx+1:]
+    appt_key = ref[:idx]
+    # Only a vtx.appointment.<NanoID> is a place this op may write: the bridge
+    # echoes externalRef verbatim, so the key it recovers is shaped by whoever
+    # minted the token, and an aspect on any other vertex type would be an
+    # unguarded cross-type write under the operator grant.
+    parts = appt_key.split(".")
+    if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "appointment" or parts[2] == "":
+        fail("InvalidArgument: externalRef: required vtx.appointment.<NanoID>:<remindedFor>; got " + ref)
+    return appt_key, ref[idx+1:]
 
 def execute(state, op):
     ot = op.operationType

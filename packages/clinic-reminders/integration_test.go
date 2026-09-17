@@ -538,6 +538,17 @@ func TestRecordAppointmentReminderNotification_WritesMarker(t *testing.T) {
 	// Rejected (once-only FR58 guard), not silently re-accepted.
 	crSubmit(t, ctx, conn, cp, cons, "crremnotif02", "RecordAppointmentReminderNotification", "",
 		`{"externalRef":"`+extRef+`","status":"completed","result":"redelivered"}`, nil, processor.OutcomeRejected)
+
+	// The recovered key must be a vtx.appointment.<NanoID>: the bridge echoes
+	// externalRef verbatim, so a token naming another vertex type would land
+	// an aspect there under the operator grant. Refused, nothing written.
+	for _, bad := range []string{"vtx.patient.CRnotifPatntMNPQRSTUV:2026-07-01T15:00:00Z", "vtx.appointment:2026-07-01T15:00:00Z", "appointment.CRnotifApptMNPQRSTUV:2026-07-01T15:00:00Z"} {
+		crSubmit(t, ctx, conn, cp, cons, "crremnotif03", "RecordAppointmentReminderNotification", "",
+			`{"externalRef":"`+bad+`","status":"completed","result":"forged"}`, nil, processor.OutcomeRejected)
+	}
+	if _, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, "vtx.patient.CRnotifPatntMNPQRSTUV.reminderNotification"); err == nil {
+		t.Fatalf("a reply naming a patient key wrote .reminderNotification on the patient")
+	}
 }
 
 // TestRecordFollowUpReminderNotification_WritesMarker mirrors
