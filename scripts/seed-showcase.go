@@ -2217,12 +2217,21 @@ func linkKey(source, relation, target string) string {
 // read. The link key is absent on a first wire and tombstoned after an
 // Unwire*, so it cannot be a required read — but without it declared the
 // script cannot see a tombstone, emits a create, and the re-wire fails
-// RevisionConflict.
+// RevisionConflict. residesIn is the one relation whose script finds the
+// tombstone by walking instead, and that walk is declared here too.
 func wireHint(source, relation, target string) *processor.ContextHint {
-	return &processor.ContextHint{
+	h := &processor.ContextHint{
 		Reads:         []string{source, target},
 		OptionalReads: []string{linkKey(source, relation, target)},
 	}
+	if relation == "residesIn" {
+		// WireResidesIn walks the identity's own residesIn links whenever its
+		// snapshot lacks the link key — a first wire included, because a
+		// known-absent optional read never reaches the snapshot — so the
+		// dispatcher declares the walk (Contract #2 §2.5.1).
+		h.Enumerations = []processor.EnumerationHint{{Hub: source, Relation: "residesIn", Direction: "out"}}
+	}
+	return h
 }
 
 // Capability grants land through the Refractor capability-lens projection, and

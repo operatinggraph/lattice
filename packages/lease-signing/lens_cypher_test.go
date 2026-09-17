@@ -2051,3 +2051,136 @@ func gapAction(t *testing.T, targetID, gapColumn string) (pkgmgr.GapActionSpec, 
 	t.Fatalf("target %q is not declared by this package", targetID)
 	return pkgmgr.GapActionSpec{}, false
 }
+
+// seedApprovedTenancy takes approvedAppFixture's fully-qualified applicant and
+// approves them on a unit with a recorded .tenancy — the shape missing_residence
+// requires before it opens at all: landlord-approved, leaseEnd present.
+func seedApprovedTenancy(t *testing.T, f *lensFixture, endedAt any) {
+	t.Helper()
+	f.landlordDecision(t, "app", "approved")
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "leased"})
+	f.edge(t, "appliesToUnit", "app", "unit1")
+	tenancy := map[string]any{"leaseStart": "2026-06-15T00:00:00Z", "leaseEnd": "2027-06-15T00:00:00Z"}
+	if endedAt != nil {
+		tenancy["endedAt"] = endedAt
+	}
+	f.aspect(t, "app", "tenancy", "tenancy", tenancy)
+}
+
+// TestLeaseApplicationComplete_ResidenceGap_OpensOnApprovalWithNoLink: a
+// landlord-approved, signed application whose term has not ended, and whose
+// applicant carries no live residesIn link to the leased unit, opens
+// missing_residence — the wire dispatches at approval, not at signing or at
+// the listing flip.
+func TestLeaseApplicationComplete_ResidenceGap_OpensOnApprovalWithNoLink(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+	seedApprovedTenancy(t, f, nil)
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["missing_residence"], "approved + live term + no residesIn link → wire")
+	require.Equal(t, true, v["violating"])
+}
+
+// TestLeaseApplicationComplete_ResidenceGap_ClosedWithLiveLink: once the
+// applicant's residesIn link to the unit exists, the gap closes — the
+// WireResidesIn dispatch's own closure, proven at the lens level.
+func TestLeaseApplicationComplete_ResidenceGap_ClosedWithLiveLink(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+	seedApprovedTenancy(t, f, nil)
+	f.edge(t, "residesIn", "alice", "unit1")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_residence"], "a live residesIn link to the unit → not missing")
+}
+
+// TestLeaseApplicationComplete_ResidenceGap_OpenWithLinkToDifferentUnit: the
+// applicant's residesIn link to a DIFFERENT unit does not close this
+// application's own gap — the closed walk requires the SAME unit this
+// application applies to (resU forced to equal u via the appliesToUnit
+// close), not merely "the applicant resides somewhere".
+func TestLeaseApplicationComplete_ResidenceGap_OpenWithLinkToDifferentUnit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+	seedApprovedTenancy(t, f, nil)
+	f.vtx(t, "unit2", "unit")
+	f.edge(t, "residesIn", "alice", "unit2")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["missing_residence"], "a residesIn link to a DIFFERENT unit leaves this application's own gap open")
+}
+
+// TestLeaseApplicationComplete_ResidenceGap_OpenWithTombstonedLink: a
+// TOMBSTONED residesIn link to the right unit opens missing_residence exactly
+// as no link at all does — the full engine filters dead links on every read
+// (executor.go:1094), which is the premise WireResidesIn's revive design
+// rests on (a dead link's key never survives a live read, so the op alone can
+// find and revive it via its own bounded enumeration).
+func TestLeaseApplicationComplete_ResidenceGap_OpenWithTombstonedLink(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+	seedApprovedTenancy(t, f, nil)
+	f.tombstoneEdge(t, "residesIn", "alice", "unit1")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, true, v["missing_residence"], "a tombstoned residesIn link is not a live one — the gap stays (or re-)opens")
+}
+
+// TestLeaseApplicationComplete_ResidenceGap_ClosedOnceEnded: an ended term
+// (tenancyEndedAt <> null) must never re-open missing_residence — the
+// release is tenancyEnd's own missing_residenceUnwired gap
+// (tenancy_end_lenses.go), not this target's concern once the term is over.
+func TestLeaseApplicationComplete_ResidenceGap_ClosedOnceEnded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+	seedApprovedTenancy(t, f, "2027-06-15T00:00:00Z")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_residence"], "an ended term never opens missing_residence, link or no link")
+}
+
+// TestLeaseApplicationComplete_ResidenceGap_ClosedWithNoTenancy: an approved
+// application with no .tenancy at all (no leaseEnd) has no live term to
+// confer residence from. DecideLeaseApplication's approve arm stamps
+// .tenancy itself — the same op call, not a later signing step — so this
+// fixture's decision-with-no-.tenancy shape is fixture-only (the test seeds
+// .decision directly, bypassing the op), pinning the pre-.tenancy state a
+// real approval never leaves standing.
+func TestLeaseApplicationComplete_ResidenceGap_ClosedWithNoTenancy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := approvedAppFixture(t)
+	f.landlordDecision(t, "app", "approved")
+	f.vtx(t, "unit1", "unit")
+	f.aspect(t, "unit1", "listing", "listing", map[string]any{"rentAmount": 2400, "status": "available"})
+	f.edge(t, "appliesToUnit", "app", "unit1")
+
+	rows := f.project(t, "app")
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, false, v["missing_residence"], "no .tenancy aspect (leaseEnd null) → no live term → nothing to confer residence from")
+	require.Equal(t, true, v["missing_listingLeased"], "sanity: this row is otherwise a live gap (approved, available unit)")
+}

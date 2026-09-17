@@ -48,7 +48,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: "leaseApplicationComplete.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_manager", "missing_lossRecorded", "missing_leaseDoc", "missing_leaseDocAttach", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "tenancyEndedAt", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
+				BodyColumns:      []string{"violating", "missing_onboarding", "missing_bgcheck", "missing_payment", "missing_signature", "missing_listingLeased", "missing_decision", "missing_manager", "missing_lossRecorded", "missing_leaseDoc", "missing_leaseDocAttach", "missing_residence", "applicantApproved", "landlordDecision", "landlordApproved", "landlordDeclined", "declineReason", "applicant", "entityKey", "signedAt", "inflight_bgcheck", "inflight_payment", "inflight_docGen", "inflight_onboarding", "inflight_signature", "declined_bgcheck", "declined_payment", "declined_docGen", "declined", "maxretries_bgcheck", "maxretries_payment", "unitKey", "unitAddress", "unitCity", "unitRegion", "unitRent", "unitCurrency", "unitBedrooms", "unitBathrooms", "unitLeaseTermMonths", "unitAvailableFrom", "unitStatus", "tenancyEndedAt", "termsMoveInDate", "termsLeaseTermMonths", "termsRequestedRent", "profileSubmitted", "incomeToRentMet", "employmentVerified", "referenceCount", "hasCoApplicant", "hasGuarantor", "guarantorIncomeToRentMet", "docStoreName", "docFilename", "docContentType", "docDigest", "docSize", "leaseDocAttached"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 				Freshness:        "auto",
@@ -564,11 +564,12 @@ func Lenses() []pkgmgr.LensSpec {
 // null, which 'lost' is not.
 //
 // violating is the explicit OR of the four applicant gaps PLUS missing_decision
-// PLUS missing_listingLeased PLUS missing_lossRecorded (Contract #10 §10.2:
-// violating is lens-projected, not an implicit OR; for this target the rule
-// is "any applicant gap OR a qualified-but-undecided application OR a
-// landlord-approved-but-unleased unit OR a rival whose loss is not yet
-// recorded → violating"). Folding missing_listingLeased into violating is
+// PLUS missing_listingLeased PLUS missing_lossRecorded PLUS missing_residence
+// (Contract #10 §10.2: violating is lens-projected, not an implicit OR; for
+// this target the rule is "any applicant gap OR a qualified-but-undecided
+// application OR a landlord-approved-but-unleased unit OR a rival whose loss
+// is not yet recorded OR an approved live term whose applicant is not wired
+// to the unit → violating"). Folding missing_listingLeased into violating is
 // load-bearing: Weaver skips all dispatch when violating=false, so the
 // listing-flip directOp only fires while the row is violating — and the same
 // holds for missing_lossRecorded's RecordApplicationLoss. missing_decision keeps a
@@ -614,6 +615,42 @@ func Lenses() []pkgmgr.LensSpec {
 // document is a record of the term whether or not it has ended. tenancyEndedAt
 // projects as a read-only column so a reader can tell this terminal shape
 // from the other two.
+//
+// missing_residence — a landlord-approved, signed application whose term has
+// not ended (leaseEnd <> null, tenancyEndedAt = null) but whose applicant
+// carries no live residesIn link to the leased unit: (unitKey <> null) AND
+// (applicant <> null) AND (landlordDecision = 'approved') AND (leaseEnd <>
+// null) AND (tenancyEndedAt = null) AND (residenceCount = 0), where
+// residenceCount is count(DISTINCT res.key) over OPTIONAL MATCH
+// (app)-[:applicationFor]->(resId:identity)-[res:residesIn]->(resU:unit)
+// <-[:appliesToUnit]-(app) — the applicant's own residesIn edge to THIS
+// application's unit, never any other unit they might separately reside at.
+// resId/resU are fresh variables closing back on the anchor `app` (already
+// bound by the required MATCH) rather than naming `id`/`u`: a clause naming
+// both `id` (owned by the applicationFor branch) and `u` (owned by the
+// appliesToUnit branch) spans two sibling subtrees and is refused for the
+// WHOLE stage's decomposition — every other fan here (docInst, mgr, onbTask,
+// sigTask) rides on it too — which is the shape `(id)-[res:residesIn]->(u)`
+// would take. Closing on the anchor instead roots a brand-new, independent
+// group (a base variable carries no group ownership to cross into,
+// ruleengine/full/branchgroups.go), and is structurally equivalent: `app`
+// carries exactly one live applicationFor target and one live appliesToUnit
+// target, so resId/resU can only bind to id/u respectively.
+// → directOp WireResidesIn{identity: row.applicant, location: row.unitKey}
+// (targets.go), the release its sibling missing_residenceUnwired on the
+// tenancyEnd target performs at endedAt (tenancy_end_lenses.go). "At
+// approval" (leaseEnd <> null the instant .tenancy is recorded, the same
+// instant landlordDecision reads 'approved') is deliberate: the fact is the
+// application's own, conferred the moment the term exists, not deferred to
+// signing or to the unit's own listing flip. Once WireResidesIn commits, the
+// gap stays shut for as long as residenceCount reads non-zero — ordinarily
+// the life of the term, since nothing else tombstones the link before
+// UnwireResidesIn does at endedAt. An operator's hand UnwireResidesIn run
+// MID-term also zeroes residenceCount, and convergence reads that exactly
+// like any other divergence: the gap re-opens on the next evaluation and
+// Weaver re-wires it, tenancyEndedAt or not — the conjunct's own
+// (tenancyEndedAt = null) term is what keeps re-wiring possible up to
+// endedAt, not a one-time transition this gap only fires once.
 //
 // unitKey / unitAddress / unitRent / unitStatus are columns carried from the
 // appliesToUnit walk (the unit's key, its .address.line1, its .listing.rentAmount
@@ -1090,6 +1127,7 @@ var leaseApplicationCompleteSpec = fmt.Sprintf(`
 MATCH (app:leaseapp {key: $actorKey})
 OPTIONAL MATCH (app)-[:applicationFor]->(id:identity)
 OPTIONAL MATCH (app)-[:appliesToUnit]->(u:unit)
+OPTIONAL MATCH (app)-[:applicationFor]->(resId:identity)-[res:residesIn]->(resU:unit)<-[:appliesToUnit]-(app)
 OPTIONAL MATCH (u)<-[:manages]-(mgr:identity)
 OPTIONAL MATCH (app)<-[:providedTo]-(docInst:service)
 OPTIONAL MATCH (app)<-[:signedLease]-(leaseDocObj:object)
@@ -1118,6 +1156,7 @@ WITH
   u.listing.data.availableFrom AS unitAvailableFrom,
   u.listing.data.status     AS unitStatus,
   app.tenancy.data.endedAt  AS tenancyEndedAt,
+  app.tenancy.data.leaseEnd AS leaseEnd,
   app.terms.data.moveInDate AS termsMoveInDate,
   app.terms.data.leaseTermMonths AS termsLeaseTermMonths,
   app.terms.data.requestedRent AS termsRequestedRent,
@@ -1144,7 +1183,8 @@ WITH
   count(DISTINCT CASE WHEN sigOp.data.operationType = 'SignLease' THEN sigTask.key ELSE null END) AS sigTaskOpen,
   count(DISTINCT CASE WHEN onbOp.data.operationType = 'RecordIdentityPII' THEN onbTask.key ELSE null END) AS onbTaskOpen,
   count(DISTINCT CASE WHEN leaseDocObj.key <> null THEN leaseDocObj.key ELSE null END) AS leaseDocAttachedCount,
-  count(DISTINCT mgr.key) AS managerCount
+  count(DISTINCT mgr.key) AS managerCount,
+  count(DISTINCT res.key) AS residenceCount
 RETURN
   entityKey AS actorKey,
   entityKey,
@@ -1202,9 +1242,10 @@ RETURN
   ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) AS missing_listingLeased,
   ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0)) AS missing_manager,
   ((unitKey <> null) AND (unitStatus = 'leased') AND (landlordDecision = null)) AS missing_lossRecorded,
+  ((unitKey <> null) AND (applicant <> null) AND (landlordDecision = 'approved') AND (leaseEnd <> null) AND (tenancyEndedAt = null) AND (residenceCount = 0)) AS missing_residence,
   %d                     AS maxretries_bgcheck,
   %d                     AS maxretries_payment,
-  (((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) AND (landlordDecision <> 'lost')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) AND (landlordDecision <> 'lost')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) AND (landlordDecision <> 'lost')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) AND (landlordDecision <> 'lost')) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0)) OR ((unitKey <> null) AND (unitStatus = 'leased') AND (landlordDecision = null))) AS violating
+  (((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) AND (landlordDecision <> 'lost')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) AND (landlordDecision <> 'lost')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (payComplete = 0) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) AND (landlordDecision <> 'lost')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (signedAt = null) AND ((unitStatus <> 'leased') OR (landlordDecision = 'approved')) AND (landlordDecision <> 'lost')) OR ((ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = null) AND (unitStatus <> 'leased')) OR ((unitKey <> null) AND (tenancyEndedAt = null) AND (ssnVal <> null) AND (freshBgComplete > 0) AND (payComplete > 0) AND (signedAt <> null) AND (landlordDecision = 'approved') AND (unitStatus <> null) AND (unitStatus <> 'leased')) OR ((signedAt <> null) AND (docGenComplete = 0) AND (docGenInflight = 0) AND (docGenFailed = 0)) OR ((docGenComplete > 0) AND (leaseDocAttachedCount = 0)) OR ((unitKey <> null) AND (landlordDecision = 'approved') AND (managerCount = 0)) OR ((unitKey <> null) AND (unitStatus = 'leased') AND (landlordDecision = null)) OR ((unitKey <> null) AND (applicant <> null) AND (landlordDecision = 'approved') AND (leaseEnd <> null) AND (tenancyEndedAt = null) AND (residenceCount = 0))) AS violating
 `, readinessOptionalMatch, readinessWithItems, maxBgcheckRetries, maxPaymentRetries)
 
 // applicantOnboardingSpec is the identity-anchored onboarding convergence

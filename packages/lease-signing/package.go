@@ -114,7 +114,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.41.2",
+	Version: "0.42.0",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -164,7 +164,12 @@ var Package = pkgmgr.Definition{
 		"losing rival's loss is a recorded fact, not a live derivation: leaseApplicationComplete's missing_lossRecorded gap " +
 		"dispatches RecordApplicationLoss (operator-granted) to write .decision = lost on an undecided application whose " +
 		"unit leased to someone else, and every liveness consumer reads the recorded value, so the winner's later tenancy " +
-		"end and relist revive no rival. Depends identity-domain + service-domain + orchestration-base.",
+		"end and relist revive no rival. An approved lease moves the tenant in: leaseApplicationComplete's " +
+		"missing_residence gap dispatches a cross-package directOp WireResidesIn (service-location, operator-granted via " +
+		"Weaver's service actor) the instant the term exists, wiring the applicant's residesIn link to the leased unit; " +
+		"tenancyEnd's missing_residenceUnwired gap dispatches the mirror UnwireResidesIn once the term ends, unless " +
+		"another live tenancy of the SAME applicant on the SAME unit still needs the link. Depends identity-domain + " +
+		"service-domain + orchestration-base.",
 	Depends:          []string{"identity-domain", "service-domain", "orchestration-base"},
 	DDLs:             DDLs(),
 	Lenses:           Lenses(),

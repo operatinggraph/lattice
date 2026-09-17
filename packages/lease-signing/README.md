@@ -65,9 +65,11 @@ keys-in-data (Contract #1); aspects hold business data (D5).
 - **`DecideLeaseApplication{leaseAppKey, decision, [reason]}`** — the **landlord**
   decision: writes the `.decision` aspect `{value (approved|declined), decidedAt,
   reason?}` (UNCONDITIONED upsert — a later decision overrides). `approved` opens
-  `missing_listingLeased` (the unit leases via `directOp(SetListingStatus)`);
-  `declined` is a terminal rejection (`declineReason` is projected for the
-  applicant's declined banner + a fair-housing record).
+  `missing_listingLeased` (the unit leases via `directOp(SetListingStatus)`) and
+  `missing_residence` (the applicant's `residesIn` link to the unit wires via
+  `directOp(WireResidesIn)`); `declined` is a terminal rejection
+  (`declineReason` is projected for the applicant's declined banner + a
+  fair-housing record).
 - **`WithdrawLeaseApplication{leaseAppKey, unit, applicant}`** — soft-deletes the
   application (the convergence row drops from My Applications) and FREES the
   guard link so the applicant can re-apply to the same unit. Validates `unit`

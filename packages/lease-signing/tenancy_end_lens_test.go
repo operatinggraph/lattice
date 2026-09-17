@@ -548,3 +548,142 @@ func TestTenancyEnd_NoNoticeProjectsUnchangedRows(t *testing.T) {
 	require.Nil(t, v["moveOutAt"])
 	require.Equal(t, false, v["missing_tenancyEnded"], "with no notice the open renewal still holds the term")
 }
+
+// TestTenancyEnd_EndedTenancyUnwiresResidence: once endedAt is recorded and the
+// applicant carries a live residesIn link to this application's unit,
+// missing_residenceUnwired opens and residenceLinkKey names the live link — the
+// key UnwireResidesIn{linkKey} dispatches with.
+func TestTenancyEnd_EndedTenancyUnwiresResidence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	f.edge(t, "residesIn", "app_tenant", "app_unit")
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, true, v["missing_residenceUnwired"], "ended + live residence link + no same-applicant live tenancy on the unit → unwire")
+	require.Equal(t, "lnk.identity."+f.ids["app_tenant"]+".residesIn.unit."+f.ids["app_unit"], v["residenceLinkKey"])
+	require.Equal(t, true, v["violating"])
+}
+
+// TestTenancyEnd_NoResidenceLinkOpensNothing: an ended term whose applicant
+// never held the residesIn link has nothing left to unwire — residenceLinkKey
+// projects null and the gap stays shut. The already-tombstoned-link shape is
+// TestTenancyEnd_TombstonedResidenceLinkOpensNothing, below.
+func TestTenancyEnd_NoResidenceLinkOpensNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, false, v["missing_residenceUnwired"], "no residesIn link → nothing to unwire")
+	require.Nil(t, v["residenceLinkKey"])
+}
+
+// TestTenancyEnd_ResidenceLinkToDifferentUnitOpensNothing: the applicant's
+// residesIn link to a DIFFERENT unit is not this application's own residence
+// — the closed walk requires the SAME unit this application applied to
+// (resU forced to equal u via the appliesToUnit close), so residenceLinkKey
+// projects null and there is nothing for THIS row to unwire.
+func TestTenancyEnd_ResidenceLinkToDifferentUnitOpensNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	f.vtx(t, "otherunit", "unit")
+	f.edge(t, "residesIn", "app_tenant", "otherunit")
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, false, v["missing_residenceUnwired"], "a residesIn link to a DIFFERENT unit is not this row's own residence")
+	require.Nil(t, v["residenceLinkKey"])
+}
+
+// TestTenancyEnd_TombstonedResidenceLinkOpensNothing: a TOMBSTONED residesIn
+// link to the right unit projects residenceLinkKey null exactly as no link at
+// all does — the full engine filters dead links on every read
+// (executor.go:1094), the premise WireResidesIn's revive design rests on.
+func TestTenancyEnd_TombstonedResidenceLinkOpensNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	f.tombstoneEdge(t, "residesIn", "app_tenant", "app_unit")
+	endTenancy(t, f, "app")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, false, v["missing_residenceUnwired"], "a tombstoned residesIn link is not a live one — nothing to unwire")
+	require.Nil(t, v["residenceLinkKey"])
+}
+
+// TestTenancyEnd_ResidenceKeptForSameApplicantReLease is the load-bearing guard
+// vector: the SAME applicant holds another approved, un-ended tenancy on the
+// SAME unit (a fresh application re-leasing them the unit they just ended), so
+// unwiring the residence link here would strip the residence the new
+// application's own missing_residence just wired.
+func TestTenancyEnd_ResidenceKeptForSameApplicantReLease(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	f.edge(t, "residesIn", "app_tenant", "app_unit")
+	endTenancy(t, f, "app")
+	f.vtx(t, "newapp", "leaseapp")
+	f.aspect(t, "newapp", "decision", "decision", map[string]any{"value": "approved"})
+	f.aspect(t, "newapp", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2027-02-01T00:00:00Z", "leaseEnd": "2028-02-01T00:00:00Z", "renewalOpensAt": "2027-12-03T00:00:00Z"})
+	f.edge(t, "applicationFor", "newapp", "app_tenant")
+	f.edge(t, "appliesToUnit", "newapp", "app_unit")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, false, v["missing_residenceUnwired"], "the same applicant's new live tenancy on the same unit still needs the link")
+	require.Equal(t, false, v["missing_relist"], "the relist guard is held by the same fact")
+}
+
+// TestTenancyEnd_ResidenceUnwiredDespiteDifferentApplicantReLease is the
+// converse pin: a DIFFERENT applicant's approved, un-ended tenancy on the same
+// unit holds the RELIST guard but not the RESIDENCE guard — the ended
+// applicant's own resident has moved on regardless of who moved in next.
+func TestTenancyEnd_ResidenceUnwiredDespiteDifferentApplicantReLease(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	f.edge(t, "residesIn", "app_tenant", "app_unit")
+	endTenancy(t, f, "app")
+	f.vtx(t, "newapp", "leaseapp")
+	f.vtx(t, "newtenant", "identity")
+	f.aspect(t, "newapp", "decision", "decision", map[string]any{"value": "approved"})
+	f.aspect(t, "newapp", "tenancy", "tenancy", map[string]any{
+		"leaseStart": "2027-02-01T00:00:00Z", "leaseEnd": "2028-02-01T00:00:00Z", "renewalOpensAt": "2027-12-03T00:00:00Z"})
+	f.edge(t, "applicationFor", "newapp", "newtenant")
+	f.edge(t, "appliesToUnit", "newapp", "app_unit")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, false, v["missing_relist"], "somebody else's live tenancy holds the relist guard")
+	require.Equal(t, true, v["missing_residenceUnwired"], "but a DIFFERENT applicant's tenancy never holds the residence guard")
+}
+
+// TestTenancyEnd_ResidenceGapClosedWhileNotEnded: a live (un-ended) term with a
+// live residesIn link has nothing to release yet — missing_residenceUnwired
+// requires endedAt <> null exactly as missing_relist does.
+func TestTenancyEnd_ResidenceGapClosedWhileNotEnded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	seedLeasedTenancy(t, f, "app", "leased")
+	f.edge(t, "residesIn", "app_tenant", "app_unit")
+
+	v := f.projectTenancyEnd(t, "app")
+	require.Equal(t, false, v["missing_residenceUnwired"], "not ended → nothing to release yet")
+}
