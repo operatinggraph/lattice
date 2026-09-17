@@ -2310,6 +2310,10 @@ def execute(state, op):
         # both to canonical whole-second UTC (time.rfc3339_utc — pure, no clock read)
         # so the stored ranges compare lexically == chronologically (the overlap test
         # CreateAppointment runs against them is sound for any caller offset).
+        # date-field-exempt: ranges — the array field itself carries no instant;
+        # each element's from/to is individually normalized through
+        # time.rfc3339_utc inside the loop below, not as a single field-level
+        # value this gate's simple per-field tracker follows.
         if not hasattr(p, "ranges"):
             fail("InvalidArgument: ranges: required (use [] to clear)")
         ranges = getattr(p, "ranges")

@@ -710,6 +710,7 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   it; the script now refuses past 4,000 bytes. A bound a design counts on is enforced in the script, never read off
   the schema. Fourth sighting (loftspace `SetListing.availableFrom`, 2026-09-17, caught cold): free text became a
   Weaver gap's input — a digit-led non-ISO string wedges the gap on every dispatch; now `required_instant` at the mint.
+  The date-format sub-rule is mechanized by `lint-date-field-normalized`.
 - **A mirror that drops one of the precedent's checks or branches drops the INVARIANT it enforced** (café `CreditCafeAccount{tabRef}`
   2026-09-16, caught cold: the `<x>Ref` mirror inherited the precedent's missing tie to the op's target) — clinic-ledger's
   `reversesRef` kept café's liveness check and dropped its ownership check (a desk waiver could disarm another

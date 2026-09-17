@@ -512,6 +512,23 @@ jobs:
         # targetField). Self-tests on every run.
         run: STRICT=1 go run ./scripts/lint-opmeta-required-fields.go
 
+      - name: Date-field normalization lint (a date/date-time payload field must be normalized before storage)
+        # An op-meta's InputSchema tags a field "format":"date-time" / "date",
+        # or describes it as RFC3339 in prose; the caller may hand it a bare
+        # YYYY-MM-DD or a full RFC3339 instant with any UTC offset. A script
+        # that stores the field verbatim instead of running it through
+        # time.rfc3339_utc breaks every downstream lexical compare against a
+        # canonical stamp (`.terms.moveInDate` before lease-signing 0.35.0;
+        # loftspace-domain's `availableFrom` before 0.15.0's
+        # `required_instant`). Parses every shipped script, derives its
+        # readers / requirer-normalizers / wrapper-normalizers from their own
+        # bodies, and checks each date-typed field's dispatch closure (top
+        # level, one helper hop) — silenced only by a same-field
+        # `# date-field-exempt: <field> — <reason>` comment inside the
+        # dispatch block. Self-tests on every run (replays this gate's own
+        # two minting incidents).
+        run: STRICT=1 go run ./scripts/lint-date-field-normalized.go
+
       - name: Ceremony throw-path lint (a secret-minting submit's catch never asserts the write did not land)
         # The FE transport throws on any non-OK response, a 5xx after the
         # Processor committed included; for a ceremony op (an op-meta with a
