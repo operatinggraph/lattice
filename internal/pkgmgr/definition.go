@@ -429,7 +429,13 @@ type GapActionSpec struct {
 	Adapter   string
 	Operation string
 	Assignee  string
-	Target    string
+	// Queue is an assignTask's role-queue endpoint — a `vtx.role.<NanoID>`
+	// literal or a `row.<column>` template — the CreateTask alternative to a
+	// concrete Assignee: the task is queued for the role and any holder may
+	// later ClaimTask it. Exactly one of Assignee / Queue is set on an
+	// assignTask; install refuses both and neither.
+	Queue  string
+	Target string
 	// Params are the dispatched op's payload fields. Each value is written in
 	// a three-arm grammar, checked in this order:
 	//
@@ -460,7 +466,7 @@ type GapActionSpec struct {
 	// never dispatch for any row.
 	//
 	// The token is confined to THIS bag. Every other field of a gap — Subject,
-	// Pattern, Operation, Assignee, Target, and each entry of Reads,
+	// Pattern, Operation, Assignee, Queue, Target, and each entry of Reads,
 	// OptionalReads and Enumerations — is a key, an operationType or a pattern
 	// ref, always a string, and carrying the token there is refused at install
 	// and at load. Those fields are compared as RAW authored strings by the
@@ -600,6 +606,7 @@ type ActionCatalogEntrySpec struct {
 	Adapter   string
 	Operation string
 	Assignee  string
+	Queue     string
 	Target    string
 	// Params are the entry's op payload fields, in the same value grammar
 	// GapActionSpec.Params documents (row.<column>, json:<literal>, or a plain

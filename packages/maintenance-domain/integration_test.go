@@ -139,13 +139,11 @@ func setupMaintenanceEnv(t *testing.T) (context.Context, *substrate.Conn) {
 		"frontOfHouse": pkgmgr.RoleID("identity-domain", "frontOfHouse"),
 		"backOfHouse":  pkgmgr.RoleID("identity-domain", "backOfHouse"),
 		"provider":     pkgmgr.RoleID("identity-domain", "provider"),
-		// orchestration-base's CompleteTask scope=self grant (an assignee
-		// completing their own task) reaches every role a task can be
-		// assignedTo, consumer included — this package never exercises a
-		// consumer-scoped op, so a placeholder id (clinic-domain's
-		// clConsumerRoleID idiom) satisfies the installer's GrantsTo
-		// NanoID-format validation with no real "consumer" role needed here.
-		"consumer": "MDConsumerRoZeHJKMNP",
+		// The consumer role is the deterministic identity-domain id: this
+		// package grants ReportIssue to it on scope=self (the resident's
+		// leg, report_issue_self_leg_test.go), and orchestration-base's
+		// CompleteTask scope=self grant reaches it too.
+		"consumer": pkgmgr.RoleID("identity-domain", "consumer"),
 	}
 	if _, err := inst.Install(ctx, orchestrationbase.Package); err != nil {
 		t.Fatalf("install orchestration-base: %v", err)

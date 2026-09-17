@@ -203,6 +203,18 @@ func TestWeaverDispatchLabelAndSummary(t *testing.T) {
 		map[string]any{"action": "surface", "issueCode": "UnroutedTasks"}).(string); !containsSub(got, "UnroutedTasks") {
 		t.Errorf("actionSummary(surface) = %v", got)
 	}
+	// An assignTask gap's queue arm renders "queue <role>", not a blank
+	// assignee — the cold review found this branch missing entirely
+	// (weaver.js rendered "ResolveWorkOrder → ?" for a gap that dispatches).
+	if got := call(t, vm, "actionSummary",
+		map[string]any{"action": "assignTask", "operation": "ResolveWorkOrder", "queue": "vtx.role.rAAAAAAAAAAAAAAAAAAA"}).(string); !containsSub(got, "queue vtx.role.rAAAAAAAAAAAAAAAAAAA") {
+		t.Errorf("actionSummary(assignTask, queue) = %v, want the queue rendered", got)
+	}
+	// An assignee-arm gap is unaffected — queue empty falls back to assignee.
+	if got := call(t, vm, "actionSummary",
+		map[string]any{"action": "assignTask", "operation": "ResolveWorkOrder", "assignee": "row.applicant"}).(string); !containsSub(got, "row.applicant") || containsSub(got, "queue") {
+		t.Errorf("actionSummary(assignTask, assignee) = %v, want assignee rendered and no queue text", got)
+	}
 }
 
 func TestWeaverUnboundBindings(t *testing.T) {

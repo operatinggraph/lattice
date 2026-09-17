@@ -41,6 +41,7 @@ func TestRegisterRoutes_EveryAPIRouteIsSessionGated(t *testing.T) {
 		"/api/unit-applications",
 		"/api/landlord/applications",
 		"/api/portfolio-pulse",
+		"/api/landlord/work-orders",
 		"/api/renewals",
 		"/api/search",
 		"/api/tasks",

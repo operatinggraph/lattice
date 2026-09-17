@@ -705,6 +705,106 @@ func TestValidateTarget_Candidates(t *testing.T) {
 	}
 }
 
+// TestValidateTarget_AssignTaskEndpoint pins the load-time mirror of
+// install's exactly-one rule on assignTask's CreateTask endpoints: a queue
+// alone loads, an assignee alone loads, both together are refused and
+// neither is refused — on the gap's own entry, on a candidate and on a
+// catalog entry alike, since every one of them reaches buildPlan's assignTask
+// arm and the arm cannot tell which surface authored the body it dispatches.
+func TestValidateTarget_AssignTaskEndpoint(t *testing.T) {
+	t.Parallel()
+	const roleKey = "vtx.role.AAroHeHJKMNPQRSTUVWX"
+	gap := func(ga GapAction) *Target {
+		return &Target{TargetID: "fixtureEndpoint", Gaps: map[string]GapAction{"missing_task": ga}}
+	}
+	if err := validateTarget(gap(GapAction{Action: actionAssignTask, Operation: "ResolveWorkOrder", Queue: roleKey, Target: "row.entityKey"})); err != nil {
+		t.Fatalf("a queue-only assignTask must load: %v", err)
+	}
+	if err := validateTarget(gap(GapAction{Action: actionAssignTask, Operation: "ResolveWorkOrder", Assignee: tpIdentity, Target: "row.entityKey"})); err != nil {
+		t.Fatalf("an assignee-only assignTask must load: %v", err)
+	}
+	err := validateTarget(gap(GapAction{Action: actionAssignTask, Operation: "ResolveWorkOrder", Assignee: tpIdentity, Queue: roleKey, Target: "row.entityKey"}))
+	if err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("assignee + queue together must be refused at load: %v", err)
+	}
+	if !strings.Contains(err.Error(), `gaps key "missing_task"`) {
+		t.Fatalf("the both-set refusal must name the gap: %v", err)
+	}
+	err = validateTarget(gap(GapAction{Action: actionAssignTask, Operation: "ResolveWorkOrder", Target: "row.entityKey"}))
+	if err == nil || !strings.Contains(err.Error(), "requires assignee or queue") {
+		t.Fatalf("neither assignee nor queue must be refused at load: %v", err)
+	}
+	// The rule is assignTask's alone: a directOp carrying neither is its
+	// ordinary shape.
+	if err := validateTarget(gap(GapAction{Action: actionDirectOp, Operation: "Fix"})); err != nil {
+		t.Fatalf("a directOp with no endpoint must still load: %v", err)
+	}
+
+	candidate := func(c GapCandidate) *Target {
+		return &Target{TargetID: "fixtureEndpointCand", Mode: targetModeShadow,
+			Gaps: map[string]GapAction{"missing_task": {Candidates: []GapCandidate{c}}}}
+	}
+	if err := validateTarget(candidate(GapCandidate{Action: actionAssignTask, Operation: "ResolveWorkOrder", Queue: roleKey, Target: "row.entityKey"})); err != nil {
+		t.Fatalf("a queue-only assignTask candidate must load: %v", err)
+	}
+	err = validateTarget(candidate(GapCandidate{Action: actionAssignTask, Operation: "ResolveWorkOrder", Assignee: tpIdentity, Queue: roleKey, Target: "row.entityKey"}))
+	if err == nil || !strings.Contains(err.Error(), "not both") || !strings.Contains(err.Error(), "candidates[0]") {
+		t.Fatalf("a both-set assignTask candidate must be refused at load, naming the candidate: %v", err)
+	}
+
+	entry := func(e ActionCatalogEntry) *Target {
+		e.Ref = "queueIt"
+		e.Effects = []json.RawMessage{json.RawMessage(`{"present":"subject.data.task"}`)}
+		return &Target{TargetID: "fixtureEndpointGoal", Gaps: map[string]GapAction{"missing_task": {
+			Goal:    json.RawMessage(`{"present":"subject.data.task"}`),
+			Actions: []ActionCatalogEntry{e},
+		}}}
+	}
+	if err := validateTarget(entry(ActionCatalogEntry{Action: actionAssignTask, Operation: "ResolveWorkOrder", Queue: roleKey, Target: "row.entityKey"})); err != nil {
+		t.Fatalf("a queue-only assignTask catalog entry must load: %v", err)
+	}
+	err = validateTarget(entry(ActionCatalogEntry{Action: actionAssignTask, Operation: "ResolveWorkOrder", Assignee: tpIdentity, Queue: roleKey, Target: "row.entityKey"}))
+	if err == nil || !strings.Contains(err.Error(), "not both") || !strings.Contains(err.Error(), `ref "queueIt"`) {
+		t.Fatalf("a both-set assignTask catalog entry must be refused at load, naming the entry: %v", err)
+	}
+}
+
+// TestRegistry_DispatchTargetQueueArmBody proves the registry's real load path
+// on a queue-arm spec body: the JSON `queue` field lands on the loaded
+// GapAction (a body the engine silently dropped would dispatch an
+// assignee-less assignTask and fail every row), and a body carrying both
+// endpoints is rejected with TargetRejected before loadCB ever fires.
+func TestRegistry_DispatchTargetQueueArmBody(t *testing.T) {
+	t.Parallel()
+	s := newTestSource(t)
+	var loaded []*Target
+	s.setLoadCallback(func(tg *Target) { loaded = append(loaded, tg) })
+
+	id := testNanoID(t)
+	s.handle(vertexEvent(t, id, weaverTargetClass))
+	s.dispatchTarget(id, []byte(`{"targetId":"workOrderQueue","lensRef":"workOrderQueue","gaps":{"missing_task":{"action":"assignTask","operation":"ResolveWorkOrder","queue":"vtx.role.AAroHeHJKMNPQRSTUVWX","target":"row.entityKey"}}}`))
+	if hasIssueCode(s.issues.snapshot(), "TargetRejected") {
+		t.Fatalf("a queue-arm body must load, got TargetRejected: %+v", s.issues.snapshot())
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loadCB calls = %d, want 1", len(loaded))
+	}
+	ga := loaded[0].Gaps["missing_task"]
+	if ga.Queue != "vtx.role.AAroHeHJKMNPQRSTUVWX" || ga.Assignee != "" || ga.Action != actionAssignTask {
+		t.Fatalf("loaded gap did not carry the queue arm: %+v", ga)
+	}
+
+	both := testNanoID(t)
+	s.handle(vertexEvent(t, both, weaverTargetClass))
+	s.dispatchTarget(both, []byte(`{"targetId":"workOrderBoth","lensRef":"workOrderQueue","gaps":{"missing_task":{"action":"assignTask","operation":"ResolveWorkOrder","assignee":"row.assignee","queue":"vtx.role.AAroHeHJKMNPQRSTUVWX","target":"row.entityKey"}}}`))
+	if !hasIssueCode(s.issues.snapshot(), "TargetRejected") {
+		t.Fatalf("a body carrying assignee AND queue must raise TargetRejected")
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("a rejected both-endpoint target must never fire loadCB, got %d calls", len(loaded))
+	}
+}
+
 // TestValidateTarget_Goal proves a gap's `goal` parses as a well-formed §10.5
 // guard (rejecting a malformed one) and is cached on the parsed target — not
 // yet consumed anywhere (Fire 6). Since the Increment-3 actions-catalog

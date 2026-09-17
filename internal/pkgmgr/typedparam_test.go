@@ -181,6 +181,8 @@ func TestValidateWeaverTargets_TypedLiteralInStringFieldRejected(t *testing.T) {
 		{"subject", GapActionSpec{Action: "triggerLoom", Pattern: "onboarding", Subject: `json:"vtx.unit.AAunitHJKMNPQRSTUVWX"`}},
 		{"assignee", GapActionSpec{Action: "assignTask", Operation: "ApproveX",
 			Assignee: `json:"vtx.identity.AAidHJKMNPQRSTUVWXYZ"`, Target: "row.entityKey"}},
+		{"queue", GapActionSpec{Action: "assignTask", Operation: "ApproveX",
+			Queue: `json:"vtx.role.AAroHeHJKMNPQRSTUVWX"`, Target: "row.entityKey"}},
 		{"target", GapActionSpec{Action: "directOp", Operation: "Fix", Target: `json:"vtx.unit.AAunitHJKMNPQRSTUVWX"`}},
 		{"reads[0]", GapActionSpec{Action: "directOp", Operation: "Fix", Reads: []string{`json:"vtx.unit.AAunitHJKMNPQRSTUVWX"`}}},
 		{"optionalReads[0]", GapActionSpec{Action: "directOp", Operation: "Fix",

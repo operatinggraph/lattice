@@ -107,6 +107,7 @@ func draftTargetBody(t pkgmgr.WeaverTargetArtifactContent) *weaverTargetBody {
 			Adapter:       ga.Adapter,
 			Operation:     ga.Operation,
 			Assignee:      ga.Assignee,
+			Queue:         ga.Queue,
 			Target:        ga.Target,
 			Params:        ga.Params,
 			Reads:         ga.Reads,

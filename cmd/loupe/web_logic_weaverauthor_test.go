@@ -77,6 +77,33 @@ func TestWeaverAuthorBuildTargetContentOmitsEmptyFields(t *testing.T) {
 	}
 }
 
+// TestWeaverAuthorBuildTargetContentCarriesQueue pins the queue arm through
+// gapActionArtifact/buildTargetContent — the cold review found the draft
+// editor's strFields list had no "queue" entry, so a queue-arm gap typed into
+// the Author form would silently export without it, an artifact the pkgmgr
+// validator refuses at Check ("takes Assignee or Queue" / requires one).
+func TestWeaverAuthorBuildTargetContentCarriesQueue(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	draft := map[string]any{
+		"targetId": "t1", "lensRef": "l1",
+		"gaps": map[string]any{
+			"missing_task": map[string]any{
+				"action": "assignTask", "operation": "CreateTask",
+				"queue": "vtx.role.rAAAAAAAAAAAAAAAAAAA", "target": "row.entityKey",
+			},
+		},
+	}
+	got := call(t, vm, "buildTargetContent", draft).(map[string]any)
+	gaps := got["gaps"].(map[string]any)
+	gx := gaps["missing_task"].(map[string]any)
+	if gx["queue"] != "vtx.role.rAAAAAAAAAAAAAAAAAAA" {
+		t.Errorf("gap = %v, want queue carried through to the exported artifact", gx)
+	}
+	if _, has := gx["assignee"]; has {
+		t.Errorf("gap = %v, an empty assignee must stay omitted on a queue-arm gap", gx)
+	}
+}
+
 // TestWeaverAuthorBuildTargetContentDescription pins both halves of the
 // optional prose field: typed prose lands trimmed on the artifact, and a blank
 // (or whitespace-only) one is OMITTED rather than carried as "" — the wire
@@ -492,6 +519,40 @@ func TestWeaverAuthorHydrateFromProposalHappyPath(t *testing.T) {
 	// own empty-field convention — never undefined.
 	if gx["pattern"] != "" {
 		t.Errorf("pattern = %v, want empty string for an omitted field", gx["pattern"])
+	}
+	// A queue-arm gap's role-queue endpoint must round-trip too, or "Load into
+	// Author" on an installed queue-arm target would silently drop it —
+	// re-proposing the loaded draft would then fail Check's exactly-one rule.
+	if gx["queue"] != "" {
+		t.Errorf("queue = %v, want empty string for missing_x (an assignee-less directOp gap)", gx["queue"])
+	}
+}
+
+// TestWeaverAuthorHydrateFromProposalCarriesQueue pins that half directly: a
+// proposal whose gap carries "queue" hydrates it onto the draft gap, the same
+// as "assignee" already does.
+func TestWeaverAuthorHydrateFromProposalCarriesQueue(t *testing.T) {
+	vm := logicVM(t, "weaverauthor.js")
+	row := map[string]any{
+		"kind": "weaverTarget",
+		"content": `{"targetId":"backOfHouse","lensRef":"workOrders",` +
+			`"gaps":{"missing_task":{"action":"assignTask","operation":"CreateTask",` +
+			`"queue":"vtx.role.rAAAAAAAAAAAAAAAAAAA","target":"row.entityKey"}}}`,
+	}
+	draft := call(t, vm, "hydrateFromProposal", row).(map[string]any)
+	if draft == nil {
+		t.Fatal("hydrateFromProposal returned nil")
+	}
+	gaps := draft["gaps"].(map[string]any)
+	gx, ok := gaps["missing_task"].(map[string]any)
+	if !ok {
+		t.Fatalf("gaps = %v, missing missing_task", gaps)
+	}
+	if gx["queue"] != "vtx.role.rAAAAAAAAAAAAAAAAAAA" {
+		t.Errorf("queue = %v, want the proposal's role-queue literal hydrated onto the draft", gx["queue"])
+	}
+	if gx["assignee"] != "" {
+		t.Errorf("assignee = %v, want empty on a queue-arm gap", gx["assignee"])
 	}
 }
 

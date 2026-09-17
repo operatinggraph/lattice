@@ -268,6 +268,67 @@ func TestRenderActionBindings(t *testing.T) {
 	}
 }
 
+// TestRenderActionQueueBinding pins the Queue arm alongside Assignee: an
+// assignTask gap naming a role queue instead of a concrete assignee must
+// render Queue on the view and track its row.<column> template as a binding,
+// exactly as Assignee's does.
+func TestRenderActionQueueBinding(t *testing.T) {
+	a := weaverActionContract{
+		Action: "assignTask", Operation: "SignLease",
+		Queue: "row.crewRole", Target: "row.entityKey",
+	}
+	got := renderAction(a, map[string]bool{"crewRole": true}, nil)
+	if got.Queue != "row.crewRole" {
+		t.Errorf("Queue = %q, want row.crewRole carried onto the view", got.Queue)
+	}
+	if got.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty on a queue-arm gap", got.Assignee)
+	}
+	byCol := map[string]bool{}
+	for _, b := range got.Bindings {
+		byCol[b.Column] = b.Observed
+	}
+	if !byCol["crewRole"] {
+		t.Errorf("bindings = %+v, want crewRole tracked and observed", got.Bindings)
+	}
+	if len(got.Bindings) != 2 {
+		t.Fatalf("bindings = %+v, want the queue and target row.<column> refs", got.Bindings)
+	}
+}
+
+// TestParseWeaverTargetBodyCarriesQueue pins the parse half: a cold review
+// found weaverActionContract had no Queue field, so parseWeaverTargetBody
+// (json.Marshal + json.Unmarshal into that shape) silently dropped an
+// installed queue-arm gap's "queue" key rather than decoding it — the studio
+// would then render "ResolveWorkOrder → ?" for a gap that dispatches fine.
+// parseLeaseTarget's fixture is shared by many other tests asserting exact
+// gap counts/shapes, so this uses its own minimal spec rather than perturbing
+// that one.
+func TestParseWeaverTargetBodyCarriesQueue(t *testing.T) {
+	const spec = `{
+  "targetId": "backOfHouse",
+  "lensRef": "lensAAAAAAAAAAAAAAAA",
+  "gaps": {
+    "missing_task": {"action": "assignTask", "operation": "CreateTask",
+                      "queue": "vtx.role.rAAAAAAAAAAAAAAAAAAA", "target": "row.entityKey"}
+  }
+}`
+	var body weaverTargetBody
+	if err := json.Unmarshal([]byte(spec), &body); err != nil {
+		t.Fatalf("parse target spec: %v", err)
+	}
+	gap, ok := body.Gaps["missing_task"]
+	if !ok {
+		t.Fatal("missing_task gap not parsed")
+	}
+	if gap.Queue != "vtx.role.rAAAAAAAAAAAAAAAAAAA" {
+		t.Errorf("Queue = %q, want the installed role-queue literal carried through parse, not discarded", gap.Queue)
+	}
+	if gap.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty on a queue-arm gap", gap.Assignee)
+	}
+}
+
 // `reads` alone accepts the strategist's derived-aspect form
 // `row.<column>.<aspect>` — the column resolves to a vertex root key and the
 // aspect is joined onto it (strategist.go resolveReadKey). Params and the

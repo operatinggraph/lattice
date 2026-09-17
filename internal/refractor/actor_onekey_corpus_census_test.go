@@ -204,6 +204,10 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"wellnessWaitlistPromotion":         oneKey,
 	"wellnessSeriesHorizon":             oneKey,
 	"wellnessRefundSettlement":          oneKey,
+	// `MATCH (wo:workorder {key: $actorKey}) OPTIONAL MATCH (wo)<-[:scopedTo]-(t:task)`
+	// carries only two positions, and `t` is task-typed — the workorder actor
+	// type binds only at the anchor across the whole pattern.
+	"workOrderQueue": oneKey,
 }
 
 // corpusOneKeyLens is one anchored cypher plus the actor type the RUNTIME pairs

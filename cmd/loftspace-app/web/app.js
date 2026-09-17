@@ -2130,6 +2130,19 @@ function renderApplicationCard(row, highlight) {
     }
   }
 
+  // Report an issue — offered on any approved, not-yet-ended tenancy row
+  // with a live unit, independent of the give-notice state above (a tenant
+  // who has already given notice still lives there until move-out). The
+  // residesIn spine is wired at approval and unwired at endedAt, so this is
+  // the same "residing tenant" gate ReportIssue's own self leg enforces
+  // server-side (NotResident). row.unitKey is required: a tombstoned unit
+  // projects a null unitKey, and this control's payload always reads
+  // location: row.unitKey — a null there would submit an op with a null
+  // required field rather than simply not offering the control.
+  if (row.landlordApproved && !row.tenancyEndedAt && row.unitKey) {
+    card.append(renderReportIssueControl(row, () => {}));
+  }
+
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
@@ -2703,6 +2716,121 @@ function renderGiveNoticeControl(row, landlord, onDone) {
   return wrap;
 }
 
+// submitReportIssue submits ReportIssue on the tenant's own self leg
+// (docs/reviews/loftspace-maintenance-loop-2026-09-17.md decision 3/4): authContext.target is
+// ALWAYS state.applicant (never typed — mirrors submitGiveNotice), reads
+// name the unit the report is about, and optionalReads declares the tenant's
+// own residesIn link at that unit — the "resource bind" the script's own
+// self leg checks (op.authTargetValidated and op.authContextTarget ==
+// op.actor, then a live residesIn link) before it will exempt a self
+// submission from the workplace guard.
+// refusal-courtesy: ReportIssue/InvalidArgument: cap — the summary field is required (empty submit does nothing) and priority only ever offers low/normal/urgent.
+// refusal-courtesy: ReportIssue/UnknownEndpoint, NotALocation: unreachable — location is always row.unitKey, the application's own unit, never typed.
+// refusal-courtesy: ReportIssue/AuthDenied: unreachable — authContext.target is always state.applicant, never typed.
+// refusal-courtesy: ReportIssue/NotResident: hide — offered only on an approved, un-ended tenancy row with a live unit (row.landlordApproved && !row.tenancyEndedAt && row.unitKey); the residesIn spine is wired at approval and unwired at endedAt, the same fact the script's self leg checks.
+async function submitReportIssue(row, summary, priority) {
+  const unitId = shortKey(row.unitKey);
+  const reads = [row.unitKey];
+  const optionalReads = ["lnk.identity." + shortKey(state.applicant) + ".residesIn.unit." + unitId];
+  let sent = false;
+  let confirmed = false;
+  try {
+    sent = true;
+    const reply = await submitOp(
+      {
+        operationType: "ReportIssue",
+        class: "workOrder",
+        reads,
+        optionalReads,
+        payload: { summary, priority, location: row.unitKey },
+      },
+      { authContext: { target: state.applicant } }
+    );
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not report the issue — " + msg, "err");
+      return false;
+    }
+    confirmed = true;
+    toast("Issue reported.", "ok");
+    return true;
+  } catch (e) {
+    if (!sent) {
+      toast("Could not report the issue: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Issue reported, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the report reached the server — it may have landed; check back before trying again. " + e.message, "err");
+    }
+    return false;
+  }
+}
+
+// renderReportIssueControl builds the tenant's "Report an issue" control: a
+// toggle button revealing an inline summary + priority form, mirroring
+// renderGiveNoticeControl's own toggle/form/cancel shape. Never
+// window.confirm() — a maintenance report is not irreversible, so there is
+// no staged consequence line, only the sent/confirmed throw handling above.
+function renderReportIssueControl(row, onDone) {
+  const wrap = document.createElement("div");
+  wrap.className = "report-issue";
+
+  const toggle = document.createElement("button");
+  toggle.className = "ghost";
+  toggle.textContent = "Report an issue";
+  wrap.append(toggle);
+
+  const form = document.createElement("form");
+  form.className = "report-issue-form";
+  form.hidden = true;
+  // markup-safe: this form has no interpolation at all — every attribute and
+  // option below is a literal.
+  form.innerHTML = `
+    <label>What's wrong
+      <input type="text" name="summary" maxlength="200" required />
+    </label>
+    <label>Priority
+      <select name="priority">
+        <option value="low">Low</option>
+        <option value="normal" selected>Normal</option>
+        <option value="urgent">Urgent</option>
+      </select>
+    </label>
+    <div class="report-issue-actions">
+      <button type="submit">Report it</button>
+      <button type="button" class="ghost cancel-report-issue">Cancel</button>
+    </div>
+  `;
+  wrap.append(form);
+
+  toggle.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+  });
+  form.querySelector(".cancel-report-issue").addEventListener("click", () => {
+    form.reset();
+    form.hidden = true;
+  });
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const summary = form.summary.value.trim();
+    if (!summary) return;
+    const priority = form.priority.value;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    try {
+      const ok = await submitReportIssue(row, summary, priority);
+      if (ok) {
+        form.reset();
+        form.hidden = true;
+        if (onDone) onDone();
+      }
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+  return wrap;
+}
+
 // ---- Tasks (inbox) ----
 //
 // The applicant's OPEN tasks, read from the `my-tasks` lens projection (P5: a
@@ -3014,6 +3142,7 @@ async function claimTask(taskKey) {
 // op-meta's `{me.workplace}` self-anchor already resolves it for an
 // edge-manifest client. No task/claim step: this MINTS the work order a
 // later ResolveWorkOrder task gets queued against.
+// refusal-courtesy: ReportIssue/NotResident: unreachable — the staff form sends no authContext.target, so the script never enters the self leg; the standing path is confined by the workplace walk instead.
 async function reportIssue(ev) {
   ev.preventDefault();
   const loc = workplaceAnchor();
@@ -4561,6 +4690,7 @@ async function loadLandlord() {
   renderUnits();
   loadLandlordRLS();
   loadPortfolioPulse();
+  loadLandlordWorkOrders();
 }
 
 // loadPortfolioPulse — the operations portfolio-pulse aggregate: occupancy
@@ -4702,6 +4832,110 @@ async function loadLandlordRLS() {
     el.textContent = "🔒 RLS read boundary unavailable in this dev posture.";
     if (listEl) { listEl.hidden = true; listEl.innerHTML = ""; }
   }
+}
+
+// workOrderState reduces a landlord work-order row to its tri-state display
+// (docs/reviews/loftspace-maintenance-loop-2026-09-17.md decision 5): "resolved" wins over
+// everything — a .resolution aspect has landed, whatever a straggling task
+// still reads — else "queued" when at least one open task is scoped to it
+// (the missing_task gap has queued ResolveWorkOrder), else "unqueued" (the
+// gap has not, or not yet, fired). Pure and DOM-free so it is goja-testable,
+// mirroring decisionOffered's own split.
+function workOrderState(row) {
+  if (row && row.resolvedAt) return "resolved";
+  if (row && row.openTaskCount > 0) return "queued";
+  return "unqueued";
+}
+
+// loadLandlordWorkOrders reads /api/landlord/work-orders as an
+// AUTHENTICATED actor; Postgres RLS returns ONLY the work orders at units
+// the signed-in landlord manages (landlordWorkOrdersRead,
+// packages/loftspace-domain). Best-effort like loadLandlordRLS /
+// loadPortfolioPulse: an unavailable read boundary hides the panel rather
+// than breaking the view.
+async function loadLandlordWorkOrders() {
+  const listEl = $("#landlord-work-orders");
+  const emptyEl = $("#landlord-work-orders-empty");
+  if (!listEl || !emptyEl) return;
+  if (!state.applicant) {
+    listEl.hidden = true;
+    emptyEl.hidden = true;
+    return;
+  }
+  try {
+    const data = await appGet("/api/landlord/work-orders");
+    renderLandlordWorkOrders(data.workOrders || []);
+  } catch (e) {
+    console.warn("landlord work-orders unavailable:", e);
+    listEl.hidden = true;
+    emptyEl.hidden = true;
+  }
+}
+
+// renderLandlordWorkOrders renders the RLS-scoped Maintenance panel, newest
+// reported first (the server's own ORDER BY reported_at DESC — never
+// re-sorted here).
+function renderLandlordWorkOrders(rows) {
+  const listEl = $("#landlord-work-orders");
+  const emptyEl = $("#landlord-work-orders-empty");
+  if (!listEl || !emptyEl) return;
+  listEl.innerHTML = "";
+  if (!rows.length) {
+    listEl.hidden = true;
+    emptyEl.hidden = false;
+    emptyEl.textContent = "No maintenance reported at your units.";
+    return;
+  }
+  emptyEl.hidden = true;
+  listEl.hidden = false;
+  for (const row of rows) listEl.append(renderWorkOrderCard(row));
+}
+
+// renderWorkOrderCard builds one Maintenance panel row. Built with
+// createElement/textContent, never innerHTML: summary is a tenant-typed
+// string and resolutionNotes a staff-typed one.
+const WORK_ORDER_STATE_LABEL = { resolved: "resolved", queued: "queued", unqueued: "unqueued" };
+const WORK_ORDER_STATE_CLS = { resolved: "approved", queued: "qualified", unqueued: "review" };
+function renderWorkOrderCard(row) {
+  const card = document.createElement("div");
+  card.className = "card work-order-card";
+
+  const head = document.createElement("div");
+  head.className = "unit-head";
+  const addr = document.createElement("div");
+  addr.className = "addr";
+  addr.textContent = row.unitAddress || shortKey(row.unitKey);
+  head.append(addr);
+
+  const sub = document.createElement("div");
+  sub.className = "unit-sub";
+  const priority = document.createElement("span");
+  priority.className = "badge";
+  priority.textContent = row.priority || "normal";
+  sub.append(priority);
+  const st = workOrderState(row);
+  sub.append(dispChip(WORK_ORDER_STATE_LABEL[st], WORK_ORDER_STATE_CLS[st]));
+  head.append(sub);
+  card.append(head);
+
+  const summary = document.createElement("p");
+  summary.className = "work-order-summary";
+  summary.textContent = row.summary;
+  card.append(summary);
+
+  const reported = document.createElement("div");
+  reported.className = "applicant-note";
+  reported.textContent = "Reported " + fmtDate(row.reportedAt);
+  card.append(reported);
+
+  if (st === "resolved") {
+    const resolved = document.createElement("div");
+    resolved.className = "applicant-note";
+    resolved.textContent = "Resolved " + fmtDate(row.resolvedAt) + (row.resolutionNotes ? " — " + row.resolutionNotes : "");
+    card.append(resolved);
+  }
+
+  return card;
 }
 
 // renderLandlordRLSUnits renders the RLS-scoped units + applications as the

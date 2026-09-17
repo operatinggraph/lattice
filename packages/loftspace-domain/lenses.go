@@ -123,6 +123,58 @@ func Lenses() []pkgmgr.LensSpec {
 			},
 		},
 		{
+			// landlordWorkOrdersRead — the protected Postgres read model for the
+			// landlord's Maintenance panel (docs/reviews/loftspace-maintenance-loop-2026-09-17.md
+			// decision 5): one row per (work order, managing landlord) pair, the
+			// same fan-out/anchor shape landlordUnitsRead already draws (MATCH
+			// REQUIRES the `manages` link, so a co-managed unit's order fans out
+			// to one row per landlord). Units only — a work order locatedAt a
+			// BUILDING (a staff-reported one) has no manages walk to anchor a
+			// row on and projects nothing, matching the PO's ask (the landlord
+			// sees what tenants report at units they manage, not every staff
+			// ticket in the building).
+			//
+			// open_task_count is the SAME CASE-inside-count shape
+			// otherLiveTenancyCount (lease-signing/tenancy_end_lenses.go) uses,
+			// over orchestration-base's own `t.data.status = 'open'` fragment
+			// (orchestration-base/lenses.go unroutedTasksSpec) — an OPTIONAL
+			// MATCH across the task's `scopedTo` link back to the work order, so
+			// an order with no task at all still projects (count 0, not an
+			// excluded row). resolved_at / resolution_notes read the
+			// `.resolution` aspect ResolveWorkOrder writes; both stay null until
+			// resolution. The console derives its queued/unqueued/resolved state
+			// from resolved_at and open_task_count client-side (workOrderState,
+			// cmd/loftspace-app/web/app.js) rather than this lens carrying a
+			// precomputed state column, so the FE's tri-state logic stays in one
+			// place and is goja-pinned there.
+			//
+			// DIFF RETRACTION: like landlordUnitsRead, this walks `locatedAt` /
+			// `manages` structurally, so an unwired link needs Refractor's
+			// target-diff retraction path, not anchor-self.
+			CanonicalName:  "landlordWorkOrdersRead",
+			Class:          "meta.lens",
+			Adapter:        "postgres",
+			Table:          "read_landlord_work_orders",
+			Engine:         "full",
+			Spec:           landlordWorkOrdersReadSpec,
+			Protected:      true,
+			DiffRetraction: true,
+			IntoKey:        []string{"work_order_id", "landlord_id"},
+			Columns: []pkgmgr.PostgresColumn{
+				{Name: "work_order_key", Type: "text"},
+				{Name: "landlord_key", Type: "text"},
+				{Name: "unit_key", Type: "text"},
+				{Name: "unit_address", Type: "text"},
+				{Name: "summary", Type: "text"},
+				{Name: "priority", Type: "text"},
+				{Name: "reported_at", Type: "text"},
+				{Name: "reported_by", Type: "text"},
+				{Name: "resolved_at", Type: "text"},
+				{Name: "resolution_notes", Type: "text"},
+				{Name: "open_task_count", Type: "double precision"},
+			},
+		},
+		{
 			// objectIdentityAttachmentsRead — the owner-anchored read
 			// surface objects-base's own objectAttachments lens cannot be:
 			// that lens is anchored on the OBJECT (right for "resolve this
@@ -280,6 +332,48 @@ RETURN
   u.listing.data.rentAmount     AS unit_rent,
   u.listing.data.rentCurrency   AS unit_currency,
   [nanoIdFromKey(landlord.key)] + [(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors
+`
+
+// landlordWorkOrdersReadSpec projects one row per (work order, managing
+// landlord) pair — see the Lenses() declaration above for the shape
+// rationale. The WITH stage carries `u` forward (needed by the
+// authz_anchors building comprehension in RETURN, the same reason
+// landlordLeaseApplicationsReadSpec's WITH carries it) and re-extracts every
+// other RETURN column as a passthrough alias first, since a WITH containing
+// an aggregation (count()) must extract every non-aggregated column it
+// carries at the same stage. authz_anchors mirrors landlordUnitsReadSpec's
+// `[landlordKey] + [containedIn building tokens]` shape verbatim.
+const landlordWorkOrdersReadSpec = `MATCH (wo:workorder)-[:locatedAt]->(u:unit)
+MATCH (u)<-[:manages]-(landlord:identity)
+OPTIONAL MATCH (wo)<-[:scopedTo]-(t:task)
+WITH
+  u,
+  wo.key                       AS entityKey,
+  landlord.key                 AS landlordKey,
+  u.key                        AS unitKey,
+  u.address.data.line1         AS unitAddress,
+  wo.report.data.summary       AS summary,
+  wo.report.data.priority      AS priority,
+  wo.report.data.reportedAt    AS reportedAt,
+  wo.report.data.reportedBy    AS reportedBy,
+  wo.resolution.data.resolvedAt AS resolvedAt,
+  wo.resolution.data.notes     AS resolutionNotes,
+  count(DISTINCT CASE WHEN t.data.status = 'open' THEN t.key ELSE null END) AS openTaskCount
+RETURN
+  nanoIdFromKey(entityKey)     AS work_order_id,
+  nanoIdFromKey(landlordKey)   AS landlord_id,
+  entityKey                    AS work_order_key,
+  landlordKey                  AS landlord_key,
+  unitKey                      AS unit_key,
+  unitAddress                  AS unit_address,
+  summary                      AS summary,
+  priority                     AS priority,
+  reportedAt                   AS reported_at,
+  reportedBy                   AS reported_by,
+  resolvedAt                   AS resolved_at,
+  resolutionNotes              AS resolution_notes,
+  openTaskCount                AS open_task_count,
+  [nanoIdFromKey(landlordKey)] + [(u)-[:containedIn]->(b:building) | nanoIdFromKey(b.key)] AS authz_anchors
 `
 
 // objectIdentityAttachmentsReadSpec — see the Lenses() declaration above for

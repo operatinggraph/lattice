@@ -741,7 +741,7 @@ var (
 
 	editableGapKeys = map[string]bool{
 		"action": true, "pattern": true, "subject": true, "adapter": true,
-		"operation": true, "assignee": true, "target": true, "params": true,
+		"operation": true, "assignee": true, "queue": true, "target": true, "params": true,
 		"reads": true, "issueCode": true, "issueSeverity": true,
 	}
 )
@@ -1160,6 +1160,7 @@ type modelGapAction struct {
 	Adapter       string       `json:"adapter"`
 	Operation     string       `json:"operation"`
 	Assignee      string       `json:"assignee"`
+	Queue         string       `json:"queue"`
 	Target        string       `json:"target"`
 	Params        []modelParam `json:"params"`
 	Reads         []string     `json:"reads"`
@@ -1330,6 +1331,7 @@ func assembleTargetContent(c modelTargetContent, fallbackDescription string, len
 			"adapter":       g.Adapter,
 			"operation":     g.Operation,
 			"assignee":      g.Assignee,
+			"queue":         g.Queue,
 			"target":        g.Target,
 			"issueCode":     g.IssueCode,
 			"issueSeverity": g.IssueSeverity,

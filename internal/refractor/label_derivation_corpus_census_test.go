@@ -318,7 +318,9 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	// filter and the fan-out arms both judge events against it, so a series
 	// vertex changing must now wake this lens. Still modeBroad — a fourth
 	// label does not narrow anything.
-	"wellnessSessions": {broad, "instructor session sessionseries studio", modeBroad},
+	"wellnessSessions":       {broad, "instructor session sessionseries studio", modeBroad},
+	"landlordWorkOrdersRead": {narrow, "building identity task unit workorder", modeLabel},
+	"workOrderQueue":         {narrow, "task workorder", modeRelation},
 }
 
 // consumerFilterMode runs a compiled cypher through the SAME

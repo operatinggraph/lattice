@@ -216,3 +216,119 @@ func TestBuildPlan_AssignTask_OptionalReadsMatchPayload(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildPlan_AssignTask_QueueArm pins the Queue arm of assignTask: a gap
+// naming a role queue instead of an assignee dispatches CreateTask with
+// `queue` in the assignee's place, the required reads are exactly
+// [queue, forOperation, target] (the three keys the CreateTask script
+// vertex_alive-checks on its queue branch), and the optionalReads carry the
+// stable task dedup key ALONE — the `.availability` routing aspect is read on
+// the script's assignee branch only, so declaring it here would be a phantom
+// read of a key the op never touches. The rest of the plan is the assignee
+// arm's: authTarget = the task target, taskId claimId-seeded and stable across
+// two claims of the same episode, expiresAt carried, expectedRevision carried.
+func TestBuildPlan_AssignTask_QueueArm(t *testing.T) {
+	t.Parallel()
+	const opMeta = "vtx.meta.AAopMetaHJKMNPQRSTUV"
+	const roleKey = "vtx.role.AAbackHJKMNPQRSTUVWX"
+	const orderKey = "vtx.workorder.AAorderHJKMNPQRSTUVW"
+	src := &targetSource{opMetaByType: map[string]string{"ResolveWorkOrder": opMeta}}
+	ga := GapAction{
+		Action:    "assignTask",
+		Operation: "ResolveWorkOrder",
+		Queue:     roleKey,
+		Target:    "row.entityKey",
+	}
+	row := map[string]any{"entityKey": orderKey}
+	pl, perr := buildPlan(src, fixtureActorKey, "workOrderQueue", "AAorderHJKMNPQRSTUVW", "missing_task", ga, row, 11)
+	if perr != nil {
+		t.Fatalf("buildPlan: %v", perr)
+	}
+	if pl.operationType != opCreateTask {
+		t.Fatalf("operationType = %q, want %q", pl.operationType, opCreateTask)
+	}
+	if pl.authTarget != orderKey {
+		t.Fatalf("authTarget = %q, want the task target %q", pl.authTarget, orderKey)
+	}
+	wantReads := []string{roleKey, opMeta, orderKey}
+	if len(pl.reads) != len(wantReads) {
+		t.Fatalf("reads = %v, want exactly [queue, forOperation, target] = %v", pl.reads, wantReads)
+	}
+	for i := range wantReads {
+		if pl.reads[i] != wantReads[i] {
+			t.Fatalf("reads[%d] = %q, want %q (full: %v)", i, pl.reads[i], wantReads[i], pl.reads)
+		}
+	}
+
+	const claimA = "AAcLaimHJKMNPQRSTUVW"
+	payload := pl.payload(claimA)
+	if got := payload["queue"]; got != roleKey {
+		t.Fatalf("payload queue = %v, want %q", got, roleKey)
+	}
+	if _, present := payload["assignee"]; present {
+		t.Fatalf("a queue-arm payload must carry no assignee: %v", payload)
+	}
+	if got := payload["forOperation"]; got != opMeta {
+		t.Fatalf("payload forOperation = %v, want %q", got, opMeta)
+	}
+	if got := payload["scopedTo"]; got != orderKey {
+		t.Fatalf("payload scopedTo = %v, want %q", got, orderKey)
+	}
+	if got, _ := payload["expiresAt"].(string); got == "" {
+		t.Fatalf("payload carries no expiresAt: %v", payload)
+	}
+	if got := payload["expectedRevision"]; got != uint64(11) {
+		t.Fatalf("payload expectedRevision = %v (%T), want 11", got, got)
+	}
+	taskID, _ := payload["taskId"].(string)
+	if taskID == "" {
+		t.Fatalf("queue-arm payload carries no taskId: %v", payload)
+	}
+	if taskID != deriveStableTaskID("workOrderQueue", "AAorderHJKMNPQRSTUVW", "missing_task", claimA) {
+		t.Fatalf("taskId %q is not the claimId-seeded stable id", taskID)
+	}
+	if again, _ := pl.payload(claimA)["taskId"].(string); again != taskID {
+		t.Fatalf("taskId drifted across two claims of one episode: %q then %q", taskID, again)
+	}
+	if other, _ := pl.payload("AAcLaimHJKMNPQRSTUVX")["taskId"].(string); other == taskID {
+		t.Fatalf("taskId must be claimId-seeded, but a different claim derived the same id %q", taskID)
+	}
+
+	if pl.optionalReads == nil {
+		t.Fatalf("queue-arm plan declares no optionalReads (the stable task dedup key must be declared)")
+	}
+	got := pl.optionalReads(claimA)
+	if len(got) != 1 || got[0] != "vtx.task."+taskID {
+		t.Fatalf("optionalReads = %v, want exactly the stable task dedup key %q and no availability aspect", got, "vtx.task."+taskID)
+	}
+}
+
+// TestBuildPlan_AssignTask_QueueArm_ResolvesRowTemplate pins that the queue
+// takes the row.<column> template like every other dispatch-identity field,
+// and that a column the row lacks fails the dispatch rather than dispatching
+// an empty queue.
+func TestBuildPlan_AssignTask_QueueArm_ResolvesRowTemplate(t *testing.T) {
+	t.Parallel()
+	src := &targetSource{opMetaByType: map[string]string{"ResolveWorkOrder": "vtx.meta.AAopMetaHJKMNPQRSTUV"}}
+	ga := GapAction{Action: "assignTask", Operation: "ResolveWorkOrder", Queue: "row.queue", Target: "row.entityKey"}
+	row := map[string]any{
+		"queue":     "vtx.role.AAbackHJKMNPQRSTUVWX",
+		"entityKey": "vtx.workorder.AAorderHJKMNPQRSTUVW",
+	}
+	pl, perr := buildPlan(src, fixtureActorKey, "workOrderQueue", "AAorderHJKMNPQRSTUVW", "missing_task", ga, row, 1)
+	if perr != nil {
+		t.Fatalf("buildPlan: %v", perr)
+	}
+	if got := pl.payload("AAcLaimHJKMNPQRSTUVW")["queue"]; got != "vtx.role.AAbackHJKMNPQRSTUVWX" {
+		t.Fatalf("payload queue = %v, want the row-resolved role key", got)
+	}
+	if pl.reads[0] != "vtx.role.AAbackHJKMNPQRSTUVWX" {
+		t.Fatalf("reads[0] = %q, want the row-resolved role key", pl.reads[0])
+	}
+
+	_, perr = buildPlan(src, fixtureActorKey, "workOrderQueue", "AAorderHJKMNPQRSTUVW", "missing_task", ga,
+		map[string]any{"entityKey": "vtx.workorder.AAorderHJKMNPQRSTUVW"}, 1)
+	if perr == nil {
+		t.Fatalf("a row lacking the queue column must fail the dispatch, not dispatch an empty queue")
+	}
+}

@@ -44,12 +44,12 @@ const reservedGapParam = "expectedRevision"
 // optionalReadsAction is the only §10.8 action whose OptionalReads the
 // engine's own dispatch leaves entirely to the playbook. Every other action's
 // ContextHint.OptionalReads is the engine's OWN to set at dispatch (buildPlan's
-// assignTask arm already builds one from the stable task dedup key + the
-// assignee availability aspect), so a package-declared value on that same
-// action would collide with it. The engine's validateTarget rejects the
-// collision at load (registry.go's validateOptionalReadsScope); install
-// rejects it first for a clearer author error, on the same "reject it here
-// too" posture as reservedGapParam above.
+// assignTask arm already builds one from the stable task dedup key, plus the
+// assignee availability aspect on its Assignee arm), so a package-declared
+// value on that same action would collide with it. The engine's
+// validateTarget rejects the collision at load (registry.go's
+// validateOptionalReadsScope); install rejects it first for a clearer author
+// error, on the same "reject it here too" posture as reservedGapParam above.
 const optionalReadsAction = actionDirectOp
 
 // enumerationsAction is the only §10.8 action whose dispatch reads a declared
@@ -66,8 +66,8 @@ const enumerationsAction = actionDirectOp
 // type: json:<literal> dispatches as whatever encoding/json decodes the suffix
 // into, so a map[string]string params bag can still deliver a number or a
 // bool. Meaningful ONLY in a gap's params bag — every string-typed field
-// (subject, pattern, operation, assignee, target, and each declared read or
-// enumeration hub) refuses it, here and in the engine.
+// (subject, pattern, operation, assignee, queue, target, and each declared
+// read or enumeration hub) refuses it, here and in the engine.
 //
 // Re-stated here because the installer depends on no engine, and tied back on
 // both axes: the CONSTANT by TestGapCompanionPrefixes_MatchWeaverVocabulary,
@@ -238,7 +238,7 @@ func (def Definition) validateWeaverTargets() error {
 					idx, t.TargetID, col, name, actorToken)
 			}
 			stringFields := dispatchStringFields(
-				ga.Subject, ga.Pattern, ga.Operation, ga.Assignee, ga.Target,
+				ga.Subject, ga.Pattern, ga.Operation, ga.Assignee, ga.Queue, ga.Target,
 				ga.Reads, ga.OptionalReads, ga.Enumerations)
 			if f, found := typedLiteralInStringField(stringFields); found {
 				return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: %s %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted there (it is meaningful only in a gap's params bag); write the value directly",
@@ -440,13 +440,14 @@ func formatJSONFloat(spelling string) string {
 // the name the engine's resolver reports it by. Params is deliberately absent:
 // it is the one bag whose values carry their own type, and so the only place
 // the typed-literal token is meaningful.
-func dispatchStringFields(subject, pattern, operation, assignee, target string,
+func dispatchStringFields(subject, pattern, operation, assignee, queue, target string,
 	reads, optionalReads []string, ens []EnumerationSpec) []namedValue {
 	out := []namedValue{
 		{name: "subject", value: subject},
 		{name: "pattern", value: pattern},
 		{name: "operation", value: operation},
 		{name: "assignee", value: assignee},
+		{name: "queue", value: queue},
 		{name: "target", value: target},
 	}
 	for i, r := range reads {
@@ -821,8 +822,12 @@ func validateAdmissionSpec(targetIdx int, targetID string, a *AdmissionSpec) err
 // presence only — the engine resolves the literal-or-template value live at
 // dispatch. The required-field set mirrors the engine's dispatch-time
 // requirements (internal/weaver/strategist.go buildPlan): triggerLoom needs
-// Pattern + Subject, assignTask needs Operation + Assignee + Target, directOp
-// needs Operation.
+// Pattern + Subject, assignTask needs Operation + Target + exactly one of
+// Assignee / Queue (CreateTask's two endpoints — a concrete identity or a
+// role queue; both set would leave the dispatched routing to the script's
+// own precedence, neither leaves it nothing to route to), directOp needs
+// Operation. The engine's validateTarget refuses the same assignTask endpoint
+// shapes at load.
 func validateGapAction(targetIdx int, targetID, col string, ga GapActionSpec) error {
 	missing := func(field string) error {
 		return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q requires field %q",
@@ -840,8 +845,12 @@ func validateGapAction(targetIdx int, targetID, col string, ga GapActionSpec) er
 		if ga.Operation == "" {
 			return missing("Operation")
 		}
-		if ga.Assignee == "" {
-			return missing("Assignee")
+		if ga.Assignee == "" && ga.Queue == "" {
+			return missing("Assignee or Queue")
+		}
+		if ga.Assignee != "" && ga.Queue != "" {
+			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q action %q takes Assignee or Queue, not both (Assignee %q, Queue %q)",
+				targetIdx, targetID, col, ga.Action, ga.Assignee, ga.Queue)
 		}
 		if ga.Target == "" {
 			return missing("Target")

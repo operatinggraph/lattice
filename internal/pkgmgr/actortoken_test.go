@@ -47,6 +47,8 @@ func TestValidateWeaverTargets_ActorTokenOutsideHubRejected(t *testing.T) {
 		{"operation", GapActionSpec{Action: "directOp", Operation: actorToken}},
 		{"assignee", GapActionSpec{Action: "assignTask", Operation: "ApproveX",
 			Assignee: actorToken, Target: "row.entityKey"}},
+		{"queue", GapActionSpec{Action: "assignTask", Operation: "ApproveX",
+			Queue: actorToken, Target: "row.entityKey"}},
 		{"target", GapActionSpec{Action: "directOp", Operation: "Fix", Target: actorToken}},
 		{"reads[0]", GapActionSpec{Action: "directOp", Operation: "Fix", Reads: []string{actorToken}}},
 		{"optionalReads[0]", GapActionSpec{Action: "directOp", Operation: "Fix",

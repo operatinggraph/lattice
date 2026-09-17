@@ -6,7 +6,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //
 // Grant matrix:
 //
-//	ReportIssue        → operator, frontOfHouse, backOfHouse
+//	ReportIssue        → operator, frontOfHouse, backOfHouse   (scope=any)
+//	ReportIssue        → consumer                              (scope=self)
 //	ResolveWorkOrder   → operator
 //
 // ReportIssue goes to `operator` and to BOTH staff roles: front-of-house takes
@@ -14,6 +15,15 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // work it finds itself. Neither grant is a widening — the workplace guard in
 // the script confines each holder to the locations they worksAt, and root is
 // the only unconfined caller.
+//
+// ReportIssue's consumer grant is scope=self — the resident reporting a
+// problem with their own home. The capability plane validates only that the
+// authContext target IS the caller; what confines the write to the caller's
+// home is the script's own residence bind (require_residence, ddls.go): the
+// reported location must be a unit, and the caller's deterministic residesIn
+// link to that unit must be live. A resident holds no worksAt link, so the
+// staff guard would deny every self-service report; the self leg is the
+// guard that path needs, and the staff walk still binds everyone else.
 //
 // ResolveWorkOrder is granted to `operator` ONLY, and that is the whole point
 // rather than an oversight: the maintenance tech does not hold a standing
@@ -31,6 +41,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator and both staff roles the right to raise a maintenance work order. The script's workplace guard confines each staff holder to the locations they worksAt; only root is unconfined.",
 			GrantsTo:      []string{"operator", "frontOfHouse", "backOfHouse"},
+		},
+		{
+			OperationType: "ReportIssue",
+			Scope:         "self",
+			Note:          "Grants a consumer the right to report an issue at the unit they reside in (the script binds the validated self target to the caller and the caller to the unit by its residesIn link).",
+			GrantsTo:      []string{"consumer"},
 		},
 		{
 			OperationType: "ResolveWorkOrder",
@@ -60,7 +76,11 @@ func Permissions() []pkgmgr.PermissionSpec {
 // ReportIssue carries an op-meta too, for a different reason: it is the op a
 // standing staff catalog offers ("something's broken"), so it needs
 // presentation + a form. Its authContext is "standing" (the fourth case F2
-// added) — a role-granted caller sends no authContext object at all.
+// added) — a role-granted caller sends no authContext object at all. The
+// consumer self leg is NOT described here: its dispatcher is loftspace-app's
+// hand-built tenant submit, which sends authContext {target: self} and
+// declares the residesIn link per hat; a descriptor-driven staff form never
+// reaches that leg.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
@@ -103,6 +123,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		},
 		{
 			OperationType: "ReportIssue",
+			// refusal-courtesy(facet): NotResident: unreachable — the descriptor's authContext is standing, so Facet's staff form sends no authContext.target and the script's self leg (the only path raising NotResident) never runs.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Report an issue",
 				ShortLabel:  "Report",

@@ -76,11 +76,12 @@ func TestResolveWorkOrder_HasNoStandingStaffGrant(t *testing.T) {
 
 // TestReportIssue_GrantedToBothStaffRoles pins the other half: reporting is
 // standing staff work, and it is confined by the script's workplace guard
-// rather than by withholding the grant.
+// rather than by withholding the grant. The scope=any grant is the one read
+// here; the consumer's self grant is its own pin below.
 func TestReportIssue_GrantedToBothStaffRoles(t *testing.T) {
 	want := map[string]bool{"operator": false, "frontOfHouse": false, "backOfHouse": false}
 	for _, p := range Permissions() {
-		if p.OperationType != "ReportIssue" {
+		if p.OperationType != "ReportIssue" || p.Scope != "any" {
 			continue
 		}
 		for _, role := range p.GrantsTo {
@@ -98,6 +99,70 @@ func TestReportIssue_GrantedToBothStaffRoles(t *testing.T) {
 	}
 }
 
+// TestReportIssue_ConsumerSelfGrantIsScopeSelfOnly pins the tenant leg's
+// grant shape: consumer reaches ReportIssue on exactly one grant, and it is
+// scope=self — the capability plane then proves the target is the caller, and
+// the script's require_residence proves the caller lives at the unit. A
+// consumer on a scope=any grant would be a staff-shaped holder with no worksAt
+// link to confine it, and the self leg would never run for them.
+func TestReportIssue_ConsumerSelfGrantIsScopeSelfOnly(t *testing.T) {
+	selfGrants := 0
+	for _, p := range Permissions() {
+		if p.OperationType != "ReportIssue" {
+			continue
+		}
+		holdsConsumer := false
+		for _, role := range p.GrantsTo {
+			if role == "consumer" {
+				holdsConsumer = true
+			}
+		}
+		switch {
+		case p.Scope == "self":
+			selfGrants++
+			if !holdsConsumer || len(p.GrantsTo) != 1 {
+				t.Errorf("ReportIssue scope=self grants %v — the self leg is the consumer's alone", p.GrantsTo)
+			}
+		case holdsConsumer:
+			t.Errorf("ReportIssue scope=%s grants consumer — the tenant reaches the op on scope=self only, bound to residence", p.Scope)
+		}
+	}
+	if selfGrants != 1 {
+		t.Fatalf("ReportIssue declares %d scope=self grants, want exactly 1 (consumer)", selfGrants)
+	}
+}
+
+// TestWorkOrderQueueTarget_QueuesToBackOfHouse pins the gap's endpoint: the
+// missing_task gap is an assignTask on ResolveWorkOrder whose Queue is the
+// deterministic backOfHouse role key — the literal the showcase seed computes
+// — and whose Target is the anchor's own key. A gap that named an Assignee, or
+// a queue derived from the row, would be a different design.
+func TestWorkOrderQueueTarget_QueuesToBackOfHouse(t *testing.T) {
+	targets := WeaverTargets()
+	if len(targets) != 1 || targets[0].TargetID != WorkOrderQueueTarget {
+		t.Fatalf("WeaverTargets = %+v, want exactly the %s target", targets, WorkOrderQueueTarget)
+	}
+	ga, ok := targets[0].Gaps["missing_task"]
+	if !ok {
+		t.Fatal("workOrderQueue declares no missing_task gap")
+	}
+	if ga.Action != "assignTask" || ga.Operation != "ResolveWorkOrder" {
+		t.Errorf("missing_task = %s %s, want assignTask ResolveWorkOrder", ga.Action, ga.Operation)
+	}
+	if want := "vtx.role." + pkgmgr.RoleID("identity-domain", "backOfHouse"); ga.Queue != want {
+		t.Errorf("missing_task.Queue = %q, want the deterministic backOfHouse role key %q", ga.Queue, want)
+	}
+	if ga.Assignee != "" {
+		t.Errorf("missing_task.Assignee = %q, want empty — the task is queued for the role, not assigned", ga.Assignee)
+	}
+	if ga.Target != "row.entityKey" {
+		t.Errorf("missing_task.Target = %q, want row.entityKey (the anchor work order)", ga.Target)
+	}
+	if len(ga.Reads) != 0 || len(ga.OptionalReads) != 0 || len(ga.Enumerations) != 0 {
+		t.Errorf("missing_task declares reads %v / optionalReads %v / enumerations %v — the queue arm derives its own declared set", ga.Reads, ga.OptionalReads, ga.Enumerations)
+	}
+}
+
 // TestPackage_StructurePins pins every declared element by count and canonical
 // name (Vertical Package Standard S6, loftspace-domain/package_test.go idiom). A
 // declaration added or dropped without a deliberate edit here reds this test
@@ -111,10 +176,10 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.DDLs), 3; got != want {
 		t.Errorf("DDLs: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.Lenses), 0; got != want {
-		t.Errorf("Lenses: got %d, want %d — this package projects nothing; its work orders are read through the verticals", got, want)
+	if got, want := len(Package.Lenses), 1; got != want {
+		t.Errorf("Lenses: got %d, want %d — the workOrderQueue convergence lens; work orders are READ through the verticals' own lenses", got, want)
 	}
-	if got, want := len(Package.Permissions), 2; got != want {
+	if got, want := len(Package.Permissions), 3; got != want {
 		t.Errorf("Permissions: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.OpMetas), 2; got != want {
@@ -123,7 +188,7 @@ func TestPackage_StructurePins(t *testing.T) {
 	if got, want := len(Package.Roles), 0; got != want {
 		t.Errorf("Roles: got %d, want %d", got, want)
 	}
-	if got, want := len(Package.WeaverTargets), 0; got != want {
+	if got, want := len(Package.WeaverTargets), 1; got != want {
 		t.Errorf("WeaverTargets: got %d, want %d", got, want)
 	}
 	if got, want := len(Package.LoomPatterns), 0; got != want {
@@ -147,7 +212,13 @@ func TestPackage_StructurePins(t *testing.T) {
 			t.Errorf("DDLs[%d]: got %s/%s, want %s/%s", i, got.CanonicalName, got.Class, want.name, want.class)
 		}
 	}
-	wantPerms := []struct{ op, scope string }{{"ReportIssue", "any"}, {"ResolveWorkOrder", "any"}}
+	if len(Package.Lenses) == 1 && Package.Lenses[0].CanonicalName != WorkOrderQueueTarget {
+		t.Errorf("Lenses[0]: got %s, want %s", Package.Lenses[0].CanonicalName, WorkOrderQueueTarget)
+	}
+	if len(Package.WeaverTargets) == 1 && Package.WeaverTargets[0].TargetID != WorkOrderQueueTarget {
+		t.Errorf("WeaverTargets[0]: got %s, want %s", Package.WeaverTargets[0].TargetID, WorkOrderQueueTarget)
+	}
+	wantPerms := []struct{ op, scope string }{{"ReportIssue", "any"}, {"ReportIssue", "self"}, {"ResolveWorkOrder", "any"}}
 	for i, want := range wantPerms {
 		if i >= len(Package.Permissions) {
 			break

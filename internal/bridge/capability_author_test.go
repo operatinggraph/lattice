@@ -1383,6 +1383,38 @@ func TestAssembleTargetContent_StructuralDefectsAreReported(t *testing.T) {
 	}
 }
 
+// TestAssembleTargetContent_CarriesQueue pins the assignTask queue-arm's own
+// field: a cold review found this field map had no "queue" entry, so a
+// model-proposed queue-arm gap would assemble missing it — a "requires field
+// Assignee or Queue" refusal at the pkgmgr validate step that follows, for an
+// answer the model believed was complete.
+func TestAssembleTargetContent_CarriesQueue(t *testing.T) {
+	t.Parallel()
+	index := map[string]string{"someLens": "aaaaaaaaaaaaaaaaaaaa"}
+	content, _, problems := assembleTargetContent(modelTargetContent{
+		TargetID: "someTarget",
+		LensRef:  "someLens",
+		Gaps: []modelGapAction{
+			{GapColumn: "missing_task", Action: "assignTask", Operation: "CreateTask",
+				Queue: "vtx.role.rAAAAAAAAAAAAAAAAAAA", Target: "row.entityKey"},
+		},
+	}, "distilled", index)
+	if len(problems) != 0 {
+		t.Fatalf("problems = %v, want none", problems)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(content, &decoded); err != nil {
+		t.Fatalf("content is not JSON: %v", err)
+	}
+	gap := decoded["gaps"].(map[string]any)["missing_task"].(map[string]any)
+	if gap["queue"] != "vtx.role.rAAAAAAAAAAAAAAAAAAA" {
+		t.Errorf("gap = %v, want queue carried through to the assembled artifact", gap)
+	}
+	if _, present := gap["assignee"]; present {
+		t.Errorf("gap = %v, an empty assignee must stay omitted on a queue-arm gap", gap)
+	}
+}
+
 func TestAssembleTargetContent_IsByteStable(t *testing.T) {
 	t.Parallel()
 	src := goodDraft().Content
@@ -2234,8 +2266,14 @@ func TestEditableSpecKeys_MirrorTheAssembler(t *testing.T) {
 		LensRef:     staleLensCanonical,
 		Description: "what this target keeps true.",
 		Gaps: []modelGapAction{{
+			// Assignee and Queue are semantically exclusive on a real assignTask
+			// gap (pkgmgr's validateGapAction refuses both set) — both are
+			// populated here anyway because this fixture's job is only to make
+			// the assembler emit every KEY it can ever produce, for the
+			// key-set pinning below; it is never itself validated for install.
 			GapColumn: "missing_a", Action: "triggerLoom", Pattern: "p", Subject: "row.key",
-			Adapter: "notification", Operation: "SendReminder", Assignee: "row.key", Target: "row.key",
+			Adapter: "notification", Operation: "SendReminder", Assignee: "row.key", Queue: "row.key",
+			Target: "row.key",
 			Params: []modelParam{{Key: "channel", Value: "email"}}, Reads: []string{"row.key"},
 			IssueCode: "cold", IssueSeverity: "warning",
 		}},

@@ -147,7 +147,9 @@ function actionSummary(a) {
   if (!a) return "";
   switch (a.action) {
     case "triggerLoom": return "pattern " + (a.pattern || "?") + " on " + (a.subject || "?");
-    case "assignTask": return (a.operation || "?") + " → " + (a.assignee || "?");
+    case "assignTask": return a.queue
+      ? (a.operation || "?") + " → queue " + a.queue
+      : (a.operation || "?") + " → " + (a.assignee || "?");
     case "directOp": return (a.operation || "?") + (a.target ? " on " + a.target : "");
     case "surface": return "raise " + (a.issueCode || "?") + " (" + (a.issueSeverity || "warning") + ")";
     case "proposedOp": return "row-carried proposed action";

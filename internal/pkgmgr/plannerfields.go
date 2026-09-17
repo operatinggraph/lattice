@@ -153,7 +153,7 @@ func validateActionsCatalogSpec(targetIdx int, targetID, col string, ga GapActio
 				targetIdx, targetID, col, i, entry.Ref, name, actorToken)
 		}
 		stringFields := dispatchStringFields(
-			entry.Subject, entry.Pattern, entry.Operation, entry.Assignee, entry.Target,
+			entry.Subject, entry.Pattern, entry.Operation, entry.Assignee, entry.Queue, entry.Target,
 			entry.Reads, entry.OptionalReads, entry.Enumerations)
 		if f, found := typedLiteralInStringField(stringFields); found {
 			return fmt.Errorf("pkgmgr: WeaverTarget[%d] %q: gaps key %q: actions[%d] (ref %q): %s %q must be a key, operationType or pattern ref — always a string — so the %s typed literal is not permitted there (it is meaningful only in a gap's params bag); write the value directly",

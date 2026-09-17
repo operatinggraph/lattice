@@ -82,7 +82,14 @@ type GapAction struct {
 	Adapter   string `json:"adapter,omitempty"`
 	Operation string `json:"operation,omitempty"`
 	Assignee  string `json:"assignee,omitempty"`
-	Target    string `json:"target,omitempty"`
+	// Queue is an assignTask's role-queue endpoint (a vtx.role.<NanoID>
+	// literal or a row.<column> template), CreateTask's alternative to a
+	// concrete Assignee: the task is queued for the role and any holder may
+	// later ClaimTask it. Exactly one of Assignee / Queue is set on an
+	// assignTask — validateTarget refuses both and neither at load, as
+	// install does.
+	Queue  string `json:"queue,omitempty"`
+	Target string `json:"target,omitempty"`
 	// Params are the dispatched op's payload fields, each value written in the
 	// three-arm value grammar pkgmgr.GapActionSpec.Params documents:
 	// row.<column>, json:<literal>, or a plain string. resolveParam is the
@@ -114,10 +121,10 @@ type GapAction struct {
 	// pkgmgr.GapActionSpec.OptionalReads documents (a step-4 snapshot serve
 	// with no live read, and a CreateOnly-conditioned create on the key's
 	// absence). Valid only on a directOp: every other action's optionalReads
-	// is the engine's own to set (e.g. assignTask's stable task dedup key +
-	// assignee availability aspect), and validateTarget refuses a
-	// non-directOp gap that declares this field rather than let the two
-	// writers collide. An entry whose template resolves null/absent for a row
+	// is the engine's own to set (e.g. assignTask's stable task dedup key,
+	// plus the assignee availability aspect on its Assignee arm), and
+	// validateTarget refuses a non-directOp gap that declares this field
+	// rather than let the two writers collide. An entry whose template resolves null/absent for a row
 	// is dropped from that dispatch rather than failing it — the field exists
 	// for keys whose absence is normal, so the rows that drop it are the rows
 	// it was written for.
@@ -223,6 +230,7 @@ type GapCandidate struct {
 	Adapter   string `json:"adapter,omitempty"`
 	Operation string `json:"operation,omitempty"`
 	Assignee  string `json:"assignee,omitempty"`
+	Queue     string `json:"queue,omitempty"`
 	Target    string `json:"target,omitempty"`
 	// Params are the chosen candidate's op payload fields, in the same value
 	// grammar GapAction.Params carries (a chosen candidate dispatches through
@@ -282,6 +290,7 @@ type ActionCatalogEntry struct {
 	Adapter   string `json:"adapter,omitempty"`
 	Operation string `json:"operation,omitempty"`
 	Assignee  string `json:"assignee,omitempty"`
+	Queue     string `json:"queue,omitempty"`
 	Target    string `json:"target,omitempty"`
 	// Params are the chosen entry's op payload fields, in the same value
 	// grammar GapAction.Params carries (a synthesized plan's step dispatches
@@ -737,6 +746,9 @@ func validateTarget(t *Target) error {
 		if err := validateGapStringFields(fmt.Sprintf("gaps key %q", col), ga); err != nil {
 			return err
 		}
+		if err := validateAssignTaskEndpoint(fmt.Sprintf("gaps key %q", col), ga); err != nil {
+			return err
+		}
 		if ga.Action == actionSurface && ga.IssueSeverity != "" && ga.IssueSeverity != "warning" && ga.IssueSeverity != "error" {
 			return fmt.Errorf("gaps key %q action %q issueSeverity %q must be \"warning\" or \"error\" (omit for the \"warning\" default) — aggregateStatus only escalates those two",
 				col, ga.Action, ga.IssueSeverity)
@@ -813,10 +825,10 @@ func hubPlaceholderRefusal(name, hub string) string {
 // validateOptionalReadsScope refuses a declared OptionalReads set on any
 // action arm other than directOp. Every other arm's ContextHint.OptionalReads
 // is the engine's OWN to set at dispatch (buildPlan's assignTask arm already
-// builds one from the stable task dedup key + the assignee availability
-// aspect); a package-declared value on that same arm would collide with it,
-// and letting one silently win would make the outcome order-dependent instead
-// of a loud, permanent install-time refusal.
+// builds one from the stable task dedup key, plus the assignee availability
+// aspect on its Assignee arm); a package-declared value on that same arm
+// would collide with it, and letting one silently win would make the outcome
+// order-dependent instead of a loud, permanent install-time refusal.
 func validateOptionalReadsScope(where, action string, optionalReads []string) error {
 	if len(optionalReads) == 0 || action == actionDirectOp {
 		return nil
@@ -895,6 +907,7 @@ func dispatchStringValues(ga GapAction) []namedValue {
 		{name: "pattern", value: ga.Pattern},
 		{name: "operation", value: ga.Operation},
 		{name: "assignee", value: ga.Assignee},
+		{name: "queue", value: ga.Queue},
 		{name: "target", value: ga.Target},
 	}
 	for i, r := range ga.Reads {
@@ -950,6 +963,29 @@ func validateGapStringFields(where string, ga GapAction) error {
 		if f.hub && f.value != actorToken && strings.ContainsAny(f.value, "{}") {
 			return fmt.Errorf("%s: %s", where, hubPlaceholderRefusal(f.name, f.value))
 		}
+	}
+	return nil
+}
+
+// validateAssignTaskEndpoint holds an assignTask to exactly one CreateTask
+// endpoint: Assignee (a concrete identity) or Queue (a role queue any holder
+// may ClaimTask). Both set would leave the routing to the script's own
+// precedence — a body that reads as two dispatch identities on the envelope
+// while only one is ever bound; neither leaves the arm nothing to route to,
+// a config error buildPlan would otherwise re-raise per violation row
+// forever. The verdict is one load-time refusal, as install's
+// validateGapAction refuses it first. Every surface whose declaration reaches
+// buildPlan's assignTask arm runs through here — the gap's own entry, a
+// candidate, a catalog entry — because the arm cannot tell which authored it.
+func validateAssignTaskEndpoint(where string, ga GapAction) error {
+	if ga.Action != actionAssignTask {
+		return nil
+	}
+	if ga.Assignee == "" && ga.Queue == "" {
+		return fmt.Errorf("%s: action %q requires assignee or queue (CreateTask's two endpoints; neither is declared)", where, ga.Action)
+	}
+	if ga.Assignee != "" && ga.Queue != "" {
+		return fmt.Errorf("%s: action %q takes assignee or queue, not both (assignee %q, queue %q)", where, ga.Action, ga.Assignee, ga.Queue)
 	}
 	return nil
 }
@@ -1074,6 +1110,9 @@ func validateGapPlannerFields(col string, ga GapAction) (GapAction, error) {
 		if err := validateGapStringFields(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), candidateGapAction(cand)); err != nil {
 			return ga, err
 		}
+		if err := validateAssignTaskEndpoint(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), candidateGapAction(cand)); err != nil {
+			return ga, err
+		}
 		if err := validateOptionalReadsScope(fmt.Sprintf("gaps key %q: candidates[%d]", col, i), cand.Action, cand.OptionalReads); err != nil {
 			return ga, err
 		}
@@ -1169,6 +1208,9 @@ func validateActionsCatalog(col string, ga *GapAction) error {
 			return err
 		}
 		if err := validateGapStringFields(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), catalogEntryGapAction(entry)); err != nil {
+			return err
+		}
+		if err := validateAssignTaskEndpoint(fmt.Sprintf("gaps key %q: actions[%d] (ref %q)", col, i, entry.Ref), catalogEntryGapAction(entry)); err != nil {
 			return err
 		}
 		if entry.Cost == 0 {
