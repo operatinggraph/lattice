@@ -77,7 +77,11 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   (café house tab limit, 2026-09-16, caught cold):** the desk's policy panel read only the workplace's OWN row and
   said "residents may self-order any total" while the op binds the tightest policy on the whole chain — a panel
   that names a rule states the op's composition, not one input to it; the read now returns the covered chains and
-  the sentence names the tighter policy that binds.
+  the sentence names the tighter policy that binds. **Seventh (café unserved settle, 2026-09-18, caught cold):** the
+  resident's settle gate counted the lens row's lines while the card drew the optimistic `pending` overlay — an
+  accepted self-order not yet projected left Settle enabled and refused; a courtesy predicate runs over the lines the
+  card RENDERS, and a stale-card re-render on a refusal is applied at every site that dispatches the op (two of five had
+  it).
 - **An op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`** — a
   rationale comment naming an exemption-less op (the instructor identity bind) reddened `lint-static` after
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats
@@ -174,3 +178,8 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   — its handler reads the roster through `queryPatients`); the tests are `POSTGRES_TEST_DSN`-gated and skip locally, so
   the census of `BuildProtectedTableDDL("<table>"` is grepped across every `_test.go`, and the package is run once with
   the stack's DSN before the merge.
+  Sixth sighting (Café `voidedReason`, 2026-09-18, caught cold — BLOCKING): a new aspect key reached the package, the
+  FE tag and its goja pin, and missed the app's own read boundary (`tabs.go`'s projection + wire structs), so the tag
+  was dead code on the wire while the pin fed the key straight into the fixture; a new key's census walks the
+  `cmd/<app>` struct pair between the lens row and the browser, and a markup pin builds its fixture from the wire
+  struct (`json.Marshal` of the app's own type), never a free-form object.

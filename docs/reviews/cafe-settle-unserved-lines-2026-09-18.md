@@ -119,3 +119,22 @@ unserved lines" as the resident's call; the PO's live count is the call.
 6. **Adjacent finds:** none at scoping.
 7. **Non-goals:** a resident cancelling their own order (VoidCharge's self scope — a different row); refusing
    `SettleStaleTab` (nobody is there to act); a made/served split (one served mark); re-opening a settled tab.
+
+### Build note (2026-09-18)
+
+Shipped `a97c193c` (merge `89491f71`); brief `92ea61a2`. Live on the shared stack (cafe-domain 0.19.0 diff-applied,
+`bin/cafe-app` cycled): Riley Chen opened a tab and self-ordered a Latte through the Gateway (`orderedAt
+2026-09-18T18:05:41Z`, no `servedAt`); their own Settle was refused `UnservedLines: 1 order(s) still to make — mark
+served or void first: line-1 (Latte)`, Dana Whitfield's desk Settle the same; Dana's `MarkLineServed` landed and
+Riley's Settle was then accepted. The sweep's void is proven by `TestSettleStaleTab_VoidsUnservedLines` (the 24 h
+deadline is not driven live).
+
+Deviations from the brief: `tabs.go` (the app's read boundary) joined the touch-list at review — the brief omitted
+it; `unservedLineCount` counts a `pending` line (an accepted self-order the lens has not projected yet) and the
+resident card counts over its rendered overlay; `settleButtonAttrs` + `residentSettlePanelMarkup` were extracted so
+the disabled markup is pinned, not the ternary; the null guard on a line's amount. Review classification (one cold
+pass, three lenses, over the whole diff): **implementation-bug + brief-gap** — `/api/tabs` dropped `voidedReason`
+(BLOCKING; the vertical-apps census class, sixth sighting); **implementation-bug** — the pending overlay left Settle
+enabled (seventh sighting on the count-predicate class), the stale-card re-render at two of five sites;
+**test-gap** — the two ordering clauses (confinement / ownership before `UnservedLines`) and the disabled markup had
+no vector; **nit** — a present-null amount would have raised in the sweep. Adjacent finds: none.
