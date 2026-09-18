@@ -596,6 +596,11 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   Sighting (wellness `wellnessBookingChangeNotices`, 2026-09-16, builder-caught): a level-triggered gap templating
   `row.startsAt` off the OPTIONAL `forSession` walk reads null for the whole call-off window — the gap carries
   `se.schedule.data.startsAt <> null` as its own conjunct.
+  Fourth sighting (wellness `wellnessBookingChangeNotices`, 2026-09-18, caught cold, BLOCKING): `row.instructorName` off
+  the OPTIONAL `ledBy` walk, null on the instructor-CLEARED class the gap existed to tell. **The Params half is RETIRED —
+  mechanized as `scripts/lint-gap-params-optional-hop.go`** (the full engine's `OptionalHopColumns` /
+  `ReturnColumnGuardsNonNull`; clean = anchor-only, `coalesce`d to a literal, or bound by the gap's own `<> null` /
+  ordering conjunct). The Hub and Reads halves stay a walk.
 - **A gap's budget and cadence are derived from its WHOLE loop, not one arm or one window** — a cap summed over
   one arm of a multi-relation sweep under-sizes it (erasure residue caps, 2026-08-24, 2× and 3×); a gap that
   re-opens on a recorded clock lapse mints a successor per window while the prior instance stays live (lease-signing
@@ -711,6 +716,11 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   `time.rfc3339_utc(op.submittedAt)` stamp read as the identity of the WRITE — it records an instant, whole seconds, so
   two writes in one second share it and a `checkedFor <> stamp` gap latched the first save's verdict; a change key is
   `op.requestId` with the instant kept beside it, an order carries a total tie key.
+  Sighting (wellness `collect_waitlist_candidates` + the new booker walk, 2026-09-18, caught by the fire's own vector): a
+  booking's `.status.value = waitlisted` read as "a live waitlister" when `CancelBooking` tombstones the ROOT alone and
+  leaves the aspect for the release and the notices — the promotion walk seated a cancelled waitlister. Check: a walk
+  over `forSession`/`bookedBy`-style in-links that reads an aspect for liveness reads the root first (`vertex_live`);
+  the vector cancels one candidate and proves the walk passes over it.
 - **A link key's type segment is what an OUTBOUND walk rebuilds the far endpoint from** — `mint_clause` wrote
   `lnk.clause.<c>.governs.lease.<l>` for a `vtx.leaseapp` target through four fires; the inbound walk bound fine, a
   clause-anchored `(c)-[:governs]->(l:leaseapp)` never could (`adjacency/store.go` `OtherType: dstType`). Check: a

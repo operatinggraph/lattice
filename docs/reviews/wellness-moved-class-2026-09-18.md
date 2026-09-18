@@ -158,3 +158,31 @@ max class size is 1; the row carries the census.
 7. **Non-goals:** telling a waitlisted member of a swap (no seat); a claim-time instructor snapshot on the booking; a
    session-level stamp for the time move; the roster's view of who leads (the session card already says *with
    <name>*); repairing cells stranded before this fire on tombstoned sessions.
+
+### Build note (2026-09-18)
+
+Shipped `3abf4b97` (CI green) + `727abcad` (the promoted gate); brief `5b699f22`. Increments landed on `main` in one
+merge: `dfd40d0f` (domain, 0.31.0), `db4103ca` (reminders, 0.5.0), `72af4323` (the app), `0c0c3907` (the close fix round),
+then `0c…→727abcad` (the gate, reminders 0.5.1). Live on the shared stack (both packages diff-applied, `bin/wellness-app`
+cycled, `verify-package-wellness-domain` 562/562): a probe class at Riverside with Sam, Riley Chen + Priya Raman booked,
+moved 18:00 → 19:00 — both members' four cells released and four claimed in the move's own batch; Riley booked at 18:00
+elsewhere (admitted) and at 19:00 (`BookerConflict … slot 20260921t190000z is already booked`); the class cleared of its
+instructor at 20:06:24Z and both seats told at 20:06:28/29Z (bridge `…:instructor:2026-09-18T20:06:24Z` beside the earlier
+`…:moved:2026-09-21T19:00:00Z`), `/api/bookings` serving `instructorName: ""`, `instructorChangedAt`, `instructorFor`; the
+three probe classes then called off. Max live class size stays 1.
+
+Deviations from the brief: (1) `bookedAt <> null` is not a conjunct — the engine's `>=` is already false on a null
+operand (revert-proven inert, dropped); (2) both walks check the booking ROOT — a cancelled seat's `.status` outlives it,
+and the pre-existing waitlist walk PROMOTED a cancelled waitlister (found by this fire's own vector, fixed in the same
+round); (3) the batch ceiling is projected from the membership before any claim read in both ops, so the bound is the
+refusal, not a script timeout, and `SeriesTooLarge` no longer advises cancelling the run; (4) `instructorName` /
+`studioName` are `coalesce`d to `''` — Weaver refuses a null templated column, which would have refused the CLEAR case
+the instructor gap exists for; (5) `wellnessBookingChangeNotices`' consumer filter moved from relation-narrowed to
+label-narrowed (5 labels × 9 relation slots > the 24-subject cap) — the two extra walks widen its delivery footprint;
+accepted, recorded here. Review classification: one BLOCKING design gap (4 — the fourth sighting of the OPTIONAL-hop
+Params class, now mechanized as `lint-gap-params-optional-hop`, the dossier entry retired), two implementation gaps (2,
+3), one brief-gap (the read-drift note claimed a declaration the FE does not make), one footprint regression (5), two
+nits (the shared `sentAt` across three badges — accepted; a message-code assert), no review over-reach. The gate's first
+corpus run also found `wellnessBookingReminders` leaning on `remindAt`'s comparison to bind the session — it now states
+`startsAt <> null` outright (0.5.1). Adjacent finds: none beyond the accounting above; the ~120-seat bound is the
+designer row on the board.
