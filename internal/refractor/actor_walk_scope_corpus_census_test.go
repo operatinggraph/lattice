@@ -206,7 +206,7 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"visitSeriesDue":                    "appointment:forPatient,withProvider|patient:forPatient|provider:withProvider|visitseries:forPatient,withProvider",
 	"visitSeriesSiteBackfill":           "building:atSite|provider:withProvider|visitseries:atSite,withProvider",
 	"wellnessArrearsReminders":          "none",
-	"wellnessBookingChangeNotices":      "booking:bookedBy,forSession|identity:bookedBy|session:forSession",
+	"wellnessBookingChangeNotices":      "booking:bookedBy,forSession|identity:bookedBy|instructor:ledBy|session:atStudio,forSession,ledBy|studio:atStudio",
 	"wellnessBookingReminders":          "booking:bookedBy,forSession|identity:bookedBy|session:forSession",
 	"wellnessClassPriceSettlement":      "booking:bookedBy,forSession,settlesClassPrice|identity:bookedBy,heldFor|session:forSession|wellnessaccount:heldFor|wellnesstransaction:settlesClassPrice",
 	"wellnessNoShowSettlement":          "booking:bookedBy,settles|identity:bookedBy,heldFor|wellnessaccount:heldFor|wellnesstransaction:settles",
