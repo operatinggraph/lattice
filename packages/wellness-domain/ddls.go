@@ -3045,11 +3045,12 @@ def claim_cell(hub, cellcode, cls, conflict_code, who):
     key = hub + ".slot" + cellcode
     # read-posture: (d) optionalReads — derived server-side by this script's
     # own derive_reads(op) for CreateSession/CreateSessionSeries, still
-    # client-declared for ReassignSession (see derive_reads' doc comment for
-    # why that op is excluded), and a class-(e) follow-up of the partOf walk
-    # for ReassignSessionSeries (each cell is a function of a walked
-    # occurrence's schedule). An absent cell is the common case (no
-    # existing booking), never a required read.
+    # client-declared for ReassignSession's studio and instructor hubs (see
+    # derive_reads' doc comment for why that op is excluded) while its
+    # booker hubs are a class-(e) follow-up of the forSession walk, and a
+    # class-(e) follow-up of the partOf walk for ReassignSessionSeries (each
+    # cell is a function of a walked occurrence's schedule). An absent cell
+    # is the common case (no existing booking), never a required read.
     existing = kv.Read(key)
     if existing != None and not existing.isDeleted:
         fail(conflict_code + ": " + who + " " + hub + " slot " + cellcode + " is already booked")
@@ -3247,7 +3248,7 @@ def collect_live_bookers(sess_key, max_pages):
     # and one member may hold two bookings on one class only when the first
     # is no longer live, so bookings AND bookers are both de-duplicated: one
     # booker gets one cell delta, never two tombstones of the same key in one
-    # batch.
+    # batch. Two live reads per booking (root, .status) beside the page.
     bookers = []
     seen_bookings = {}
     seen_bookers = {}
@@ -3266,6 +3267,12 @@ def collect_live_bookers(sess_key, max_pages):
             if lk.sourceVertex in seen_bookings:
                 continue
             seen_bookings[lk.sourceVertex] = True
+            # A booking's .status outlives its root (CancelBooking tombstones
+            # the root alone), so a cancelled seat still reads booked here;
+            # the root is the liveness fact, and a dead booking's hub holds
+            # no cells to carry (vertex_live is the class-(e) read).
+            if not vertex_live(lk.sourceVertex):
+                continue
             # read-posture: (e) per-booking follow-up read off the
             # enumeration above (data-derived key -- the booking is unknown
             # until it resolves from the link).
@@ -4470,6 +4477,38 @@ def execute(state, op):
                     new_sched[carried] = sched.data.get(carried)
             moved.append({"key": sess_key, "startsAt": occ["startsAt"], "sched": new_sched, "revision": sched.revision})
 
+        # The batch ceiling, projected from the sets BEFORE any claim read:
+        # every hub's delta is a function of the cells it holds and will
+        # hold, and the booker hubs scale the batch by attendance (one
+        # regular on every week of a 1 h run is 52 x 8 mutations clear of
+        # their cells), so counting only what was assembled would spend a
+        # claim read per new cell per hub first and surface the bound as a
+        # script timeout the desk cannot read. A shift onto cells the run
+        # already holds (its own interval) writes only the difference and
+        # lands well under it; a run that does not fit moves week by week
+        # (ReassignSession, which carries each class's members with it) --
+        # never by cancelling, which would release every member's seat.
+        projected = len(moved)
+        for c in old_studio_cells:
+            if c not in new_studio_cells:
+                projected += 1
+        for c in new_studio_cells:
+            if c not in old_studio_cells:
+                projected += 1
+        for hubs in [old_instr_cells, old_booker_cells]:
+            new_hubs = new_instr_cells if hubs == old_instr_cells else new_booker_cells
+            for hub in hubs:
+                for c in hubs[hub]:
+                    if c not in new_hubs[hub]:
+                        projected += 1
+                for c in new_hubs[hub]:
+                    if c not in hubs[hub]:
+                        projected += 1
+        if projected > SERIES_MOVE_MAX_MUTATIONS:
+            fail("SeriesTooLarge: moving " + str(len(moved)) + " occurrences with " + str(len(old_booker_cells)) +
+                 " members takes " + str(projected) + " mutations, more than the " + str(SERIES_MOVE_MAX_MUTATIONS) +
+                 " one operation can commit; shift the run onto cells it already holds, or move it week by week")
+
         mutations = []
         for c in old_studio_cells:
             if c not in new_studio_cells:
@@ -4536,16 +4575,13 @@ def execute(state, op):
                 shifted["instructor"] = horizon.data.get("instructor")
             mutations.append(make_aspect_upsert(series_key, "horizon", "sessionSeriesHorizon", shifted))
 
-        # The batch ceiling, checked on what was actually assembled rather
-        # than on the run's shape: a shift onto the run's own cells writes only
-        # the difference, so the same 52-occurrence run fits or does not by
-        # where it is going, not by how long it is (SERIES_MOVE_MAX_MUTATIONS).
+        # The assembled count, behind the projection above (which is exact
+        # for every cell delta): this catches the horizon write and anything
+        # else assembled beside them.
         if len(mutations) > SERIES_MOVE_MAX_MUTATIONS:
             fail("SeriesTooLarge: moving " + str(len(moved_keys)) + " occurrences takes " + str(len(mutations)) +
                  " mutations, more than the " + str(SERIES_MOVE_MAX_MUTATIONS) +
-                 " one operation can commit; move the run in two halves (cancel the later half with " +
-                 "TombstoneSessionSeries and schedule it again with CreateSessionSeries), or shift it onto " +
-                 "cells it already holds")
+                 " one operation can commit; shift the run onto cells it already holds, or move it week by week")
 
         # NO primaryKey, for TombstoneSessionSeries's reason: the occurrences
         # this op moves are its subject, and every mutation for them roots at
@@ -4836,14 +4872,40 @@ def execute(state, op):
         # member's hub, and the desk resolves it -- nothing is half-moved. A
         # walk that does not reach the end of the session's bookings is
         # refused too: migrating the members it found and stranding the rest
-        # would be this bug in a new coat. The hubs and the cells are
-        # class-(e) follow-ups of the walk; a dispatcher that knows the
-        # roster (cmd/wellness-app) declares the cells as optionalReads.
+        # would be this bug in a new coat. The bookers' hubs are two hops
+        # off the walk (a booking's .status.booker), so their cells are live
+        # class-(e) follow-up reads for every dispatcher -- no client can
+        # name them up front (internal/testutil/read_drift_baseline.txt).
+        # A cell a legacy booking never claimed tombstones as a fresh dead
+        # key, which a later claim_cell revives through its isDeleted branch
+        # -- the same shape CancelBooking's release already leaves.
+        #
+        # The batch ceiling is judged BEFORE the claim reads: the booker
+        # delta scales the batch by the class's membership (eight mutations
+        # per member clear of their old cells on a one-hour class), so a
+        # full class can assemble more than substrate.MaxBatchMessages
+        # admits -- a commit-time fault the desk cannot read -- and counting
+        # only what was assembled would spend a claim read per cell per
+        # member first and surface the bound as a script timeout instead of
+        # the refusal. The count is a function of the sets alone (the same
+        # ceiling ReassignSessionSeries keeps, SERIES_MOVE_MAX_MUTATIONS).
         if reschedule and (new_starts != cur_starts or new_ends != cur_ends):
             bookers, reached_end = collect_live_bookers(sess_key, MAX_BOOKER_WALK_PAGES)
             if not reached_end:
                 fail("BookingWalkBound: session " + sess_key + " carries more bookings than " +
                      str(MAX_BOOKER_WALK_PAGES * BOOKER_WALK_PAGE_LIMIT) + " links; its members cannot all be moved in one call")
+            per_booker = 0
+            for c in old_cells:
+                if c not in new_cells:
+                    per_booker += 1
+            for c in new_cells:
+                if c not in old_cells:
+                    per_booker += 1
+            projected = len(mutations) + len(bookers) * per_booker + 1
+            if projected > SERIES_MOVE_MAX_MUTATIONS:
+                fail("MoveTooLarge: moving session " + sess_key + " with its " + str(len(bookers)) + " members takes " +
+                     str(projected) + " mutations, more than the " + str(SERIES_MOVE_MAX_MUTATIONS) +
+                     " one operation may commit; its members cannot all be moved in one call")
             for booker in bookers:
                 for c in old_cells:
                     if c not in new_cells:
@@ -4937,12 +4999,9 @@ def execute(state, op):
             new_sched["residentPriceCents"] = cur_resident_price_cents
         mutations.append(make_aspect_upsert_occ(sess_key, "schedule", "sessionSchedule", new_sched, sched.revision))
 
-        # One batch, one ceiling: the booker delta scales the batch by the
-        # class's membership (eight mutations per member clear of their old
-        # cells on a one-hour class), so a full class can assemble more than
-        # substrate.MaxBatchMessages admits -- a commit-time fault the desk
-        # cannot read. Counted and refused here under the same ceiling
-        # ReassignSessionSeries keeps (SERIES_MOVE_MAX_MUTATIONS).
+        # The assembled count, behind the projection above: the projection
+        # is exact for the booker delta, and this catches anything the
+        # branches above assembled beside it.
         if len(mutations) > SERIES_MOVE_MAX_MUTATIONS:
             fail("MoveTooLarge: moving session " + sess_key + " with its " + str(len(mutations)) + " mutations exceeds the " +
                  str(SERIES_MOVE_MAX_MUTATIONS) + " one operation may commit; its members cannot all be moved in one call")
@@ -5277,6 +5336,13 @@ def collect_waitlist_candidates(session_key, max_pages):
             if lk.isDeleted:
                 continue
             if lk.sourceVertex in seen:
+                continue
+            # A booking's .status outlives its root: CancelBooking tombstones
+            # the root alone and leaves the aspect for the release and the
+            # notices to read, so a cancelled waitlister still reads
+            # waitlisted here. The root is the liveness fact; a dead one is
+            # passed over, never seated (vertex_live is the class-(e) read).
+            if not vertex_live(lk.sourceVertex):
                 continue
             # read-posture: (e) per-candidate follow-up read off the
             # enumeration above (data-derived key — the booking is unknown

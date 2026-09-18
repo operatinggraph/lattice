@@ -153,9 +153,13 @@ func reassignSessionOpMeta() pkgmgr.OpMetaSpec {
 			},
 			// The operator-role confinement probe: the workplace-exempt
 			// short-circuit walks the actor's own holdsRole links to test
-			// for the operator role (actor_holds_operator).
+			// for the operator role (actor_holds_operator) — and, this
+			// descriptor being the reschedule form (startsAt/endsAt
+			// required), the class's own bookings, walked to carry every
+			// booker's slot cells with the moved class.
 			Enumerations: []pkgmgr.EnumerationSpec{
 				{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+				{Hub: "{payload.sessionKey}", Relation: "forSession", Direction: "in"},
 			},
 		},
 	}

@@ -241,9 +241,12 @@ RETURN
 //     null` conjunct is needed or carried; a class whose leader or room
 //     never changed has no stamp and `null <> null` is false.
 //     instructorName / studioName walk the session's live ledBy / atStudio
-//     links so the notice says who leads now and where it meets; an un-led
-//     class names nobody, and the walk to a tombstoned neighbour binds
-//     nothing.
+//     links so the notice says who leads now and where it meets, coalesced
+//     to ” — the target templates both as Params, and Weaver refuses to
+//     dispatch a gap whose templated column is null (strategist.go's
+//     resolveRowTemplate), so an un-led class (the clear case this gap
+//     exists for) or a room whose studio was since tombstoned must project
+//     a string, never null; the op drops the empty name.
 //   - se.schedule.data.startsAt <> null guards ALL FOUR gaps: a tombstoned
 //     session unbinds the OPTIONAL forSession walk (the rule engine drops a
 //     dead neighbour), so a called-off class projects null startsAt for
@@ -295,8 +298,8 @@ RETURN
   b.status.data.bookedAt AS bookedAt,
   b.status.data.promotedAt AS promotedAt,
   b.status.data.className AS className,
-  i.profile.data.displayName AS instructorName,
-  st.profile.data.name AS studioName,
+  coalesce(i.profile.data.displayName, '') AS instructorName,
+  coalesce(st.profile.data.name, '') AS studioName,
   se.schedule.data.instructorChangedAt AS instructorChangedAt,
   se.schedule.data.studioChangedAt AS studioChangedAt,
   b.changeNotice.data.promotedFor AS promotedFor,

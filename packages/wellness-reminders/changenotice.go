@@ -152,14 +152,14 @@ func changeNoticeAspectTypeDDL() pkgmgr.DDLSpec {
 			`"movedFor":{"type":"string","description":"The session startsAt (RFC3339, canonical UTC) the last move notice was for."},` +
 			`"instructorFor":{"type":"string","description":"The session's .schedule.instructorChangedAt (RFC3339, canonical UTC) the last instructor notice was for."},` +
 			`"roomFor":{"type":"string","description":"The session's .schedule.studioChangedAt (RFC3339, canonical UTC) the last room notice was for."},` +
-			`"sentAt":{"type":"string","description":"RFC3339 instant the latest notice of either kind was recorded (the op's submittedAt, canonical UTC)."}}}`,
+			`"sentAt":{"type":"string","description":"RFC3339 instant the latest notice of any kind was recorded (the op's submittedAt, canonical UTC)."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"promotedFor":   "The .status.promotedAt instant the promotion notice was for. promotedFor = promotedAt closes the promotion gap.",
 			"movedFor":      "The session startsAt the last move notice was for. movedFor = the current startsAt closes the move gap; a further ReassignSession reopens it.",
 			"instructorFor": "The session's .schedule.instructorChangedAt the last instructor notice was for. Equality closes the instructor gap; a further swap, clear or assignment reopens it.",
 			"roomFor":       "The session's .schedule.studioChangedAt the last room notice was for. Equality closes the room gap; a further room move reopens it.",
-			"sentAt":        "RFC3339 instant the latest notice of either kind was recorded (op.submittedAt, canonical UTC).",
+			"sentAt":        "RFC3339 instant the latest notice of any kind was recorded (op.submittedAt, canonical UTC).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -203,8 +203,9 @@ def parts_of(key, name, want_type):
     return parts[1], parts[2]
 
 def optional_param(p, name):
-    # A row column the target templates as a param: null when the walk it
-    # comes from bound nothing, else its string.
+    # A row column the target templates as a param: '' when the walk it
+    # comes from bound nothing (the lens coalesces so Weaver can template
+    # it), read here as absent.
     if not hasattr(p, name):
         return None
     v = getattr(p, name)
@@ -375,14 +376,19 @@ def execute(state, op):
         class_name = status.data.get("className")
         if class_name != None:
             params["className"] = class_name
-        # An instructor notice says who leads now (an un-led class names
-        # nobody); a room notice says where the class meets. Both arrive off
-        # the dispatching row -- the lens's ledBy / atStudio walks -- so the
-        # script reads no link of its own.
+        # An instructor notice says who leads now; a room notice says where
+        # the class meets. Both arrive off the dispatching row -- the lens's
+        # ledBy / atStudio walks, coalesced to '' so Weaver can template them
+        # -- and the script reads no link of its own. An un-led class names
+        # nobody: the key is omitted, never sent as an empty string.
         if kind == "instructor":
-            params["instructorName"] = optional_param(p, "instructorName")
+            instructor_name = optional_param(p, "instructorName")
+            if instructor_name != None:
+                params["instructorName"] = instructor_name
         if kind == "room":
-            params["studioName"] = optional_param(p, "studioName")
+            studio_name = optional_param(p, "studioName")
+            if studio_name != None:
+                params["studioName"] = studio_name
         events.append({"class": "external.notification",
                        "data": {"instanceKey": ext_ref, "adapter": "notification",
                                 "replyOp": "RecordBookingChangeNotification",

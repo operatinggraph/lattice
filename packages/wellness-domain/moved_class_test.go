@@ -2,6 +2,7 @@ package wellnessdomain_test
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -65,8 +66,9 @@ func TestReassignSession_MovesBookersCellsWithTheClass(t *testing.T) {
 		t.Fatalf("a booking on the freed 09:00 hour = %v, want Accepted", o)
 	}
 	held, _ := createSession(t, ctx, conn, cp, cons, "wdmvcellsheld0000001", otherStudio, "Late", "2026-07-08T09:30:00Z", "2026-07-08T09:45:00Z", 5)
-	if _, o := createBooking(t, ctx, conn, cp, cons, "wdmvcellsbookheld001", held, seated, ""); o != processor.OutcomeRejected {
-		t.Fatalf("a booking on the newly held 09:30 hour = %v, want Rejected (BookerConflict)", o)
+	heldEnv := createBookingEnv(t, ctx, conn, "wdmvcellsbookheld001", held, seated)
+	if o, r := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, heldEnv); o != processor.OutcomeRejected || r.Error == nil || !strings.Contains(r.Error.Message, "BookerConflict") {
+		t.Fatalf("a booking on the newly held 09:30 hour = %v (%+v), want BookerConflict", o, r.Error)
 	}
 
 	// A cancel releases the cells on the span the class now holds.
@@ -232,4 +234,122 @@ func TestReassignSessionSeries_MovesARegularsCellsAcrossTheRun(t *testing.T) {
 		assertCells(t, ctx, conn, regular, week+"T09:00:00Z", week+"T09:30:00Z", false, "the regular's morning "+week)
 		assertCells(t, ctx, conn, regular, week+"T18:00:00Z", week+"T18:30:00Z", true, "the regular's evening "+week)
 	}
+}
+
+// The batch ceiling is refused by name, projected from the membership before
+// a single claim read: 123 members clear of their old cells on a one-hour
+// class is 984 cell mutations beside the studio's 8 and the schedule — over
+// the 990 one operation may commit — and
+// the desk reads MoveTooLarge naming the count, not a commit-time fault or a
+// script timeout. The positive vector is the same class one member lighter.
+func TestReassignSession_MoveTooLargeIsRefusedByName(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "movedclasstoolarge")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdmvbigstudio0000001", "Hall")
+	sessionKey, outcome := createSession(t, ctx, conn, cp, cons, "wdmvbigsession000001", studioKey, "Big Flow",
+		"2026-07-08T09:00:00Z", "2026-07-08T10:00:00Z", 130)
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("CreateSession = %v, want Accepted", outcome)
+	}
+	lastBooking := ""
+	for i := 0; i < 123; i++ {
+		member := seedIdentity(t, ctx, conn, "BBWELLMVBGMEMBER"+nanoDigits(i)+"x")
+		bk, o := createBooking(t, ctx, conn, cp, cons, "wdmvbigbook"+strconv.Itoa(100000+i), sessionKey, member, "")
+		if o != processor.OutcomeAccepted {
+			t.Fatalf("CreateBooking %d = %v, want Accepted", i, o)
+		}
+		lastBooking = bk
+	}
+	move := func(label string) (processor.MessageOutcome, *processor.OperationReply) {
+		env := reassignSessionEnv(t, ctx, conn, label, sessionKey, studioKey, "", domainActorKey,
+			map[string]any{"sessionKey": sessionKey, "studio": studioKey, "startsAt": "2026-07-08T11:00:00Z", "endsAt": "2026-07-08T12:00:00Z"}, "2026-07-07T13:00:00Z")
+		return testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	}
+	outcome, reply := move("wdmvbigmove00000001")
+	if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, "MoveTooLarge") || !strings.Contains(reply.Error.Message, "123 members") {
+		t.Fatalf("123 members clear of their cells = %v (%+v), want MoveTooLarge naming 123 members", outcome, reply.Error)
+	}
+	if starts, _, _, _ := sessionSchedule(t, ctx, conn, sessionKey); starts != "2026-07-08T09:00:00Z" {
+		t.Fatalf("a refused move must leave the schedule at 09:00, got %s", starts)
+	}
+	// One member lighter fits.
+	cancelEnv := &processor.OperationEnvelope{
+		RequestID: testutil.GenReqID("wdmvbigcancel0000001"), Lane: processor.LaneDefault,
+		OperationType: "CancelBooking", Actor: domainActorKey, SubmittedAt: "2026-07-07T13:30:00Z", Class: "booking",
+		Payload: json.RawMessage(`{"bookingKey":"` + lastBooking + `","session":"` + sessionKey + `"}`),
+		ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()),
+			Reads: []string{lastBooking, lastBooking + ".status", sessionKey + ".schedule", forSessionLnkKey(t, lastBooking, sessionKey)}},
+	}
+	if o, r := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, cancelEnv); o != processor.OutcomeAccepted {
+		t.Fatalf("CancelBooking = %v (%+v), want Accepted", o, r.Error)
+	}
+	if outcome, reply := move("wdmvbigmove00000002"); outcome != processor.OutcomeAccepted {
+		t.Fatalf("122 members = %v (%+v), want Accepted", outcome, reply.Error)
+	}
+}
+
+// nanoDigits renders n as three digits from the NanoID alphabet's '1'..'9'
+// (base 9, zero excluded — '0' is outside the alphabet), for seeded keys.
+func nanoDigits(n int) string {
+	out := ""
+	for range 3 {
+		out = string(rune('1'+n%9)) + out
+		n /= 9
+	}
+	return out
+}
+
+// A booking's .status outlives its root (CancelBooking tombstones the root
+// alone; the aspect is what a later release or notice reads), so a walk over
+// a session's bookings that reads .status alone counts cancelled seats: a
+// cancelled waitlister would be promoted into a freed seat, and a cancelled
+// member's hub would have cells claimed for a class they left. Both walks
+// check the root.
+func TestSessionBookingWalks_SkipACancelledBookingWhoseStatusOutlivesIt(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "walkscancelled")
+
+	studioKey := createStudio(t, ctx, conn, cp, cons, "wdwalkstudio00000001", "Small Studio")
+	sessionKey, _ := createSession(t, ctx, conn, cp, cons, "wdwalksession0000001", studioKey, "Intro", "2026-07-08T09:00:00Z", "2026-07-08T09:30:00Z", 1)
+	seated := seedIdentity(t, ctx, conn, "BBWELLWALKSEATEDABCD")
+	leaver := seedIdentity(t, ctx, conn, "BBWELLWALKLEAVERABCD")
+	stayer := seedIdentity(t, ctx, conn, "BBWELLWALKSTAYERABCD")
+	seatedBooking, _ := createBooking(t, ctx, conn, cp, cons, "wdwalkbook0000000001", sessionKey, seated, "")
+	leaverBooking, _ := joinWaitlist(t, ctx, conn, cp, cons, "wdwalkwait0000000001", sessionKey, leaver, "")
+	stayerBooking, _ := joinWaitlist(t, ctx, conn, cp, cons, "wdwalkwait0000000002", sessionKey, stayer, "")
+	cancel := func(label, bookingKey, at string) {
+		env := &processor.OperationEnvelope{
+			RequestID: testutil.GenReqID(label), Lane: processor.LaneDefault,
+			OperationType: "CancelBooking", Actor: domainActorKey, SubmittedAt: at, Class: "booking",
+			Payload: json.RawMessage(`{"bookingKey":"` + bookingKey + `","session":"` + sessionKey + `"}`),
+			ContextHint: &processor.ContextHint{Enumerations: testutil.DeclaredEnumerations("CancelBooking", domainActorKey, wellnessdomain.OpMetas()),
+				Reads: []string{bookingKey, bookingKey + ".status", sessionKey + ".schedule", forSessionLnkKey(t, bookingKey, sessionKey)}},
+		}
+		if o, r := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env); o != processor.OutcomeAccepted {
+			t.Fatalf("%s = %v (%+v), want Accepted", label, o, r.Error)
+		}
+	}
+	// The first waitlister leaves; their .status still reads waitlisted.
+	cancel("wdwalkcancelleaver01", leaverBooking, "2026-07-07T12:10:00Z")
+	if st, _ := readDoc(t, ctx, conn, leaverBooking+".status")["data"].(map[string]any); st["value"] != "waitlisted" {
+		t.Fatalf("the premise: a cancelled waitlister's .status outlives the root, got %v", st["value"])
+	}
+	// The seat frees: the promotion must pass over the leaver to the stayer.
+	cancel("wdwalkcancelseated01", seatedBooking, "2026-07-07T12:20:00Z")
+	if st, _ := readDoc(t, ctx, conn, stayerBooking+".status")["data"].(map[string]any); st["value"] != "booked" {
+		t.Fatalf("the stayer must be promoted, got %v", st["value"])
+	}
+	if st, _ := readDoc(t, ctx, conn, leaverBooking+".status")["data"].(map[string]any); st["value"] != "waitlisted" {
+		t.Fatalf("a cancelled waitlister must never be promoted, got %v", st["value"])
+	}
+	// A move must carry the stayer's cells and leave the leaver's hub alone.
+	env := reassignSessionEnv(t, ctx, conn, "wdwalkmove0000000001", sessionKey, studioKey, "", domainActorKey,
+		map[string]any{"sessionKey": sessionKey, "studio": studioKey, "startsAt": "2026-07-08T11:00:00Z", "endsAt": "2026-07-08T11:30:00Z"}, "2026-07-07T13:00:00Z")
+	if o, r := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env); o != processor.OutcomeAccepted {
+		t.Fatalf("ReassignSession = %v (%+v), want Accepted", o, r.Error)
+	}
+	assertCells(t, ctx, conn, stayer, "2026-07-08T11:00:00Z", "2026-07-08T11:30:00Z", true, "the stayer's moved cells")
+	assertCells(t, ctx, conn, leaver, "2026-07-08T11:00:00Z", "2026-07-08T11:30:00Z", false, "the leaver holds nothing on the new hour")
+	assertCells(t, ctx, conn, seated, "2026-07-08T11:00:00Z", "2026-07-08T11:30:00Z", false, "the cancelled member holds nothing on the new hour")
 }

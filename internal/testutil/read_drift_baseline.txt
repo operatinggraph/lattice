@@ -200,9 +200,9 @@ read	ReassignLeaseUnit	lnk.identity.<id>.appliedToUnit.unit.<id>
 # ReassignSession and ReassignSessionSeries carry every live booker's slot cells with
 # a moved class (bookerSlotClaim, wellness-domain/ddls.go): the booker hub is the
 # .status.booker value of a booking the forSession walk discovered — two hops off
-# the enumeration, so not the walk's own far endpoint the guard admits — and a
-# dispatcher that knows the roster (cmd/wellness-app) declares the cells as
-# optionalReads; one that does not (the CLI, this harness) reads them live.
+# the enumeration, so not the walk's own far endpoint the guard admits, and not a
+# key any dispatcher can name up front (a roster snapshot would be the roster's
+# copy of the membership, not the membership) — category 3 for every dispatcher.
 read	ReassignSession	vtx.identity.<id>.slot<t>
 read	ReassignSessionSeries	lnk.session.<id>.atStudio.studio.<id>
 read	ReassignSessionSeries	vtx.identity.<id>.slot<t>

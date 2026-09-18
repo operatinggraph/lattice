@@ -116,7 +116,7 @@ func TestRecordBookingChangeNotice_RoomWritesMarkerAndClearedInstructorNamesNobo
 
 	// A cleared instructor: the row carries no instructorName; the notice
 	// still goes (being un-led is the change) and names nobody.
-	env, reply, outcome = submit("wrcnroom0002", map[string]any{"bookingKey": bookingKey, "sessionKey": sessionKey, "kind": "instructor", "changeRef": cnStampAt})
+	env, reply, outcome = submit("wrcnroom0002", map[string]any{"bookingKey": bookingKey, "sessionKey": sessionKey, "kind": "instructor", "changeRef": cnStampAt, "instructorName": ""})
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("un-led notice = %v (%+v), want Accepted", outcome, reply.Error)
 	}
@@ -129,8 +129,8 @@ func TestRecordBookingChangeNotice_RoomWritesMarkerAndClearedInstructorNamesNobo
 	}
 	notifs, _ = cnOutboxNotifications(t, ctx, conn, env.RequestID)
 	params, _ = notifs[0]["params"].(map[string]any)
-	if v, present := params["instructorName"]; present && v != nil {
-		t.Fatalf("params.instructorName = %v, want null for an un-led class", v)
+	if v, present := params["instructorName"]; present {
+		t.Fatalf("params.instructorName = %v, want the key omitted for an un-led class", v)
 	}
 
 	// StaleChange: the dispatched stamp is not the live one, and a schedule

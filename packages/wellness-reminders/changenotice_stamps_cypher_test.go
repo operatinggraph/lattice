@@ -7,9 +7,12 @@ package wellnessreminders
 // Same harness and fixture as changenotice_cypher_test.go.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/operatinggraph/lattice/internal/pkgmgr"
 )
 
 const (
@@ -105,7 +108,7 @@ func TestChangeNotices_NoStampNoGap(t *testing.T) {
 	f.mkChangeNoticeBooking(t, "bk", "flow", cnBooking{status: "booked", classStartsAt: cnClassAt, startsAt: cnClassAt, endsAt: cnClassEnd, bookedAt: cnBookedAt})
 	v := f.projectChangeNotices(t, "bk")
 	requireAllGaps(t, v, false, false, false, false, "no stamp → `null <> null` is false")
-	require.Nil(t, v["instructorName"])
+	require.Equal(t, "", v["instructorName"], "coalesced to '' so the target can template it")
 	require.Nil(t, v["instructorChangedAt"])
 }
 
@@ -123,7 +126,7 @@ func TestChangeNotices_RoomChangedAndCleared(t *testing.T) {
 	requireAllGaps(t, v, false, false, true, true, "both stamps after the claim, neither told")
 	require.Equal(t, "Riverside", v["studioName"])
 	require.Equal(t, cnSwappedAt, v["studioChangedAt"])
-	require.Nil(t, v["instructorName"], "an un-led class names nobody")
+	require.Equal(t, "", v["instructorName"], "an un-led class names nobody — '' not null, or Weaver refuses the dispatch")
 
 	f.mkChangeNoticeBooking(t, "told", "flow2", cnBooking{status: "booked", classStartsAt: cnClassAt, startsAt: cnClassAt, endsAt: cnClassEnd,
 		bookedAt: cnBookedAt, studioChangedAt: cnSwappedAt, roomFor: cnSwappedAt, instructorChangedAt: cnSwappedAt, instructorFor: cnSwappedAt})
@@ -145,4 +148,37 @@ func TestChangeNotices_StampGapsWaitlistedAndOverClose(t *testing.T) {
 		bookedAt: cnBookedAt, instructorChangedAt: cnSwappedAt, studioChangedAt: cnSwappedAt})
 	f.aspect(t, "over", "freshnessExpiry", "freshnessExpiry", map[string]any{"byTarget": map[string]any{PastDueBookingsTarget: cnClassEnd}})
 	requireAllGaps(t, f.projectChangeNotices(t, "over"), false, false, false, false, "the class is over")
+}
+
+// Every row.<column> a gap templates into its Params must be non-null on the
+// row that opens it — Weaver refuses to dispatch a gap whose templated column
+// is null (internal/weaver/strategist.go resolveRowTemplate), so a name
+// walked off an OPTIONAL hop has to reach the row as ” when the hop binds
+// nothing. Pinned on the two rows that bind nothing: a cleared instructor
+// and a room whose studio is gone.
+func TestChangeNotices_TemplatedParamsNeverNullOnAnOpenRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	var gaps map[string]pkgmgr.GapActionSpec
+	for _, tgt := range WeaverTargets() {
+		if tgt.TargetID == WellnessBookingChangeNoticesTarget {
+			gaps = tgt.Gaps
+		}
+	}
+	require.NotNil(t, gaps)
+	f := newRemFixture(t)
+	f.mkChangeNoticeBooking(t, "bk", "flow", cnBooking{status: "booked", classStartsAt: cnClassAt, startsAt: cnClassAt, endsAt: cnClassEnd,
+		bookedAt: cnBookedAt, instructorChangedAt: cnSwappedAt, studioChangedAt: cnSwappedAt})
+	v := f.projectChangeNotices(t, "bk")
+	for _, gap := range []string{"missing_instructor_notice", "missing_room_notice"} {
+		require.Equal(t, true, v[gap], gap+" must be open on this row")
+		for name, val := range gaps[gap].Params {
+			col, templated := strings.CutPrefix(val, "row.")
+			if !templated {
+				continue
+			}
+			require.NotNilf(t, v[col], "%s templates %s off row.%s, which is null on an open row — Weaver would refuse the dispatch", gap, name, col)
+		}
+	}
 }

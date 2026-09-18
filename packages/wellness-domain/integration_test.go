@@ -430,15 +430,37 @@ func bookingEnumerations(t *testing.T, opType, actorKey, bookerKey string) []pro
 
 func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath, cons jetstream.Consumer, label, sessionKey, bookerKey, leaseAppKey string) (string, processor.MessageOutcome) {
 	t.Helper()
+	env := createBookingEnvLease(t, ctx, conn, label, sessionKey, bookerKey, leaseAppKey)
+	testutil.PublishOp(t, conn, env)
+	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
+	return "vtx.booking." + nanoIDFromRequestID(env.RequestID), outcome
+}
+
+// createBookingEnv builds createBooking's envelope without submitting it, for
+// a vector that needs the reply's refusal code rather than the outcome alone.
+func createBookingEnv(t *testing.T, ctx context.Context, conn *substrate.Conn, label, sessionKey, bookerKey string) *processor.OperationEnvelope {
+	t.Helper()
+	return createBookingEnvLease(t, ctx, conn, label, sessionKey, bookerKey, "")
+}
+
+func createBookingEnvLease(t *testing.T, ctx context.Context, conn *substrate.Conn, label, sessionKey, bookerKey, leaseAppKey string) *processor.OperationEnvelope {
+	t.Helper()
 	reqID := testutil.GenReqID(label)
 	payloadMap := map[string]any{"session": sessionKey, "booker": bookerKey}
 	reads := []string{sessionKey, sessionKey + ".schedule", bookerKey}
 	// Resident-rate lookup (leaseapp + .tenancy + applicationFor link) is
 	// (d)-declared optionalReads — absent falls through to the standard rate
 	// (ddls.go, script-read-posture-design.md §13). Seat claims are the same
-	// class over the session's capacity dimension (20 covers every capacity
-	// this suite's fixtures use; claim_first_free_seat bounds it at 200).
-	optionalReads := wdSeatKeys(sessionKey, 20)
+	// class over the session's capacity dimension, declared to the session's
+	// own capacity the way app.js's seatKeys(sessionKey, capacity) does
+	// (claim_first_free_seat bounds it at 200).
+	sched := readDoc(t, ctx, conn, sessionKey+".schedule")
+	schedData, _ := sched["data"].(map[string]any)
+	capacity, _ := schedData["capacity"].(float64)
+	if capacity < 20 {
+		capacity = 20
+	}
+	optionalReads := wdSeatKeys(sessionKey, int(capacity))
 	// The per-(session, booker) double-book guard (ddls.go) — declared so the
 	// script can classify absent/tombstoned/alive (a re-book after cancel needs
 	// the tombstoned revision to OCC-revive).
@@ -447,8 +469,6 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 	// The booker's own slot cells over the session's [startsAt, endsAt) window
 	// (app.js slotCellKeys()) — the overlap guard against the booker's other
 	// live bookings, so its absence is a legitimate branch.
-	sched := readDoc(t, ctx, conn, sessionKey+".schedule")
-	schedData, _ := sched["data"].(map[string]any)
 	startsAt, _ := schedData["startsAt"].(string)
 	endsAt, _ := schedData["endsAt"].(string)
 	optionalReads = append(optionalReads, wdSlotClaimKeys(t, bookerKey, startsAt, endsAt)...)
@@ -469,9 +489,7 @@ func createBooking(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *
 		Payload:       payload,
 		ContextHint:   &processor.ContextHint{Enumerations: bookingEnumerations(t, "CreateBooking", domainActorKey, bookerKey), Reads: reads, OptionalReads: optionalReads},
 	}
-	testutil.PublishOp(t, conn, env)
-	outcome := testutil.DriveOne(t, ctx, cp, cons, "")
-	return "vtx.booking." + nanoIDFromRequestID(reqID), outcome
+	return env
 }
 
 // joinWaitlist mirrors createBooking's dispatch shape exactly (same declared
@@ -4817,8 +4835,10 @@ func TestReassignSessionSeries_AllPastRejected(t *testing.T) {
 // CreateSessionSeries's ceiling (occurrenceCount 52, every occurrence still
 // upcoming and instructor-led) under the Processor's DEFAULT script wall,
 // mirroring the call-off's wall test. The shift is disjoint from the old
-// spans, so every occurrence costs its four walk reads plus a claim read per
-// new cell on both hubs — the op's worst read budget.
+// spans, so every occurrence costs its walk reads (ledBy, its bookings and
+// each booking's status) plus a claim read per new cell on every hub — the
+// studio's, the instructor's and, with one regular seated on every week of
+// the run, a booker's — the op's worst read budget.
 func TestReassignSessionSeries_FiftyTwoOccurrencesUnderTheWall(t *testing.T) {
 	if os.Getenv("PROCESSOR_SCRIPT_WALL_MS") != "" {
 		t.Skip("wall override set — this test measures the default budget")
@@ -4834,6 +4854,12 @@ func TestReassignSessionSeries_FiftyTwoOccurrencesUnderTheWall(t *testing.T) {
 	if outcome != processor.OutcomeAccepted {
 		t.Fatalf("CreateSessionSeries outcome = %v, want Accepted", outcome)
 	}
+	regular := seedIdentity(t, ctx, conn, "BBWELLSMVREGULARabcd")
+	for i, sk := range sessionKeys {
+		if _, o := createBooking(t, ctx, conn, cp, cons, "wdsmovebook52"+strconv.Itoa(1000000+i), sk, regular, ""); o != processor.OutcomeAccepted {
+			t.Fatalf("CreateBooking on occurrence %d = %v, want Accepted", i, o)
+		}
+	}
 	started := time.Now()
 	if got, why := reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000052", seriesKey, studioKey, sessionKeys[0], "2026-07-08T09:00:00Z",
 		"2026-07-08T10:00:00Z", "2026-07-08T10:30:00Z", "2026-07-07T12:00:00Z"); got != processor.OutcomeAccepted {
@@ -4841,7 +4867,10 @@ func TestReassignSessionSeries_FiftyTwoOccurrencesUnderTheWall(t *testing.T) {
 	}
 	t.Logf("52-occurrence move round trip: %s", time.Since(started))
 	for i, sessionKey := range sessionKeys {
-		assertMoved(t, ctx, conn, sessionKey, wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*24*time.Hour), time.Hour, 30*time.Minute)
+		old := wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*24*time.Hour)
+		assertMoved(t, ctx, conn, sessionKey, old, time.Hour, 30*time.Minute)
+		assertCells(t, ctx, conn, regular, old, wdShifted(t, old, 30*time.Minute), false, "the regular's old week")
+		assertCells(t, ctx, conn, regular, wdShifted(t, old, time.Hour), wdShifted(t, old, 90*time.Minute), true, "the regular's moved week")
 	}
 }
 
@@ -5033,7 +5062,8 @@ func TestReassignSessionSeries_MovesEarlierAndRevivesCancelledCells(t *testing.T
 // is refused SeriesTooLarge with nothing moved, where the same run at 60
 // minutes (884 mutations) moves. Both are creatable, so without the in-script
 // count the first would die at commit as a batch-too-large fault the desk
-// could not read.
+// could not read. The third shape adds a member: the run's bookers' hubs
+// move with it and count against the same ceiling.
 func TestReassignSessionSeries_BatchCeiling(t *testing.T) {
 	ctx, conn := setupDomainEnv(t)
 	cp, cons := newDomainPipeline(t, ctx, conn, "seriesmoveceiling")
@@ -5074,4 +5104,25 @@ func TestReassignSessionSeries_BatchCeiling(t *testing.T) {
 		assertMoved(t, ctx, conn, sessionKey, wdShifted(t, "2026-07-08T09:00:00Z", time.Duration(i)*24*time.Hour), 2*time.Hour, time.Hour)
 	}
 	assertCells(t, ctx, conn, instructorB, "2026-08-28T11:00:00Z", "2026-08-28T12:00:00Z", true, "the last class's instructor cells")
+
+	// The members' hubs count too: the same 60-minute run with one regular on
+	// every week is 884 + 52 × 8 = 1300 clear of its cells — refused, naming
+	// the membership, before a single claim read — and the regular keeps
+	// every week's cells where they are.
+	regular := seedIdentity(t, ctx, conn, "BBWELLSMVCAPREGULARx")
+	for i, sk := range keysB {
+		if _, o := createBooking(t, ctx, conn, cp, cons, "wdsmvbkcap"+strconv.Itoa(1000000+i), sk, regular, ""); o != processor.OutcomeAccepted {
+			t.Fatalf("CreateBooking on occurrence %d = %v, want Accepted", i, o)
+		}
+	}
+	got, why = reassignSeries(t, ctx, conn, cp, cons, "wdsmoveseries0000055", seriesB, studioB, keysB[0], "2026-07-08T11:00:00Z",
+		"2026-07-08T13:00:00Z", "2026-07-08T14:00:00Z", "2026-07-07T12:30:00Z")
+	if got != processor.OutcomeRejected || !strings.Contains(why, "SeriesTooLarge") || !strings.Contains(why, "1 members") {
+		t.Fatalf("52 x 60-minute led run with a regular, shifted clear = %v (%q), want Rejected SeriesTooLarge naming the membership", got, why)
+	}
+	for i := range keysB {
+		old := wdShifted(t, "2026-07-08T11:00:00Z", time.Duration(i)*24*time.Hour)
+		assertCells(t, ctx, conn, regular, old, wdShifted(t, old, time.Hour), true, "the regular's week after the refusal")
+		assertCells(t, ctx, conn, regular, wdShifted(t, old, 2*time.Hour), wdShifted(t, old, 3*time.Hour), false, "refused move claims nothing for the regular")
+	}
 }
