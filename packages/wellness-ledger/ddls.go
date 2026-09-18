@@ -324,6 +324,9 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"wellnessLedgerHistory lens projects reason so a reader never mistakes a refund or a waiver for a fresh payment. " +
 			"reason:\"waiver\" and reason:\"refund\" are both rejected on a self-scoped (member) credit — post_entry's own " +
 			"authContextTarget branch — since a member may pay down their own balance but never forgive or refund it. " +
+			"Nobody clears their own debt from the desk either: a staff waiver or refund against an account whose heldFor " +
+			"identity is the actor is refused SelfClearing, operator included (the rule is about whose money it is, not " +
+			"whose standing); a payment credit and a charge are untouched. " +
 			"Every entry, debit or credit, ALSO marks the account's .arrears episode state (wellnessAccountArrears DDL) " +
 			"stale where it exists — carrying every other field, the episode's send record included, but DROPPING " +
 			"any replay checkpoint (the entry changes the postedTo set the checkpoint's cursor pages over, so the " +
@@ -400,7 +403,7 @@ func transactionDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Same shape as a plain payment, but .entry carries reason: \"waiver\" instead of the default \"payment\" — the " +
 					"balance drops identically, but the wellnessLedgerHistory lens projects reason so a reader never mistakes forgiven debt for " +
 					"cash collected. Rejects AuthDenied if the caller is a self-scoped member — only the operator/front-of-house scope=any " +
-					"grant may waive.",
+					"grant may waive — and SelfClearing if that staffer is the account's own member: another staffer forgives it.",
 			},
 		},
 	}

@@ -3,6 +3,8 @@ package cafeledger_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -464,4 +466,217 @@ func TestPayoutWorkplace_UnwiredStaffDeniedNotWidened(t *testing.T) {
 		wcStaffKey, acctA, 900, processor.OutcomeRejected)
 	payoutAs(t, ctx, conn, cp, cons, "cafepwuwpayoutaway",
 		wcStaffKey, acctB, 900, processor.OutcomeRejected)
+}
+
+// Self-clearing — the staff leg's other half. The workplace walk above proves
+// STANDING: the caller works where the account's lease sits. A front-of-house
+// staffer who also holds a lease at their own building passes it against their
+// own account, and could forgive, refund or pay out what the house is owed to
+// themselves. post_entry's require_not_own_account resolves the account's
+// holder off its own heldFor lease and refuses the three clearing verbs when
+// that holder is the actor.
+const (
+	scStaffAwayID  = "BBCAFELSCAWAYSTAFFHJ"
+	scStaffAwayKey = "vtx.identity." + scStaffAwayID
+	scUnitA2ID     = "BBCAFELSCUNTA2HJKMNP"
+	scLeaseA2ID    = "BBCAFELSCLEASEA2HJKM"
+	scResidentA2ID = "BBCAFELSCRESDA2HJKMN"
+)
+
+// seedSecondLeaseAtBuildingA adds a second unit + lease at building A, held by
+// an ordinary resident (scResidentA2ID) rather than any staffer, so a vector
+// can prove the refusal is about the ACTOR's own lease and not about the
+// building.
+func seedSecondLeaseAtBuildingA(t *testing.T, ctx context.Context, conn *substrate.Conn) string {
+	t.Helper()
+	unitKey := "vtx.unit." + scUnitA2ID
+	seedVertex(t, ctx, conn, unitKey, "location", map[string]any{})
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.unit."+scUnitA2ID+".containedIn.building."+wcBuildingAID,
+		"containedIn", unitKey, wcBuildingAKey)
+	seedIdentity(t, ctx, conn, scResidentA2ID)
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, scLeaseA2ID, scResidentA2ID)
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.leaseapp."+scLeaseA2ID+".appliesToUnit.unit."+scUnitA2ID,
+		"appliesToUnit", leaseKey, unitKey)
+	return leaseKey
+}
+
+// holdLease records that identityID is the applicant of leaseKey — the
+// applicationFor link the self leg's ownership proof and the staff leg's
+// self-clearing refusal both read.
+func holdLease(t *testing.T, ctx context.Context, conn *substrate.Conn, leaseKey, identityID string) {
+	t.Helper()
+	leaseID := leaseKey[len("vtx.leaseapp."):]
+	seedLink(t, ctx, conn,
+		"lnk.leaseapp."+leaseID+".applicationFor.identity."+identityID,
+		leaseKey, "vtx.identity."+identityID, "applicationFor", "applicationFor")
+}
+
+// waiverEnvFor is creditEnvFor with reason: "waiver" — the staff-voice
+// write-off, declaring exactly what the descriptor declares.
+func waiverEnvFor(label, actorKey, acctKey string, amountCents int) *processor.OperationEnvelope {
+	env, _ := creditEnvFor(label, actorKey, acctKey, amountCents)
+	env.Payload = json.RawMessage(`{"accountKey":"` + acctKey + `","amountCents":` +
+		strconv.Itoa(amountCents) + `,"reason":"waiver","memo":"Written off"}`)
+	return env
+}
+
+const (
+	selfClearingForgive = "SelfClearing: a staffer may not forgive their own account"
+	selfClearingRefund  = "SelfClearing: a staffer may not refund their own account"
+	selfClearingPayout  = "SelfClearing: a staffer may not pay out their own account"
+)
+
+// seedOwnChargedAccount builds the self-clearing topology: the front-of-house
+// staffer worksAt building A AND holds lease A, whose account carries one
+// operator-posted charge of 1850. Returns the account and the charge.
+func seedOwnChargedAccount(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, prefix string) (string, string) {
+	t.Helper()
+	leaseA, _ := seedWorkplaceTopology(t, ctx, conn)
+	holdLease(t, ctx, conn, leaseA, wcStaffID)
+	acctOwn := createAccount(t, ctx, conn, cp, cons, prefix+"acct", leaseA)
+	chargeOwn := postDebit(t, ctx, conn, cp, cons, prefix+"debit", acctOwn, 1850, "Settled tab")
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+	return acctOwn, chargeOwn
+}
+
+// TestSelfClearing_WaiverRefusedOnOwnAccount: the lease-holding staffer's
+// write-off of their own account is refused, and the counter payment of the
+// same balance is accepted straight after — a payment is money coming IN, not
+// a clearing verb. The refusal is read from the reply: the workplace walk
+// passes here (home building), so an outcome-only assertion could not tell
+// this rule from confinement. One test per verb, so each refusal is
+// revert-provable on its own rather than shadowed by the one before it.
+func TestSelfClearing_WaiverRefusedOnOwnAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "selfclearingwaiver")
+	acctOwn, _ := seedOwnChargedAccount(t, ctx, conn, cp, cons, "cafescwv")
+
+	assertRejectedBecause(t, ctx, conn, cp, cons,
+		waiverEnvFor("cafescwvwaiver000001", wcStaffKey, acctOwn, 1850), selfClearingForgive)
+	if got := balanceCents(t, ctx, conn, acctOwn); got != 1850 {
+		t.Fatalf("balance after the refused write-off = %v, want the untouched 1850", got)
+	}
+	creditAs(t, ctx, conn, cp, cons, "cafescwvpayment00001",
+		wcStaffKey, acctOwn, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctOwn); got != 0 {
+		t.Fatalf("balance after the staffer's own counter payment = %v, want 0", got)
+	}
+}
+
+// TestSelfClearing_RefundRefusedOnOwnAccount: the same staffer, having paid
+// their own charge in full (so the refund would otherwise be within the
+// charge and the cash floor), is refused refunding it; the operator refunds
+// it in their place.
+func TestSelfClearing_RefundRefusedOnOwnAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "selfclearingrefund")
+	acctOwn, chargeOwn := seedOwnChargedAccount(t, ctx, conn, cp, cons, "cafescrf")
+	creditAs(t, ctx, conn, cp, cons, "cafescrfpayment00001",
+		wcStaffKey, acctOwn, "", processor.OutcomeAccepted)
+
+	refund, _ := refundEnv("cafescrfrefund000001", wcStaffKey, acctOwn, chargeOwn, 1850, "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, refund, selfClearingRefund)
+	if got := balanceCents(t, ctx, conn, acctOwn); got != 0 {
+		t.Fatalf("balance after the refused refund = %v, want the untouched 0", got)
+	}
+	refundAs(t, ctx, conn, cp, cons, "cafescrfoprefund0001",
+		ledgerActorKey, acctOwn, chargeOwn, 1850, "", processor.OutcomeAccepted)
+}
+
+// TestSelfClearing_PayoutRefusedOnOwnAccount: the same staffer's account is
+// driven into credit the only way the ledger offers (charge, paid, refunded by
+// the operator), and the staffer is refused paying that credit out to
+// themselves.
+func TestSelfClearing_PayoutRefusedOnOwnAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "selfclearingpayout")
+	acctOwn, chargeOwn := seedOwnChargedAccount(t, ctx, conn, cp, cons, "cafescpo")
+	creditAs(t, ctx, conn, cp, cons, "cafescpopayment00001",
+		wcStaffKey, acctOwn, "", processor.OutcomeAccepted)
+	refundAs(t, ctx, conn, cp, cons, "cafescpooprefund0001",
+		ledgerActorKey, acctOwn, chargeOwn, 1850, "", processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctOwn); got != -1850 {
+		t.Fatalf("balance after the operator's refund = %v, want -1850 (in credit)", got)
+	}
+
+	payout, _ := payoutEnv("cafescpopayout000001", wcStaffKey, acctOwn, payoutPayload(acctOwn, 1850), "")
+	assertRejectedBecause(t, ctx, conn, cp, cons, payout, selfClearingPayout)
+	if got := balanceCents(t, ctx, conn, acctOwn); got != -1850 {
+		t.Fatalf("balance after the refused payout = %v, want the untouched -1850", got)
+	}
+}
+
+// TestSelfClearing_StaffClearsAnotherResidentsAccount is the accepting half
+// the refusals above are measured against: the SAME lease-holding staffer,
+// at the SAME building, writes off another resident's account. A guard that
+// refused every write-off at a building where the staffer lives would pass
+// the vector above and fail this one.
+func TestSelfClearing_StaffClearsAnotherResidentsAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "selfclearingother")
+
+	leaseA, _ := seedWorkplaceTopology(t, ctx, conn)
+	holdLease(t, ctx, conn, leaseA, wcStaffID)
+	leaseA2 := seedSecondLeaseAtBuildingA(t, ctx, conn)
+	acctOther := seedChargedAccount(t, ctx, conn, cp, cons, "cafescotheracct00001", "cafescotherdebit0001", leaseA2, 1850)
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+
+	testutil.PublishOp(t, conn, waiverEnvFor("cafescotherwaiver001", wcStaffKey, acctOther, 1850))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	if got := balanceCents(t, ctx, conn, acctOther); got != 0 {
+		t.Fatalf("balance after the write-off of another resident's account = %v, want 0", got)
+	}
+}
+
+// TestSelfClearing_OperatorNotExempt pins the one place root is not root: the
+// operator worksAt nowhere and clears at every building, but an operator who
+// holds a lease is a resident of it, and the house's money is no more theirs to
+// forgive to themselves than a staffer's. The rule is about whose money it is,
+// not whose standing.
+func TestSelfClearing_OperatorNotExempt(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "selfclearingop")
+
+	_, leaseB := seedWorkplaceTopology(t, ctx, conn)
+	holdLease(t, ctx, conn, leaseB, ledgerActorID)
+	acctB := seedChargedAccount(t, ctx, conn, cp, cons, "cafescopacct00000001", "cafescopdebit0000001", leaseB, 1850)
+
+	assertRejectedBecause(t, ctx, conn, cp, cons,
+		waiverEnvFor("cafescopwaiver000001", ledgerActorKey, acctB, 1850), selfClearingForgive)
+	creditAs(t, ctx, conn, cp, cons, "cafescoppayment00001",
+		ledgerActorKey, acctB, "", processor.OutcomeAccepted)
+}
+
+// TestSelfClearing_ConfinementRefusesFirst pins the order of the two staff-leg
+// checks: a staffer who holds lease A but worksAt building B is refused the
+// write-off of their own account on CONFINEMENT, and the refusal never names
+// SelfClearing — standing is settled before ownership is asked, so the
+// ownership walk is never spent on a caller with no standing at all.
+func TestSelfClearing_ConfinementRefusesFirst(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "selfclearingaway")
+
+	leaseA, _ := seedWorkplaceTopology(t, ctx, conn)
+	seedVertex(t, ctx, conn, scStaffAwayKey, "identity", map[string]any{})
+	testutil.SeedLink(t, ctx, conn,
+		"lnk.identity."+scStaffAwayID+".worksAt.building."+wcBuildingBID,
+		"worksAt", scStaffAwayKey, wcBuildingBKey)
+	holdLease(t, ctx, conn, leaseA, scStaffAwayID)
+	acctA := seedChargedAccount(t, ctx, conn, cp, cons, "cafescawayacct000001", "cafescawaydebit00001", leaseA, 1850)
+	testutil.SeedCapDoc(t, ctx, conn, staffCapDocFor(scStaffAwayKey))
+
+	env := waiverEnvFor("cafescawaywaiver0001", scStaffAwayKey, acctA, 1850)
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "does not worksAt") {
+		t.Fatalf("rejected with %+v, want the confinement refusal", reply.Error)
+	}
+	if strings.Contains(reply.Error.Message, "SelfClearing") {
+		t.Fatalf("rejected with %+v, want confinement to refuse before the self-clearing walk runs", reply.Error)
+	}
 }

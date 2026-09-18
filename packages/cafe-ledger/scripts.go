@@ -1575,6 +1575,48 @@ def require_counter_payment(state, tab_key, acct_key, amount_cents, reason):
         if cursor == None:
             break
 
+# The verbs that give the house's money up, keyed by the .entry.reason they
+# write, each with the verb the SelfClearing refusal names. A "payment" credit
+# records money coming IN and a charge records money owed; neither is a
+# clearing verb, so neither is listed.
+CLEARING_VERBS = {"waiver": "forgive", "refund": "refund", "payout": "pay out"}
+
+def require_not_own_account(acct_key, verb):
+    # Nobody clears their own debt from the desk. The staff leg proves STANDING
+    # (require_workplace: the caller works where the account's lease sits) and
+    # nothing about ownership, so a staffer who also holds the lease passes it
+    # against their own account. This is the other half: the account's
+    # holder is resolved off its OWN heldFor topology (never the payload) and
+    # compared with the actor, and a match refuses the clearing verb.
+    #
+    # The operator is NOT exempt, on purpose. Every other guard on this leg is
+    # about standing -- what a caller may do at which building -- and root has
+    # all of it. This one is about whose money it is: an operator who holds a
+    # lease is a resident of that lease, and the house's money is no more
+    # theirs to forgive to themselves than a staffer's. Another operator or
+    # staffer clears it.
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    # read-posture: (e) relation=heldFor epoch=none -- a cafeaccount carries
+    # exactly one heldFor link, so this is never a keyspace scan.
+    held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
+    lease_key = None
+    for lk in held_for_page:
+        if not lk.isDeleted:
+            lease_key = lk.targetVertex
+    # An account with no live lease has no holder to match; the workplace walk
+    # above already denied everyone but the operator on that topology, and an
+    # operator clearing an orphaned account is clearing nobody's own money.
+    if lease_key == None:
+        return
+    _, lease_id = parts_of(lease_key, "heldFor target", "leaseapp")
+    # read-posture: (e) per-candidate follow-up read off the enumeration
+    # above -- the lease id is data-derived, unknowable client-side.
+    application_for = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + actor_id)
+    if application_for != None and not application_for.isDeleted:
+        # No account key in the text: it is toasted verbatim at the staffer,
+        # and a raw vtx key tells them nothing the rule does not.
+        fail("SelfClearing: a staffer may not " + verb + " their own account — another staffer must")
+
 def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses_ref, confine, reason):
     # reason is the classification the dispatching op asserts for its entry:
     # None on a charge (DebitAccount), "refund" on RefundCafeCharge, "payout" on
@@ -1671,6 +1713,16 @@ def post_entry(state, op, entry_type, event_class, allow_tab_ref, allow_reverses
         application_for = kv.Read("lnk.leaseapp." + lease_id + ".applicationFor.identity." + target_identity_id)
         if application_for == None or application_for.isDeleted:
             fail("AuthDenied: a resident may only pay down their own lease's account")
+    elif reason in CLEARING_VERBS:
+        # The staff leg's ownership check, the mirror image of the self leg's
+        # above: there the walk proves the account IS the caller's; here it
+        # proves the account is NOT. Runs for the operator too -- it sits
+        # outside the workplace_exempt() gate because standing is not the
+        # question (require_not_own_account). After the reason has resolved
+        # (a CreditCafeAccount's payload may have just made it a waiver) and
+        # before the tabRef / .balance reads, so a refused self-clearing never
+        # spends a legacy account's replay budget.
+        require_not_own_account(acct_key, CLEARING_VERBS[reason])
 
     # tabRef (DebitAccount and CreditCafeAccount — the cafe-domain settlement
     # consumers): the tab this entry settles. On a debit it is the charge that

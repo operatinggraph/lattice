@@ -99,7 +99,14 @@ self-submitted payment actually happened, so the amount is as much the attack su
 named. Both refusals spell the amounts as dollars and carry no entity key: they are toasted verbatim
 at the patient. A **staff** credit or waiver is not capped — it records a decision the clinic made,
 and the reversal `clinicNoShowSettlement` dispatches gives back a charge that may already have been
-paid, so both may legitimately take the balance negative.
+paid, so both may legitimately take the balance negative. What a staff credit *is* checked for is
+**whose money it is**: nobody clears their own debt from the desk. A waiver, or a `reversesRef`
+reversal, against an account whose `heldFor` patient is `identifiedBy` the actor is refused
+`SelfClearing` ("a staffer may not forgive their own account — another staffer must"), the holder
+resolved off the account's own topology and never the payload. The operator is not exempt — every
+other guard on the staff leg is about standing, this one is not — and the Weaver's reversal dispatch
+passes on the same terms as any staffer, its actor being nobody's patient. A payment credit on one's
+own account is untouched: money coming in is the fact every patient may record on the self leg anyway.
 
 The ownership proof runs before the balance is read, which is what keeps a scope=self holder from
 naming a stranger's account and making the server walk that account's history.

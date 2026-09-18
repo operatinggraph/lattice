@@ -1080,6 +1080,35 @@ def held_for_patient_id(acct_key):
     _, patient_id = parts_of(patient_key, "heldFor target", "patient")
     return patient_id
 
+def require_not_own_account(acct_key, verb):
+    # Nobody clears their own debt from the desk. The staff leg proves STANDING
+    # (the frontOfHouse / operator grant) and nothing about ownership, so a
+    # staffer who is also a patient of the clinic passes it against their own
+    # account. This is the other half: the account's holder is resolved off
+    # its OWN heldFor patient and that patient's identifiedBy link (never the
+    # payload) and compared with the actor, and a match refuses the clearing
+    # verb. The self leg's ownership proof walks the same chain to prove the
+    # account IS the caller's; this proves it is NOT.
+    #
+    # The operator is NOT exempt, on purpose: every other guard on this leg is
+    # about standing, and root has all of it, but this one is about whose money
+    # it is. An operator who is a patient is a patient. Another staffer clears
+    # it. A Weaver-dispatched reversal (clinicNoShowSettlement) passes on the
+    # same terms as any staffer -- the dispatch actor is nobody's patient.
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    patient_id = held_for_patient_id(acct_key)
+    # An account with no live patient has no holder to match.
+    if patient_id == None:
+        return
+    # read-posture: (e) per-candidate follow-up read off the heldFor
+    # enumeration inside held_for_patient_id -- the patient id is data-derived,
+    # unknowable client-side.
+    identified_by = kv.Read("lnk.patient." + patient_id + ".identifiedBy.identity." + actor_id)
+    if identified_by != None and not identified_by.isDeleted:
+        # No account key in the text: it is toasted verbatim at the staffer,
+        # and a raw vtx key tells them nothing the rule does not.
+        fail("SelfClearing: a staffer may not " + verb + " their own account — another staffer must")
+
 def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -1148,6 +1177,18 @@ def post_entry(state, op, entry_type, event_class, allow_appointment_ref):
         identified_by = kv.Read("lnk.patient." + patient_id + ".identifiedBy.identity." + target_identity_id)
         if identified_by == None or identified_by.isDeleted:
             fail("AuthDenied: a patient may only pay down their own account")
+    elif entry_type == "credit":
+        # The staff leg's ownership check, the mirror image of the self leg's
+        # above. The two verbs that give the clinic's money up -- a waiver
+        # (debt forgiven) and a reversal (a credit naming the charge it gives
+        # back, reversesRef; validated below, tested here by presence only so
+        # a refused self-clearing never reaches the .balance read) -- are
+        # refused on the actor's own account. A payment credit records money
+        # coming IN and is untouched, as is every charge.
+        if reason == "waiver":
+            require_not_own_account(acct_key, "forgive")
+        elif hasattr(p, "reversesRef") and getattr(p, "reversesRef") != None:
+            require_not_own_account(acct_key, "reverse a charge on")
 
     # Everything above this line is the caller's standing and the payload's
     # shape; everything below it touches the ACCOUNT's own money. The order is

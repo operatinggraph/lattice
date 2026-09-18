@@ -118,6 +118,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				OptionalReads: []string{"{payload.accountKey}.balance", "{payload.accountKey}.arrears"},
 				// refusal-courtesy(facet): InvalidState, NoFeeToSettle, WrongAccount, WrongPatient: none — TargetType "clinicaccount" names an entityType no edge-manifest lens projects; Facet has no picker row for the account, and visitRef is a plain typed field, not an x-entityRef picker Facet could drop.
 				// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — ClinicDebitAccount dispatches post_entry with entry_type="debit" (scripts.go); is_self_pay requires entry_type=="credit" on the authContextTarget branch (a debit with a target fails AuthDenied before is_self_pay is ever set), so the block these codes live in never runs for a debit
+				// refusal-courtesy(facet): SelfClearing: unreachable — require_not_own_account (post_entry, scripts.go) runs only on a credit (entry_type == "credit"); ClinicDebitAccount dispatches post_entry with entry_type="debit"
 			},
 		},
 		{
@@ -164,6 +165,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// the walk and ClinicDebitAccount does not.
 				Enumerations: []pkgmgr.EnumerationSpec{{Hub: "{payload.accountKey}", Relation: "postedTo", Direction: "in"}},
 				// refusal-courtesy(facet): InvalidState, NoFeeToSettle, WrongAccount, WrongPatient: none — TargetType "clinicaccount" names an entityType no edge-manifest lens projects; Facet has no picker row for the account, and reversesRef is a plain typed field, not an x-entityRef picker Facet could drop.
+				// refusal-courtesy(facet): SelfClearing: unreachable — AuthContext "self" means every Facet submit of this op takes post_entry's authContextTarget branch (scripts.go), which refuses a waiver or a reversesRef AuthDenied; the self-clearing check lives on the staff leg (no target) this form never submits on
 				// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: none — AuthContext "self" means every Facet submit of this op is self-scoped, so is_self_pay is always true server-side, but amountCents carries no maximum tied to the account's own live balance (InputSchema above), and no edge-manifest entity lens projects that balance as a column Facet could bound against
 			},
 		},

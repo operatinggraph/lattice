@@ -174,6 +174,20 @@ function idOf(key) {
   return parts[parts.length - 1];
 }
 
+// isOwnAccount answers whether the account held by identityKey (a
+// wellnessaccount's heldFor identity — the billing picker's member value)
+// belongs to the signed-in viewer. Pure: reads state.identityId (the raw
+// NanoID) and nothing else, and answers false when either side is missing —
+// an unresolved pick or a whoami that never answered must not hide a button
+// from a staffer entitled to it. The courtesy half of packages/wellness-
+// ledger's SelfClearing refusal: nobody clears their own debt from the desk,
+// so the waive button is withheld on the viewer's own account; the
+// enforcement is the script's own heldFor compare, never this.
+function isOwnAccount(identityKey) {
+  if (!identityKey || !state.identityId) return false;
+  return idOf(identityKey) === state.identityId;
+}
+
 // seatKeys enumerates a session's seat-claim aspect keys up to its capacity,
 // mirroring the Starlark's claim_first_free_seat loop (ddls.go) so the
 // dispatcher can declare each as an optionalReads (script-read-posture-
@@ -1312,6 +1326,7 @@ let myBalanceCache = null;
 // refusal-courtesy: WellnessCreditAccount/NoBalanceToPay: hide — renderMyBalance hides #myclasses-pay-form (payForm.hidden) whenever data.balanceCents is not > 0
 // refusal-courtesy: WellnessCreditAccount/PaymentExceedsBalance: cap — renderMyBalance sets #myclasses-pay-amount's max/value to the balance just shown
 // refusal-courtesy: WellnessCreditAccount/InvalidState: none — the account's arrears aspect carrying the wrong class is a data-integrity fault (post_entry, packages/wellness-ledger/scripts.go), not a state this form's controls could gate.
+// refusal-courtesy: WellnessCreditAccount/SelfClearing: unreachable — this function never sets prefill.reason, so the credit posts as the default "payment", and require_not_own_account (post_entry, packages/wellness-ledger/scripts.go) runs only on a waiver or a refund
 async function submitMyPayment() {
   const amountInput = document.getElementById("myclasses-pay-amount");
   const btn = document.getElementById("myclasses-pay-submit");
@@ -3440,6 +3455,7 @@ async function renderBilling() {
   const list = document.getElementById("billing-list");
   const empty = document.getElementById("billing-empty");
   const memberKey = document.getElementById("billing-member").value;
+  renderWaiveControl(memberKey);
   if (!memberKey) {
     balanceEl.textContent = "";
     list.innerHTML = "";
@@ -3463,6 +3479,29 @@ async function renderBilling() {
   }
   billingCache = data;
   renderBillingBody(data);
+}
+
+// renderWaiveControl withholds the Waive charge button on the viewer's OWN
+// account and says why in its place: packages/wellness-ledger refuses a
+// staffer's waiver of their own account SelfClearing, so the desk never
+// offers the button only to have the submit come back refused. The charge
+// and payment buttons stay — a charge and a payment are not clearing verbs
+// and the script accepts both from anyone standing.
+function renderWaiveControl(memberKey) {
+  const waiveBtn = document.getElementById("billing-waive");
+  if (!waiveBtn) return;
+  const own = isOwnAccount(memberKey);
+  waiveBtn.hidden = own;
+  let note = document.getElementById("billing-own-note");
+  if (own && !note) {
+    note = document.createElement("span");
+    note.id = "billing-own-note";
+    note.className = "meta";
+    note.textContent = "your own account — another staffer clears it";
+    waiveBtn.insertAdjacentElement("afterend", note);
+  } else if (!own && note) {
+    note.remove();
+  }
 }
 
 function renderBillingBody(data) {
@@ -3517,6 +3556,8 @@ function renderBillingBody(data) {
 // refusal-courtesy: WellnessCreditAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — same as WellnessDebitAccount above: this front-desk site never attaches a target, so is_self_pay is always false regardless of entry_type
 // refusal-courtesy: WellnessDebitAccount/InvalidState: none — the account's arrears aspect carrying the wrong class is a data-integrity fault (post_entry, packages/wellness-ledger/scripts.go), not a state this form's controls could gate.
 // refusal-courtesy: WellnessCreditAccount/InvalidState: none — same as WellnessDebitAccount's InvalidState above: post_entry is shared by both entry types.
+// refusal-courtesy: WellnessCreditAccount/SelfClearing: hide — renderWaiveControl (renderBilling) hides #billing-waive when isOwnAccount(#billing-member's value), the picked member's identityKey against state.identityId, and puts the "your own account — another staffer clears it" note in its place; the payment button posts the default "payment" reason, which require_not_own_account (post_entry, packages/wellness-ledger/scripts.go) ignores
+// refusal-courtesy: WellnessDebitAccount/SelfClearing: unreachable — require_not_own_account (post_entry, packages/wellness-ledger/scripts.go) runs only on a credit (entry_type == "credit"); WellnessDebitAccount dispatches post_entry with entry_type="debit"
 async function submitBillingEntry(opType, what, reason) {
   const memberKey = document.getElementById("billing-member").value;
   if (!memberKey) {
@@ -4309,6 +4350,8 @@ async function createSession(studioKey, els) {
 // refusal-courtesy: WellnessDebitAccount/NoBalanceToPay, PaymentExceedsBalance: see submitBillingEntry
 // refusal-courtesy: WellnessCreditAccount/InvalidState: see submitMyPayment
 // refusal-courtesy: WellnessDebitAccount/InvalidState: see submitBillingEntry
+// refusal-courtesy: WellnessCreditAccount/SelfClearing: see submitBillingEntry
+// refusal-courtesy: WellnessDebitAccount/SelfClearing: see submitBillingEntry
 // init wires billing-payment/billing-waive to submitBillingEntry("WellnessCreditAccount", ...) too — that leg's own courtesy (or lack of it) is submitBillingEntry's declaration, not repeated here since both legs' codes are unreachable there regardless of which button dispatched them.
 function init() {
   document.querySelectorAll(".tab").forEach((b) => {

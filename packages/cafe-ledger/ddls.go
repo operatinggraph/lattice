@@ -380,7 +380,11 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"outright on an account that owes nothing (AuthDenied) — on the resident's own scope=self submit and on " +
 			"a staff scope=any submit alike, since nothing on this platform verifies that a payment actually " +
 			"happened whoever keyed it; a write-off (reason \"waiver\") is the same credit under the same cap, " +
-			"refused AuthDenied on a self-scoped submit because forgiving a debt is the café's call. " +
+			"refused AuthDenied on a self-scoped submit because forgiving a debt is the café's call. Nobody clears " +
+			"their own debt from the desk: on the staff leg the three verbs that give the house's money up — a " +
+			"write-off (reason \"waiver\"), RefundCafeCharge and PayoutCafeCredit — are refused SelfClearing when the " +
+			"account's own heldFor lease is held (applicationFor) by the actor, operator included (the rule is " +
+			"about whose money it is, not whose standing); a payment credit and a charge are untouched. " +
 			".entry.reason is a complete classification: a credit is payment / waiver / refund, a debit carries " +
 			"none (a charge) or payout. Only CreditCafeAccount accepts a payload reason; every other op writes " +
 			"its own and refuses one (InvalidArgument). Requires the accountKey be a live account and amountCents " +
@@ -493,7 +497,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"the revision its .entry was read at, and emits account.credited. Rejects UnknownTransaction if " +
 					"the reference is absent, InvalidArgument if it is a credit, a payout or posted to another account, " +
 					"RefundExceedsCharge if the amount runs past the charge, RefundExceedsPaid if it would leave the " +
-					"account in more credit than the cash it has paid in, and AuthDenied on a self-scoped submit.",
+					"account in more credit than the cash it has paid in, AuthDenied on a self-scoped submit, and " +
+					"SelfClearing when the actor holds the account's own lease.",
 			},
 			{
 				Name:    "CreditCafeAccount — write off a house tab the café will never collect",
@@ -502,7 +507,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"consumer sums it as a credit, and the statement reads the reason to say the debt was forgiven " +
 					"rather than paid. Capped at the outstanding balance like a payment (\"a write-off of $X exceeds " +
 					"the outstanding balance of $Y\"). Rejects AuthDenied on a self-scoped submit: a resident pays " +
-					"their tab down, never writes it off.",
+					"their tab down, never writes it off — and SelfClearing on a staff submit against the actor's " +
+					"own lease's account: another staffer forgives it.",
 			},
 			{
 				Name:    "PayoutCafeCredit — hand back credit in cash",
@@ -513,8 +519,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 					"zero; never writes .arrears (the balance it leaves is at most zero). Emits " +
 					"account.paidOut{accountKey, transactionKey, amountCents}. Rejects NoCreditToPayOut if the account " +
 					"owes or is square, PayoutExceedsCredit if the amount runs past the credit, AuthDenied on a " +
-					"self-scoped submit, PayoutExceedsCash past the cash paid in, and InvalidArgument on a tabRef, " +
-					"reversesRef or reason field.",
+					"self-scoped submit, SelfClearing when the actor holds the account's own lease, PayoutExceedsCash " +
+					"past the cash paid in, and InvalidArgument on a tabRef, reversesRef or reason field.",
 			},
 		},
 	}
