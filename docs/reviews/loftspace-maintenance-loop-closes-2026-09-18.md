@@ -224,3 +224,47 @@ rule (`lint-gap-params` clean on `row.taskKey`, the anchor).
 backfill gap (the ask's live instance predates the link); the stale-task cancel (the landlord leg's own consequence);
 the Facet exclusion (the self grant's own consequence, the `ReportIssue` precedent). Declared dependency re-verified both
 ways: `ea15ca76`'s queue + landlord lens are load-bearing and shipped; nothing here is load-bearing for anything unbuilt.
+
+**Build note (2026-09-18).** Deviations from the brief, each an increment of the same mechanism: the reportedBy link is
+minted AHEAD of the `.report` stamp (Refractor evaluates per CDC message and an atomic batch lands as N messages, so
+stamp-before-link opened `missing_reporter` for one revision on every fresh report — a doomed backfill dispatch);
+`staleWorkOrderTasks` is grounded on `resolvedBy <> assignee` (the task-path resolve's auto-complete is appended one
+message after `.resolution`, so `resolvedAt <> null` alone drew a doomed `CancelTask` on the common tech path — reasoned
+from the pipeline, not observed: `processor.log` holds no rejected `CancelTask` over its lifetime; the sibling
+`staleUserTasks` carries the same shape) — a claimant who resolves on the STANDING path keeps their claimed task to
+complete from their inbox (`CompleteTask` self grant), else it expires into `UnroutedTasks`; `reported_by_resident` is an
+`OPTIONAL MATCH … residesIn … (u)` closing on the bound unit with `(r.key <> null)` (this engine has no `size()`; the far
+node is constrained by `rel_traverse.go`), not a pattern comprehension; `LinkWorkOrderReporter` replies the LINK key as
+`primaryKey` (the reply constraint refuses a vertex root for a link-only write); its `.report` read is `(a)` — the target
+lists it in required `Reads`; `unit_address` is loftspace-domain's `.address` (`SetUnitAddress`), not location-domain's;
+the two self-leg refusals share one `AuthDenied` text (no unit-vs-building oracle); `Depends` gains `orchestration-base`
+(`CancelTask` by `Class: task`). Accepted bound, stated at the gap: a reporter whose identity ROOT is tombstoned keeps
+`missing_reporter` open until the directOp retry budget parks that gap alone with a standing Health issue (no op
+tombstones an identity root today). The landlord panel offers Resolve on the row's own `landlord_key` only (the lens also
+anchors covering buildings); both new refreshes defer 800 ms behind projection and the work-orders load runs after the
+applications it joins; "My reports" renders once per tenant view.
+
+**Shipped `a8d26b2e` (merge of `6a2761ad`), CI green, live 2026-09-18.** `refresh-loftspace` (maintenance-domain 0.3.0 →
+0.4.0, loftspace-domain 0.15.0 → 0.16.0, `provision-readpath`, the app cycled), `reinstall-package` edge-manifest 0.17.20;
+weaver targets `staleWorkOrderTasks` / `workOrderResolvedNotices` active, `workOrderQueue` re-registered with both gaps.
+The backfill's first 15 dispatches were `AuthDenied` on the capability-projection lag of the new grant (the documented
+first-dispatch race) and cleared by `weaver revoke` + `enable workOrderQueue`; 19/19 legacy orders linked within a minute
+after, the three resolved ones told (`.resolvedNotice` + the bridge's `.resolvedNotification {completed}`), the new
+protected lens active (`read_reporter_work_orders`: 19 rows, 3 resolved, 3 told; `read_landlord_work_orders`: 18 rows, 1
+by a resident). Through the app's own path (dev-login → session token → Gateway): Jordan Ellis's 09-17 report
+`whDpTDRwQiJmA6PfFhdF` reads on `/api/my/work-orders` (1 row, was 0); his fresh report `vtx.workorder.CY2hf44PMgArj6JRbXyw`
+lands with its link in the batch, is queued by the gap (`vtx.task.En3UTQGSgZPLAW3H5GQc`) with no backfill dispatch, and
+reads on Nora Vance's console as *Reported by Jordan Ellis*; Jordan resolving it → `AuthDenied`; Nora with the manages
+link undeclared → `AuthDenied`; declared → `.resolution` committed, the task `cancelled` by convergence, the notice sent
+and its outcome recorded within 27 s, Jordan's card reading *resolved … — Replaced the hallway ballast · you were told*.
+Rendered: Nora's Maintenance panel (19 cards, Resolve on 15 unresolved of her own) and Jordan's My reports, one tab,
+closed. Native `prompt()` on Resolve was not driven in-browser; the op was proven through the Gateway.
+
+**Review classification (two cold passes over the whole diff, 0 BLOCKING, 4 SHOULD-FIX, all fixed before merge):**
+design-gap ×2 (the per-message transient of an atomic batch on `missing_reporter` and on the task-path resolve — a
+`_packages.md` sighting under the every-ARM entry), implementation ×3 (a former resident labelled staff — the residence
+boolean read as "ever" not "now"; both refreshes ahead of projection; the reporter label read before the applications
+loaded — a `vertical-apps.md` sighting), brief-gap ×3 (six vectors added: another-unit link declared, operator naming
+self, tombstoned link, identical-notes replay, reporter in a different unit, self-on-task catalog), convention ×3 (Depends,
+one refusal text, the OPTIONAL-MATCH build-note line), review-over-reach ×1 (Resolve offered to a co-anchored building
+staffer — gated on `landlord_key`).

@@ -81,7 +81,10 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   resident's settle gate counted the lens row's lines while the card drew the optimistic `pending` overlay — an
   accepted self-order not yet projected left Settle enabled and refused; a courtesy predicate runs over the lines the
   card RENDERS, and a stale-card re-render on a refusal is applied at every site that dispatches the op (two of five had
-  it).
+  it). **Eighth (LoftSpace maintenance, 2026-09-18, caught cold ×3):** two new refreshes read ahead of projection (no
+  800 ms defer), a label joined a list not yet loaded (concurrent loads), and a "resides here NOW" boolean was read as
+  "ever reported from here" — a new load site mirrors the sibling's defer, runs after the lists it joins, and a projected
+  boolean is read as the fact it records.
 - **An op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`** — a
   rationale comment naming an exemption-less op (the instructor identity bind) reddened `lint-static` after
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats

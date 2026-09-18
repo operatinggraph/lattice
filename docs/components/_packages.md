@@ -614,7 +614,11 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   the run's extreme, pin a re-projection after the op's write) — Weaver has no episode boundary of its own; for every
   ARM of the op (no-op, collapse, complete) pin the gap FALSE over the state that arm leaves — and every arm of every
   NEIGHBOUR op that writes the gap's inputs (`CompleteTask` without a resolution re-opens `missing_task`; stated and
-  pinned, 2026-09-17, caught cold). Sighting: a lens-computed
+  pinned, 2026-09-17, caught cold). Sighting (maintenance `missing_reporter` + `staleWorkOrderTasks`, 2026-09-18, caught cold ×2): an ARM is
+  also every MESSAGE of its batch — Refractor evaluates per CDC message, so a gap over two keys of one atomic write opens
+  between them (stamp before link; `.resolution` before the appended auto-complete) and dispatches a doomed op — order the
+  batch so the closing key lands first, or ground the gap on a fact that lands earlier (`resolvedBy <> assignee`); pin the
+  intermediate state. Sighting: a lens-computed
   param the dispatched op can refuse on SHAPE (`whole_cents` on a fractional-dollar `depositAmount`) is a gap refused on every
   pass — pin the param's admissible domain at its source (loftspace deposit, 2026-09-15, caught cold). Sighting: a replay budget mirrored as a NUMBER (500) was sized against the live-read budget, not the 250 ms wall — a
   98-entry account aborted, and a ScriptTimeout is a rejection the gap re-dispatches forever (clinic arrears, 2026-09-16,

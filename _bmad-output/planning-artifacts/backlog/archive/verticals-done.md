@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-16 · `0f769e58` · A self-booking patient holds one open visit per provider per day — `patientSelfDayClaim` on the self path, moved by a reschedule, freed on every terminal transition; `SelfBookingLimit`; desk unrestricted; refused live.
+- 2026-09-16 · `99615546` · A clinical note is amended, not rewritten — the prior text stays in the encrypted record, `documentedAt` preserved, `amendedAt` projected ([design](../../../docs/reviews/clinic-visit-record-integrity-2026-09-16.md)).
 - 2026-09-16 · `99615546` · A moved visit returns to scheduled — `RescheduleAppointment` re-stamps a live non-terminal `.status`; `MarkPastDueNoShow` is a no-op before the visit's end and its playbook declares its reads; live.
 - 2026-09-16 · `99615546` · A patient confirms their own visit — the consumer self grant admits `confirmed` before start (refused over a check-in, once started; a re-confirm writes nothing); Confirm on the patient card; live via the Gateway.
 - 2026-09-16 · `e880c00f` · A clinic debtor is reminded — `.arrears` + `EvaluateClinicArrears` + a Weaver target; the desk sees the debt beside Check in, no op refuses care ([design](../../../docs/reviews/clinic-arrears-reminder-2026-09-15.md)).
