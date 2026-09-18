@@ -552,6 +552,14 @@ RETURN
 // (bookings.go). The session's own residentPriceCents is not projected here:
 // nothing reads it off a booking row once the effective price is one column.
 //
+// instructorKey / instructorName walk the session's live ledBy link the way
+// wellnessSessionsSpec does (an un-led class, or one whose instructor is
+// tombstoned, projects null). instructorChangedAt / studioChangedAt are the
+// stamps ReassignSession records on the schedule when who leads or where it
+// meets changes; instructorFor / roomFor are the stamps the member was last
+// told, off the same .changeNotice marker movedFor reads — a client badges a
+// change told SINCE by comparing each pair.
+//
 // changeNoticeSentAt / movedFor read the booking's own .changeNotice aspect —
 // the same cross-package aspect-read pattern reminderSentAt above uses,
 // against a marker written by wellness-reminders' own booking-change-notice
@@ -562,6 +570,7 @@ RETURN
 const wellnessBookingsSpec = `MATCH (b:booking)
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
 OPTIONAL MATCH (se)-[:atStudio]->(s:studio)
+OPTIONAL MATCH (se)-[:ledBy]->(i:instructor)
 OPTIONAL MATCH (b)-[:bookedBy]->(id:identity)
 RETURN
   b.key AS key,
@@ -582,7 +591,13 @@ RETURN
   b.status.data.promotedAt AS promotedAt,
   b.status.data.bookedAt AS bookedAt,
   b.changeNotice.data.sentAt AS changeNoticeSentAt,
-  b.changeNotice.data.movedFor AS movedFor`
+  b.changeNotice.data.movedFor AS movedFor,
+  i.key AS instructorKey,
+  i.profile.data.displayName AS instructorName,
+  se.schedule.data.instructorChangedAt AS instructorChangedAt,
+  se.schedule.data.studioChangedAt AS studioChangedAt,
+  b.changeNotice.data.instructorFor AS instructorFor,
+  b.changeNotice.data.roomFor AS roomFor`
 
 // orphanedBookingSettlementSpec is the one-row-per-booking convergence
 // cypher: TombstoneSession deliberately does not cascade (package.go), so a

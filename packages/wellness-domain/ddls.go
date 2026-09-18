@@ -803,7 +803,8 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{"CreateSession", "ReassignSession", "CreateSessionSeries", "ReassignSessionSeries", "ExtendSessionSeries"},
 		Description: "Session schedule aspect (wellness). Stored as vtx.session.<NanoID>.schedule (class " +
-			"sessionSchedule) = {name, startsAt, endsAt, capacity, priceCents?, residentPriceCents?, remindAt}. " +
+			"sessionSchedule) = {name, startsAt, endsAt, capacity, priceCents?, residentPriceCents?, remindAt, " +
+			"instructorChangedAt?, studioChangedAt?}. " +
 			"Non-sensitive. Written by " +
 			"CreateSession (mints, priceCents omitted or 0 for a free class), ReassignSession (OCC-conditioned; " +
 			"startsAt/endsAt update on a time move, name/capacity/priceCents/residentPriceCents update when the " +
@@ -823,16 +824,18 @@ func sessionScheduleAspectTypeDDL() pkgmgr.DDLSpec {
 			"remindAt on the appointment .schedule aspect) to arm the ~24h-ahead class reminder.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
-			`{"name":{"type":"string"},"startsAt":{"type":"string"},"endsAt":{"type":"string"},"capacity":{"type":"integer"},"priceCents":{"type":"integer"},"residentPriceCents":{"type":"integer"},"remindAt":{"type":"string"}}}`,
+			`{"name":{"type":"string"},"startsAt":{"type":"string"},"endsAt":{"type":"string"},"capacity":{"type":"integer"},"priceCents":{"type":"integer"},"residentPriceCents":{"type":"integer"},"remindAt":{"type":"string"},"instructorChangedAt":{"type":"string"},"studioChangedAt":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"name":               "The session's display name.",
-			"startsAt":           "Session start (RFC3339).",
-			"endsAt":             "Session end (RFC3339).",
-			"capacity":           "Maximum concurrent bookings (integer 1..200).",
-			"priceCents":         "Optional class price in integer cents (>= 0). Omitted or 0 means a free class.",
-			"residentPriceCents": "Optional resident class price in integer cents (>= 0), charged instead of priceCents to a booking whose .status.rate is resident. Omitted means a resident pays priceCents same as a standard booker.",
-			"remindAt":           "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateSession/CreateSessionSeries/ExtendSessionSeries/ReassignSession/ReassignSessionSeries, not a caller input; wellness-reminders' convergence lens projects it as freshUntil to arm the @at class-reminder timer.",
+			"name":                "The session's display name.",
+			"startsAt":            "Session start (RFC3339).",
+			"endsAt":              "Session end (RFC3339).",
+			"capacity":            "Maximum concurrent bookings (integer 1..200).",
+			"priceCents":          "Optional class price in integer cents (>= 0). Omitted or 0 means a free class.",
+			"residentPriceCents":  "Optional resident class price in integer cents (>= 0), charged instead of priceCents to a booking whose .status.rate is resident. Omitted means a resident pays priceCents same as a standard booker.",
+			"remindAt":            "Precomputed reminder deadline (RFC3339, canonical UTC) = startsAt − 24h. Derived by CreateSession/CreateSessionSeries/ExtendSessionSeries/ReassignSession/ReassignSessionSeries, not a caller input; wellness-reminders' convergence lens projects it as freshUntil to arm the @at class-reminder timer.",
+			"instructorChangedAt": "Optional RFC3339 instant (canonical UTC) ReassignSession last changed who leads the class (a swap, a clear, or a first assignment) — the op's own submittedAt, carried forward by every later schedule rewrite, absent on a class whose leader never changed. wellness-reminders' wellnessBookingChangeNotices tells each seat claimed before it, once per change.",
+			"studioChangedAt":     "Optional RFC3339 instant (canonical UTC) ReassignSession last moved the class to another studio — the op's own submittedAt, carried forward, absent on a class that never moved rooms. Read by wellnessBookingChangeNotices as instructorChangedAt is.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -1073,7 +1076,7 @@ func bookerSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     bookerSlotClaimAspectDDL,
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking"},
+		PermittedCommands: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking", "ReassignSession", "ReassignSessionSeries"},
 		Description: "Booker 15-minute slot-claim aspect (wellness). Stored as vtx.identity.<NanoID>.slot<cellcode> " +
 			"(class bookerSlotClaim) = {} — a pure existence marker, no relationship field. <cellcode> is the " +
 			"cell's canonical whole-second UTC start with '-'/':' stripped and lowercased, computed from the " +
@@ -1083,7 +1086,10 @@ func bookerSlotClaimAspectTypeDDL() pkgmgr.DDLSpec {
 			"refused before any cell is claimed — ProtectedBooker — since a cell under a protected root could never " +
 			"be tombstoned); CancelBooking tombstones " +
 			"all held cells for the cancelled booking's session on release; ReleaseOrphanedBooking does the same " +
-			"for a booking whose session TombstoneSession already killed (a called-off class does not cascade). " +
+			"for a booking whose session TombstoneSession already killed (a called-off class does not cascade); " +
+			"ReassignSession and ReassignSessionSeries carry every live booker's cells with a moved class (release the " +
+			"old span's, claim the new span's, in the batch that rewrites the schedule — BookerConflict refuses the " +
+			"whole move when a member already holds the new hour elsewhere). " +
 			"Non-sensitive; created on demand, no CreateBooking init needed. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
 		InputSchema:  `{"type":"object","properties":{}}`,
@@ -3219,6 +3225,65 @@ def session_atlocation_links(sess_key):
             break
     return out
 
+# The bookers whose slot cells a session's span holds. CreateBooking and
+# JoinWaitlist each claim a bookerSlotClaim per covered cell on the booker's
+# identity hub (bookingDDLScript), so a booked AND a waitlisted booking both
+# hold the class's cells; every other status (cancelled, forfeited, attended,
+# noShow) has released them or sits on a class already over. A time move has
+# to carry those cells with the class -- left behind, the member's old hour
+# stays refused BookerConflict with no booking to show for it, the new hour
+# guards nothing, and a later cancel tombstones cells that were never claimed.
+BOOKER_WALK_PAGE_LIMIT = 50
+MAX_BOOKER_WALK_PAGES = 4
+
+def collect_live_bookers(sess_key, max_pages):
+    # Every distinct booker holding cells for this session, and whether the
+    # walk reached the END of the session's forSession-in set -- the same
+    # bounded, paginated kv.Links "in" walk bookingDDLScript's
+    # collect_waitlist_candidates makes (the session is the link's TARGET,
+    # the booking its SOURCE), reading each booking's .status for its value
+    # and its booker. The set is one class occurrence's own booking history,
+    # never a keyspace scan. A link may be delivered on more than one page,
+    # and one member may hold two bookings on one class only when the first
+    # is no longer live, so bookings AND bookers are both de-duplicated: one
+    # booker gets one cell delta, never two tombstones of the same key in one
+    # batch.
+    bookers = []
+    seen_bookings = {}
+    seen_bookers = {}
+    cursor = None
+    reached_end = False
+    for _page in range(max_pages):
+        # read-posture: (e) relation=forSession epoch=none (one class
+        # occurrence's own bookings -- bounded real-world churn; a booking
+        # created concurrently with this walk claims its cells on the span
+        # the schedule says at ITS commit, so it lands on whichever side of
+        # the move it observed).
+        links, cursor = kv.Links(sess_key, "forSession", "in", cursor, BOOKER_WALK_PAGE_LIMIT)
+        for lk in links:
+            if lk.isDeleted:
+                continue
+            if lk.sourceVertex in seen_bookings:
+                continue
+            seen_bookings[lk.sourceVertex] = True
+            # read-posture: (e) per-booking follow-up read off the
+            # enumeration above (data-derived key -- the booking is unknown
+            # until it resolves from the link).
+            st = kv.Read(lk.sourceVertex + ".status")
+            if st == None or st.isDeleted:
+                continue
+            if st.data.get("value") not in ["booked", "waitlisted"]:
+                continue
+            booker = st.data.get("booker")
+            if booker == None or booker in seen_bookers:
+                continue
+            seen_bookers[booker] = True
+            bookers.append(booker)
+        if cursor == None:
+            reached_end = True
+            break
+    return bookers, reached_end
+
 def valid_vertex_key(key, want_type):
     # Lenient key-shape check for a pre-pass that must never fault (objects-base's
     # derive_reads sets this precedent): a malformed/wrong-type key derives
@@ -4341,6 +4406,14 @@ def execute(state, op):
         new_studio_cells = {}
         old_instr_cells = {}
         new_instr_cells = {}
+        # The bookers' hubs get the identical grouped treatment: a regular who
+        # holds three weeks of this run is one hub whose old set spans three
+        # occurrences, so a shift by the run's own interval writes only the
+        # difference for them too, and a member seated on two occurrences that
+        # would land on one cell is refused by name (collect_live_bookers, the
+        # per-occurrence walk ReassignSession makes for one class).
+        old_booker_cells = {}
+        new_booker_cells = {}
         moved = []
         for occ in eligible:
             sess_key = occ["key"]
@@ -4354,10 +4427,20 @@ def execute(state, op):
                 if instructor not in old_instr_cells:
                     old_instr_cells[instructor] = {}
                     new_instr_cells[instructor] = {}
+            bookers, reached_end = collect_live_bookers(sess_key, MAX_BOOKER_WALK_PAGES)
+            if not reached_end:
+                fail("BookingWalkBound: the class of " + occ["startsAt"] + " carries more bookings than " +
+                     str(MAX_BOOKER_WALK_PAGES * BOOKER_WALK_PAGE_LIMIT) + " links; its members cannot all be moved in one call")
+            for booker in bookers:
+                if booker not in old_booker_cells:
+                    old_booker_cells[booker] = {}
+                    new_booker_cells[booker] = {}
             for c in occ_old:
                 old_studio_cells[c] = occ["startsAt"]
                 if instructor != None:
                     old_instr_cells[instructor][c] = occ["startsAt"]
+                for booker in bookers:
+                    old_booker_cells[booker][c] = occ["startsAt"]
             for c in occ_new:
                 if c in new_studio_cells:
                     fail("StudioConflict: the classes of " + new_studio_cells[c] + " and " + occ["startsAt"] +
@@ -4368,6 +4451,11 @@ def execute(state, op):
                         fail("InstructorConflict: the classes of " + new_instr_cells[instructor][c] + " and " + occ["startsAt"] +
                              " would both need instructor " + instructor + " slot " + slot_cellcode(c) + " after the move")
                     new_instr_cells[instructor][c] = occ["startsAt"]
+                for booker in bookers:
+                    if c in new_booker_cells[booker]:
+                        fail("BookerConflict: the classes of " + new_booker_cells[booker][c] + " and " + occ["startsAt"] +
+                             " would both need booker " + booker + " slot " + slot_cellcode(c) + " after the move")
+                    new_booker_cells[booker][c] = occ["startsAt"]
             # remindAt re-derived from the new start, exactly as ReassignSession
             # does; name/capacity/price carried forward unchanged, a missing
             # price field staying missing rather than arriving as null.
@@ -4377,10 +4465,9 @@ def execute(state, op):
                 "capacity": sched.data.get("capacity"),
                 "remindAt": time.rfc3339_add(occ_new_starts, "-24h"),
             }
-            if sched.data.get("priceCents") != None:
-                new_sched["priceCents"] = sched.data.get("priceCents")
-            if sched.data.get("residentPriceCents") != None:
-                new_sched["residentPriceCents"] = sched.data.get("residentPriceCents")
+            for carried in ["priceCents", "residentPriceCents", "instructorChangedAt", "studioChangedAt"]:
+                if sched.data.get(carried) != None:
+                    new_sched[carried] = sched.data.get(carried)
             moved.append({"key": sess_key, "startsAt": occ["startsAt"], "sched": new_sched, "revision": sched.revision})
 
         mutations = []
@@ -4404,6 +4491,14 @@ def execute(state, op):
                 if c not in old_instr_cells[instructor]:
                     mutations.append(claim_cell(instructor, slot_cellcode(c), "instructorSlotClaim", "InstructorConflict",
                                                 "moving the class of " + new_instr_cells[instructor][c] + ": instructor"))
+        for booker in old_booker_cells:
+            for c in old_booker_cells[booker]:
+                if c not in new_booker_cells[booker]:
+                    mutations.append(make_tombstone(booker + ".slot" + slot_cellcode(c)))
+            for c in new_booker_cells[booker]:
+                if c not in old_booker_cells[booker]:
+                    mutations.append(claim_cell(booker, slot_cellcode(c), "bookerSlotClaim", "BookerConflict",
+                                                "moving the class of " + new_booker_cells[booker][c] + ": booker"))
         moved_keys = []
         for mv in moved:
             # OCC on the revision this walk itself read -- the guard rests on
@@ -4729,6 +4824,34 @@ def execute(state, op):
             for c in new_instr_cells:
                 mutations.append(claim_cell(new_instructor_final, slot_cellcode(c), "instructorSlotClaim", "InstructorConflict", "instructor"))
 
+        # Booker slot-claim migration -- the third hub, whose cells the same
+        # time move must carry: every member who holds this class's cells
+        # (booked or waitlisted, collect_live_bookers) gets the same-hub
+        # reschedule delta the studio gets above -- release only what the OLD
+        # span held, claim only what the NEW span needs, a cell both spans
+        # cover untouched. In the same batch as the schedule rewrite, so no
+        # member is ever unguarded on the new hour or refused on the old.
+        # claim_cell refuses BookerConflict when a member already holds the
+        # new hour on another class: the WHOLE move is refused, naming that
+        # member's hub, and the desk resolves it -- nothing is half-moved. A
+        # walk that does not reach the end of the session's bookings is
+        # refused too: migrating the members it found and stranding the rest
+        # would be this bug in a new coat. The hubs and the cells are
+        # class-(e) follow-ups of the walk; a dispatcher that knows the
+        # roster (cmd/wellness-app) declares the cells as optionalReads.
+        if reschedule and (new_starts != cur_starts or new_ends != cur_ends):
+            bookers, reached_end = collect_live_bookers(sess_key, MAX_BOOKER_WALK_PAGES)
+            if not reached_end:
+                fail("BookingWalkBound: session " + sess_key + " carries more bookings than " +
+                     str(MAX_BOOKER_WALK_PAGES * BOOKER_WALK_PAGE_LIMIT) + " links; its members cannot all be moved in one call")
+            for booker in bookers:
+                for c in old_cells:
+                    if c not in new_cells:
+                        mutations.append(make_tombstone(booker + ".slot" + slot_cellcode(c)))
+                for c in new_cells:
+                    if c not in old_cells:
+                        mutations.append(claim_cell(booker, slot_cellcode(c), "bookerSlotClaim", "BookerConflict", "booker"))
+
         # A shrink is refused under a claimed seat. Seat cells are
         # sessionSeatClaim aspects, alive while claimed and tombstoned on
         # release (claim_free_seats), and a seat index is never compacted: a
@@ -4779,6 +4902,25 @@ def execute(state, op):
             "capacity": new_capacity if new_capacity != None else sched.data.get("capacity"),
             "remindAt": new_remind_at,
         }
+        # Who leads and where it meets are links, swapped by tombstone-old +
+        # revive-new, so a swap leaves no fact a member's seat can be told
+        # against. The op that makes the change records WHEN it did, on the
+        # schedule it is rewriting anyway: instructorChangedAt stamps a swap,
+        # a clear or a newly-assigned instructor (old != final), studioChangedAt
+        # a room move, each the op's own submittedAt; an unchanged stamp is
+        # carried forward, and a class whose leader or room never changed has
+        # none. wellness-reminders' wellnessBookingChangeNotices reads them
+        # against each seat's bookedAt (told once per change, only seats
+        # claimed before it).
+        changed_at = time.rfc3339_utc(op.submittedAt)
+        if old_instructor != new_instructor_final:
+            new_sched["instructorChangedAt"] = changed_at
+        elif sched.data.get("instructorChangedAt") != None:
+            new_sched["instructorChangedAt"] = sched.data.get("instructorChangedAt")
+        if studio_changed:
+            new_sched["studioChangedAt"] = changed_at
+        elif sched.data.get("studioChangedAt") != None:
+            new_sched["studioChangedAt"] = sched.data.get("studioChangedAt")
         # priceCents/residentPriceCents: an explicit edit wins; otherwise carry
         # forward UNCHANGED — a session created before either field existed (or
         # created free / with no resident rate) simply has none to carry, so
@@ -4794,6 +4936,16 @@ def execute(state, op):
         elif cur_resident_price_cents != None:
             new_sched["residentPriceCents"] = cur_resident_price_cents
         mutations.append(make_aspect_upsert_occ(sess_key, "schedule", "sessionSchedule", new_sched, sched.revision))
+
+        # One batch, one ceiling: the booker delta scales the batch by the
+        # class's membership (eight mutations per member clear of their old
+        # cells on a one-hour class), so a full class can assemble more than
+        # substrate.MaxBatchMessages admits -- a commit-time fault the desk
+        # cannot read. Counted and refused here under the same ceiling
+        # ReassignSessionSeries keeps (SERIES_MOVE_MAX_MUTATIONS).
+        if len(mutations) > SERIES_MOVE_MAX_MUTATIONS:
+            fail("MoveTooLarge: moving session " + sess_key + " with its " + str(len(mutations)) + " mutations exceeds the " +
+                 str(SERIES_MOVE_MAX_MUTATIONS) + " one operation may commit; its members cannot all be moved in one call")
 
         final_studio = new_studio if studio_changed else studio
         events = [{"class": "wellness.sessionReassigned", "data": {"sessionKey": sess_key, "studio": final_studio}}]

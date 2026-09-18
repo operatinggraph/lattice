@@ -247,7 +247,7 @@ var corpusLabelVerdicts = map[string]labelVerdict{
 	"wellnessArrearsReminders":          {narrow, "wellnessaccount", modeRelation},
 	"wellnessBookingChangeNotices":      {narrow, "booking identity session", modeRelation},
 	"wellnessBookingReminders":          {narrow, "booking identity session", modeRelation},
-	"wellnessBookings":                  {narrow, "booking identity session studio", modeLabel},
+	"wellnessBookings":                  {narrow, "booking identity instructor session studio", modeLabel},
 	"wellnessClassPriceSettlement":      {narrow, "booking identity session wellnessaccount wellnesstransaction", modeLabel},
 	"wellnessInstructors":               {narrow, "instructor studio", modeRelation},
 	"wellnessLedgerHistory":             {narrow, "booking identity wellnessaccount wellnessrefund wellnesstransaction", modeLabel},

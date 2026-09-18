@@ -1838,6 +1838,13 @@ func reassignSessionEnv(t *testing.T, ctx context.Context, conn *substrate.Conn,
 			processor.EnumerationHint{Hub: sessionKey, Relation: "atLocation", Direction: "out"},
 			processor.EnumerationHint{Hub: newStudio, Relation: "locatedAt", Direction: "out"})
 	}
+	// A time move walks the session's own bookings to carry every booker's
+	// cells with the class (collect_live_bookers, ddls.go) — session-hubbed,
+	// so a dispatcher declares it, the pair app.js's reassignSession sends.
+	if reschedule {
+		enumerations = append(enumerations,
+			processor.EnumerationHint{Hub: sessionKey, Relation: "forSession", Direction: "in"})
+	}
 
 	payloadBytes, _ := json.Marshal(payload)
 	return &processor.OperationEnvelope{
