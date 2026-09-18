@@ -360,6 +360,18 @@ jobs:
         # columns.
         run: STRICT=1 go run ./scripts/lint-gap-column-declaration.go
 
+      - name: Weaver gap Params optional-hop lint (a row.<column> Params value is non-null on every open row)
+        # Weaver refuses to dispatch a gap whose templated row column is null
+        # (strategist.go resolveRowTemplate) — a data error no redelivery can
+        # fix — and a column walked off an OPTIONAL MATCH is null exactly where
+        # the hop bound nothing. Four sightings (café arrears, wellness
+        # CreateBooking, the change-notices call-off window, the change-notices
+        # cleared-instructor case, 2026-09-06..18) before this gate; it classifies
+        # every templated column through the full engine's OptionalHopColumns and
+        # accepts a coalesce to a literal or the gap's own `<> null` / ordering
+        # conjunct. Self-tests on every run.
+        run: STRICT=1 go run ./scripts/lint-gap-params-optional-hop.go
+
       - name: Weaver witnessed-retire lint (a `surface` membership leaves only on a READ column)
         # internal/weaver has two column readers with two verdicts: boolColumnRead
         # reports the value AND whether the row stated it, while boolColumn
