@@ -111,6 +111,12 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"itemsMemo and every other line carried forward unchanged. " +
 			"Settle{tabKey} closes an " +
 			"OPEN tab (.status.value → settled, settledAt stamped, totalCents AND itemsMemo frozen), also OCC-conditioned, and " +
+			"only over made orders: it rejects UnservedLines, naming each line, while any .status.lines entry is still to " +
+			"make (not voided, orderedAt set, no servedAt — a self-order the desk has neither marked served nor voided; a " +
+			"legacy line with neither key is never counted), after the confinement / ownership checks and before the " +
+			"paidCents checks. A person is refused rather than the line voided: the desk knows whether the order was handed " +
+			"over and holds both verbs (MarkLineServed, VoidCharge), and a closed tab can no longer be marked or voided. " +
+			"Settle " +
 			"tombstones both the lease's cafeOpenTabGuard (so a later OpenTab can claim it again) and the tab's own " +
 			"openFor link (so the tab leaves every resident's edgeEntityTabs read grant, which walks that hop and " +
 			"cannot see the .status aspect the lens tail filters on). chargedTo is deliberately left standing — the " +
@@ -128,7 +134,11 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"SettleStaleTab{tabKey} (operator only, orchestration-internal — no human dispatches it) is the " +
 			"auto-settle twin of Settle, dispatched by cafeStaleTabSettlement (lenses.go) once an OPEN tab's own " +
 			"staleAt deadline passes with no staff Settle; it no-ops cleanly (rather than rejecting TabNotOpen) if a " +
-			"staff Settle already won the race. A dedicated operationType rather than a directOp against Settle " +
+			"staff Settle already won the race. Where Settle refuses UnservedLines, the sweep — with nobody there to mark " +
+			"or void — voids every line still to make: each is copied whole with voided:true and voidedReason:\"unserved\" " +
+			"(the receipt reads it as never made), totalCents drops by each such line's own amount clamped at 0, itemsMemo is " +
+			"re-derived from the updated lines, and the tab.settled event carries voidedUnservedLineIds (always present, " +
+			"empty when every line was made). A dedicated operationType rather than a directOp against Settle " +
 			"itself, because Settle's own confinement checks (require_workplace, the applicationFor ownership " +
 			"probe) declare OptionalReads a Weaver GapActionSpec's Reads cannot template (row.<column> only) — " +
 			"none of which apply to Weaver's own service actor anyway. " +
@@ -283,14 +293,17 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"(OCC-conditioned close, value=settled, settledAt stamped, totalCents/lines carried over frozen, itemsMemo frozen as the " +
 			"comma-joined non-voided line descriptions, staleAt dropped — " +
 			"no longer meaningful once settled; a staff Settle{paidCents} also records paidAtSettleCents + paidAtSettleBy, " +
-			"the cash the desk took at the counter, which SettleStaleTab never writes), and BackfillTabStaleAt (OCC-conditioned backfill of a missing staleAt on a tab opened " +
+			"the cash the desk took at the counter, which SettleStaleTab never writes. A tab closes only over made orders: " +
+			"Settle rejects UnservedLines while any line is still to make (orderedAt, no servedAt, not voided), whereas " +
+			"SettleStaleTab voids each such line in place — voided:true, voidedReason:\"unserved\" — and subtracts its amount " +
+			"from totalCents, clamped at 0, re-deriving itemsMemo from the updated lines), and BackfillTabStaleAt (OCC-conditioned backfill of a missing staleAt on a tab opened " +
 			"before that field shipped, computed the same way OpenTab computes it; a no-op once staleAt is already present) — " +
 			"all owned by the tab vertexType DDL's script. " +
 			"Declaration-only: no op handler of its own.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"value":{"type":"string","enum":["open","settled"]},"totalCents":{"type":"number"},"itemsMemo":{"type":"string"},` +
-			`"lines":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"},"amountCents":{"type":"number"},"voided":{"type":"boolean"},"orderedBy":{"type":"string"},"orderedAt":{"type":"string"},"servedAt":{"type":"string"},"servedBy":{"type":"string"}}}},` +
+			`"lines":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"description":{"type":"string"},"amountCents":{"type":"number"},"voided":{"type":"boolean"},"voidedReason":{"type":"string"},"orderedBy":{"type":"string"},"orderedAt":{"type":"string"},"servedAt":{"type":"string"},"servedBy":{"type":"string"}}}},` +
 			`"openedAt":{"type":"string"},"staleAt":{"type":"string"},"leaseAppKey":{"type":"string"},"settledAt":{"type":"string"},` +
 			`"paidAtSettleCents":{"type":"number"},"paidAtSettleBy":{"type":"string"}}}`,
 		OutputSchema: `{"type":"object"}`,
@@ -298,7 +311,7 @@ func tabStatusAspectTypeDDL() pkgmgr.DDLSpec {
 			"value":             "open | settled.",
 			"totalCents":        "The tab's running total in integer cents, accumulated by Charge.",
 			"itemsMemo":         "A comma-joined line of what was charged, derived from lines: the description of every non-voided line, in charge order (a lineId void drops its line out). A tab with no lines keeps whatever memo it already carries. Empty string on a fresh tab. Frozen by Settle (never rewritten after).",
-			"lines":             "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, orderedBy, orderedAt, servedAt?, servedBy?}, one entry per Charge, in charge order. orderedAt is the Charge's op.submittedAt (RFC3339). servedAt/servedBy record that the line was handed over: stamped at ring-up on a staff Charge (the counter hands it over), by MarkLineServed on a self-order; a line with orderedAt and no servedAt is still to make, a line with neither predates this field and its state is unknown. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle (never rewritten after).",
+			"lines":             "The itemized breakdown a receipt renders instead of the flat itemsMemo string: a list of {id, description, amountCents, voided, voidedReason?, orderedBy, orderedAt, servedAt?, servedBy?}, one entry per Charge, in charge order. orderedAt is the Charge's op.submittedAt (RFC3339). servedAt/servedBy record that the line was handed over: stamped at ring-up on a staff Charge (the counter hands it over), by MarkLineServed on a self-order; a line with orderedAt and no servedAt is still to make, a line with neither predates this field and its state is unknown. id is \"line-\" + the entry's 1-based position (deterministic, unique within one tab). orderedBy is op.actor from the Charge that created the line — the resident's own identity on a self-order, the staffer's on a POS ring-up — so a shared house tab's receipt can tell the two apart; a line predating this field carries no orderedBy key at all, read as unknown. A lineId-targeted VoidCharge marks the matching entry voided:true rather than removing it, so a voided line still shows on the receipt struck through. A tab closes only over made orders: Settle rejects UnservedLines (naming each line) while any line is still to make, so the desk marks it served or voids it first; SettleStaleTab, with nobody there to act, voids each such line in place with voidedReason: \"unserved\" — the only void that records a reason (a desk void carries none), read as \"never made\", and subtracts its amount from totalCents. A tab whose .status predates this field carries no lines key at all — read it as []. Empty list on a fresh tab. Frozen by Settle/SettleStaleTab (never rewritten after).",
 			"openedAt":          "When the tab was opened (RFC3339, = OpenTab's op.submittedAt).",
 			"staleAt":           "RFC3339, = openedAt + 24h (OpenTab). The cafeStaleTabSettlement convergence lens (lenses.go) auto-dispatches SettleStaleTab once this passes with the tab still open, or BackfillTabStaleAt if it is absent entirely (a tab opened before this field shipped). Carried forward unchanged by Charge/VoidCharge; dropped by Settle/SettleStaleTab once settled.",
 			"leaseAppKey":       "The resident lease this tab belongs to (denormalized from OpenTab's payload).",
@@ -1323,6 +1336,52 @@ def void_line_by_id(lines, line_id):
             new_lines.append(line)
     return new_lines, found_amount
 
+def line_is_unserved(line):
+    # The three-state read the desk's orders queue applies: a line is still
+    # to make when it is not voided, carries orderedAt and carries no
+    # servedAt. A legacy line with neither key predates the served fields
+    # and its state is unknown, so it is never unserved; a voided line has
+    # nothing to make.
+    if line.get("voided", False):
+        return False
+    if line.get("orderedAt") == None:
+        return False
+    return line.get("servedAt") == None
+
+def unserved_line_ids(lines):
+    # The ids of every .status.lines entry still to make (line_is_unserved),
+    # in charge order — what Settle names in its UnservedLines refusal.
+    ids = []
+    for line in lines or []:
+        if line_is_unserved(line):
+            ids.append(line.get("id"))
+    return ids
+
+def void_unserved_lines(lines):
+    # Voids every unserved line (line_is_unserved) the way void_line_by_id
+    # voids one: each is copied whole with voided:true rewritten and
+    # voidedReason:"unserved" added — the one void that records a reason,
+    # because it is the stale-tab sweep's act rather than the desk's, and
+    # the receipt reads it as "never made". Returns (new_lines, voided_ids,
+    # voided_amount_sum); every other line is carried through untouched.
+    voided_ids = []
+    voided_sum = 0
+    new_lines = []
+    for line in lines or []:
+        if line_is_unserved(line):
+            voided_line = dict(line)
+            voided_line["voided"] = True
+            voided_line["voidedReason"] = "unserved"
+            new_lines.append(voided_line)
+            voided_ids.append(line.get("id"))
+            # A null amount is not constructible by any writer today; the
+            # guard keeps the sweep's total arithmetic safe regardless.
+            amt = line.get("amountCents")
+            voided_sum += amt if amt != None else 0
+        else:
+            new_lines.append(line)
+    return new_lines, voided_ids, voided_sum
+
 def serve_line_by_id(lines, line_id, served_at, served_by):
     # Stamps servedAt/servedBy on the .status.lines entry matching line_id,
     # copied whole with only those two keys added, and returns the new list.
@@ -1775,6 +1834,31 @@ def execute(state, op):
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only settle their own tab")
 
+        # A tab closes only over made orders. A self-ordered line still to
+        # make (orderedAt, no servedAt) at settle would freeze onto a closed
+        # tab the desk can no longer mark or void (both refuse TabNotOpen),
+        # so the kitchen loses the ticket and the resident pays for it. A
+        # person settling is REFUSED, never silently voided: the one at the
+        # counter knows whether the latte was handed over, and the desk holds
+        # both verbs — MarkLineServed for a served-but-unmarked line, VoidCharge
+        # for one nobody wants — whereas a void here would hand a served line
+        # out free. The refusal names each line so the desk can act on it;
+        # the resident asks the desk. It sits AFTER the confinement / ownership
+        # proofs above (a foreign staffer or another resident learns nothing
+        # about this tab's lines from it) and BEFORE the paidCents checks (a
+        # counter payment over an unmade order is refused on the order, not
+        # on the amount). SettleStaleTab, with nobody there to act, voids
+        # these lines instead.
+        existing_lines = existing.data.get("lines", [])
+        unserved_ids = unserved_line_ids(existing_lines)
+        if len(unserved_ids) > 0:
+            labels = []
+            for line in existing_lines:
+                if line_is_unserved(line):
+                    labels.append(str(line.get("id")) + " (" + str(line.get("description", "")) + ")")
+            fail("UnservedLines: " + str(len(unserved_ids)) + " order(s) still to make — mark served or void first: " +
+                 ", ".join(labels))
+
         # paidCents: cash the desk took at the counter as the tab closed. Staff
         # legs only — a resident settling their own tab from their phone hands
         # over no cash, so the self leg refuses the field (the waiver-is-staff-
@@ -1803,7 +1887,6 @@ def execute(state, op):
                 fail("PaidMismatchesTab: the counter payment of " + dollars(paid_cents) +
                      " does not match the tab total of " + dollars(total_cents))
 
-        existing_lines = existing.data.get("lines", [])
         frozen_memo = items_memo_from_lines(existing_lines, existing.data.get("itemsMemo", ""))
         status_data = {"value": "settled", "totalCents": total_cents, "itemsMemo": frozen_memo,
                         "lines": existing_lines,
@@ -1906,10 +1989,23 @@ def execute(state, op):
         lease_key = existing.data.get("leaseAppKey")
         _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
 
+        # Where a human Settle is refused UnservedLines, the sweep — with nobody
+        # there to mark or void — voids every line still to make: a tab nobody
+        # closed in 24 h whose order nobody marked made is a tab whose order
+        # was not made, and the house's remedy for a served-but-unmarked line
+        # is the Orders panel, before the sweep. Each voided line is copied
+        # whole with voided:true and voidedReason:"unserved" (the receipt reads
+        # it as "never made"); the total drops by each line's own amount,
+        # clamped at 0 the way VoidCharge clamps; itemsMemo is re-derived from
+        # the updated lines so the voided ones drop out of the ledger memo.
         existing_lines = existing.data.get("lines", [])
+        new_lines, voided_unserved_ids, voided_sum = void_unserved_lines(existing_lines)
+        total_cents = (total_cents if total_cents != None else 0) - voided_sum
+        if total_cents < 0:
+            total_cents = 0
         status_data = {"value": "settled", "totalCents": total_cents,
-                        "itemsMemo": items_memo_from_lines(existing_lines, existing.data.get("itemsMemo", "")),
-                        "lines": existing_lines,
+                        "itemsMemo": items_memo_from_lines(new_lines, existing.data.get("itemsMemo", "")),
+                        "lines": new_lines,
                         "openedAt": existing.data.get("openedAt"),
                         "leaseAppKey": lease_key, "settledAt": settled_at}
         mutations = [
@@ -1933,7 +2029,10 @@ def execute(state, op):
         if not has_charged_to:
             mutations.append(make_link(charged_to_lnk, tab_key, lease_key, "chargedTo", "chargedTo", {}))
 
-        events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents, "reason": "stale"}}]
+        # voidedUnservedLineIds is always present (empty when every line was
+        # made) so a consumer of the event never reads absence as "unknown".
+        events = [{"class": "tab.settled", "data": {"tabKey": tab_key, "leaseAppKey": lease_key, "totalCents": total_cents,
+                                                    "reason": "stale", "voidedUnservedLineIds": voided_unserved_ids}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": tab_key}}
 

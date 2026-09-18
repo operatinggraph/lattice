@@ -17,14 +17,15 @@ const weaverTargetsBucket = "weaver-targets"
 // tabChargeLineProjection is one entry of a cafeTabSettlement row's `lines`
 // array — the raw JSON shape cafe-domain's tabStatus aspect stores (ddls.go).
 type tabChargeLineProjection struct {
-	ID          string   `json:"id"`
-	Description string   `json:"description"`
-	AmountCents *float64 `json:"amountCents"`
-	Voided      bool     `json:"voided"`
-	OrderedBy   string   `json:"orderedBy"`
-	OrderedAt   string   `json:"orderedAt"`
-	ServedAt    string   `json:"servedAt"`
-	ServedBy    string   `json:"servedBy"`
+	ID           string   `json:"id"`
+	Description  string   `json:"description"`
+	AmountCents  *float64 `json:"amountCents"`
+	Voided       bool     `json:"voided"`
+	VoidedReason string   `json:"voidedReason"`
+	OrderedBy    string   `json:"orderedBy"`
+	OrderedAt    string   `json:"orderedAt"`
+	ServedAt     string   `json:"servedAt"`
+	ServedBy     string   `json:"servedBy"`
 }
 
 // tabSettlementProjection is one row of the cafe-domain `cafeTabSettlement`
@@ -55,16 +56,19 @@ type tabSettlementProjection struct {
 // Charge's own op.submittedAt (RFC3339); ServedAt/ServedBy record the
 // hand-over — stamped at ring-up on a staff Charge, by MarkLineServed on a
 // self-order. A line with OrderedAt and no ServedAt is still to make; a line
-// with neither predates these fields and its state is unknown.
+// with neither predates these fields and its state is unknown. VoidedReason
+// is "unserved" exactly when SettleStaleTab's sweep voided the line (never a
+// desk VoidCharge, which records no reason) — the receipt's "never made" tag.
 type tabChargeLine struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	AmountCents int64  `json:"amountCents"`
-	Voided      bool   `json:"voided"`
-	OrderedBy   string `json:"orderedBy,omitempty"`
-	OrderedAt   string `json:"orderedAt,omitempty"`
-	ServedAt    string `json:"servedAt,omitempty"`
-	ServedBy    string `json:"servedBy,omitempty"`
+	ID           string `json:"id"`
+	Description  string `json:"description"`
+	AmountCents  int64  `json:"amountCents"`
+	Voided       bool   `json:"voided"`
+	VoidedReason string `json:"voidedReason,omitempty"`
+	OrderedBy    string `json:"orderedBy,omitempty"`
+	OrderedAt    string `json:"orderedAt,omitempty"`
+	ServedAt     string `json:"servedAt,omitempty"`
+	ServedBy     string `json:"servedBy,omitempty"`
 }
 
 // tabRow is the tab card the POS/front-desk views render.
@@ -130,7 +134,7 @@ func computeTabs(keys []string, get kvGetter, leaseAppKey string) []tabRow {
 				amount = int64(*l.AmountCents)
 			}
 			lines = append(lines, tabChargeLine{
-				ID: l.ID, Description: l.Description, AmountCents: amount, Voided: l.Voided,
+				ID: l.ID, Description: l.Description, AmountCents: amount, Voided: l.Voided, VoidedReason: l.VoidedReason,
 				OrderedBy: l.OrderedBy, OrderedAt: l.OrderedAt, ServedAt: l.ServedAt, ServedBy: l.ServedBy,
 			})
 		}

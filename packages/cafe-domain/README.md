@@ -1,6 +1,6 @@
 # cafe-domain
 
-The Café house-tab POS session domain (v0.18.0) — a short-lived `tab` per resident visit
+The Café house-tab POS session domain (v0.19.0) — a short-lived `tab` per resident visit
 (`OpenTab`/`Charge`/`VoidCharge`/`Settle`), settled onto `cafe-ledger`'s append-only house-tab account via a
 Weaver playbook, never a direct cross-package write — plus the `menuitem` self-order catalog a resident's
 own `Charge` binds against, and staff-workplace write confinement for both.
@@ -69,6 +69,17 @@ marks that entry `voided: true` in place. `Settle` freezes `totalCents`, flips `
 and stamps `settledAt` — also OCC-conditioned. All three reject a tab that is not currently `open`
 (`TabNotOpen`).
 
+A tab closes only over made orders. `Settle` (the desk's leg and the resident's self leg alike) refuses
+`UnservedLines: N order(s) still to make — mark served or void first: line-3 (Latte), …` while any line is
+still to make — not voided, `orderedAt` set, no `servedAt`; a legacy line with neither key is never counted.
+The refusal sits after the confinement / ownership proofs (a foreign staffer or another resident learns
+nothing about the tab's lines from it) and before the `paidCents` checks. A person is refused rather than
+the line voided: whoever is at the counter knows whether the order was handed over, and the desk holds both
+verbs — `MarkLineServed` for a served-but-unmarked line, `VoidCharge` for one nobody wants — whereas a
+silent void would hand a served line out free, and a closed tab can no longer be marked or voided. The desk
+marks or voids and settles again; the resident asks the desk. `SettleStaleTab`, with nobody there to act,
+voids every such line instead (below).
+
 `Settle{tabKey, paidCents?}` — the desk settles and takes the cash in one act. `paidCents` is
 optional, staff-only integer cents: the cash the desk took at the counter as the tab closed. When
 present it is recorded on `.status` as `paidAtSettleCents` + `paidAtSettleBy` (`op.actor`, the staffer
@@ -78,6 +89,8 @@ a resident's self-scoped `Settle` (a resident hands over no cash — the `waiver
 `PaidMismatchesTab` unless it equals `totalCents` (the desk pays the whole tab; a card that went stale
 between render and click submits the old total and is refused, never recorded as a partial — the
 resident's own Record payment is the partial path), `InvalidArgument` unless a positive whole number.
+`UnservedLines` is checked before any of the `paidCents` checks, so a counter payment over an unmade order
+is refused on the order, not on the amount.
 Nothing is posted to the ledger by the op itself (P2): the settlement playbook below posts the payment
 after the charge, and `cafe-ledger` bounds that credit by the recorded value.
 
@@ -87,7 +100,7 @@ menu item's own `.price.name`, or an off-menu `Charge`'s caller-supplied `descri
 default) so a tab (open or settled) shows what was actually rung up, not just the sum — the `cafeTabSettlement`
 lens projects it verbatim and the Weaver-dispatched `DebitAccount` posts the same string as the
 settled ledger entry's `memo`. The structured itemization lives beside it in `.status.lines` — one
-`{id, description, amountCents, voided, orderedBy, orderedAt, servedAt?, servedBy?}` entry per `Charge`, the
+`{id, description, amountCents, voided, voidedReason?, orderedBy, orderedAt, servedAt?, servedBy?}` entry per `Charge`, the
 receipt's own record — so on every tab that can still be voided, `totalCents` equals the sum of its non-voided
 lines.
 
@@ -99,6 +112,15 @@ with `orderedAt` and no `servedAt` is still to make — the desk's orders queue 
 first, read off the `lines` column `cafeTabSettlement` already projects; a line with neither predates the
 field and its state is unknown. `VoidCharge` and `MarkLineServed` both copy the line whole and overwrite only
 the key they own, so neither drops what the other recorded.
+
+A voided line may carry `voidedReason: "unserved"` — written only by `SettleStaleTab`, the 24 h sweep, when it
+voids a line still to make at the moment it closes the tab (a tab nobody closed in 24 h whose order nobody
+marked made is a tab whose order was not made; the house's remedy for a served-but-unmarked line is the
+Orders panel, before the sweep). Each such line is copied whole with `voided: true` and the reason added, its
+amount is subtracted from `totalCents` (clamped at 0), `itemsMemo` is re-derived from the updated lines, and
+the `tab.settled` event carries `voidedUnservedLineIds` (always present, empty when every line was made). A
+desk `VoidCharge` records no reason, so a voided line with the key reads *never made* and one without reads
+as the desk's act.
 
 ## Self-order menu catalog
 

@@ -281,7 +281,12 @@ func TestMarkLineServed_Refusals(t *testing.T) {
 		t.Fatalf("lines[2] carries servedAt after refused submissions naming other lines")
 	}
 
-	// Settled: the tab is frozen.
+	// Settled: the tab is frozen. Line-3 is handed over first — Settle
+	// refuses UnservedLines over a line still to make — and the refusal on
+	// the closed tab is still TabNotOpen: require_open_status runs before the
+	// line lookup, so the served line never reaches LineAlreadyServed.
+	testutil.PublishOp(t, conn, markLineServedEnv("cdsrvdserve300000001", tabKey, "line-3", domainActorKey, "2026-07-22T12:40:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
 	settleEnv := &processor.OperationEnvelope{
 		RequestID:     testutil.GenReqID("cdsrvdsettle00000001"),
 		Lane:          processor.LaneDefault,
