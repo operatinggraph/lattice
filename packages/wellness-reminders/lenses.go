@@ -105,6 +105,13 @@ func Lenses() []pkgmgr.LensSpec {
 // `booked` means the class already happened or the booker was marked absent,
 // so a reminder is moot either way).
 //
+// se.schedule.data.startsAt <> null leads every conjunction: the target
+// templates row.startsAt as the op's remindedFor, and Weaver refuses a
+// dispatch whose templated column is null (strategist.go resolveRowTemplate),
+// so the gap states outright that the class is bound — a called-off class
+// unbinds the OPTIONAL walk — rather than leaning on remindAt's comparison
+// to imply it (scripts/lint-gap-params-optional-hop.go).
+//
 // "Never remind for a class that has already started" is NOT a term of this
 // gate — it is RecordBookingReminder's own guard
 // (time.rfc3339_utc(op.submittedAt) < startsAt, ddls.go), which refuses the
@@ -183,9 +190,9 @@ RETURN
   b.reminder.data.remindedFor AS remindedFor,
   b.status.data.value AS status,
   id.key AS bookerKey,
-  CASE WHEN (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt) AND NOT (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_reminder,
-  ((b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS violating`,
+  CASE WHEN (se.schedule.data.startsAt <> null) AND (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt) AND NOT (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) THEN se.schedule.data.remindAt ELSE null END AS freshUntil,
+  ((se.schedule.data.startsAt <> null) AND (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_reminder,
+  ((se.schedule.data.startsAt <> null) AND (b.reminder.data.remindedFor <> se.schedule.data.startsAt) AND (b.status.data.value = 'booked') AND NOT (b.status.data.bookedAt >= se.schedule.data.startsAt) AND (b.freshnessExpiry.data.byTarget.%[2]s >= se.schedule.data.remindAt) AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS violating`,
 	PastDueBookingsTarget, WellnessBookingRemindersTarget)
 
 // wellnessBookingChangeNoticesSpec is the one-row-per-booking change-notice

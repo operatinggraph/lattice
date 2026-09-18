@@ -173,7 +173,7 @@ LATTICE_PROCESSOR_AUTH_MODE ?= capability
 # Load .env if it exists (ignored by git).
 -include .env
 
-.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-derive-reads-bare-vector lint-opmeta-required-fields lint-date-field-normalized lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads lint-refusal-courtesy lint-workplace-staff-vector install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps lint-live-read-pinned-mutation
+.PHONY: assert-main-checkout up up-full up-full-capability dev-seed-staff provision-gateway-identity-provisioner test-real-actor-auth test-claim-ceremony up-loftspace orchestration install-packages install-loftspace run-loupe run-gateway run-loftspace-app down verify-kernel verify-package-rbac verify-package-identity verify-package-identity-hygiene verify-package-privacy-base verify-erasure-ceremony verify-package-objects-base verify-package-location-domain verify-package-loftspace-domain verify-package-clinic-domain verify-package-clinic-reminders verify-package-wellness-domain up-clinic install-clinic refresh-clinic refresh-loftspace provision-loftspace-role provision-clinic-role provision-cafe-role provision-wellness-role provision-gateway-role provision-readpath provision-vault-kek reinstall-package verify-package-service-location verify-package-edge-manifest install-edge-manifest install-ai seed-edge-demo seed-classic-demo seed-showcase install-showcase-domains install-maintenance install-front-desk install-one-bill up-facet up-facet-edge run-facet provision-facet-role verify-package-augur verify-package-lease-signing verify-permission-provenance verify-conformance build regen-cypher vet lint-conventions lint-web lint-board lint-package-version lint-lens-anchors lint-cap-read-producers lint-refractor-single-instance lint-package-standard lint-facet-discovery lint-facet-renderer-drift lint-app-op-descriptors lint-manifest-entity-type lint-doc-orphan lint-capability-kv-readers lint-gap-column-declaration lint-gap-params-optional-hop lint-slog-values lint-flag-consumer-census lint-link-target-count lint-links-page-limit lint-derive-reads-bare-vector lint-opmeta-required-fields lint-date-field-normalized lint-ceremony-throw-path lint-stale-render-guard lint-markup-escaping lint-loupe-console-grants lint-seed-declared-reads lint-refusal-courtesy lint-workplace-staff-vector install-skills test test-rollback test-lease-convergence test-object-gc test-edge-idb-conformance test-crypto-shred test-system-actor-capability test-control-plane-authz test-augur-convergence test-unrouted-convergence test-cli test-hello-lattice test-health-completeness processor run-processor model-runner clean logs ps lint-live-read-pinned-mutation
 
 ## assert-main-checkout — Refuse stack lifecycle from anywhere but the main working
 ## tree. docker-compose.yml mounts deploy/nats-server.conf by a RELATIVE path, so a
@@ -2359,6 +2359,21 @@ lint-capability-kv-readers:
 lint-gap-column-declaration:
 	@echo "==> Linting weaver gap-column declarations..."
 	go run ./scripts/lint-gap-column-declaration.go
+
+## lint-gap-params-optional-hop — a weaver target's `row.<column>` Params value
+## names a column that is non-null on every row the gap opens. Weaver templates
+## Params off the violating row and refuses a null column as a data error
+## (strategist.go resolveRowTemplate) — no redelivery fixes it — and a column
+## walked off an OPTIONAL MATCH is null exactly where the hop bound nothing,
+## which is often the row the gap exists for (four sightings, 2026-09-06..18).
+## Classifies every templated column through the full engine's
+## OptionalHopColumns; clean when the column reads no OPTIONAL-only variable,
+## is coalesced to a non-null literal, or the gap's own column carries a
+## `<> null` / ordering conjunct that binds it. Self-tests on every run.
+## Advisory by default; STRICT=1 exits non-zero.
+lint-gap-params-optional-hop:
+	@echo "==> Linting weaver gap Params against OPTIONAL hops..."
+	go run ./scripts/lint-gap-params-optional-hop.go
 
 ## lint-slog-values — an slog attribute VALUE whose static type is an in-module
 ## named struct (directly, behind one pointer, or as a slice/array/map element)
