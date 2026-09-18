@@ -111,6 +111,7 @@ var withAliasClosureBuckets = map[string]string{
 	"landlordWorkOrdersRead":         closureG,
 	"leaseAccounts":                  closureA,
 	"leaseApplicationsRead":          closureF,
+	"reporterWorkOrdersRead":         closureF,
 	"ledgerHistory":                  closureA,
 	"menuCatalog":                    closureA,
 	"objectIdentityAttachmentsRead":  closureB,
@@ -252,7 +253,7 @@ func TestPlainWithAliasClosureCensus(t *testing.T) {
 	}
 	t.Logf("TOTAL: %d", len(got))
 
-	require.Equal(t, []string{"clinicPatientsRead", "leaseApplicationsRead", "renewalsRead", "wellnessMemberAccounts"}, byBucket[closureF],
+	require.Equal(t, []string{"clinicPatientsRead", "leaseApplicationsRead", "renewalsRead", "reporterWorkOrdersRead", "wellnessMemberAccounts"}, byBucket[closureF],
 		"F is the set the alias resolution is responsible for — a lens arriving here gains a retraction, a "+
 			"narrowing licence and an audit direction at once, and a lens leaving it loses all three")
 	require.Equal(t, []string{"landlordLeaseApplicationsRead", "landlordWorkOrdersRead"}, byBucket[closureG],

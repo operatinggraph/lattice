@@ -20,6 +20,23 @@ package loftspacedomain
 //   - TestLandlordWorkOrdersRead_ExcludesBuildingLocatedOrder: a work order
 //     locatedAt a building (staff-reported) has no manages walk to anchor on
 //     and projects nothing.
+//   - TestLandlordWorkOrdersRead_ReportedByResidentTrue: a reportedBy identity
+//     who also residesIn the order's own unit reads reported_by_resident true.
+//   - TestLandlordWorkOrdersRead_ReportedByStaffFalse: a reportedBy identity
+//     with no residesIn link at all (staff) reads reported_by_resident false.
+//   - TestLandlordWorkOrdersRead_NoReporterLinkFalse: an order with no
+//     reportedBy link (the pre-backfill legacy shape) reads reported_by_resident
+//     false, never null.
+//   - TestLandlordWorkOrdersRead_ReporterResidesInDifferentUnitFalse: a
+//     reportedBy identity who residesIn a UNIT OTHER than the order's own
+//     locatedAt unit reads reported_by_resident false — the constrained-target
+//     walk closes back on THIS order's unit, never any unit the reporter
+//     happens to live in.
+//   - TestLandlordWorkOrdersRead_OpenTaskAndResidentReporterCoexist: an order
+//     carrying BOTH an open task and a resident reportedBy link still
+//     projects exactly one row (no branch-decomposition duplication across
+//     the two independent OPTIONAL MATCH fans), with open_task_count and
+//     reported_by_resident both correct on it.
 
 import (
 	"context"
@@ -202,6 +219,110 @@ func TestLandlordWorkOrdersRead_FansOutPerCoLandlord(t *testing.T) {
 	}
 	require.True(t, byLandlord["vtx.identity."+f.ids["larry"]])
 	require.True(t, byLandlord["vtx.identity."+f.ids["linda"]])
+}
+
+func TestLandlordWorkOrdersRead_ReportedByResidentTrue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLuFixture(t)
+	f.vtx(t, "larry", "identity")
+	f.vtx(t, "jordan", "identity")
+	f.vtx(t, "u1", "unit")
+	f.manages(t, "larry", "u1")
+	f.link(t, "residesIn", "jordan", "u1")
+	f.vtx(t, "wo1", "workorder")
+	f.link(t, "locatedAt", "wo1", "u1")
+	f.link(t, "reportedBy", "wo1", "jordan")
+	f.unitAspect(t, "wo1", "report", "workOrderReport", map[string]any{"summary": "leak", "priority": "urgent"})
+
+	rows := f.projectWorkOrders(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0].Values["reported_by_resident"], "the reporter resides in this order's own unit")
+}
+
+func TestLandlordWorkOrdersRead_ReportedByStaffFalse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLuFixture(t)
+	f.vtx(t, "larry", "identity")
+	f.vtx(t, "priya", "identity")
+	f.vtx(t, "u1", "unit")
+	f.manages(t, "larry", "u1")
+	f.vtx(t, "wo1", "workorder")
+	f.link(t, "locatedAt", "wo1", "u1")
+	f.link(t, "reportedBy", "wo1", "priya")
+	f.unitAspect(t, "wo1", "report", "workOrderReport", map[string]any{"summary": "leak", "priority": "urgent"})
+	// No residesIn link at all — a staff reporter.
+
+	rows := f.projectWorkOrders(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, false, rows[0].Values["reported_by_resident"], "a reporter with no residesIn link is staff")
+}
+
+func TestLandlordWorkOrdersRead_NoReporterLinkFalse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLuFixture(t)
+	f.vtx(t, "larry", "identity")
+	f.vtx(t, "u1", "unit")
+	f.manages(t, "larry", "u1")
+	f.vtx(t, "wo1", "workorder")
+	f.link(t, "locatedAt", "wo1", "u1")
+	f.unitAspect(t, "wo1", "report", "workOrderReport", map[string]any{"summary": "leak", "priority": "urgent"})
+	// No reportedBy link — the pre-backfill legacy shape.
+
+	rows := f.projectWorkOrders(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, false, rows[0].Values["reported_by_resident"], "no reportedBy link reads false, never null")
+}
+
+func TestLandlordWorkOrdersRead_ReporterResidesInDifferentUnitFalse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLuFixture(t)
+	f.vtx(t, "larry", "identity")
+	f.vtx(t, "jordan", "identity")
+	f.vtx(t, "u1", "unit")
+	f.vtx(t, "u2", "unit")
+	f.manages(t, "larry", "u1")
+	f.link(t, "residesIn", "jordan", "u2")
+	f.vtx(t, "wo1", "workorder")
+	f.link(t, "locatedAt", "wo1", "u1")
+	f.link(t, "reportedBy", "wo1", "jordan")
+	f.unitAspect(t, "wo1", "report", "workOrderReport", map[string]any{"summary": "leak", "priority": "urgent"})
+
+	rows := f.projectWorkOrders(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, false, rows[0].Values["reported_by_resident"],
+		"the reporter resides at a DIFFERENT unit than this order — the constrained-target walk must not admit it")
+}
+
+func TestLandlordWorkOrdersRead_OpenTaskAndResidentReporterCoexist(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLuFixture(t)
+	f.vtx(t, "larry", "identity")
+	f.vtx(t, "jordan", "identity")
+	f.vtx(t, "u1", "unit")
+	f.manages(t, "larry", "u1")
+	f.link(t, "residesIn", "jordan", "u1")
+	f.vtx(t, "wo1", "workorder")
+	f.link(t, "locatedAt", "wo1", "u1")
+	f.link(t, "reportedBy", "wo1", "jordan")
+	f.unitAspect(t, "wo1", "report", "workOrderReport", map[string]any{"summary": "leak", "priority": "urgent"})
+	f.taskVtx(t, "t1", "open")
+	f.link(t, "scopedTo", "t1", "wo1")
+
+	rows := f.projectWorkOrders(t)
+	require.Len(t, rows, 1, "two independent OPTIONAL MATCH fans off the same order must not fan the row out")
+	v := rows[0].Values
+	require.EqualValues(t, 1, v["open_task_count"])
+	require.Equal(t, true, v["reported_by_resident"])
 }
 
 func TestLandlordWorkOrdersRead_ExcludesBuildingLocatedOrder(t *testing.T) {

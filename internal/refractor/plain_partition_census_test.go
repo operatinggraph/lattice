@@ -100,6 +100,7 @@ var plainPartitionCorpusVerdicts = map[string]partitionVerdict{
 	"landlordWorkOrdersRead":         {oneRowPerAnchor: false, partitions: true, identifying: []string{"work_order_id"}, diffRetraction: true},
 	"leaseAccounts":                  {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"leaseApplicationsRead":          {oneRowPerAnchor: true, partitions: true, identifying: []string{"app_id"}, diffRetraction: false},
+	"reporterWorkOrdersRead":         {oneRowPerAnchor: true, partitions: true, identifying: []string{"work_order_id"}, diffRetraction: true},
 	"ledgerHistory":                  {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"menuCatalog":                    {oneRowPerAnchor: true, partitions: true, identifying: []string{"key"}, diffRetraction: false},
 	"objectIdentityAttachmentsRead":  {oneRowPerAnchor: false, partitions: true, identifying: []string{"oid_id"}, diffRetraction: true},

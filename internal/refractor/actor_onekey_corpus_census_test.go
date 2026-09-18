@@ -206,10 +206,18 @@ var corpusActorOneKeyVerdicts = map[string]string{
 	"wellnessWaitlistPromotion":         oneKey,
 	"wellnessSeriesHorizon":             oneKey,
 	"wellnessRefundSettlement":          oneKey,
-	// `MATCH (wo:workorder {key: $actorKey}) OPTIONAL MATCH (wo)<-[:scopedTo]-(t:task)`
-	// carries only two positions, and `t` is task-typed — the workorder actor
-	// type binds only at the anchor across the whole pattern.
+	// `MATCH (wo:workorder {key: $actorKey}) OPTIONAL MATCH (wo)<-[:scopedTo]-(t:task)
+	// OPTIONAL MATCH (wo)-[:reportedBy]->(r:identity)` carries three positions,
+	// `t` task-typed and `r` identity-typed — the workorder actor type binds
+	// only at the anchor across the whole pattern.
 	"workOrderQueue": oneKey,
+	// `MATCH (t:task {key: $actorKey}) MATCH (t)-[:scopedTo]->(wo:workorder)
+	// OPTIONAL MATCH (t)-[:assignedTo]->(a:identity)`: three positions, `wo`
+	// workorder-typed and `a` identity-typed — task binds only at the anchor.
+	"staleWorkOrderTasks": oneKey,
+	// `MATCH (wo:workorder {key: $actorKey}) OPTIONAL MATCH (wo)-[:reportedBy]->(reporter:identity)`:
+	// two positions, `reporter` identity-typed — workorder binds only at the anchor.
+	"workOrderResolvedNotices": oneKey,
 }
 
 // corpusOneKeyLens is one anchored cypher plus the actor type the RUNTIME pairs

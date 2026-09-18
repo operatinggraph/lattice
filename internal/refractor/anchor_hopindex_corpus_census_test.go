@@ -193,8 +193,14 @@ var corpusAnchorIndexVerdicts = map[string]string{
 	"wellnessWaitlistPromotion":         hopIndexed,
 	"wellnessSeriesHorizon":             hopIndexed,
 	"wellnessRefundSettlement":          hopIndexed,
-	// Single OPTIONAL MATCH, headed by the anchor: `(wo)<-[:scopedTo]-(t:task)`.
+	// Two OPTIONAL MATCHes, each headed by the anchor: `(wo)<-[:scopedTo]-(t:task)`
+	// and `(wo)-[:reportedBy]->(r:identity)`.
 	"workOrderQueue": hopIndexed,
+	// One required MATCH and one OPTIONAL MATCH, each headed by the anchor:
+	// `(t)-[:scopedTo]->(wo:workorder)`, `(t)-[:assignedTo]->(a:identity)`.
+	"staleWorkOrderTasks": hopIndexed,
+	// Single OPTIONAL MATCH, headed by the anchor: `(wo)-[:reportedBy]->(reporter:identity)`.
+	"workOrderResolvedNotices": hopIndexed,
 }
 
 // noAnchorPosition is the one verdict this census deliberately does not pin: a

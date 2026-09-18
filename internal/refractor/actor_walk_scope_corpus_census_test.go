@@ -214,7 +214,9 @@ var corpusActorWalkScopeDigests = map[string]string{
 	"wellnessWaitlistPromotion":         "booking:forSession|session:forSession",
 	"wellnessSeriesHorizon":             "sessionseries:atStudio|studio:atStudio",
 	"wellnessRefundSettlement":          "wellnessrefund:settlesRefund|wellnesstransaction:settlesRefund",
-	"workOrderQueue":                    "task:scopedTo|workorder:scopedTo",
+	"workOrderQueue":                    "identity:reportedBy|task:scopedTo|workorder:reportedBy,scopedTo",
+	"staleWorkOrderTasks":               "identity:assignedTo|task:assignedTo,scopedTo|workorder:scopedTo",
+	"workOrderResolvedNotices":          "identity:reportedBy|workorder:reportedBy",
 }
 
 // corpusActorWalkScopeRefusals pins WHY each `nil` lens is relation-blind.
