@@ -2,6 +2,7 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-16 · `e880c00f` · A clinic debtor is reminded — `.arrears` + `EvaluateClinicArrears` + a Weaver target; the desk sees the debt beside Check in, no op refuses care ([design](../../../docs/reviews/clinic-arrears-reminder-2026-09-15.md)).
 - 2026-09-15 · `ec274abe` · A lease takes a security deposit — `depositAmount` on the listing, `.deposit` at approval, a `oneTime` clause billed, returned on `endedAt` ([design](../../../docs/reviews/loftspace-security-deposit-2026-09-15.md)).
 - 2026-09-15 · `6e6ea0f3` · A tenant gives notice and a lease ends early — `GiveNotice` records `.notice`, the term ends at `termEnd`, the renewal closes; live ([design](../../../docs/reviews/loftspace-tenancy-notice-2026-09-15.md)).
 - 2026-09-15 · `c44e1f44` · "Rent owed" says how late — `.arrears` on the rent account, one reminder per episode after a 5-day grace; N days overdue on every surface ([design](../../../docs/reviews/loftspace-rent-arrears-2026-09-15.md)).

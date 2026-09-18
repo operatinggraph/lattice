@@ -44,7 +44,9 @@ their own balance. Winston-adjudicated (implementation-level; no contract surfac
    on the viewer's own row (the *Take payment* stays — a payment is not a clearing verb) and says *your own
    account — another staffer clears it*; the desk's resident ledger hides `refund-charge-btn` when the picked
    lease's resident is the viewer. clinic-app / wellness-app: the same courtesy at their waiver sites. Facet:
-   `none` — the generic form cannot see the actor's own lease.
+   `none` on the standing-dispatched refund / payout descriptors (the generic form cannot see the actor's own
+   lease); `unreachable` on every `self`-dispatched credit descriptor, whose self leg refuses a waiver `AuthDenied`
+   before the staff-leg check runs.
 4. cafe-ledger `0.8.1 → 0.9.0`; clinic-ledger and wellness-ledger minor bumps; DDL prose + READMEs.
 
 ### Fire brief (build note, 2026-09-18 — S, compressed)
@@ -69,3 +71,20 @@ precedent's checks drops the invariant* (the refusal reads the account's OWN top
 checklist #3 (revert-prove each package's vector) · #6 (the sibling ledgers are the precedent being fixed, not
 copied). Non-goals: a payment on one's own account; the loftspace ledger (its `PayOutBalance` is the landlord's
 verb on a tenant's deposit — a different actor/owner pair); a resident's self leg (already refused `waiver`).
+
+### Build note (2026-09-18)
+
+Shipped `5e86a342` (merge `b3a354ca`); brief `745105f6`. Live on the shared stack (cafe-ledger 0.9.0, clinic-ledger
+0.8.0, wellness-ledger 0.4.0 diff-applied; the three apps cycled): Sam Okafor (front of house, holder of lease
+`KYeRsfCAYA51y5mrFYSK`) submitted a staff-leg `CreditCafeAccount{reason: waiver, 1¢}` against their own account
+through the Gateway and was refused `SelfClearing: a staffer may not forgive their own account — another staffer
+must`; a 1¢ `payment` on the same account was accepted, and a 1¢ waiver on another resident's account was accepted.
+(Two 1¢ probe waivers landed on other residents' demo accounts while locating Sam's own — `U2zSpGUFWK1So6BRyjF6`,
+`5jYLVXXwmgEshTitVQqR` — $0.02 of demo write-offs, left as posted.)
+
+Deviations from the brief: none in scope; the clinic staff leg admits a `reversesRef` reversal and the wellness leg
+a `refund`, both covered as the design's §2 "where the leg admits one". Review classification (one cold pass, three
+lenses at capability-plane depth, over the whole diff): no BLOCKING — the forged-target, reason-order, Weaver-dispatch
+and read-drift attacks were each grounded closed; **test-gap** — the clinic `reversesRef` leg had no vector (added,
+revert-proven); **convention** — a Facet courtesy on a `self`-dispatched descriptor was `none` where `unreachable`
+is the fact; a predicate's doc comment asserted the staffer is never the patient. Adjacent finds: none.
