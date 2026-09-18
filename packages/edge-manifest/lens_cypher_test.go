@@ -577,6 +577,50 @@ func TestEdgeCatalog_ResidenceBranchIsUntouchedByTheExclusion(t *testing.T) {
 	require.Equal(t, f.key("tpl"), via[0])
 }
 
+// TestEdgeCatalog_SelfGrantOnTaskOpIsNotOffered is the NEGATIVE vector for
+// the self-on-task half of the exclusion (docs/reviews/loftspace-maintenance-loop-closes-2026-09-18.md
+// decision 8): a consumer holding only a scope=self permission on an op
+// whose descriptor dispatches `task` gets no manifest.op row for it. A task
+// descriptor's authContext.target names a TASK the caller must already hold
+// (ResolveWorkOrder's landlord leg is `resource_bound` on the task grant, not
+// this permission), so a self grant on it is the same unauthorizable shape
+// as the standing case — the caller has no client-authorable authContext to
+// send from a bare scope=self grant. Mutation that fails it: drop `OR
+// op.dispatch.data.authContext = "task"` from the WHERE's second conjunct.
+func TestEdgeCatalog_SelfGrantOnTaskOpIsNotOffered(t *testing.T) {
+	f := emSelfOnStandingWorld(t)
+	f.vtx(t, "taskOp", "meta")
+	f.aspect(t, "taskOp", "dispatch", "dispatch", map[string]any{"class": "capability", "authContext": "task"})
+	f.vtxData(t, "permSelfTask", "permission", map[string]any{"operationType": "ResolveWorkOrder", "scope": "self"})
+	f.edge(t, "grantedBy", "permSelfTask", "roleConsumer")
+	f.edge(t, "forOperation", "permSelfTask", "taskOp")
+
+	require.Empty(t, emCatalogRowsFor(t, f, "tenant", "taskOp"),
+		"a scope=self grant on a task-descriptor op must not surface a manifest.op row")
+}
+
+// TestEdgeCatalog_OwnTaskOnTaskOpStillProjects is the positive half: the
+// same task-descriptor op reached through an own task (no role, no service)
+// still projects — the exclusion is on the (scope=self, permission) pair,
+// never on a task-dispatched op as such. `perm` is unbound on the task
+// branch, so `null = "self"` is false and the exclusion cannot fire, exactly
+// as TestEdgeCatalog_ResidenceBranchIsUntouchedByTheExclusion proves for the
+// residence branch.
+func TestEdgeCatalog_OwnTaskOnTaskOpStillProjects(t *testing.T) {
+	f := newEmFixture(t)
+	f.vtx(t, "landlord", "identity")
+	f.vtx(t, "task", "task")
+	f.vtx(t, "taskOp", "meta")
+	f.aspect(t, "taskOp", "dispatch", "dispatch", map[string]any{"class": "capability", "authContext": "task"})
+	f.edge(t, "assignedTo", "task", "landlord")
+	f.edge(t, "forOperation", "task", "taskOp")
+
+	rows := emRowsByEntity(f.project(t, emComposedSpecBranch(t, "edgeCatalog", 2), f.key("landlord")))
+	row, ok := rows[f.ids["taskOp"]]
+	require.True(t, ok, "the task-assigned op must still project through the own-task Walk")
+	require.Equal(t, "task", row["dispatchAuthContext"])
+}
+
 // TestEdgeEntitySessions_ProjectsTheLeadingInstructorKey proves the shared
 // tail's bridging OPTIONAL MATCH: a resident's residence-anchored session row
 // (emResidentWorld, coverage_proof_test.go), reached via the domainBase

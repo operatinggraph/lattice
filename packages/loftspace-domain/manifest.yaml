@@ -1,5 +1,5 @@
 name: loftspace-domain
-version: 0.15.0
+version: 0.16.0
 description: |
   LoftSpace listing economics. Adds the leasable facets of a unit — the
   .listing aspect (rent / term / availability) and the .address aspect — on
@@ -31,7 +31,9 @@ description: |
   resolves it too; landlordWorkOrdersRead — a PROTECTED Postgres model of the
   maintenance-domain work orders raised at a landlord's managed units (locatedAt
   a unit, manages to the landlord, an OPTIONAL scopedTo task fan for the
-  open-task count), the same anchor shape as landlordUnitsRead, units only; and
+  open-task count, an OPTIONAL reportedBy/residesIn walk closing back on the
+  order's own unit for reported_by_resident), the same anchor shape as
+  landlordUnitsRead, units only; and
   objectIdentityAttachmentsRead — a PROTECTED Postgres
   owner-anchored read model of objects-base's generic object/AttachObject
   vertices, self-scoped to an identity's own attached documents (one row per

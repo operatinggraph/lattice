@@ -47,6 +47,11 @@ const state = {
   // requires status, and an edit must not silently relist a withdrawn/leased unit).
   editUnitKey: null,
   editStatus: null,
+  // landlordApplications is the flattened /api/landlord/applications rows
+  // (loadLandlordRLS), reused by renderWorkOrderCard's reporterLabel to name
+  // the resident who reported an order without a second read — empty until
+  // loadLandlordRLS resolves.
+  landlordApplications: [],
 };
 
 // DOC_SLOTS labels the upload "slot" (the link name) for display.
@@ -1485,6 +1490,17 @@ function fmtDate(s) {
   return isNaN(d) ? s : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+// localDateTime renders an instant (date + time, not just the calendar day)
+// in the viewer's own local timezone — cafe-app's own helper of the same
+// name, verbatim: every "reported at" / "resolved at" / "told at" stamp on
+// the tenant's My-reports list runs through it. "?" for an absent or
+// malformed stamp, never the raw ISO string.
+function localDateTime(iso) {
+  if (!iso) return "?";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "?" : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
 // UTC_MONTH_ABBR renders fmtUTCDate's month name without touching the local
 // timezone at all — Intl/Date formatting of a UTC instant is timezone-sensitive
 // by construction, which is exactly what fmtUTCDate exists to avoid.
@@ -1967,11 +1983,20 @@ async function loadApplications() {
   renderApplications();
 }
 
+// myWorkOrdersSection is the tenant's shared "My reports" list — rendered
+// ONCE per renderApplications pass (below the whole card grid), not once
+// per approved card, since GET /api/my/work-orders is scoped to the
+// signed-in reporter, not to one lease: a tenant with two live leases would
+// otherwise see it twice, each firing its own GET. null when this pass
+// holds no card that would offer the report control at all.
+let myWorkOrdersSection = null;
+
 function renderApplications() {
   const highlight = state.highlight;
   const grid = $("#apps");
   const empty = $("#apps-empty");
   grid.innerHTML = "";
+  myWorkOrdersSection = null;
   if (state.applications.length === 0) {
     empty.hidden = false;
     empty.textContent = state.appsProjectionHealthy === false
@@ -1982,6 +2007,12 @@ function renderApplications() {
   }
   empty.hidden = true;
   for (const row of state.applications) grid.append(renderApplicationCard(row, highlight));
+  const offerMyReports = state.applications.some((row) => row.landlordApproved && !row.tenancyEndedAt && row.unitKey);
+  if (offerMyReports) {
+    myWorkOrdersSection = renderMyWorkOrdersSection();
+    grid.append(myWorkOrdersSection.el);
+    myWorkOrdersSection.refresh();
+  }
   const n = state.applications.length;
   $("#apps-summary").textContent = `${n} application${n === 1 ? "" : "s"}`;
 }
@@ -2183,7 +2214,13 @@ function renderApplicationCard(row, highlight) {
   // location: row.unitKey — a null there would submit an op with a null
   // required field rather than simply not offering the control.
   if (row.landlordApproved && !row.tenancyEndedAt && row.unitKey) {
-    card.append(renderReportIssueControl(row, () => {}));
+    // My reports is reporter-scoped (GET /api/my/work-orders), not per-lease
+    // — the shared myWorkOrdersSection renderApplications built once for this
+    // view lives below the whole card grid, so a tenant with two live leases
+    // sees it once, not once per card.
+    card.append(renderReportIssueControl(row, () => {
+      if (myWorkOrdersSection) setTimeout(() => myWorkOrdersSection.refresh(), 800);
+    }));
   }
 
   const actions = document.createElement("div");
@@ -2872,6 +2909,84 @@ function renderReportIssueControl(row, onDone) {
     }
   });
   return wrap;
+}
+
+// reportStateLabel renders the tenant's own report line's state + instants
+// (docs/reviews/loftspace-maintenance-loop-closes-2026-09-18.md decision 7):
+// workOrderState(row)'s tri-state reused verbatim (resolved/queued/unqueued
+// read as reported/queued/resolved here — the same fields, resolvedAt /
+// openTaskCount), always followed by when it was reported, then — once
+// resolved — the resolution notes, then — whenever
+// RecordWorkOrderResolvedNotice has run (noticeSentAt), independent of the
+// other three — that the reporter was told. Pure and DOM-free so every one
+// of the four textual states (reported / queued / resolved / told) is
+// goja-testable without a fixture server.
+function reportStateLabel(row) {
+  const st = workOrderState(row);
+  const label = st === "resolved" ? "resolved" : st === "queued" ? "queued" : "reported";
+  const parts = [label, "reported " + localDateTime(row && row.reportedAt)];
+  if (st === "resolved") {
+    parts.push("resolved " + localDateTime(row.resolvedAt) + (row && row.resolutionNotes ? " — " + row.resolutionNotes : ""));
+  }
+  if (row && row.noticeSentAt) {
+    parts.push("you were told " + localDateTime(row.noticeSentAt));
+  }
+  return parts.join(" · ");
+}
+
+// renderMyWorkOrderLine builds one line of the tenant's "My reports" list.
+// Built with createElement/textContent, never innerHTML: summary is a
+// tenant-typed string and resolutionNotes a staff-typed one.
+function renderMyWorkOrderLine(row) {
+  const line = document.createElement("div");
+  line.className = "applicant-note";
+  line.textContent = row.summary + " · " + (row.priority || "normal") + " · " + reportStateLabel(row);
+  return line;
+}
+
+// renderMyWorkOrdersSection builds the tenant's "My reports" list (decision
+// 7): GET /api/my/work-orders, RLS-scoped to the signed-in reporter (never a
+// client-side filter), rendered newest-reported-first (the server's own
+// ORDER BY, never re-sorted here). Returns { el, refresh } so
+// submitReportIssue's onDone can reload it after a fresh report without a
+// full page reload, mirroring loadLandlordWorkOrders' best-effort posture:
+// an unavailable read boundary leaves the last-rendered list in place rather
+// than breaking the card.
+function renderMyWorkOrdersSection() {
+  const wrap = document.createElement("div");
+  wrap.className = "my-work-orders";
+  const heading = document.createElement("p");
+  heading.className = "hint";
+  heading.textContent = "My reports";
+  const list = document.createElement("div");
+  wrap.append(heading, list);
+
+  async function refresh() {
+    let data;
+    try {
+      data = await appGet("/api/my/work-orders");
+    } catch (e) {
+      console.warn("my work-orders unavailable:", e);
+      return;
+    }
+    const rows = data.workOrders || [];
+    list.innerHTML = "";
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "hint";
+      // Mirrors loadLandlordRLS: an empty result is either "reported
+      // nothing" or "the projection is temporarily behind" (a paused/
+      // fail-closed lens), and those are not the same message.
+      empty.textContent = data.projectionHealthy === false
+        ? "Report data is temporarily behind — this list may be incomplete."
+        : "No reports yet.";
+      list.append(empty);
+      return;
+    }
+    for (const row of rows) list.append(renderMyWorkOrderLine(row));
+  }
+
+  return { el: wrap, refresh };
 }
 
 // ---- Tasks (inbox) ----
@@ -4851,9 +4966,13 @@ async function loadLandlord() {
     return;
   }
   renderUnits();
-  loadLandlordRLS();
+  // loadLandlordWorkOrders is chained after loadLandlordRLS resolves, not
+  // fired concurrently with it: renderWorkOrderCard's reporterLabel reads
+  // state.landlordApplications, which only loadLandlordRLS populates — fired
+  // side by side, a work-orders response landing first renders every card
+  // before that state exists, and nothing re-renders it once it does.
+  loadLandlordRLS().then(loadLandlordWorkOrders);
   loadPortfolioPulse();
-  loadLandlordWorkOrders();
 }
 
 // loadPortfolioPulse — the operations portfolio-pulse aggregate: occupancy
@@ -4973,6 +5092,7 @@ async function loadLandlordRLS() {
     const data = await appGet("/api/landlord/applications");
     const units = data.units || [];
     const apps = data.applicationCount || 0;
+    state.landlordApplications = units.flatMap((u) => u.applications || []);
     el.hidden = false;
     if (units.length === 0) {
       if (data.projectionHealthy === false) {
@@ -5008,6 +5128,45 @@ function workOrderState(row) {
   if (row && row.resolvedAt) return "resolved";
   if (row && row.openTaskCount > 0) return "queued";
   return "unqueued";
+}
+
+// reporterLabel names who reported a work order, over two projections the
+// landlord already holds under RLS (docs/reviews/loftspace-maintenance-loop-closes-2026-09-18.md
+// decision 6): the landlord's own /api/landlord/applications rows
+// (state.landlordApplications), matched on (applicant, unitKey) at ANY
+// status — approved, ended, declined, still pending — checked FIRST, then
+// landlordWorkOrdersRead's own reportedByResident boolean (never a name — an
+// identity's name is a sensitive aspect and that lens stays plain) as the
+// fallback classifier. The application match must run first and unconditional
+// on status: reportedByResident reads "resides in the unit NOW" (residesIn is
+// unwired at term end, lease-signing's UnwireResidesIn), so a former
+// resident's own closed-out order would otherwise read "staff" the moment
+// their tenancy ends, despite the application record still naming them. Only
+// when no application record at all matches does the resident/staff split
+// apply — "the resident" for an unnamed resident (an older report predating
+// the applications window, or one still pending with no name on file yet),
+// "staff" for a non-resident. Pure and DOM-free so it is goja-testable.
+function reporterLabel(row, applications) {
+  const apps = Array.isArray(applications) ? applications : [];
+  for (const a of apps) {
+    if (a && a.applicant === row.reportedBy && a.unitKey === row.unitKey && a.applicantName) {
+      return a.applicantName;
+    }
+  }
+  if (row && row.reportedByResident) return "the resident";
+  return "staff";
+}
+
+// resolveOffered gates the landlord panel's Resolve button
+// (docs/reviews/loftspace-maintenance-loop-closes-2026-09-18.md decision 6
+// fix round): landlordWorkOrdersRead also anchors covering BUILDINGS, so
+// a dual-hat landlord/staffer holding a building worksAt grant sees every
+// order in that building, not only the units they themselves manage — and
+// ResolveWorkOrder's self leg can only ever bind THIS row's own landlordKey,
+// never a co-landlord's or a bare staffer's. Pure and DOM-free so it is
+// goja-testable.
+function resolveOffered(row, me) {
+  return !!(row && me && row.landlordKey === me);
 }
 
 // loadLandlordWorkOrders reads /api/landlord/work-orders as an
@@ -5054,6 +5213,61 @@ function renderLandlordWorkOrders(rows) {
   for (const row of rows) listEl.append(renderWorkOrderCard(row));
 }
 
+// submitResolveWorkOrder submits ResolveWorkOrder on the landlord's own
+// self leg (docs/reviews/loftspace-maintenance-loop-closes-2026-09-18.md
+// decision 6): authContext.target is state.applicant (landlordSubmit — the
+// leg the script selects on op.authContextTarget == op.actor), reads name
+// the work order, and optionalReads declares its .resolution marker (the
+// read-before-write terminal) plus the landlord's own manages link to the
+// order's unit — the "management bind" require_manages_unit reads.
+// refusal-courtesy: ResolveWorkOrder/InvalidArgument: cap — notes is required non-empty client-side (an empty submit is refused before the op is built) and workOrderKey always comes from row.workOrderKey, never typed.
+// refusal-courtesy: ResolveWorkOrder/UnknownWorkOrder: hide — offered only from a row this same RLS-scoped read just projected; a tombstoned order would not appear here.
+// refusal-courtesy: ResolveWorkOrder/AuthDenied: hide — the button is offered only when resolveOffered(row, state.applicant) (row.landlordKey === state.applicant), so the self leg's own manages-link probe binds the exact identity that named itself, never a co-landlord's or a bare building-worksAt staffer's.
+// refusal-courtesy: ResolveWorkOrder/AlreadyResolved: hide — the button is offered only on a card whose workOrderState(row) is not "resolved" yet; a stale card that still races this (another landlord/session resolved it first) is refreshed on the rejection too, so the card catches up on its next render.
+//
+// Returns "ok" on a confirmed resolve, "rejected" on a server refusal (the
+// caller still reloads the panel: a stale card refused AlreadyResolved needs
+// to re-read the row that beat it there, not just toast), or "error" when
+// the transport itself threw (unknown landed-or-not; the caller does not
+// reload blind).
+async function submitResolveWorkOrder(row, notes) {
+  const unitId = shortKey(row.unitKey);
+  const reads = [row.workOrderKey];
+  const optionalReads = [row.workOrderKey + ".resolution", "lnk.identity." + shortKey(state.applicant) + ".manages.unit." + unitId];
+  let sent = false;
+  let confirmed = false;
+  try {
+    sent = true;
+    const reply = await submitOp(
+      {
+        operationType: "ResolveWorkOrder",
+        class: "workOrder",
+        reads,
+        optionalReads,
+        payload: { workOrderKey: row.workOrderKey, notes },
+      },
+      landlordSubmit()
+    );
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not resolve the work order — " + msg, "err");
+      return "rejected";
+    }
+    confirmed = true;
+    toast("Work order resolved.", "ok");
+    return "ok";
+  } catch (e) {
+    if (!sent) {
+      toast("Could not resolve the work order: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Work order resolved, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the resolution reached the server — it may have landed; check back before trying again. " + e.message, "err");
+    }
+    return "error";
+  }
+}
+
 // renderWorkOrderCard builds one Maintenance panel row. Built with
 // createElement/textContent, never innerHTML: summary is a tenant-typed
 // string and resolutionNotes a staff-typed one.
@@ -5086,16 +5300,45 @@ function renderWorkOrderCard(row) {
   summary.textContent = row.summary;
   card.append(summary);
 
+  const reportedBy = document.createElement("div");
+  reportedBy.className = "applicant-note";
+  reportedBy.textContent = "Reported by " + reporterLabel(row, state.landlordApplications);
+  card.append(reportedBy);
+
   const reported = document.createElement("div");
   reported.className = "applicant-note";
-  reported.textContent = "Reported " + fmtDate(row.reportedAt);
+  reported.textContent = "Reported " + localDateTime(row.reportedAt);
   card.append(reported);
 
   if (st === "resolved") {
     const resolved = document.createElement("div");
     resolved.className = "applicant-note";
-    resolved.textContent = "Resolved " + fmtDate(row.resolvedAt) + (row.resolutionNotes ? " — " + row.resolutionNotes : "");
+    resolved.textContent = "Resolved " + localDateTime(row.resolvedAt) + (row.resolutionNotes ? " — " + row.resolutionNotes : "");
     card.append(resolved);
+  } else if (resolveOffered(row, state.applicant)) {
+    const actions = document.createElement("div");
+    actions.className = "card-actions";
+    const resolveBtn = document.createElement("button");
+    resolveBtn.className = "ghost";
+    resolveBtn.textContent = "Resolve";
+    resolveBtn.addEventListener("click", async () => {
+      const notes = prompt("What was done to resolve it?", "");
+      if (notes === null) return;
+      const trimmed = notes.trim();
+      if (!trimmed) {
+        toast("Resolution notes are required.", "err");
+        return;
+      }
+      resolveBtn.disabled = true;
+      try {
+        const result = await submitResolveWorkOrder(row, trimmed);
+        if (result === "ok" || result === "rejected") setTimeout(loadLandlordWorkOrders, 800);
+      } finally {
+        resolveBtn.disabled = false;
+      }
+    });
+    actions.append(resolveBtn);
+    card.append(actions);
   }
 
   return card;

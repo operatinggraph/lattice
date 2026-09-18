@@ -160,6 +160,12 @@ var scanRootCorpusVerdicts = map[string]plainScanRootVerdict{
 	"landlordWorkOrdersRead": {hasNeighbour: true, reason: rootIndexed, closure: closureRefused},
 	"leaseAccounts":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"leaseApplicationsRead":  {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
+	// Anchor-first tails throughout (`(wo)-[:reportedBy]->`, `(wo)-[:locatedAt]->`,
+	// `(wo)<-[:scopedTo]-`), the anchor position labelled and unpinned, so the
+	// root index is complete; the aggregating WITH re-exposes the anchor key
+	// (entityKey → work_order_id), so the per-anchor closure holds — the same
+	// verdict leaseApplicationsRead earns just above.
+	"reporterWorkOrdersRead": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	"ledgerHistory":          {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},
 	// Acted on — see cafeLeaseWorkplaces.
 	"menuCatalog": {hasNeighbour: true, reason: rootIndexed, closure: closureHolds},

@@ -146,6 +146,7 @@ var plainRetractionCorpusVerdicts = map[string]retractionVerdict{
 	"landlordWorkOrdersRead":         {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetractionPartition},
 	"leaseAccounts":                  {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"leaseApplicationsRead":          {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
+	"reporterWorkOrdersRead":         {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetraction},
 	"ledgerHistory":                  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDerivation},
 	"menuCatalog":                    {plane: planeBusiness, dependsOnNeighbour: false, transport: pipeline.RetractionTransportDerivation},
 	"objectIdentityAttachmentsRead":  {plane: planeBusiness, dependsOnNeighbour: true, transport: pipeline.RetractionTransportDiffRetractionPartition},

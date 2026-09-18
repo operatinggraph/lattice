@@ -151,6 +151,31 @@ func Lenses() []pkgmgr.LensSpec {
 			// DIFF RETRACTION: like landlordUnitsRead, this walks `locatedAt` /
 			// `manages` structurally, so an unwired link needs Refractor's
 			// target-diff retraction path, not anchor-self.
+			//
+			// reported_by_resident (docs/reviews/loftspace-maintenance-loop-closes-2026-09-18.md
+			// decision 6) answers "is the reporter a resident of THIS unit" without
+			// projecting a name: an identity's `name` is a sensitive aspect
+			// (identity-domain/ddls.go) and this lens stays plain. The walk is
+			// `(wo)-[:reportedBy]->(r:identity)-[:residesIn]->(u)`, closing back on
+			// the already-bound anchor `u` rather than naming a fresh unit
+			// variable — lease-signing's missing_residence walk
+			// (lease-signing/lenses.go's doc comment on
+			// `(app)-[:applicationFor]->(resId:identity)-[res:residesIn]->(resU:unit)<-[:appliesToUnit]-(app)`)
+			// is the precedent for reusing an already-bound anchor as a
+			// pattern's far endpoint: the traversal only admits a destination
+			// that resolves to the SAME node already bound
+			// (rel_traverse.go's constrained-target rule), so the OPTIONAL MATCH
+			// below only binds `r` when the reporter resides in the unit the
+			// order is AT, never a unit they merely happen to live in elsewhere.
+			// The boolean is the SHIPPED "walk exists" idiom (clinic-domain's
+			// `missing_site`, wellness-domain's `missingStudio` / `missingInstructor`):
+			// `(r.key <> null)` off an OPTIONAL MATCH-bound variable, not a
+			// pattern-comprehension list tested for non-emptiness — this engine
+			// has no size()/any() function and no other lens in the repo compares
+			// a list to `[]`, so the bound-key check is the only proven path to a
+			// real boolean. A staff-reported order (reportedBy an identity with
+			// no residesIn link at all) and a legacy order with no reportedBy
+			// link yet (decision 1's backfill gap) both read false, never null.
 			CanonicalName:  "landlordWorkOrdersRead",
 			Class:          "meta.lens",
 			Adapter:        "postgres",
@@ -169,6 +194,7 @@ func Lenses() []pkgmgr.LensSpec {
 				{Name: "priority", Type: "text"},
 				{Name: "reported_at", Type: "text"},
 				{Name: "reported_by", Type: "text"},
+				{Name: "reported_by_resident", Type: "boolean"},
 				{Name: "resolved_at", Type: "text"},
 				{Name: "resolution_notes", Type: "text"},
 				{Name: "open_task_count", Type: "double precision"},
@@ -346,6 +372,7 @@ RETURN
 const landlordWorkOrdersReadSpec = `MATCH (wo:workorder)-[:locatedAt]->(u:unit)
 MATCH (u)<-[:manages]-(landlord:identity)
 OPTIONAL MATCH (wo)<-[:scopedTo]-(t:task)
+OPTIONAL MATCH (wo)-[:reportedBy]->(r:identity)-[:residesIn]->(u)
 WITH
   u,
   wo.key                       AS entityKey,
@@ -356,6 +383,7 @@ WITH
   wo.report.data.priority      AS priority,
   wo.report.data.reportedAt    AS reportedAt,
   wo.report.data.reportedBy    AS reportedBy,
+  (r.key <> null)              AS reportedByResident,
   wo.resolution.data.resolvedAt AS resolvedAt,
   wo.resolution.data.notes     AS resolutionNotes,
   count(DISTINCT CASE WHEN t.data.status = 'open' THEN t.key ELSE null END) AS openTaskCount
@@ -370,6 +398,7 @@ RETURN
   priority                     AS priority,
   reportedAt                   AS reported_at,
   reportedBy                   AS reported_by,
+  reportedByResident           AS reported_by_resident,
   resolvedAt                   AS resolved_at,
   resolutionNotes              AS resolution_notes,
   openTaskCount                AS open_task_count,

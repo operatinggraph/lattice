@@ -290,7 +290,13 @@ var appOpCeilings = map[string]int{
 	// entirely) — the same hand-built-form-for-a-described-op shape
 	// GiveNotice already established one line above, not a new
 	// descriptor-catalog gap.
-	"cmd/loftspace-app": 21,
+	// 22: ResolveWorkOrder (docs/reviews/loftspace-maintenance-loop-closes-2026-09-18.md
+	// decision 6) — the landlord Maintenance panel's own "Resolve" control
+	// (submitResolveWorkOrder, app.js): a single free-text notes field via
+	// prompt(), the same hand-built-form-for-a-described-op shape GiveNotice
+	// and the two ledger controls above already established, not a new
+	// descriptor-catalog gap.
+	"cmd/loftspace-app": 22,
 	// 13: CreateUnclaimedIdentity backs the new-guest modal's submit
 	// (submitNewGuest, app.js), reusing loftspace-app's/clinic-app's own
 	// hand-built new-identity ceremony for the same op — a hardcoded literal

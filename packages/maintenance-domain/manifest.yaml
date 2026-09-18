@@ -1,23 +1,32 @@
 name: maintenance-domain
-version: 0.3.0
+version: 0.4.0
 description: |
   Cross-vertical maintenance work orders: vtx.workorder.<NanoID> raised at a
-  location by ReportIssue and closed by ResolveWorkOrder, the op an FR28
-  role-queued task grants its claimant (the §10.6 auto-complete closes the
-  task, so no separate completion op exists). `.resolution` is the
-  read-before-write terminal marker — an identical re-submit is an idempotent
-  no-op so an offline device's drain retry cannot fail the work, a differing
-  one is rejected so a resolution never silently flips. Both ops carry F4's
+  location by ReportIssue (which also links the order to its reporter) and
+  closed by ResolveWorkOrder — the op an FR28 role-queued task grants its
+  claimant (the §10.6 auto-complete closes the task, so no separate
+  completion op exists), and the op a landlord reaches on a scope=self grant
+  bound to the unit they manage. `.resolution` is the read-before-write
+  terminal marker — an identical re-submit is an idempotent no-op so an
+  offline device's drain retry cannot fail the work, a differing one is
+  rejected so a resolution never silently flips. Both ops carry F4's
   canonical workplace write-confinement guard on the standing path;
   ReportIssue additionally admits a consumer on a scope=self grant bound to
-  the unit they residesIn. The workOrderQueue lens + weaverTarget queue every
-  unresolved, untasked work order as a ResolveWorkOrder task to backOfHouse,
-  so a reported issue becomes work without the reporter minting the task.
-  ResolveWorkOrder carries an op-meta with the full edge-manifest descriptor
-  vocabulary (presentation/inputSchema/dispatch authContext=task) so a Facet
-  client can render and submit it from the task row alone.
+  the unit they residesIn. Three convergence targets close the loop: the
+  workOrderQueue lens + weaverTarget queue every unresolved, untasked work
+  order as a ResolveWorkOrder task to backOfHouse and backfill a missing
+  reporter link (LinkWorkOrderReporter); staleWorkOrderTasks cancels an open
+  task whose order was resolved by a non-task route; workOrderResolvedNotices
+  tells the reporter once that someone else resolved their order
+  (RecordWorkOrderResolvedNotice, its outcome recorded by the bridge's
+  RecordWorkOrderResolvedNotification replyOp). reporterWorkOrdersRead is the
+  protected Postgres read model of a reporter's own orders. ResolveWorkOrder
+  carries an op-meta with the full edge-manifest descriptor vocabulary
+  (presentation/inputSchema/dispatch authContext=task) so a Facet client can
+  render and submit it from the task row alone.
 depends:
   - location-domain
+  - orchestration-base
 declares:
   ddls:
     - canonicalName: workOrder
@@ -26,10 +35,25 @@ declares:
       class: meta.ddl.aspectType
     - canonicalName: workOrderResolution
       class: meta.ddl.aspectType
+    - canonicalName: workOrderResolvedNotice
+      class: meta.ddl.aspectType
+    - canonicalName: workOrderResolvedNotification
+      class: meta.ddl.aspectType
   lenses:
     - canonicalName: workOrderQueue
       adapter: nats-kv
       bucket: weaver-targets
+      engine: full
+    - canonicalName: staleWorkOrderTasks
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: workOrderResolvedNotices
+      adapter: nats-kv
+      bucket: weaver-targets
+      engine: full
+    - canonicalName: reporterWorkOrdersRead
+      adapter: postgres
       engine: full
   permissions:
     - operationType: ReportIssue
@@ -41,9 +65,27 @@ declares:
     - operationType: ResolveWorkOrder
       scope: any
       grantsTo: [operator]
+    - operationType: ResolveWorkOrder
+      scope: self
+      grantsTo: [consumer]
+    - operationType: LinkWorkOrderReporter
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordWorkOrderResolvedNotice
+      scope: any
+      grantsTo: [operator]
+    - operationType: RecordWorkOrderResolvedNotification
+      scope: any
+      grantsTo: [operator]
   opMetas:
     - operationType: ResolveWorkOrder
     - operationType: ReportIssue
+    - operationType: RecordWorkOrderResolvedNotice
+    - operationType: RecordWorkOrderResolvedNotification
   weaverTargets:
     - targetId: workOrderQueue
       lensRef: workOrderQueue
+    - targetId: staleWorkOrderTasks
+      lensRef: staleWorkOrderTasks
+    - targetId: workOrderResolvedNotices
+      lensRef: workOrderResolvedNotices

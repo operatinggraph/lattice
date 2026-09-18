@@ -2,10 +2,11 @@ package maintenancedomain
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Canonical names. One vertexType DDL owns both op scripts (an op is admitted
+// Canonical names. One vertexType DDL owns every op script (an op is admitted
 // by EXACTLY ONE vertexType DDL — the operationType→script index drops an op
 // claimed by two). The aspect-type DDLs are step-6 write gates only, mirroring
-// clinic-domain / wellness-domain's split.
+// clinic-domain / wellness-domain's split; the two notice aspects live in
+// notices.go beside the notice half of the script.
 const (
 	workOrderVertexDDL = "workOrder"
 
@@ -13,7 +14,9 @@ const (
 	workOrderResolutionAspectDDL = "workOrderResolution"
 )
 
-// DDLs returns the package's three DDL meta-vertex declarations.
+// DDLs returns the package's five DDL meta-vertex declarations: the workOrder
+// vertexType (owner of every op script) and the four aspect-type write gates
+// (.report, .resolution, .resolvedNotice, .resolvedNotification).
 //
 // Architectural rules (binding — the known-key discipline of clinic-domain /
 // wellness-domain): the scripts read by known key, plus the ONE sanctioned
@@ -25,6 +28,8 @@ func DDLs() []pkgmgr.DDLSpec {
 		workOrderVertexTypeDDL(),
 		workOrderReportAspectTypeDDL(),
 		workOrderResolutionAspectTypeDDL(),
+		workOrderResolvedNoticeAspectTypeDDL(),
+		workOrderResolvedNotificationAspectTypeDDL(),
 	}
 }
 
@@ -32,13 +37,15 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     workOrderVertexDDL,
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"ReportIssue", "ResolveWorkOrder"},
+		PermittedCommands: []string{"ReportIssue", "ResolveWorkOrder", "LinkWorkOrderReporter", resolvedNoticeOp, resolvedNotificationOp},
 		Description: "Maintenance work-order DDL. Vertex shape: vtx.workorder.<NanoID>, class=workorder, root " +
 			"data = {} (minimal, D5 — the content lives in the .report / .resolution aspects). ReportIssue " +
 			"mints the work order + the .report aspect {summary, priority, reportedAt (canonical-UTC of " +
 			"op.submittedAt), reportedBy (op.actor)} + the workorder locatedAt location LINK " +
 			"(lnk.workorder.<id>.locatedAt.<locType>.<locId>; source = the later-arriving work order, target = " +
-			"the pre-existing location, Contract #1 §1.1). It does NOT mint a task: a work order becomes queued " +
+			"the pre-existing location, Contract #1 §1.1) + the workorder reportedBy identity LINK " +
+			"(lnk.workorder.<id>.reportedBy.identity.<actorId>, the reporter relation the read path and the " +
+			"resolved notice walk; .report.reportedBy stays as the audit stamp). It does NOT mint a task: a work order becomes queued " +
 			"WORK only when someone submits orchestration-base's CreateTask(queue: <role>, forOperation: " +
 			"<ResolveWorkOrder's op-meta>, scopedTo: <the work order>), which owns the FR28 exactly-one-of " +
 			"assignedTo/queuedFor invariant. ResolveWorkOrder writes the .resolution aspect {notes, resolvedAt, " +
@@ -55,25 +62,45 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 			"grant authorized the call), under which the caller must residesIn the " +
 			"reported UNIT (the deterministic lnk.identity.<actor>.residesIn.unit.<id>, declared as an " +
 			"OptionalRead by the tenant dispatcher), else NotResident; any validated target that is not " +
-			"the caller is refused AuthDenied.",
-		Script: workOrderDDLScript,
+			"the caller is refused AuthDenied. ResolveWorkOrder additionally admits a consumer on a scope=self " +
+			"grant — the landlord leg: an authContext.target naming the caller selects the management bind, " +
+			"under which the work order must be locatedAt a UNIT and the caller's deterministic " +
+			"lnk.identity.<actor>.manages.unit.<id> must be live (declared as an OptionalRead by the landlord " +
+			"dispatcher; undeclared or absent reads as absent), else AuthDenied naming no unit; any validated " +
+			"target that is neither the caller nor the work order is refused AuthDenied. " +
+			"LinkWorkOrderReporter{workOrderKey} (operator-granted; the workOrderQueue target's missing_reporter " +
+			"gap dispatches it) backfills the reportedBy link on an order whose .report stamps a reporter the " +
+			"link does not yet name: it reads .report.reportedBy from hydration and mints the link as a CreateOnly " +
+			"write, so a collision with the link ReportIssue wrote is a refused no-op, never a rewrite; refused " +
+			"UnknownWorkOrder on a dead order and InvalidArgument when .report or its reportedBy is absent. " +
+			"RecordWorkOrderResolvedNotice / RecordWorkOrderResolvedNotification (notices.go) tell the reporter " +
+			"once that their order was resolved and record the send's outcome.",
+		Script: workOrderDDLScript + workOrderNoticeScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"summary":{"type":"string","description":"What is wrong (ReportIssue; required)."},` +
 			`"priority":{"type":"string","enum":["low","normal","urgent"],"description":"How urgent the issue is (ReportIssue; optional, default normal)."},` +
 			`"location":{"type":"string","description":"vtx.<locType>.<NanoID> of the place the issue is at (ReportIssue; required, validated alive + an admitted location type segment)."},` +
 			`"workOrderId":{"type":"string","description":"Optional bare NanoID for the new work-order vertex (ReportIssue); absent → minted."},` +
-			`"workOrderKey":{"type":"string","description":"vtx.workorder.<NanoID> being resolved (ResolveWorkOrder; required, validated alive)."},` +
-			`"notes":{"type":"string","description":"What was done to resolve it (ResolveWorkOrder; required)."}},` +
+			`"workOrderKey":{"type":"string","description":"vtx.workorder.<NanoID> being resolved / linked / told about (ResolveWorkOrder, LinkWorkOrderReporter, RecordWorkOrderResolvedNotice; required, validated alive)."},` +
+			`"notes":{"type":"string","description":"What was done to resolve it (ResolveWorkOrder; required)."},` +
+			`"changeRef":{"type":"string","description":"The .resolution.resolvedAt instant the notice is for (RecordWorkOrderResolvedNotice; required, refused StaleChange when it no longer matches the live aspect)."},` +
+			`"externalRef":{"type":"string","description":"The <workOrderKey>:resolved:<changeRef> token the adapter event carried (RecordWorkOrderResolvedNotification; required)."},` +
+			`"status":{"type":"string","enum":["completed","failed"],"description":"The adapter's terminal verdict (RecordWorkOrderResolvedNotification; required)."},` +
+			`"result":{"type":"string","description":"The adapter's free-form Detail string (RecordWorkOrderResolvedNotification; audit only)."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
-			`{"primaryKey":{"type":"string","description":"vtx.workorder.<NanoID> the operation wrote."}}}`,
+			`{"primaryKey":{"type":"string","description":"vtx.workorder.<NanoID> the operation wrote (LinkWorkOrderReporter: the lnk.workorder.<id>.reportedBy.identity.<id> key it minted)."}}}`,
 		FieldDescription: map[string]string{
 			"summary":      "One line describing the issue, e.g. \"Boiler in the basement is cycling\" (ReportIssue; required). Shown as the work order's label everywhere — keep it free of resident PII, since it rides the SYNC plane to staff devices (D3).",
 			"priority":     "low | normal | urgent (ReportIssue; optional, default normal).",
 			"location":     "Full vtx.<locType>.<NanoID> key of the location-domain place the issue is at (a unit, a building). Validated alive + an admitted location type segment; written as the workorder locatedAt location link. MUST be listed in ContextHint.Reads. On the consumer self leg it must be a UNIT the caller residesIn, and the caller's lnk.identity.<actor>.residesIn.unit.<id> MUST be listed in ContextHint.OptionalReads — undeclared, the link reads as absent and the report is refused NotResident.",
 			"workOrderId":  "Optional bare NanoID (no dots / key segments) for the new work-order vertex. Absent → minted with nanoid.new().",
-			"workOrderKey": "Full vtx.workorder.<NanoID> key of the work order being resolved (ResolveWorkOrder). Auto-filled by a task-driven client from the task's scopedTo target, not typed.",
+			"workOrderKey": "Full vtx.workorder.<NanoID> key of the work order being resolved (ResolveWorkOrder; auto-filled by a task-driven client from the task's scopedTo target, not typed — on the landlord self leg the caller's lnk.identity.<actor>.manages.unit.<id> to the order's unit MUST be listed in ContextHint.OptionalReads, else AuthDenied), linked (LinkWorkOrderReporter; the dispatching gap lists it and its .report in Reads) or told about (RecordWorkOrderResolvedNotice; the dispatching gap lists it, .report and .resolution in Reads and .resolvedNotice in OptionalReads).",
 			"notes":        "What was actually done (ResolveWorkOrder; required). TERMINAL: the same notes re-submit harmlessly — which is what makes an offline drain retry safe — but different notes are rejected, so a resolution can never silently flip.",
+			"changeRef":    "The .resolution.resolvedAt instant this notice is for (RecordWorkOrderResolvedNotice). Re-checked against the live aspect before anything is sent; recorded verbatim as .resolvedNotice.resolvedFor so the lens's equality closes the gap.",
+			"externalRef":  "The <workOrderKey>:resolved:<changeRef> token RecordWorkOrderResolvedNotice minted as instanceKey/idempotencyKey (RecordWorkOrderResolvedNotification). Split on the first ':' to recover the work-order key, then on the second ':' to split the kind from changeRef.",
+			"status":       "The adapter's terminal verdict, completed or failed (RecordWorkOrderResolvedNotification), written to .resolvedNotification.",
+			"result":       "The adapter's free-form Detail string (RecordWorkOrderResolvedNotification), carried for audit only — not written to the aspect.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -81,15 +108,27 @@ func workOrderVertexTypeDDL() pkgmgr.DDLSpec {
 				Payload: map[string]any{"summary": "Kitchen tap is dripping", "priority": "normal", "location": "vtx.unit.<NanoID>"},
 				ExpectedOutcome: "Validates the location is alive + an admitted location type segment and that the caller worksAt a location covering it " +
 					"(root exempt), or — on the consumer self leg — that the caller residesIn the unit. Mints vtx.workorder.<NanoID> " +
-					"(class=workorder, root {}) + the .report aspect + lnk.workorder.<id>.locatedAt.unit.<NanoID>. Returns primaryKey (the work-order key).",
+					"(class=workorder, root {}) + the .report aspect + lnk.workorder.<id>.locatedAt.unit.<NanoID> + " +
+					"lnk.workorder.<id>.reportedBy.identity.<actorId>. Returns primaryKey (the work-order key).",
 			},
 			{
 				Name:    "ResolveWorkOrder — close it out",
 				Payload: map[string]any{"workOrderKey": "vtx.workorder.<NanoID>", "notes": "Replaced the washer."},
 				ExpectedOutcome: "Validates the work order is alive and unresolved, then writes the .resolution aspect " +
 					"{notes, resolvedAt, resolvedBy}. Submitted under authContext.task by the claimant of the task " +
-					"scopedTo this work order, the §10.6 auto-complete closes that task on the same commit. " +
+					"scopedTo this work order, the §10.6 auto-complete closes that task on the same commit; submitted " +
+					"with authContext.target = the caller by a landlord who manages the order's unit (the manages link " +
+					"declared as an OptionalRead), the order resolves and the staleWorkOrderTasks target cancels its " +
+					"open task by convergence. " +
 					"Re-submitting the identical notes is an accepted no-op; different notes reject AlreadyResolved.",
+			},
+			{
+				Name:    "LinkWorkOrderReporter — backfill the reporter link",
+				Payload: map[string]any{"workOrderKey": "vtx.workorder.<NanoID>"},
+				ExpectedOutcome: "Validates the work order is alive and that .report.reportedBy names an identity, then mints " +
+					"lnk.workorder.<id>.reportedBy.identity.<reporterId> as a CreateOnly write (a link already present " +
+					"is a refused no-op). Dispatched by the workOrderQueue target's missing_reporter gap under Weaver's " +
+					"service actor. Returns primaryKey (the link key — the op's whole write footprint).",
 			},
 		},
 	}
@@ -164,7 +203,10 @@ def execute(state, op):
     fail("UnknownOperation: declaration-only aspect DDL admits no operations")
 `
 
-// workOrderDDLScript handles ReportIssue + ResolveWorkOrder.
+// workOrderDDLScript handles ReportIssue, ResolveWorkOrder and
+// LinkWorkOrderReporter, and hands the two notice ops to execute_notice
+// (workOrderNoticeScript, notices.go — the vertex DDL's Script is the two
+// consts concatenated, so every helper defined here is visible there).
 //
 // The workplace-confinement half (WORKPLACE_* constants, actor_holds_operator,
 // worksAt_covers, workplace_exempt, require_workplace) is byte-identical to the
@@ -521,6 +563,50 @@ def require_residence(location_key, location_type, location_id):
     if lnk == None or lnk.isDeleted:
         fail("NotResident: " + op.actor + " does not reside at " + location_key)
 
+def require_manages_unit(work_order_key, what):
+    # The landlord's ownership probe on ResolveWorkOrder's self leg -- the
+    # management counterpart to require_residence above and the shape of
+    # lease-signing's require_manages: a signed-in landlord holds no worksAt
+    # link and authorizes via a scope=self grant, so what confines them is
+    # their own manages link to the unit the work order is at. The unit is
+    # resolved from the ORDER's own locatedAt link (workorder_location, the
+    # bounded (e) walk the standing leg already runs), never from a payload
+    # field, so a caller cannot name which unit it claims to manage.
+    #
+    # A unit and only a unit: the manages spine binds an identity to a unit,
+    # so a building- or property-located order (a staff report) can never
+    # carry the link, and a landlord naming one is refused by the same code
+    # rather than falling to the staff walk.
+    #
+    # Read from hydration only. The key is derivable by the dispatcher (the
+    # actor plus the unit the order's own row already shows), so the landlord
+    # dispatcher declares it as an OptionalRead, and a submitter that never
+    # declared it reads the link as absent and is refused -- never served by a
+    # lazy GET that would admit a write on a fact the envelope never named. A
+    # tombstoned link is ABSENT (property 2 above).
+    #
+    # No refusal names the unit, and the not-a-unit arm and the no-link arm
+    # share ONE text: the caller reached here holding only the work-order
+    # key, and a refusal that told a building-located order apart from an
+    # unmanaged unit would turn a denial into a lookup over where an order
+    # the caller does not manage is. (The no-location arm is a shape
+    # ReportIssue never mints -- every order carries its locatedAt link --
+    # and stays distinct as an integrity signal, not a location oracle.)
+    loc = workorder_location(work_order_key)
+    if loc == None:
+        fail("AuthDenied: no unit resolves for this write, so no management link can authorize it; " + what)
+    lt, lid = parts_of(loc, "location", "")
+    if lt != "unit":
+        fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
+    _, actor_id = parts_of(op.actor, "actor", "identity")
+    # read-posture: (d) declared optionalReads at the landlord dispatch
+    # (loftspace-app's Resolve) -- absent means the caller does not manage
+    # this order's unit.
+    link_key = "lnk.identity." + actor_id + ".manages." + lt + "." + lid
+    lnk = state[link_key] if link_key in state else None
+    if lnk == None or lnk.isDeleted:
+        fail("AuthDenied: " + op.actor + " does not manage the unit this write is for; " + what)
+
 PRIORITIES = ["low", "normal", "urgent"]
 
 def priority_of(p):
@@ -604,9 +690,28 @@ def execute(state, op):
 
         wid = bare_nanoid_or_mint(p, "workOrderId")
         wkey = "vtx.workorder." + wid
+        _, actor_id = parts_of(op.actor, "actor", "identity")
         reported_at = time.rfc3339_utc(op.submittedAt)
+        # The reporter is recorded twice, on purpose: .report.reportedBy is the
+        # audit stamp, and the reportedBy LINK is what a reader walks (the
+        # engine walks links, never a key stored in data) -- the reporter's own
+        # read path and the resolved notice both anchor on it. Written in the
+        # same batch as the root, so a fresh order never opens the
+        # workOrderQueue target's missing_reporter backfill gap; that gap is
+        # the second writer of this deterministic key, arbitrated by
+        # population (it runs only where the lens proves the link absent).
+        #
+        # ORDER INVARIANT: the link lands ahead of the stamp. A batch commits
+        # atomically but Refractor evaluates it as N ordered CDC messages, and
+        # the backfill gap is 'reportedBy stamped AND link absent' -- so the
+        # link is emitted BEFORE the .report aspect, and at every message of
+        # the batch one of the two is still absent and the gap reads false. A
+        # stamp landing first would open the gap for one revision and dispatch
+        # a doomed backfill (a create collision) on every fresh report.
         mutations = [
             make_vtx(wkey, "workorder", {}),
+            make_link("lnk.workorder." + wid + ".reportedBy.identity." + actor_id,
+                      wkey, op.actor, "reportedBy", "reportedBy", {}),
             make_aspect(wkey, "report", "workOrderReport",
                         {"summary": summary, "priority": priority,
                          "reportedAt": reported_at, "reportedBy": op.actor}),
@@ -638,19 +743,50 @@ def execute(state, op):
         # ahead of the guard, so key EXISTENCE remains distinguishable from
         # denial -- the same shape clinic's SetAppointmentStatus carries.
         #
-        # A validated target only exempts a claimant when it names THIS work
-        # order. The task grant is scopedTo one work order (authContext.target),
-        # while the work order actually resolved comes from payload.workOrderKey
-        # -- two independent client fields. Without the bind, a tech holding a
-        # legitimate grant for one work order could resolve a different one at a
-        # building they do not work at. Past the bind the caller is ordinary
-        # staff, so enforce_workplace (not require_workplace, whose own
-        # validated-target exemption would re-open exactly this hole) runs the
-        # worksAt walk.
+        # Three legs, selected by the caller's STATED target and tested in
+        # THIS order, each bound by the guard the others cannot see:
+        #   1. A target naming the CALLER selects the management bind: the
+        #      order must be at a unit the caller manages
+        #      (require_manages_unit). This keys on the raw authContext.target,
+        #      which step 3 never inspects on a scope=any grant -- and that is
+        #      safe here for the reason ReportIssue's leg 1 gives: a
+        #      self-named target opts the caller IN to the stricter unit-level
+        #      bind, never out of anything, so staff who are also landlords
+        #      and name themselves are held to the manages link. It runs
+        #      before the validated-bit test because a dual-hat actor is
+        #      authorized by whichever grant row step 3 meets first, and the
+        #      bind the caller asked for must not depend on that order.
+        #   2. A validated target naming THIS work order is the task claimant,
+        #      exempt: the task grant is scopedTo one work order
+        #      (authContext.target), while the work order actually resolved
+        #      comes from payload.workOrderKey -- two independent client
+        #      fields. Without the bind, a tech holding a legitimate grant for
+        #      one work order could resolve a different one at a building they
+        #      do not work at. Root (the operator role, resolved from the
+        #      graph) is exempt on the same line.
+        #   3. Any OTHER validated target -- neither the caller nor this order
+        #      -- is refused outright rather than falling to the staff walk.
+        #   4. The STANDING leg (operator + staff roles, scope=any, no target)
+        #      is the worksAt walk over the order's own location. It runs
+        #      enforce_workplace directly (not require_workplace, whose own
+        #      validated-target exemption would re-open exactly the hole leg 2
+        #      closes).
+        # authcontext-target: (ownership) the target is used only as
+        # op.actor's own key, and the authority it buys is then proven by the
+        # manages link require_manages_unit reads, so a forged one only forces
+        # the stricter proof.
+        if op.authContextTarget == op.actor:
+            require_manages_unit(wkey, "ResolveWorkOrder on " + wkey)
         # authcontext-target: (resource-bind) the VALIDATED target must name
         # the work order this op resolves.
-        resource_bound = op.authTargetValidated and op.authContextTarget == wkey
-        if not (resource_bound or actor_holds_operator(op.actor)):
+        elif (op.authTargetValidated and op.authContextTarget == wkey) or actor_holds_operator(op.actor):
+            pass
+        # authcontext-target: (selector) the branch is selected by the
+        # platform bit op.authTargetValidated; the target is only echoed in
+        # the refusal.
+        elif op.authTargetValidated:
+            fail("AuthDenied: validated target " + str(op.authContextTarget) + " is neither the caller nor " + wkey)
+        else:
             loc = workorder_location(wkey)
             locs = []
             if loc != None:
@@ -694,5 +830,41 @@ def execute(state, op):
                    "data": {"workOrderKey": wkey, "resolvedBy": op.actor}}]
         return {"mutations": mutations, "events": events, "response": {"primaryKey": wkey}}
 
-    fail("UnknownOperation: " + ot)
+    if ot == "LinkWorkOrderReporter":
+        # The backfill writer of the reportedBy link, for an order minted
+        # before ReportIssue wrote it in the same batch as the root. Granted
+        # to the operator role and dispatched by the workOrderQueue target's
+        # missing_reporter gap under Weaver's service actor; no actor guard
+        # narrows it further because nothing here is caller-chosen -- the
+        # link's far endpoint is read off the order's own .report stamp, and
+        # a create that collides with a link already present is refused by
+        # the commit path rather than rewriting it (one deterministic key,
+        # two writers arbitrated by population: this op runs only where the
+        # lens proved the link absent).
+        wkey = required_string(p, "workOrderKey")
+        _, wid = parts_of(wkey, "workOrderKey", "workorder")
+        if not vertex_alive(state, wkey):
+            fail("UnknownWorkOrder: " + wkey)
+        # read-posture: (a) declared in contextHint.reads by the workOrderQueue
+        # target's missing_reporter gap (targets.go) -- row.entityKey.report.
+        report = kv.Read(wkey + ".report")
+        if report == None or report.isDeleted:
+            fail("InvalidArgument: " + wkey + ".report is absent; a work order with no report names no reporter")
+        reporter = report.data.get("reportedBy")
+        if reporter == None or type(reporter) != type("") or len(reporter) == 0:
+            fail("InvalidArgument: " + wkey + ".report carries no reportedBy; nothing to link")
+        _, rid = parts_of(reporter, "report.reportedBy", "identity")
+        link_key = "lnk.workorder." + wid + ".reportedBy.identity." + rid
+        mutations = [
+            make_link(link_key, wkey, reporter, "reportedBy", "reportedBy", {}),
+        ]
+        events = [{"class": "maintenance.workOrderReporterLinked",
+                   "data": {"workOrderKey": wkey, "reporter": reporter}}]
+        # The link IS the write footprint (the reply constraint admits a
+        # mutation key or an aspect's vertex root, never a link's endpoint),
+        # so the link key is the primaryKey -- location-domain's
+        # WireContainedIn posture.
+        return {"mutations": mutations, "events": events, "response": {"primaryKey": link_key}}
+
+    return execute_notice(state, op)
 `

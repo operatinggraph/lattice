@@ -650,19 +650,23 @@ RETURN
 // (not actor-scoped) permitsOperation fan-in is an acceptable v1 narrowing,
 // same class as the other named scope-downs above.
 //
-// The WHERE's second conjunct is the self-on-standing exclusion: a
-// `scope=self` permission on an op whose descriptor dispatches `standing`
-// has no client-authorable shape here. A self grant authorizes only an
-// envelope whose authContext.target IS the caller (step 3's scope=self
-// check, internal/processor/step3_auth_capability.go), and a standing
-// descriptor tells the client to send NO authContext at all — so a row
-// reached through such a grant would render a form the Processor can never
+// The WHERE's second conjunct is the self-on-standing/self-on-task
+// exclusion: a `scope=self` permission on an op whose descriptor dispatches
+// `standing` OR `task` has no client-authorable shape here. A self grant
+// authorizes only an envelope whose authContext.target IS the caller (step
+// 3's scope=self check, internal/processor/step3_auth_capability.go); a
+// standing descriptor tells the client to send NO authContext at all, and a
+// task descriptor's authContext.target is the TASK the caller must already
+// hold, never the caller's own key — so a row reached through either
+// descriptor via a self grant would render a form the Processor can never
 // authorize from it (maintenance-domain's ReportIssue consumer leg is the
-// case: its real dispatcher is a hand-built self submit, not this catalog).
-// The catalog therefore declines to offer the op THROUGH THAT GRANT; the
-// same op reached through a scope=any grant on another held role, through
-// a service's permitsOperation, or through an own task still projects. This
-// is presentation only (design §4.5) — the grant itself is untouched.
+// standing case; its ResolveWorkOrder landlord leg is the task case — both
+// dispatchers are hand-built submits, not this catalog). The catalog
+// therefore declines to offer the op THROUGH THAT GRANT; the same op reached
+// through a scope=any grant on another held role, through a service's
+// permitsOperation, or through an own task still projects (a task-dispatched
+// op's OWN task grant is `resource_bound`, not `scope=self` on the
+// permission — the exclusion never reaches it).
 //
 // `perm` is bound only by the role Walk's chain; on the residence and task
 // branches it is unbound and every read off it is null (executor.go's
@@ -679,7 +683,7 @@ RETURN
 const edgeCatalogTail = `
 WITH op, role, perm
 WHERE op.key <> null
-  AND NOT (perm.data.scope = "self" AND op.dispatch.data.authContext = "standing")
+  AND NOT (perm.data.scope = "self" AND (op.dispatch.data.authContext = "standing" OR op.dispatch.data.authContext = "task"))
 RETURN
   op.key AS anchor,
   "manifest.op" AS ns,

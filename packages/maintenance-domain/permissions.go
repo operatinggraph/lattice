@@ -2,13 +2,17 @@ package maintenancedomain
 
 import "github.com/operatinggraph/lattice/internal/pkgmgr"
 
-// Permissions grants the two work-order ops.
+// Permissions grants the five work-order ops.
 //
 // Grant matrix:
 //
-//	ReportIssue        → operator, frontOfHouse, backOfHouse   (scope=any)
-//	ReportIssue        → consumer                              (scope=self)
-//	ResolveWorkOrder   → operator
+//	ReportIssue                          → operator, frontOfHouse, backOfHouse   (scope=any)
+//	ReportIssue                          → consumer                              (scope=self)
+//	ResolveWorkOrder                     → operator                              (scope=any)
+//	ResolveWorkOrder                     → consumer                              (scope=self)
+//	LinkWorkOrderReporter                → operator                              (scope=any)
+//	RecordWorkOrderResolvedNotice        → operator                              (scope=any)
+//	RecordWorkOrderResolvedNotification  → operator                              (scope=any)
 //
 // ReportIssue goes to `operator` and to BOTH staff roles: front-of-house takes
 // the walk-in report ("the tap in 204 is dripping"), back-of-house raises the
@@ -25,15 +29,33 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // staff guard would deny every self-service report; the self leg is the
 // guard that path needs, and the staff walk still binds everyone else.
 //
-// ResolveWorkOrder is granted to `operator` ONLY, and that is the whole point
-// rather than an oversight: the maintenance tech does not hold a standing
+// ResolveWorkOrder's standing grant is `operator` ONLY, and that is the whole
+// point rather than an oversight: the maintenance tech does not hold a standing
 // resolve grant, they resolve the work order the queued task GRANTS them
 // (orchestration-base's capabilityEphemeral lens link-sources the op from the
 // task's forOperation, scoped to its scopedTo target). This is lease-signing's
 // SignLease posture exactly — the op is operator-granted and the real performer
-// reaches it through the §10.7 ephemeral task grant. A standing grant would
-// hand every back-of-house holder every work order in the building and make
-// the claim ceremony decorative.
+// reaches it through the §10.7 ephemeral task grant. A standing staff grant
+// would hand every back-of-house holder every work order in the building and
+// make the claim ceremony decorative.
+//
+// ResolveWorkOrder's consumer grant is scope=self — the landlord closing an
+// order at a unit they manage, lease-signing's DecideLeaseApplication posture.
+// The capability plane validates only that the authContext target IS the
+// caller; what confines the write is the script's own management bind
+// (require_manages_unit, ddls.go): the order must be locatedAt a unit, and the
+// caller's deterministic manages link to that unit must be live in the
+// declared read set. A tenant holding consumer reaches the leg and is refused
+// (no manages link); the order's queued task, left open by a landlord resolve,
+// is cancelled by the staleWorkOrderTasks target rather than by the op.
+//
+// The three operator-only grants are orchestration-internal: LinkWorkOrderReporter
+// and RecordWorkOrderResolvedNotice are the directOps the workOrderQueue and
+// workOrderResolvedNotices playbooks dispatch under Weaver's service actor (the
+// notice op's script pins op.actor to that actor), and
+// RecordWorkOrderResolvedNotification is the replyOp the bridge posts after its
+// notification adapter Executes. Not console operations: nothing in Loupe or
+// loftspace-app dispatches them.
 func Permissions() []pkgmgr.PermissionSpec {
 	return []pkgmgr.PermissionSpec{
 		{
@@ -52,6 +74,30 @@ func Permissions() []pkgmgr.PermissionSpec {
 			OperationType: "ResolveWorkOrder",
 			Scope:         "any",
 			Note:          "Grants the operator the right to submit ResolveWorkOrder; the maintenance tech reaches it through the §10.7 ephemeral grant of the task queued to their role (same posture as lease-signing's SignLease), never a standing grant.",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "ResolveWorkOrder",
+			Scope:         "self",
+			Note:          "Grants a landlord the right to resolve a work order at a unit they MANAGE (the acting identity is signed in as itself; the script resolves the order's own locatedAt unit and requires the acting identity's manages link, declared as an OptionalRead by the landlord dispatcher).",
+			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "LinkWorkOrderReporter",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit LinkWorkOrderReporter (orchestration-internal: the workOrderQueue target's missing_reporter directOp, dispatched by Weaver's service actor to backfill the reportedBy link on an order minted before ReportIssue wrote it).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: resolvedNoticeOp,
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit RecordWorkOrderResolvedNotice (orchestration-internal: the workOrderResolvedNotices directOp playbook, dispatched by Weaver's service actor; the script pins op.actor to that actor).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: resolvedNotificationOp,
+			Scope:         "any",
+			Note:          "Grants the operator (the bridge's service actor) the right to submit RecordWorkOrderResolvedNotification — the replyOp the bridge posts after its \"notification\" adapter Executes for a resolved notice. Not a console operation: nothing in Loupe or loftspace-app dispatches it, the bridge does, so the grant needs no consoleOperator counterpart.",
 			GrantsTo:      []string{"operator"},
 		},
 	}
@@ -77,14 +123,24 @@ func Permissions() []pkgmgr.PermissionSpec {
 // standing staff catalog offers ("something's broken"), so it needs
 // presentation + a form. Its authContext is "standing" (the fourth case F2
 // added) — a role-granted caller sends no authContext object at all. The
-// consumer self leg is NOT described here: its dispatcher is loftspace-app's
-// hand-built tenant submit, which sends authContext {target: self} and
-// declares the residesIn link per hat; a descriptor-driven staff form never
-// reaches that leg.
+// consumer self legs are NOT described here: their dispatcher is loftspace-app's
+// hand-built tenant submit (ReportIssue, sending authContext {target: self}
+// and declaring the residesIn link) and its hand-built landlord Resolve
+// (ResolveWorkOrder, the same target shape, declaring the manages link); a
+// descriptor-driven form never reaches either leg, and Facet's catalog
+// withholds a scope=self grant on a task- or standing-dispatched descriptor.
+//
+// The two notice ops carry BARE op-metas (no presentation, no form, no
+// dispatch) for discoverability only — the loftspace-ledger replyOp posture:
+// the playbook dispatches RecordWorkOrderResolvedNotice directly and the
+// bridge resolves RecordWorkOrderResolvedNotification from the event body, so
+// neither meta is load-bearing for dispatch. LinkWorkOrderReporter carries
+// none: it is reached by its playbook alone.
 func OpMetas() []pkgmgr.OpMetaSpec {
 	return []pkgmgr.OpMetaSpec{
 		{
 			OperationType: "ResolveWorkOrder",
+			// refusal-courtesy(facet): AlreadyResolved: none — the task form is offered while the task is open, and a resolution landing under it by another route (a landlord's self leg, an operator's console) retires that task through the staleWorkOrderTasks target by convergence; in the window before the cancellation lands, the refusal itself is the answer the tech needs.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Resolve a work order",
 				ShortLabel:  "Resolve",
@@ -169,5 +225,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				},
 			},
 		},
+		{OperationType: resolvedNoticeOp},
+		{OperationType: resolvedNotificationOp},
 	}
 }

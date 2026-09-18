@@ -166,7 +166,7 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	// carried column is an anchor-own or neighbour-own scalar the count does
 	// not touch, so nothing sheds — the same shape landlordLeaseApplicationsRead
 	// carries just above, one column list longer.
-	"landlordWorkOrdersRead":            {"key(entityKey landlordKey priority reportedAt reportedBy resolutionNotes resolvedAt summary u unitAddress unitKey) p!entityKey", 0},
+	"landlordWorkOrdersRead":            {"key(entityKey landlordKey priority reportedAt reportedBy reportedByResident resolutionNotes resolvedAt summary u unitAddress unitKey) p!entityKey", 0},
 	"leaseAccounts":                     {"p", 0},
 	"leaseApplicationComplete":          {"key(applicant declineReason employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision leaseEnd profileSubmittedAt referenceCount signedAt ssnVal tenancyEndedAt termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!leaseEnd", 0},
 	"leaseApplicationsRead":             {"key(applicantKey declineReason depositAmount employmentVerified entityKey guarantorIncomeToRentMet hasCoApplicant hasGuarantor incomeToRentMet landlordDecision noticeGivenAt noticeGivenBy noticeMoveOutAt profileSubmitted referenceCount signedAt ssnVal tenancyEndedAt tenancyLeaseEnd tenancyLeaseStart tenancyRentAmount tenancyTermStart termsLeaseTermMonths termsMoveInDate termsRequestedRent unitAddress unitAvailableFrom unitBathrooms unitBedrooms unitCity unitCurrency unitKey unitLeaseTermMonths unitRegion unitRent unitStatus) p!applicantKey", 0},
@@ -228,7 +228,10 @@ var corpusGroupingVerdicts = map[string]groupingVerdict{
 	// wo.resolution.data.resolvedAt) the count(DISTINCT CASE …) never
 	// touches, so nothing sheds; the RETURN re-exposes every carried
 	// column, so its clause earns no key at all.
-	"workOrderQueue": {"key(entityKey resolvedAt) p", 0},
+	"workOrderQueue":           {"key(entityKey reportedBy reporterKey resolvedAt) p!reporterKey", 0},
+	"staleWorkOrderTasks":      {"p p", 0},
+	"workOrderResolvedNotices": {"p p", 0},
+	"reporterWorkOrdersRead":   {"key(entityKey noticeSentAt priority reportedAt reporterKey resolutionNotes resolvedAt summary unitAddress unitKey) p!entityKey", 0},
 }
 
 // stageVerdict renders one projecting clause's answer.

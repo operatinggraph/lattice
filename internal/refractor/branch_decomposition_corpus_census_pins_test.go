@@ -90,10 +90,11 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	"identityIndexHint":              {"g0/o0!no-aggregating-item", 0, 0},
 	"landlordLeaseApplicationsRead":  {"g3/o3[inst] g0/o0!no-aggregating-item", 1, 3},
 	"landlordUnitsRead":              {"g0/o0!no-aggregating-item", 0, 0},
-	// Single OPTIONAL MATCH off the anchor (t), aggregated by the WITH's
-	// count(DISTINCT CASE …) into open_task_count — the same fold
-	// workOrderQueue's own single `[t]` clause earns.
-	"landlordWorkOrdersRead": {"g1/o1[t] g0/o0!no-aggregating-item", 1, 1},
+	// Two sibling OPTIONAL MATCHes off the anchor: the task fold (t),
+	// aggregated by the WITH's count(DISTINCT CASE …) into open_task_count,
+	// and the reporter-residence walk (r) that lands as reported_by_resident —
+	// each its own closed subtree, so a row never fans out across them.
+	"landlordWorkOrdersRead": {"g2/o2[t] g0/o0!no-aggregating-item", 1, 2},
 	"leaseAccounts":          {"g1/o1!no-aggregating-item", 0, 1},
 	// The applicant's own residesIn link (WireResidesIn's wire, decision 2 of
 	// loftspace-residence-spine-2026-09-16.md) is walked as ITS OWN closed
@@ -187,10 +188,22 @@ var corpusBranchVerdicts = map[string]branchVerdict{
 	// aggregation — the shape wellnessOrphanedBookingSettlement's own
 	// single-hop row already carries.
 	"wellnessSeriesHorizon": {"g1/o1!no-aggregating-item", 0, 1},
-	// Single OPTIONAL MATCH off the anchor (t), aggregated by the WITH's
-	// count(DISTINCT CASE …) into openTaskCount — the same fold
-	// leaseRentSettlement's own single `[c]` clause earns.
-	"workOrderQueue": {"g1/o1[t] g0/o0!no-aggregating-item", 1, 1},
+	// Two OPTIONAL MATCHes off the anchor — the task fan (t), aggregated by
+	// the WITH's count(DISTINCT CASE …) into openTaskCount and evaluated as
+	// its own subtree, and the single reportedBy hop (r), carried flat — two
+	// sibling groups in one stage, one folded.
+	"workOrderQueue": {"g2/o2[t] g0/o0!no-aggregating-item", 1, 2},
+	// One required MATCH (scopedTo) and one OPTIONAL MATCH (assignedTo) off
+	// the task anchor, 0..1, flat, no aggregation.
+	"staleWorkOrderTasks": {"g1/o1!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
+	// Single OPTIONAL MATCH off the anchor (reporter), 0..1, flat, no
+	// aggregation — wellnessSeriesHorizon's own single-hop shape.
+	"workOrderResolvedNotices": {"g1/o1!no-aggregating-item g0/o0!no-aggregating-item", 0, 1},
+	// Two OPTIONAL MATCHes off the anchor — the unit (u), flat, and the task
+	// fan (t), aggregated by the WITH's count(DISTINCT CASE …) into
+	// open_task_count and evaluated as its own subtree — two sibling groups
+	// in one stage, one folded.
+	"reporterWorkOrdersRead": {"g2/o2[t] g0/o0!no-aggregating-item", 1, 2},
 }
 
 // decomposingCorpusLenses is the population whose sibling branches the executor
@@ -231,6 +244,7 @@ var decomposingCorpusLenses = []string{
 	"objectAttachments",
 	"opCatalog",
 	"renewalComplete",
+	"reporterWorkOrdersRead",
 	"tenancyEnd",
 	"visitSeriesDue",
 	"wellnessWaitlistPromotion",
@@ -240,7 +254,7 @@ var decomposingCorpusLenses = []string{
 // siblingBranchGroupLenses is the design's §2 claim made executable: the lenses
 // holding two or more SIBLING branch groups in one stage. The design said
 // FOURTEEN by eye and the fire brief's coarse scan bounded it above at
-// thirty-two clause-counted literals; the analysis derives THIRTY-THREE.
+// thirty-two clause-counted literals; the analysis derives THIRTY-FOUR.
 var siblingBranchGroupLenses = []string{
 	"applicantOnboarding",
 	"appointmentReminders",
@@ -257,6 +271,7 @@ var siblingBranchGroupLenses = []string{
 	"followUpReminders",
 	"identityAnchors",
 	"landlordLeaseApplicationsRead",
+	"landlordWorkOrdersRead",
 	"leaseApplicationComplete",
 	"leaseApplicationsRead",
 	"leaseExpiry",
@@ -264,6 +279,7 @@ var siblingBranchGroupLenses = []string{
 	"pastDueAppointments",
 	"pastDueBookings",
 	"providerAppointmentsRead",
+	"reporterWorkOrdersRead",
 	"staleUserTasks",
 	"tenancyEnd",
 	"visitSeriesDue",
@@ -276,6 +292,7 @@ var siblingBranchGroupLenses = []string{
 	"wellnessLedgerHistory",
 	"wellnessNoShowSettlement",
 	"wellnessSessions",
+	"workOrderQueue",
 }
 
 // multiGroupDecomposingLenses is the intersection — wide AND foldable. The
@@ -291,12 +308,15 @@ var multiGroupDecomposingLenses = []string{
 	"followUpReminders",
 	"identityAnchors",
 	"landlordLeaseApplicationsRead",
+	"landlordWorkOrdersRead",
 	"leaseApplicationComplete",
 	"leaseApplicationsRead",
 	"leaseExpiry",
 	"myTasks",
+	"reporterWorkOrdersRead",
 	"tenancyEnd",
 	"visitSeriesDue",
+	"workOrderQueue",
 }
 
 // footprintValidationVerdicts pins every actorAggregate lens's
@@ -358,4 +378,6 @@ var footprintValidationVerdicts = map[string]bool{
 	"wellnessWaitlistPromotion":         true,
 	"wellnessSeriesHorizon":             true,
 	"workOrderQueue":                    true,
+	"staleWorkOrderTasks":               true,
+	"workOrderResolvedNotices":          true,
 }

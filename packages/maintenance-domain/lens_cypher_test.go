@@ -1,14 +1,17 @@
 package maintenancedomain
 
 // Rule-engine proof of the workOrderQueue convergence cypher — the
-// workorder-anchored gap that turns an unresolved, unqueued order into queued
-// work. The spec is driven through the `full` engine directly (the engine
-// selected at activation via engine:"full") against an embedded NATS
-// Core/Adjacency KV, so what is pinned is the projection row itself: one row
-// per anchor, strict-bool gap columns, and the gap FALSE over every state an
-// arm of the op leaves (an open task, a resolution) and TRUE again over the
-// one the platform re-opens (a cancelled task alone). No $now is supplied —
-// the cypher reads no clock.
+// workorder-anchored gaps that turn an unresolved, unqueued order into queued
+// work and backfill a missing reporter link. The spec is driven through the
+// `full` engine directly (the engine selected at activation via engine:"full")
+// against an embedded NATS Core/Adjacency KV, so what is pinned is the
+// projection row itself: one row per anchor, strict-bool gap columns, and the
+// gap FALSE over every state an arm of the op leaves (an open task, a
+// resolution, a linked reporter) and TRUE again over the one the platform
+// re-opens (a cancelled task alone). No $now is supplied — the cypher reads no
+// clock. The fixture (lensFixture) is shared by the package's other lens
+// proofs (stale_task_lens_test.go, resolved_notice_lens_test.go,
+// reporter_work_orders_lens_test.go).
 
 import (
 	"context"
@@ -78,9 +81,25 @@ func (f *lensFixture) edge(t *testing.T, name, fromName, toName string) {
 		CoreKvKey: linkKey, EdgeID: edgeID, Name: name, Direction: "inbound", NodeID: toID, OtherNodeID: fromID, OtherType: fromType}))
 }
 
-// seedWorkOrder mints an unresolved work order with its .report aspect — the
-// shape ReportIssue commits.
+// seedWorkOrder mints an unresolved work order with its .report aspect and
+// its reportedBy link to a reporter identity — the shape ReportIssue commits.
+// The reporter vertex is minted once per fixture under the logical name
+// "reporter" and shared by every order seeded through here.
 func (f *lensFixture) seedWorkOrder(t *testing.T, name string) string {
+	t.Helper()
+	key := f.seedLegacyWorkOrder(t, name)
+	if _, ok := f.ids["reporter"]; !ok {
+		f.vtx(t, "reporter", "identity", nil)
+	}
+	f.edge(t, "reportedBy", name, "reporter")
+	return key
+}
+
+// seedLegacyWorkOrder mints an unresolved work order with its .report aspect
+// stamping a reporter but NO reportedBy link — the shape an order minted
+// before ReportIssue wrote the link carries, the population the
+// missing_reporter backfill gap exists for.
+func (f *lensFixture) seedLegacyWorkOrder(t *testing.T, name string) string {
 	t.Helper()
 	key := f.vtx(t, name, "workorder", nil)
 	f.aspect(t, name, "report", "workOrderReport", map[string]any{
@@ -136,6 +155,9 @@ func TestWorkOrderQueue_UnresolvedUntaskedOrderOpensTheGap(t *testing.T) {
 	require.EqualValues(t, 0, v["openTaskCount"])
 	_, isBool := v["missing_task"].(bool)
 	require.True(t, isBool, "missing_task must be a strict bool for Weaver's openGapColumns")
+	require.Equal(t, false, v["missing_reporter"], "the reporter is linked; only the task gap is open")
+	require.Equal(t, true, v["reporterLinked"])
+	require.Equal(t, "vtx.identity."+lenstest.NanoID("reporter"), v["reportedBy"], "reportedBy is the .report stamp")
 }
 
 // TestWorkOrderQueue_OpenTaskClosesTheGap: an open task scopedTo the order IS
@@ -282,50 +304,155 @@ func TestWorkOrderQueue_TaskOnAnotherOrderDoesNotCount(t *testing.T) {
 	require.EqualValues(t, 0, v["openTaskCount"])
 }
 
-// TestWorkOrderQueue_PlaybookColumnsMatchLens is the §10.2↔§10.8 seam pin
-// (lease-signing's TestLeaseSigning_PlaybookColumnsMatchLens shape): the
-// target's LensRef resolves to the lens, its TargetID is the lens's
-// OutputKeyPattern prefix, every row.<col> the playbook templates is a
-// BodyColumn, and every missing_* column has a gap entry AND every gap entry
-// names a missing_* column — the bijection that keeps Weaver from holding a
-// row on the long redelivery floor for a column nothing declares.
-func TestWorkOrderQueue_PlaybookColumnsMatchLens(t *testing.T) {
+// TestWorkOrderQueue_LegacyOrderWithoutLinkOpensTheReporterGap is the
+// backfill vector: an order whose .report stamps a reporter but carries no
+// reportedBy link — the population minted before ReportIssue wrote the link —
+// projects missing_reporter = true, violating = true, and the stamp the op
+// mints the link from. Its task gap is independent: seeded with an open task
+// so the row is violating on the reporter gap ALONE.
+func TestWorkOrderQueue_LegacyOrderWithoutLinkOpensTheReporterGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedLegacyWorkOrder(t, "wo")
+	f.seedTask(t, "task", "wo", "open")
+
+	v := f.projectWorkOrderQueue(t, "wo")
+	require.Equal(t, true, v["missing_reporter"], "a stamped reporter with no link is the backfill population")
+	require.Equal(t, false, v["reporterLinked"])
+	require.Equal(t, false, v["missing_task"], "the open task closes the queue gap; the row violates on the reporter gap alone")
+	require.Equal(t, true, v["violating"], "violating is missing_task OR missing_reporter")
+	require.Equal(t, "vtx.identity."+lenstest.NanoID("reporter"), v["reportedBy"])
+	_, isBool := v["missing_reporter"].(bool)
+	require.True(t, isBool, "missing_reporter must be a strict bool for Weaver's openGapColumns")
+}
+
+// TestWorkOrderQueue_LinkedReporterClosesTheReporterGap pins the gap FALSE
+// over the state the backfill op leaves (and ReportIssue writes in the first
+// place): once the link is present the row is not violating on the reporter
+// gap, whatever else the order carries — here a resolved, task-complete
+// order, so the queue gap is closed too and the row is clean on both.
+func TestWorkOrderQueue_LinkedReporterClosesTheReporterGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedWorkOrder(t, "wo")
+	f.seedTask(t, "task", "wo", "complete")
+	f.resolve(t, "wo")
+
+	v := f.projectWorkOrderQueue(t, "wo")
+	require.Equal(t, false, v["missing_reporter"], "a linked reporter closes the backfill gap")
+	require.Equal(t, true, v["reporterLinked"])
+	require.Equal(t, false, v["missing_task"])
+	require.Equal(t, false, v["violating"], "neither gap open — the row is clean")
+}
+
+// TestWorkOrderQueue_MintBatchIntermediateStateStaysClosed pins the order
+// invariant ReportIssue states at its mutation list: Refractor evaluates the
+// mint batch as ordered CDC messages, and the link lands AHEAD of the stamp,
+// so the intermediate state the lens can observe — root + reportedBy link,
+// no .report yet — reads missing_reporter false. Were the stamp first, the
+// gap would open for one revision on every fresh report and dispatch a
+// doomed backfill.
+func TestWorkOrderQueue_MintBatchIntermediateStateStaysClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "wo", "workorder", nil)
+	f.vtx(t, "reporter", "identity", nil)
+	f.edge(t, "reportedBy", "wo", "reporter")
+
+	v := f.projectWorkOrderQueue(t, "wo")
+	require.Nil(t, v["reportedBy"], "the stamp has not landed")
+	require.Equal(t, true, v["reporterLinked"], "the link has")
+	require.Equal(t, false, v["missing_reporter"], "no stamp, nothing to backfill — the intermediate message is not a gap")
+}
+
+// TestReportIssue_MintsTheLinkAheadOfTheStamp pins the same invariant at its
+// source: in ReportIssue's mutation list the reportedBy make_link precedes
+// the .report make_aspect.
+func TestReportIssue_MintsTheLinkAheadOfTheStamp(t *testing.T) {
+	link := strings.Index(workOrderDDLScript, `make_link("lnk.workorder." + wid + ".reportedBy.identity." + actor_id,`)
+	stamp := strings.Index(workOrderDDLScript, `make_aspect(wkey, "report", "workOrderReport",`)
+	require.Positive(t, link)
+	require.Positive(t, stamp)
+	require.Less(t, link, stamp, "the reportedBy link must be emitted before the .report stamp so the backfill gap never opens on a fresh report")
+}
+
+// TestWorkOrderQueue_NoReportStampNeverOpensTheReporterGap: an order whose
+// .report carries no reportedBy (a shape ReportIssue never writes, seeded
+// here to pin the conjunct) has nothing to backfill from — the gap stays
+// closed rather than dispatching an op that would refuse InvalidArgument on
+// every pass.
+func TestWorkOrderQueue_NoReportStampNeverOpensTheReporterGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "wo", "workorder", nil)
+	f.aspect(t, "wo", "report", "workOrderReport", map[string]any{"summary": "No stamp", "priority": "low"})
+
+	v := f.projectWorkOrderQueue(t, "wo")
+	require.Nil(t, v["reportedBy"])
+	require.Equal(t, false, v["missing_reporter"], "no stamp, nothing to link from")
+	require.Equal(t, false, v["reporterLinked"])
+	require.Equal(t, true, v["missing_task"], "the queue gap is its own — unresolved, untasked")
+}
+
+// TestMaintenanceDomain_PlaybookColumnsMatchLens is the §10.2↔§10.8 seam pin
+// (lease-signing's TestLeaseSigning_PlaybookColumnsMatchLens shape), run over
+// EVERY target the package declares: the target's LensRef resolves to the
+// lens, its TargetID is the lens's OutputKeyPattern prefix, every row.<col>
+// the playbook templates (Params included) is a BodyColumn, and every
+// missing_* column has a gap entry AND every gap entry names a missing_*
+// column — the bijection that keeps Weaver from holding a row on the long
+// redelivery floor for a column nothing declares.
+func TestMaintenanceDomain_PlaybookColumnsMatchLens(t *testing.T) {
 	targets := WeaverTargets()
-	require.Len(t, targets, 1)
-	target := targets[0]
-
-	var lens *pkgmgr.LensSpec
-	for i := range Lenses() {
-		if l := Lenses()[i]; l.CanonicalName == target.LensRef {
-			lens = &l
-		}
-	}
-	require.NotNil(t, lens, "target %q: LensRef %q resolves to no lens this package declares", target.TargetID, target.LensRef)
-	require.NotNil(t, lens.Output)
-	require.Equal(t, target.TargetID, strings.TrimSuffix(lens.Output.OutputKeyPattern, ".{actorSuffix}"),
-		"TargetID must be the lens OutputKeyPattern prefix (the §10.2↔§10.8 binding)")
-	require.Equal(t, "actorAggregate", lens.ProjectionKind)
-	require.Equal(t, "weaver-targets", lens.Bucket)
-
-	cols := map[string]bool{}
-	for _, c := range append(append([]string{}, lens.Output.BodyColumns...), lens.Output.StaticEmptyColumns...) {
-		cols[c] = true
-	}
-	require.True(t, cols["violating"], "Weaver dispatches only violating rows")
-	for col := range cols {
-		if strings.HasPrefix(col, "missing_") {
-			_, ok := target.Gaps[col]
-			require.True(t, ok, "lens projects gap column %q with no Gaps entry", col)
-		}
-	}
-	for col, ga := range target.Gaps {
-		require.True(t, strings.HasPrefix(col, "missing_"), "gap %q is not a missing_* column", col)
-		require.True(t, cols[col], "gap %q is declared but the lens projects no such column", col)
-		for _, tmpl := range []string{ga.Subject, ga.Pattern, ga.Operation, ga.Assignee, ga.Queue, ga.Target} {
-			if strings.HasPrefix(tmpl, "row.") {
-				require.True(t, cols[strings.TrimPrefix(tmpl, "row.")], "gap %q templates %q, not a lens column", col, tmpl)
+	require.Len(t, targets, 3)
+	for _, target := range targets {
+		t.Run(target.TargetID, func(t *testing.T) {
+			var lens *pkgmgr.LensSpec
+			for i := range Lenses() {
+				if l := Lenses()[i]; l.CanonicalName == target.LensRef {
+					lens = &l
+				}
 			}
-		}
+			require.NotNil(t, lens, "target %q: LensRef %q resolves to no lens this package declares", target.TargetID, target.LensRef)
+			require.NotNil(t, lens.Output)
+			require.Equal(t, target.TargetID, strings.TrimSuffix(lens.Output.OutputKeyPattern, ".{actorSuffix}"),
+				"TargetID must be the lens OutputKeyPattern prefix (the §10.2↔§10.8 binding)")
+			require.Equal(t, "actorAggregate", lens.ProjectionKind)
+			require.Equal(t, "weaver-targets", lens.Bucket)
+
+			cols := map[string]bool{}
+			for _, c := range append(append([]string{}, lens.Output.BodyColumns...), lens.Output.StaticEmptyColumns...) {
+				cols[c] = true
+			}
+			require.True(t, cols["violating"], "Weaver dispatches only violating rows")
+			for col := range cols {
+				if strings.HasPrefix(col, "missing_") {
+					_, ok := target.Gaps[col]
+					require.True(t, ok, "lens projects gap column %q with no Gaps entry", col)
+				}
+			}
+			for col, ga := range target.Gaps {
+				require.True(t, strings.HasPrefix(col, "missing_"), "gap %q is not a missing_* column", col)
+				require.True(t, cols[col], "gap %q is declared but the lens projects no such column", col)
+				tmpls := []string{ga.Subject, ga.Pattern, ga.Operation, ga.Assignee, ga.Queue, ga.Target}
+				for _, v := range ga.Params {
+					tmpls = append(tmpls, v)
+				}
+				for _, tmpl := range tmpls {
+					if strings.HasPrefix(tmpl, "row.") {
+						require.True(t, cols[strings.TrimPrefix(tmpl, "row.")], "gap %q templates %q, not a lens column", col, tmpl)
+					}
+				}
+			}
+		})
 	}
 }
 
