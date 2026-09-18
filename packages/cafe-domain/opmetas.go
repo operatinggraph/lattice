@@ -237,6 +237,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "Settle",
 			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a Settle target
 			// refusal-courtesy(facet): PaidMismatchesTab: unreachable — the self-voice InputSchema names no paidCents, and the script raises the code only when the field is present (a resident's self leg is refused AuthDenied before the equality check regardless)
+			// refusal-courtesy(facet): UnservedLines: none — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects no per-line column, so the generic form cannot see an unmade order; the refusal names each line and the desk
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Close & settle tab",
 				Description: "Close your tab and post the total to your account.",

@@ -2323,6 +2323,341 @@ func TestSettle_ConsumerSelfScope_PaidCentsDenied(t *testing.T) {
 	}
 }
 
+// voidLineEnv is the VoidCharge{tabKey, lineId} envelope the desk submits.
+func voidLineEnv(label, tabKey, lineID, submittedAt string) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "VoidCharge",
+		Actor:         domainActorKey,
+		SubmittedAt:   submittedAt,
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `","lineId":"` + lineID + `"}`),
+		ContextHint: &processor.ContextHint{
+			Reads: []string{tabKey, tabKey + ".status"},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: domainActorKey, Relation: "holdsRole", Direction: "out"},
+			},
+		},
+	}
+}
+
+// selfSettleEnv is the resident's own Settle: the applicationFor link the
+// ownership proof reads declared as an optional read, the target set.
+func selfSettleEnv(label, tabKey, applicationForLnk, payload, submittedAt string) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "Settle",
+		Actor:         domainConsumerKey,
+		SubmittedAt:   submittedAt,
+		Class:         "tab",
+		Payload:       json.RawMessage(payload),
+		ContextHint: &processor.ContextHint{
+			Reads:         []string{tabKey, tabKey + ".status"},
+			OptionalReads: []string{applicationForLnk},
+			Enumerations: []processor.EnumerationHint{
+				{Hub: tabKey, Relation: "chargedTo", Direction: "out"},
+			},
+		},
+		AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+	}
+}
+
+// TestSettle_RefusesUnservedLine_UntilMarkedServed: a tab closes only over
+// made orders. The desk's Settle over a self-order the desk has not handed
+// over is refused UnservedLines, naming the line; once MarkLineServed stamps
+// it, the same Settle closes the tab — the refusal is the line's state and
+// nothing else.
+func TestSettle_RefusesUnservedLine_UntilMarkedServed(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "settleunservedmark")
+	tabKey, itemKey, appFor := selfOrderFixture(t, ctx, conn, cp, cons, "BBCAFEDMNUNSALEASEHJ", "BBCAFEDMNUNSAUNTHJKM", "cdunsa0000000001")
+	selfOrder(t, ctx, conn, cp, cons, "cdunsaorder100000001", tabKey, itemKey, appFor, "2026-07-22T12:10:00Z")
+
+	settleRejectedBecause(t, ctx, conn, cp, cons,
+		staffSettleEnv("cdunsasettle00000001", tabKey, domainActorKey, `{"tabKey":"`+tabKey+`"}`, "2026-07-22T13:00:00Z"),
+		tabKey, "UnservedLines: 1 order(s) still to make — mark served or void first: line-1 (Latte)")
+
+	testutil.PublishOp(t, conn, markLineServedEnv("cdunsaserve100000001", tabKey, "line-1", domainActorKey, "2026-07-22T13:01:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	testutil.PublishOp(t, conn, staffSettleEnv("cdunsasettle00000002", tabKey, domainActorKey, `{"tabKey":"`+tabKey+`"}`, "2026-07-22T13:02:00Z"))
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("Settle after MarkLineServed outcome = %v, want Accepted — the refusal above was the unserved line alone", outcome)
+	}
+	status, lines := tabLines(t, ctx, conn, tabKey)
+	if got, _ := status["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, _ := status["totalCents"].(float64); got != 450 {
+		t.Fatalf("status.totalCents = %v, want 450 — a served line is billed in full", got)
+	}
+	if got, _ := lines[0]["voided"].(bool); got {
+		t.Fatalf("lines[0].voided = true — a human Settle never voids")
+	}
+}
+
+// TestSettle_RefusesUnservedLine_UntilVoided: the desk's other way through
+// the refusal — VoidCharge on the unmade line — and the Settle then closes
+// the tab at the voided total.
+func TestSettle_RefusesUnservedLine_UntilVoided(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "settleunservedvoid")
+	tabKey, itemKey, appFor := selfOrderFixture(t, ctx, conn, cp, cons, "BBCAFEDMNUNSBLEASEHJ", "BBCAFEDMNUNSBUNTHJKM", "cdunsb0000000001")
+	selfOrder(t, ctx, conn, cp, cons, "cdunsborder100000001", tabKey, itemKey, appFor, "2026-07-22T12:10:00Z")
+
+	settleRejectedBecause(t, ctx, conn, cp, cons,
+		staffSettleEnv("cdunsbsettle00000001", tabKey, domainActorKey, `{"tabKey":"`+tabKey+`"}`, "2026-07-22T13:00:00Z"),
+		tabKey, "UnservedLines")
+
+	testutil.PublishOp(t, conn, voidLineEnv("cdunsbvoid1000000001", tabKey, "line-1", "2026-07-22T13:01:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	testutil.PublishOp(t, conn, staffSettleEnv("cdunsbsettle00000002", tabKey, domainActorKey, `{"tabKey":"`+tabKey+`"}`, "2026-07-22T13:02:00Z"))
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("Settle after VoidCharge outcome = %v, want Accepted — a voided line has nothing to make", outcome)
+	}
+	status, lines := tabLines(t, ctx, conn, tabKey)
+	if got, _ := status["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, _ := status["totalCents"].(float64); got != 0 {
+		t.Fatalf("status.totalCents = %v, want 0 after the void", got)
+	}
+	if _, has := lines[0]["voidedReason"]; has {
+		t.Fatalf("lines[0] carries voidedReason %v — a desk void records no reason", lines[0]["voidedReason"])
+	}
+}
+
+// TestSettle_ConsumerSelfScope_RefusesUnservedLine: the resident's own
+// Settle meets the same refusal — the ownership proof passes (the tab is
+// theirs), and the line still to make is what stops the close. A resident
+// holds neither MarkLineServed nor VoidCharge, so the desk is their way
+// through.
+func TestSettle_ConsumerSelfScope_RefusesUnservedLine(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "settleunservedself")
+	tabKey, itemKey, appFor := selfOrderFixture(t, ctx, conn, cp, cons, "BBCAFEDMNUNSCLEASEHJ", "BBCAFEDMNUNSCUNTHJKM", "cdunsc0000000001")
+	selfOrder(t, ctx, conn, cp, cons, "cdunscorder100000001", tabKey, itemKey, appFor, "2026-07-22T12:10:00Z")
+
+	settleRejectedBecause(t, ctx, conn, cp, cons,
+		selfSettleEnv("cdunscsettle00000001", tabKey, appFor, `{"tabKey":"`+tabKey+`"}`, "2026-07-22T13:00:00Z"),
+		tabKey, "UnservedLines: 1 order(s) still to make — mark served or void first: line-1 (Latte)")
+
+	// The positive sibling: the desk hands it over and the same resident's
+	// Settle closes the tab.
+	testutil.PublishOp(t, conn, markLineServedEnv("cdunscserve100000001", tabKey, "line-1", domainActorKey, "2026-07-22T13:01:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+	testutil.PublishOp(t, conn, selfSettleEnv("cdunscsettle00000002", tabKey, appFor, `{"tabKey":"`+tabKey+`"}`, "2026-07-22T13:02:00Z"))
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("the resident's Settle after MarkLineServed outcome = %v, want Accepted", outcome)
+	}
+}
+
+// TestSettle_ConsumerSelfScope_OthersTabRefusedBeforeUnservedLines: the
+// UnservedLines refusal sits AFTER the ownership proof, so another resident's
+// self Settle over a tab carrying an unserved line is refused AuthDenied and
+// the message never names a line — a resident learns nothing about a tab that
+// is not theirs from the refusal they get.
+func TestSettle_ConsumerSelfScope_OthersTabRefusedBeforeUnservedLines(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	otherID := "BBCAFEDMNUNSGQTHERHJ"
+	otherKey := "vtx.identity." + otherID
+	otherDoc := domainConsumerCapDoc()
+	otherDoc.Key = "cap.identity." + otherID
+	otherDoc.Actor = otherKey
+	otherDoc.ProjectedFromRevisions = map[string]uint64{otherKey: 1}
+	testutil.SeedCapDoc(t, ctx, conn, otherDoc)
+	cp, cons := newDomainPipeline(t, ctx, conn, "settleunservedother")
+
+	// The tab is domainConsumer's, carrying their own unserved self-order.
+	tabKey, itemKey, appFor := selfOrderFixture(t, ctx, conn, cp, cons, "BBCAFEDMNUNSGLEASEHJ", "BBCAFEDMNUNSGUNTHJKM", "cdunsg0000000001")
+	selfOrder(t, ctx, conn, cp, cons, "cdunsgorder100000001", tabKey, itemKey, appFor, "2026-07-22T12:10:00Z")
+	seedIdentity(t, ctx, conn, otherID)
+	wrongApplicationForLnk := "lnk.leaseapp.BBCAFEDMNUNSGLEASEHJ.applicationFor.identity." + otherID
+
+	env := selfSettleEnv("cdunsgsettle00000001", tabKey, wrongApplicationForLnk, `{"tabKey":"`+tabKey+`"}`, "2026-07-22T13:00:00Z")
+	env.Actor = otherKey
+	env.AuthContext = &processor.AuthContext{Target: otherKey}
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected || reply.Error == nil {
+		t.Fatalf("another resident's self Settle: outcome = %q error = %+v, want rejected", outcome, reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "AuthDenied") {
+		t.Fatalf("another resident's self Settle rejected with %q, want AuthDenied", reply.Error.Message)
+	}
+	if strings.Contains(reply.Error.Message, "UnservedLines") || strings.Contains(reply.Error.Message, "line-1") {
+		t.Fatalf("another resident's self Settle rejected with %q — the refusal must not name the tab's lines", reply.Error.Message)
+	}
+	status, _ := tabLines(t, ctx, conn, tabKey)
+	if got, _ := status["value"].(string); got != "open" {
+		t.Fatalf("status.value = %q, want open — a denied Settle writes nothing", got)
+	}
+}
+
+// TestSettle_UnservedLineRefusedBeforePaidCents: the refusal sits before
+// the paidCents checks — a counter payment over an unmade order is refused
+// on the order, not on the amount, so the desk never reads a mismatch it
+// then "fixes" by retyping the total.
+func TestSettle_UnservedLineRefusedBeforePaidCents(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "settleunservedpaid")
+	tabKey, itemKey, appFor := selfOrderFixture(t, ctx, conn, cp, cons, "BBCAFEDMNUNSDLEASEHJ", "BBCAFEDMNUNSDUNTHJKM", "cdunsd0000000001")
+	selfOrder(t, ctx, conn, cp, cons, "cdunsdorder100000001", tabKey, itemKey, appFor, "2026-07-22T12:10:00Z")
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		staffSettleEnv("cdunsdsettle00000001", tabKey, domainActorKey, `{"tabKey":"`+tabKey+`","paidCents":999}`, "2026-07-22T13:00:00Z"))
+	if outcome != processor.OutcomeRejected || reply.Error == nil {
+		t.Fatalf("Settle{paidCents: 999} over an unserved line: outcome = %q error = %+v, want rejected", outcome, reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "UnservedLines") || strings.Contains(reply.Error.Message, "PaidMismatchesTab") {
+		t.Fatalf("Settle{paidCents: 999} over an unserved line rejected with %q, want UnservedLines and never PaidMismatchesTab", reply.Error.Message)
+	}
+}
+
+// TestSettle_LegacyLineWithoutOrderedAtIsNotUnserved: a line predating the
+// served fields — neither orderedAt nor servedAt — has an unknown state and
+// is never counted as unserved, so a tab whose only line is such a line
+// still settles. Seeded directly: no live writer produces the shape.
+func TestSettle_LegacyLineWithoutOrderedAtIsNotUnserved(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	cp, cons := newDomainPipeline(t, ctx, conn, "settlelegacyline")
+
+	leaseKey := seedLease(t, ctx, conn, "BBCAFEDMNUNSELEASEHJ")
+	tabKey := "vtx.tab.BBCAFEDMNUNSETABHJKM"
+	tabID := tabKey[len("vtx.tab."):]
+	leaseID := leaseKey[len("vtx.leaseapp."):]
+
+	seedVertex(t, ctx, conn, tabKey, "tab", map[string]any{})
+	seedAspect(t, ctx, conn, tabKey, "status", "tabStatus", map[string]any{
+		"value": "open", "totalCents": 300.0, "itemsMemo": "Scone", "openedAt": "2026-07-20T10:00:00Z",
+		"staleAt": "2026-07-21T10:00:00Z", "leaseAppKey": leaseKey,
+		"lines": []any{map[string]any{"id": "line-1", "description": "Scone", "amountCents": 300.0, "voided": false}},
+	})
+	seedLink(t, ctx, conn, "lnk.tab."+tabID+".openFor.leaseapp."+leaseID, tabKey, leaseKey, "openFor", "openFor")
+	seedLink(t, ctx, conn, "lnk.tab."+tabID+".chargedTo.leaseapp."+leaseID, tabKey, leaseKey, "chargedTo", "chargedTo")
+	seedAspect(t, ctx, conn, leaseKey, "cafeOpenTab", "cafeOpenTabGuard", map[string]any{"tabKey": tabKey})
+
+	testutil.PublishOp(t, conn, staffSettleEnv("cdunsesettle00000001", tabKey, domainActorKey, `{"tabKey":"`+tabKey+`"}`, "2026-07-22T13:00:00Z"))
+	if outcome := testutil.DriveOne(t, ctx, cp, cons, ""); outcome != processor.OutcomeAccepted {
+		t.Fatalf("Settle over a legacy line outcome = %v, want Accepted — a line with neither orderedAt nor servedAt is never unserved", outcome)
+	}
+	status, _ := tabLines(t, ctx, conn, tabKey)
+	if got, _ := status["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, _ := status["totalCents"].(float64); got != 300 {
+		t.Fatalf("status.totalCents = %v, want 300 (frozen)", got)
+	}
+}
+
+// TestSettleStaleTab_VoidsUnservedLines: the sweep, with nobody there to
+// mark or void, voids the line still to make and nothing else — three lines
+// (a staff ring-up served at the counter, a self-order the desk marked, a
+// self-order it did not), of which exactly the third is voided with the
+// reason recorded, the total drops by exactly its amount, the memo omits it,
+// the other two lines are byte-identical to before, no counter payment is
+// recorded, and the event names the voided id.
+func TestSettleStaleTab_VoidsUnservedLines(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "staletabunserved")
+	tabKey, itemKey, appFor := selfOrderFixture(t, ctx, conn, cp, cons, "BBCAFEDMNUNSFLEASEHJ", "BBCAFEDMNUNSFUNTHJKM", "cdunsf0000000001")
+	staffCharge(t, ctx, conn, cp, cons, "cdunsfcharge10000001", tabKey, 300, "2026-07-22T12:05:00Z")
+	selfOrder(t, ctx, conn, cp, cons, "cdunsforder200000001", tabKey, itemKey, appFor, "2026-07-22T12:10:00Z")
+	selfOrder(t, ctx, conn, cp, cons, "cdunsforder300000001", tabKey, itemKey, appFor, "2026-07-22T12:12:00Z")
+	testutil.PublishOp(t, conn, markLineServedEnv("cdunsfserve200000001", tabKey, "line-2", domainActorKey, "2026-07-22T12:15:00Z"))
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	before, linesBefore := tabLines(t, ctx, conn, tabKey)
+	if got, _ := before["totalCents"].(float64); got != 1200 {
+		t.Fatalf("test setup: totalCents = %v, want 1200 (300 + 450 + 450)", got)
+	}
+	if len(linesBefore) != 3 {
+		t.Fatalf("test setup: %d lines, want 3", len(linesBefore))
+	}
+
+	staleEnv := &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID("cdunsfstale000000001"),
+		Lane:          processor.LaneDefault,
+		OperationType: "SettleStaleTab",
+		Actor:         domainActorKey,
+		SubmittedAt:   "2026-07-23T12:00:01Z",
+		Class:         "tab",
+		Payload:       json.RawMessage(`{"tabKey":"` + tabKey + `"}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{tabKey, tabKey + ".status"}},
+	}
+	testutil.PublishOp(t, conn, staleEnv)
+	testutil.DriveOne(t, ctx, cp, cons, processor.OutcomeAccepted)
+
+	status, lines := tabLines(t, ctx, conn, tabKey)
+	if got, _ := status["value"].(string); got != "settled" {
+		t.Fatalf("status.value = %q, want settled", got)
+	}
+	if got, _ := status["totalCents"].(float64); got != 750 {
+		t.Fatalf("status.totalCents = %v, want 750 — 1200 less exactly the unserved line's 450", got)
+	}
+	if got, want := status["itemsMemo"], "Off-menu charge, Latte"; got != want {
+		t.Fatalf("status.itemsMemo = %v, want %q — the voided line drops out of the memo", got, want)
+	}
+	if _, has := status["paidAtSettleCents"]; has {
+		t.Fatalf("SettleStaleTab must write no paidAtSettleCents, found %v", status["paidAtSettleCents"])
+	}
+	if len(lines) != 3 {
+		t.Fatalf("status.lines has %d entries, want 3 — a void marks, never removes", len(lines))
+	}
+	for i := 0; i < 2; i++ {
+		gotJSON, _ := json.Marshal(lines[i])
+		wantJSON, _ := json.Marshal(linesBefore[i])
+		if string(gotJSON) != string(wantJSON) {
+			t.Fatalf("lines[%d] = %s after the sweep, want byte-identical to %s", i, gotJSON, wantJSON)
+		}
+	}
+	if got, _ := lines[2]["voided"].(bool); !got {
+		t.Fatalf("lines[2].voided = %v, want true — the sweep voids the line still to make", lines[2]["voided"])
+	}
+	if got, _ := lines[2]["voidedReason"].(string); got != "unserved" {
+		t.Fatalf("lines[2].voidedReason = %v, want \"unserved\"", lines[2]["voidedReason"])
+	}
+	for k, want := range linesBefore[2] {
+		if k == "voided" {
+			continue
+		}
+		if got := lines[2][k]; got != want {
+			t.Fatalf("lines[2].%s = %v after the sweep, want %v carried unchanged — the line is copied whole", k, got, want)
+		}
+	}
+	if len(lines[2]) != len(linesBefore[2])+1 {
+		t.Fatalf("lines[2] has %d keys, want %d — voidedReason is the one key added", len(lines[2]), len(linesBefore[2])+1)
+	}
+
+	outbox, err := conn.KVGet(ctx, testutil.HarnessCoreBucket, processor.OutboxAspectKey(staleEnv.RequestID))
+	if err != nil {
+		t.Fatalf("read outbox aspect: %v", err)
+	}
+	ob, err := processor.ParseOutboxAspect(outbox.Value)
+	if err != nil {
+		t.Fatalf("parse outbox aspect: %v", err)
+	}
+	if len(ob.Data.Events) != 1 || ob.Data.Events[0].EventType != "tab.settled" {
+		t.Fatalf("SettleStaleTab emitted %+v, want exactly one tab.settled", ob.Data.Events)
+	}
+	evData := ob.Data.Events[0].Payload
+	voidedIDs, _ := evData["voidedUnservedLineIds"].([]any)
+	if len(voidedIDs) != 1 || voidedIDs[0] != "line-3" {
+		t.Fatalf("tab.settled.voidedUnservedLineIds = %v, want [line-3]", evData["voidedUnservedLineIds"])
+	}
+	if got, _ := evData["totalCents"].(float64); got != 750 {
+		t.Fatalf("tab.settled.totalCents = %v, want 750 — the event carries the reduced total", evData["totalCents"])
+	}
+}
+
 // createMenuItem submits CreateMenuItem{name, priceCents, locationKey}
 // expecting acceptance and returns the new item's key. locationKey is a
 // declared read (Contract #2 §2.5) — the script's liveness check reads the

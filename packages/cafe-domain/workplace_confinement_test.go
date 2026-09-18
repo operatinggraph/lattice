@@ -230,6 +230,55 @@ func TestWorkplace_SettleWithCounterPaymentStaffConfinedToWorkplace(t *testing.T
 	}
 }
 
+// TestWorkplace_SettleUnservedLineStaffConfinedBeforeUnservedLines: the
+// UnservedLines refusal sits AFTER the workplace walk, so a frontOfHouse
+// staffer at another building learns nothing about a foreign tab's lines from
+// the refusal they get. Both tabs carry one unserved self-order: at the
+// staffer's OWN building Settle is refused on the line (proving the line is
+// unserved and the refusal reachable on this shape); at ANOTHER building the
+// same call is refused on confinement alone, the message never naming a line.
+func TestWorkplace_SettleUnservedLineStaffConfinedBeforeUnservedLines(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, wcStaffCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "wcsettleunserved")
+	leaseA, leaseB := seedWorkplaceTopology(t, ctx, conn)
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	tabs := map[string]string{}
+	for _, tc := range []struct{ leaseID, leaseKey, unitID, label string }{
+		{wcLeaseAID, leaseA, wcUnitAID, "wcsuna"}, {wcLeaseBID, leaseB, wcUnitBID, "wcsunb"},
+	} {
+		appFor := "lnk.leaseapp." + tc.leaseID + ".applicationFor.identity." + domainConsumerID
+		testutil.SeedLink(t, ctx, conn, appFor, "applicationFor", tc.leaseKey, domainConsumerKey)
+		tab := openTab(t, ctx, conn, cp, cons, tc.label+"tab00000000001", tc.leaseKey)
+		item := createMenuItem(t, ctx, conn, cp, cons, tc.label+"itm00000000001", "Latte", 450, "vtx.unit."+tc.unitID)
+		selfOrder(t, ctx, conn, cp, cons, tc.label+"ord00000000001", tab, item, appFor, "2026-07-20T12:10:00Z")
+		tabs[tc.leaseKey] = tab
+	}
+	tabA, tabB := tabs[leaseA], tabs[leaseB]
+
+	settleRejectedBecause(t, ctx, conn, cp, cons,
+		staffSettleEnv("wcsunasettlea0000001", tabA, wcStaffKey, `{"tabKey":"`+tabA+`"}`, "2026-07-20T13:00:00Z"),
+		tabA, "UnservedLines: 1 order(s) still to make — mark served or void first: line-1 (Latte)")
+
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons,
+		staffSettleEnv("wcsunbsettleb0000001", tabB, wcStaffKey, `{"tabKey":"`+tabB+`"}`, "2026-07-20T13:00:00Z"))
+	if outcome != processor.OutcomeRejected || reply.Error == nil {
+		t.Fatalf("staff Settle at ANOTHER building: outcome = %q error = %+v, want rejected", outcome, reply.Error)
+	}
+	if !strings.Contains(reply.Error.Message, "AuthDenied") || !strings.Contains(reply.Error.Message, "cannot settle tab") {
+		t.Fatalf("staff Settle at ANOTHER building rejected with %q, want the confinement AuthDenied", reply.Error.Message)
+	}
+	if strings.Contains(reply.Error.Message, "UnservedLines") || strings.Contains(reply.Error.Message, "line-1") {
+		t.Fatalf("staff Settle at ANOTHER building rejected with %q — a foreign staffer must learn nothing about the tab's lines", reply.Error.Message)
+	}
+	statusB, _ := readDoc(t, ctx, conn, tabB+".status")["data"].(map[string]any)
+	if got, _ := statusB["value"].(string); got != "open" {
+		t.Fatalf("tabB status.value = %q, want open — a denied Settle writes nothing", got)
+	}
+}
+
 // wcSubmitVoidCharge submits VoidCharge as an arbitrary actor. forgedTarget,
 // when non-empty, becomes authContext.target with no task — the shape any
 // scope=any holder can put on the wire, since the Gateway forwards target

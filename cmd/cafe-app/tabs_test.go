@@ -145,10 +145,10 @@ func TestComputeTabs_PostedWaitsOnMissingPayment(t *testing.T) {
 	}
 }
 
-// A line's orderedAt/servedAt/servedBy pass through computeTabs unchanged —
-// the desk's orders queue and the receipt's per-line state tag both read
-// these straight off tabChargeLine, so a silently dropped or renamed field
-// here would starve both without either failing to compile.
+// A line's orderedAt/servedAt/servedBy/voidedReason pass through computeTabs
+// unchanged — the desk's orders queue and the receipt's per-line state tag
+// both read these straight off tabChargeLine, so a silently dropped or
+// renamed field here would starve both without either failing to compile.
 func TestComputeTabs_LineOrderedAndServedFieldsRoundTrip(t *testing.T) {
 	keys, get := fakeKV(map[string]any{
 		"cafeTabSettlement.open1": map[string]any{
@@ -160,12 +160,16 @@ func TestComputeTabs_LineOrderedAndServedFieldsRoundTrip(t *testing.T) {
 					"orderedBy": "vtx.identity.riley", "orderedAt": "2026-09-16T12:00:00Z",
 					"servedAt": "2026-09-16T12:05:00Z", "servedBy": "vtx.identity.dana",
 				},
+				{
+					"id": "line-2", "description": "Cortado", "amountCents": 400.0, "voided": true,
+					"voidedReason": "unserved", "orderedBy": "vtx.identity.jamie", "orderedAt": "2026-09-16T11:00:00Z",
+				},
 			},
 		},
 	})
 	rows := computeTabs(keys, get, "")
-	if len(rows) != 1 || len(rows[0].Lines) != 1 {
-		t.Fatalf("want 1 tab with 1 line, got %+v", rows)
+	if len(rows) != 1 || len(rows[0].Lines) != 2 {
+		t.Fatalf("want 1 tab with 2 lines, got %+v", rows)
 	}
 	line := rows[0].Lines[0]
 	if got, want := line.OrderedAt, "2026-09-16T12:00:00Z"; got != want {
@@ -176,5 +180,9 @@ func TestComputeTabs_LineOrderedAndServedFieldsRoundTrip(t *testing.T) {
 	}
 	if got, want := line.ServedBy, "vtx.identity.dana"; got != want {
 		t.Errorf("ServedBy = %q, want %q", got, want)
+	}
+	swept := rows[0].Lines[1]
+	if got, want := swept.VoidedReason, "unserved"; got != want {
+		t.Errorf("VoidedReason = %q, want %q (the sweep's own void, threaded from the source row)", got, want)
 	}
 }

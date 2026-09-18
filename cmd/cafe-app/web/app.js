@@ -193,6 +193,7 @@ function chargedToOptionalRead(tabKey, leaseAppKey) {
 // visitor could construct.
 // refusal-courtesy: Settle/TabNotOpen: hide — settlePayEnvelope is only called from the settle-pay-btn/settle-pay-<tabKey> click handlers, themselves only wired inside renderOpenTabCard/frontDeskCard, both only rendered on the `open` branch
 // refusal-courtesy: Settle/PaidMismatchesTab: cap — paidCents is always the totalCents argument, the card's own total, so a mismatch only arises from a stale card (a self-order or void since render) and the refusal toast is the courtesy
+// refusal-courtesy: Settle/UnservedLines: disable — both callers (renderOpenTabCard's settle-pay-btn and frontDeskCard's settle-pay-<tabKey>) render the button disabled while unservedLineCount(tab) > 0
 function settlePayEnvelope(tabKey, leaseAppKey, totalCents) {
   return {
     operationType: "Settle", class: "tab",
@@ -503,15 +504,19 @@ function orderedByLabel(orderedBy) {
 // yet) falls back to the flat itemsMemo line — the only place old and new
 // tabs still look the same. voidableTabKey, when given, adds a per-line
 // Void action (wired by the caller after insertion) — staff POS only, since
-// VoidCharge grants no self-service scope. A synthetic {pending: true} line
-// (renderResident's own optimistic overlay, not real cafeTabs data) renders
-// muted and labeled instead of getting a Void button. A live (not voided,
-// not pending) line also carries a state tag — "to make" while orderedAt is
-// set and servedAt isn't AND the tab is still open (tabOpen; a settled tab's
-// unserved line is done, whatever its stamps say, so a receipt never asks for
-// it to be made), "served" once servedAt lands, nothing for a line that
-// predates both fields — so a resident sees their own order's state on their
-// own card, same as the desk does on POS/Front Desk.
+// VoidCharge grants no self-service scope — and, on a to-make line while the
+// tab is open, a Mark served action before it (renderPos wires both). A
+// synthetic {pending: true} line (renderResident's own optimistic overlay,
+// not real cafeTabs data) renders muted and labeled instead of getting either
+// button. A live (not voided, not pending) line also carries a state tag —
+// "to make" while orderedAt is set and servedAt isn't AND the tab is still
+// open (tabOpen; a settled tab's unserved line is done, whatever its stamps
+// say, so a receipt never asks for it to be made), "served" once servedAt
+// lands, nothing for a line that predates both fields — so a resident sees
+// their own order's state on their own card, same as the desk does on
+// POS/Front Desk. A voided line whose voidedReason is "unserved" (the 24 h
+// sweep's own void, never a desk void) reads "(voided — never made)" instead
+// of "(voided)".
 function chargeLinesBlock(lines, memo, voidableTabKey, tabOpen) {
   if (!lines || !lines.length) return itemsMemoLine(memo);
   return (
@@ -526,11 +531,14 @@ function chargeLinesBlock(lines, memo, voidableTabKey, tabOpen) {
           "</span>" +
           '<span class="item-amount">' + money(l.amountCents) + "</span>" +
           (l.voided
-            ? '<span class="meta">(voided)</span>'
+            ? '<span class="meta">' + (l.voidedReason === "unserved" ? "(voided — never made)" : "(voided)") + "</span>"
             : l.pending
             ? '<span class="meta">(pending)</span>'
             : voidableTabKey
-            ? '<button type="button" class="ghost" data-void-line="' + escapeHtml(l.id) + '">Void</button>'
+            ? (tabOpen && l.orderedAt && !l.servedAt
+                ? '<button type="button" class="ghost" data-serve-line="' + escapeHtml(l.id) + '">Mark served</button>'
+                : "") +
+              '<button type="button" class="ghost" data-void-line="' + escapeHtml(l.id) + '">Void</button>'
             : "") +
           "</li>"
       )
@@ -1023,7 +1031,10 @@ async function loadPos() {
 // refusal-courtesy: OpenTab/TabLimitExceeded: unreachable — open-tab-btn submits on the staff leg (no authContext), and the script applies the closed-house check only inside the authContextTarget branch (packages/cafe-domain/ddls.go)
 // refusal-courtesy: Settle/TabNotOpen: hide — settle-btn only renders inside renderOpenTabCard, itself only rendered on the `open` branch
 // refusal-courtesy: Settle/PaidMismatchesTab: see settlePayEnvelope
+// refusal-courtesy: Settle/UnservedLines: disable — renderOpenTabCard renders settle-btn/settle-pay-btn disabled while unservedLineCount(tab) > 0, with the count as the hint
 // refusal-courtesy: VoidCharge/TabNotOpen: hide — the void buttons (chargeLinesBlock's data-void-line) only render inside renderOpenTabCard, itself only rendered on the `open` branch
+// refusal-courtesy: MarkLineServed/TabNotOpen: hide — the Mark served buttons (chargeLinesBlock's data-serve-line) only render inside renderOpenTabCard, itself only rendered on the `open` branch
+// refusal-courtesy: MarkLineServed/LineVoided, LineAlreadyServed: hide — chargeLinesBlock renders data-serve-line only on a line with !voided && orderedAt && !servedAt
 async function renderPos() {
   const body = document.getElementById("pos-body");
   const summary = document.getElementById("pos-summary");
@@ -1117,6 +1128,28 @@ async function renderPos() {
       }
     });
   });
+  body.querySelectorAll("[data-serve-line]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      const lineId = btn.dataset.serveLine;
+      btn.disabled = true;
+      try {
+        await opOrThrow(
+          {
+            operationType: "MarkLineServed", class: "tab",
+            reads: [open.tabKey, open.tabKey + ".status"],
+            payload: { tabKey: open.tabKey, lineId },
+          },
+          "mark the order served"
+        );
+        toast("Served.", true);
+        setTimeout(renderPos, 700);
+      } catch (e) {
+        toast(e.message, false);
+        btn.disabled = false;
+      }
+    });
+  });
   const catalogForm = document.getElementById("pos-catalog-form");
   if (catalogForm) {
     catalogForm.addEventListener("submit", async (ev) => {
@@ -1171,6 +1204,7 @@ async function renderPos() {
   });
   document.getElementById("settle-btn").addEventListener("click", async () => {
     const btn = document.getElementById("settle-btn");
+    if (btn.disabled) return;
     btn.disabled = true;
     try {
       await opOrThrow(
@@ -1187,11 +1221,19 @@ async function renderPos() {
     } catch (e) {
       toast(e.message, false);
       btn.disabled = false;
+      // An UnservedLines refusal means a self-order landed since this card
+      // rendered — the same stale-card idiom as the settle-pay-btn's own
+      // catch below: re-render so the desk sees the Mark served button /
+      // hint instead of a dead click that refuses the same way again.
+      if (e.message && e.message.indexOf("UnservedLines") !== -1) {
+        setTimeout(renderPos, 700);
+      }
     }
   });
   const settlePayBtn = document.getElementById("settle-pay-btn");
   if (settlePayBtn) {
     settlePayBtn.addEventListener("click", async () => {
+      if (settlePayBtn.disabled) return;
       settlePayBtn.disabled = true;
       try {
         await opOrThrow(settlePayEnvelope(open.tabKey, leaseAppKey, open.totalCents), "settle the tab");
@@ -1200,14 +1242,19 @@ async function renderPos() {
       } catch (e) {
         toast(e.message, false);
         settlePayBtn.disabled = false;
-        // A PaidMismatchesTab or TabNotOpen refusal means the card is stale
-        // (a self-order or void changed the total, or someone else settled
-        // the tab since this render) — the toast already says why, so the
-        // only courtesy left is showing the current card rather than leaving
-        // the stale one on screen. opOrThrow throws a bare Error for a
-        // rejection and a transport failure alike, so the refusal is read
-        // off its message.
-        if (e.message && (e.message.indexOf("PaidMismatchesTab") !== -1 || e.message.indexOf("TabNotOpen") !== -1)) {
+        // A PaidMismatchesTab, TabNotOpen, or UnservedLines refusal means the
+        // card is stale (a self-order or void changed the total, someone else
+        // settled the tab since this render, or a self-order landed since the
+        // count was drawn) — the toast already says why, so the only courtesy
+        // left is showing the current card rather than leaving the stale one
+        // on screen. opOrThrow throws a bare Error for a rejection and a
+        // transport failure alike, so the refusal is read off its message.
+        if (
+          e.message &&
+          (e.message.indexOf("PaidMismatchesTab") !== -1 ||
+            e.message.indexOf("TabNotOpen") !== -1 ||
+            e.message.indexOf("UnservedLines") !== -1)
+        ) {
           setTimeout(renderPos, 700);
         }
       }
@@ -1253,6 +1300,8 @@ function renderOpenTabCard(tab, items, limitCents) {
   const catalogHasAvailable = catalog.some((it) => it.available !== false);
   const limitLine = houseLimitLine(limitCents, tab.totalCents);
   const atLimit = typeof limitCents === "number" && (tab.totalCents || 0) >= limitCents;
+  const unserved = unservedLineCount(tab);
+  const settleAttrs = settleButtonAttrs(unserved, "Mark served or void every unserved order first");
   return (
     '<div class="panel">' +
     "<h2>Open tab</h2>" +
@@ -1274,11 +1323,12 @@ function renderOpenTabCard(tab, items, limitCents) {
     '<input id="charge-desc" type="text" placeholder="Description (optional)" />' +
     '<button id="charge-submit" type="submit">Add Charge</button>' +
     "</form>" +
-    '<div class="panel-actions"><button id="settle-btn" class="danger">Settle Tab</button>' +
+    '<div class="panel-actions"><button id="settle-btn" class="danger"' + settleAttrs + ">Settle Tab</button>" +
     (tab.totalCents > 0
-      ? '<button id="settle-pay-btn" class="danger">Settle &amp; pay ' + money(tab.totalCents) + "</button>"
+      ? '<button id="settle-pay-btn" class="danger"' + settleAttrs + ">Settle &amp; pay " + money(tab.totalCents) + "</button>"
       : "") +
     "</div>" +
+    (unserved > 0 ? '<p class="meta">' + escapeHtml(unservedSettleHint(unserved)) + "</p>" : "") +
     "</div>"
   );
 }
@@ -1430,6 +1480,60 @@ function ordersQueue(tabs) {
   return rows;
 }
 
+// unservedLineCount applies Settle's own refusal predicate
+// (packages/cafe-domain's unserved_line_ids: not voided, orderedAt set,
+// servedAt absent) to one tab's own lines — the same three-state read
+// ordersQueue uses, so a settle button's courtesy can never drift from what
+// the op actually refuses. A legacy line (neither field), a voided line, and
+// a served line count for nothing. A synthetic {pending: true} line
+// (renderResident's own optimistic overlay for a self-order this session
+// just submitted, shown before the tab's own lines catch up) counts as
+// unserved too — it IS an accepted self-order with no servedAt, and settling
+// over it right now would meet the Processor's own UnservedLines refusal a
+// moment later once the lens catches up. ordersQueue never sees a pending
+// line (only renderResident ever constructs one), so the desk queue is
+// unaffected by this.
+function unservedLineCount(tab) {
+  const lines = (tab && tab.lines) || [];
+  let n = 0;
+  for (const l of lines) {
+    if (l.pending) { n++; continue; }
+    if (l.voided || !l.orderedAt || l.servedAt) continue;
+    n++;
+  }
+  return n;
+}
+
+// unservedSettleHint is the one-line note the POS and Front Desk cards show
+// under a settle button disabled by unservedLineCount — one shared string so
+// the two cards never drift on wording.
+function unservedSettleHint(count) {
+  return count + (count === 1 ? " order" : " orders") + " to make — mark served or void first";
+}
+
+// settleButtonAttrs is the exact disabled/title markup every settle button —
+// the POS card's, the Front Desk card's, and the resident panel's — renders
+// while its own unservedLineCount is positive; one shared function so a
+// single pin over it is a pin over what every settle button actually
+// renders, not three copies of the same ternary. count <= 0 renders nothing
+// (an enabled button).
+function settleButtonAttrs(count, title) {
+  return count > 0 ? ' disabled title="' + escapeHtml(title) + '"' : "";
+}
+
+// residentSettlePanelMarkup is renderResident's own "Settle My Tab" action —
+// pulled out of its template so a pin can check the exact button + hint
+// markup a resident's own open-tab panel emits, not a copy of the ternary.
+function residentSettlePanelMarkup(count) {
+  const hint = "Your order is still being made — the desk can settle or cancel it";
+  return (
+    '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger"' +
+    settleButtonAttrs(count, hint) +
+    ">Settle My Tab</button></div>" +
+    (count > 0 ? '<p class="meta">' + escapeHtml(hint) + "</p>" : "")
+  );
+}
+
 // orderedAgoLabel renders how long ago a queued line's orderedAt was,
 // relative to now: "just now" under a minute, "N min ago" under an hour,
 // "N h ago" beyond that. orderedAt or now failing to parse renders "?"
@@ -1513,6 +1617,7 @@ function renderFrontDeskOrders(tabs) {
 
 // refusal-courtesy: Settle/TabNotOpen: hide — loadFrontDesk filters to tabs whose status === "open" (tabs = (r.tabs || []).filter(...)) before drawing a settle-<tabKey> button per one
 // refusal-courtesy: Settle/PaidMismatchesTab: see settlePayEnvelope
+// refusal-courtesy: Settle/UnservedLines: disable — frontDeskCard renders settle-<tabKey>/settle-pay-<tabKey> disabled while unservedLineCount(t) > 0
 async function loadFrontDesk() {
   const grid = document.getElementById("frontdesk-grid");
   const summary = document.getElementById("frontdesk-summary");
@@ -1586,6 +1691,7 @@ async function loadFrontDesk() {
     const btn = document.getElementById("settle-" + sanitized);
     if (btn) {
       btn.addEventListener("click", async () => {
+        if (btn.disabled) return;
         btn.disabled = true;
         try {
           await opOrThrow(
@@ -1602,12 +1708,19 @@ async function loadFrontDesk() {
         } catch (e) {
           toast(e.message, false);
           btn.disabled = false;
+          // See settle-pay-<tabKey>'s own catch below: an UnservedLines
+          // refusal means a self-order landed since this card rendered, so
+          // the courtesy is refreshing it rather than leaving a dead click.
+          if (e.message && e.message.indexOf("UnservedLines") !== -1) {
+            setTimeout(loadFrontDesk, 700);
+          }
         }
       });
     }
     const payBtn = document.getElementById("settle-pay-" + sanitized);
     if (payBtn) {
       payBtn.addEventListener("click", async () => {
+        if (payBtn.disabled) return;
         payBtn.disabled = true;
         try {
           await opOrThrow(settlePayEnvelope(t.tabKey, t.leaseAppKey, t.totalCents), "settle the tab");
@@ -1617,9 +1730,15 @@ async function loadFrontDesk() {
           toast(e.message, false);
           payBtn.disabled = false;
           // See the POS settle-pay-btn's own catch (renderPos): a
-          // PaidMismatchesTab or TabNotOpen refusal means the card is stale,
-          // and the courtesy is refreshing it rather than leaving it up.
-          if (e.message && (e.message.indexOf("PaidMismatchesTab") !== -1 || e.message.indexOf("TabNotOpen") !== -1)) {
+          // PaidMismatchesTab, TabNotOpen, or UnservedLines refusal means the
+          // card is stale, and the courtesy is refreshing it rather than
+          // leaving it up.
+          if (
+            e.message &&
+            (e.message.indexOf("PaidMismatchesTab") !== -1 ||
+              e.message.indexOf("TabNotOpen") !== -1 ||
+              e.message.indexOf("UnservedLines") !== -1)
+          ) {
             setTimeout(loadFrontDesk, 700);
           }
         }
@@ -1943,6 +2062,8 @@ function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
   // applicant is unknown or unresolved, the same degrade the "who" title
   // always showed before this join existed.
   const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(t.leaseAppKey);
+  const unserved = unservedLineCount(t);
+  const settleAttrs = settleButtonAttrs(unserved, "Mark served or void every unserved order first");
   return (
     '<div class="card">' +
     '<span class="badge open">open</span>' +
@@ -1954,11 +2075,12 @@ function frontDeskCard(t, booking, lease, visit, bookerKey, balance) {
     classBadge +
     leaseLine +
     visitBadge +
-    '<div class="card-actions"><button id="' + id + '" class="danger">Settle</button>' +
+    '<div class="card-actions"><button id="' + id + '" class="danger"' + settleAttrs + ">Settle</button>" +
     (t.totalCents > 0
-      ? '<button id="' + payId + '" class="danger">Settle &amp; pay ' + money(t.totalCents) + "</button>"
+      ? '<button id="' + payId + '" class="danger"' + settleAttrs + ">Settle &amp; pay " + money(t.totalCents) + "</button>"
       : "") +
     "</div>" +
+    (unserved > 0 ? '<p class="meta">' + escapeHtml(unservedSettleHint(unserved)) + "</p>" : "") +
     "</div>"
   );
 }
@@ -2298,6 +2420,7 @@ async function loadResident() {
 // refusal-courtesy: Charge/TabNotOpen: hide — self-order-form only renders inside the `if (open)` branch
 // refusal-courtesy: Settle/TabNotOpen: hide — resident-settle-btn only renders inside the `if (open)` branch
 // refusal-courtesy: Settle/PaidMismatchesTab: unreachable — resident-settle-btn submits no paidCents, and the script only raises the code when the field is present
+// refusal-courtesy: Settle/UnservedLines: disable — resident-settle-btn renders disabled while unservedLineCount({ lines: openDisplayLines }) > 0 (counting the just-submitted {pending: true} overlay too), the hint naming the desk
 // refusal-courtesy: CreditCafeAccount/InvalidState, NoCreditToPayOut, PayoutExceedsCash, PayoutExceedsCredit, RefundExceedsCharge, RefundExceedsPaid: see handleWriteOffDebt
 // refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — both #record-payment-form (desk) and #self-pay-form (resident) render only when ledger.accountKey exists and (ledger.balanceCents||0) > 0
 // refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: cap — both forms' amount input is prefilled to ledger.balanceCents/100 and its `max` is set to the same value
@@ -2346,12 +2469,18 @@ async function renderResident() {
   const parts = [];
   if (open) {
     const limitLine = houseLimitLine(limitCents, openDisplayTotal);
+    // Counted over openDisplayLines, not open — a self-order this session
+    // just submitted shows as a {pending: true} overlay before the tab's own
+    // lines catch up, and unservedLineCount counts a pending line as
+    // unserved: Settle My Tab must not stay enabled over an order the
+    // Processor would refuse to settle a moment later.
+    const residentUnserved = unservedLineCount({ lines: openDisplayLines });
     parts.push(
       '<div class="panel"><h2>Open tab</h2><p class="amount">' + money(openDisplayTotal) +
       '</p><p class="meta">Opened ' + escapeHtml(localDateTime(open.openedAt)) + " — not yet settled</p>" +
       (limitLine ? '<p class="meta" id="resident-house-limit">' + escapeHtml(limitLine) + "</p>" : "") +
       chargeLinesBlock(openDisplayLines, open.itemsMemo, null, true) + "</div>" +
-      (selfMode ? '<div class="panel-actions" style="margin-top:-8px;"><button id="resident-settle-btn" class="danger">Settle My Tab</button></div>' : "")
+      (selfMode ? residentSettlePanelMarkup(residentUnserved) : "")
     );
     if (selfMode) {
       const items = (menu && menu.menu) || [];
@@ -2713,6 +2842,7 @@ async function renderResident() {
     const settleBtn = document.getElementById("resident-settle-btn");
     if (settleBtn) {
       settleBtn.addEventListener("click", async () => {
+        if (settleBtn.disabled) return;
         settleBtn.disabled = true;
         try {
           await opOrThrow(
@@ -2731,6 +2861,13 @@ async function renderResident() {
         } catch (e) {
           toast(e.message, false);
           settleBtn.disabled = false;
+          // The count this button disabled on can go stale between renders
+          // (a pending self-order lands, or the desk marks/voids a line) —
+          // an UnservedLines refusal re-renders so the card catches up
+          // rather than leaving a dead click behind.
+          if (e.message && e.message.indexOf("UnservedLines") !== -1) {
+            setTimeout(renderResident, 700);
+          }
         }
       });
     }
