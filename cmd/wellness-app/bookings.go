@@ -55,6 +55,19 @@ type bookingProjection struct {
 	// StartsAt to badge a notice for the CURRENT time, not a stale one a
 	// later move superseded.
 	MovedFor *string `json:"movedFor,omitempty"`
+	// InstructorKey / InstructorName walk the session's live ledBy link —
+	// nil / empty on an un-led class.
+	InstructorKey  string `json:"instructorKey"`
+	InstructorName string `json:"instructorName"`
+	// InstructorChangedAt / StudioChangedAt are the stamps ReassignSession
+	// records on the schedule when who leads or where it meets changes;
+	// InstructorFor / RoomFor are the stamps the member was last told
+	// (.changeNotice). A client badges each notice only while its pair is
+	// equal — a later change makes the told stamp stale.
+	InstructorChangedAt *string `json:"instructorChangedAt,omitempty"`
+	StudioChangedAt     *string `json:"studioChangedAt,omitempty"`
+	InstructorFor       *string `json:"instructorFor,omitempty"`
+	RoomFor             *string `json:"roomFor,omitempty"`
 }
 
 // bookingRow is the roster / my-classes row a view renders. Status carries
@@ -88,6 +101,15 @@ type bookingRow struct {
 	// seat the member was already told moved — see movedBadge in web/app.js.
 	ChangeNoticeSentAt *string `json:"changeNoticeSentAt,omitempty"`
 	MovedFor           *string `json:"movedFor,omitempty"`
+	// InstructorName says who leads the seat's class; the two stamp pairs
+	// let the card badge an instructor or room change the member was told
+	// of, the same way MovedFor is compared against StartsAt.
+	InstructorKey       string  `json:"instructorKey"`
+	InstructorName      string  `json:"instructorName"`
+	InstructorChangedAt *string `json:"instructorChangedAt,omitempty"`
+	StudioChangedAt     *string `json:"studioChangedAt,omitempty"`
+	InstructorFor       *string `json:"instructorFor,omitempty"`
+	RoomFor             *string `json:"roomFor,omitempty"`
 }
 
 // computeBookings decodes every wellnessBookings row, optionally filtered to
@@ -117,23 +139,29 @@ func computeBookings(keys []string, get kvGetter, sessionKey, bookerKey string) 
 			priceCents = int64(*p.PriceCents)
 		}
 		rows = append(rows, bookingRow{
-			BookingKey:         p.BookingKey,
-			Status:             p.Status,
-			Rate:               p.Rate,
-			WaitlistSlot:       p.WaitlistSlot,
-			SessionKey:         p.SessionKey,
-			SessionName:        p.SessionName,
-			StartsAt:           p.StartsAt,
-			EndsAt:             p.EndsAt,
-			PriceCents:         priceCents,
-			StudioKey:          p.StudioKey,
-			StudioName:         p.StudioName,
-			MissingStudio:      p.MissingStudio,
-			BookerKey:          p.BookerKey,
-			ReminderSentAt:     p.ReminderSentAt,
-			PromotedAt:         p.PromotedAt,
-			ChangeNoticeSentAt: p.ChangeNoticeSentAt,
-			MovedFor:           p.MovedFor,
+			BookingKey:          p.BookingKey,
+			Status:              p.Status,
+			Rate:                p.Rate,
+			WaitlistSlot:        p.WaitlistSlot,
+			SessionKey:          p.SessionKey,
+			SessionName:         p.SessionName,
+			StartsAt:            p.StartsAt,
+			EndsAt:              p.EndsAt,
+			PriceCents:          priceCents,
+			StudioKey:           p.StudioKey,
+			StudioName:          p.StudioName,
+			MissingStudio:       p.MissingStudio,
+			BookerKey:           p.BookerKey,
+			ReminderSentAt:      p.ReminderSentAt,
+			PromotedAt:          p.PromotedAt,
+			ChangeNoticeSentAt:  p.ChangeNoticeSentAt,
+			MovedFor:            p.MovedFor,
+			InstructorKey:       p.InstructorKey,
+			InstructorName:      p.InstructorName,
+			InstructorChangedAt: p.InstructorChangedAt,
+			StudioChangedAt:     p.StudioChangedAt,
+			InstructorFor:       p.InstructorFor,
+			RoomFor:             p.RoomFor,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {

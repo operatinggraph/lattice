@@ -15,7 +15,7 @@ import (
 // matches startsAt — a new notice is pending, and the badge must say
 // nothing rather than claim a notice for a time that has since changed.
 func TestMovedBadge_OnlyForTheCurrentTime(t *testing.T) {
-	vm := webHelperVM(t, "esc", "fmtTime", "fmtDay", "movedBadge")
+	vm := webHelperVM(t, "esc", "fmtTime", "fmtDay", "toldBadge", "movedBadge")
 	fn, ok := goja.AssertFunction(vm.Get("movedBadge"))
 	if !ok {
 		t.Fatal("movedBadge is not a function after evaluating its declaration")
@@ -54,7 +54,7 @@ func TestMovedBadge_OnlyForTheCurrentTime(t *testing.T) {
 // without a time in the label, the same as an unparseable promotedAt on
 // promotedBadge.
 func TestMovedBadge_InvalidSentAtStillLabelsWithoutATime(t *testing.T) {
-	vm := webHelperVM(t, "esc", "fmtTime", "fmtDay", "movedBadge")
+	vm := webHelperVM(t, "esc", "fmtTime", "fmtDay", "toldBadge", "movedBadge")
 	fn, ok := goja.AssertFunction(vm.Get("movedBadge"))
 	if !ok {
 		t.Fatal("movedBadge is not a function after evaluating its declaration")
@@ -78,7 +78,7 @@ func TestMovedBadge_InvalidSentAtStillLabelsWithoutATime(t *testing.T) {
 // straight from a booking-supplied instant must not be raw-concatenated into
 // the returned markup.
 func TestMovedBadge_EscapesTheLabel(t *testing.T) {
-	vm := webHelperVM(t, "esc", "fmtTime", "fmtDay", "movedBadge")
+	vm := webHelperVM(t, "esc", "fmtTime", "fmtDay", "toldBadge", "movedBadge")
 	fn, ok := goja.AssertFunction(vm.Get("movedBadge"))
 	if !ok {
 		t.Fatal("movedBadge is not a function after evaluating its declaration")

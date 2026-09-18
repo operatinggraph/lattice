@@ -100,6 +100,8 @@ func reassignSessionOpMeta() pkgmgr.OpMetaSpec {
 		// refusal-courtesy(facet): InstructorConflict, StudioConflict: none — the requested new time is not a property of any row Facet's entity lens offers; no `available` column could preview a collision before submit.
 		// refusal-courtesy(facet): SlotGridViolation: none — the descriptor's startsAt/endsAt fields carry format:"date-time" with no step constraint; Facet's generic renderer enforces no 15-minute grid.
 		// refusal-courtesy(facet): SessionTooLong: none — the descriptor enforces no maximum span before submit.
+		// refusal-courtesy(facet): BookerConflict: none — a time move carries every member's slot cells with the class; no row Facet offers previews another member's other bookings, so a member already holding the new hour refuses the whole move as a message.
+		// refusal-courtesy(facet): BookingWalkBound, MoveTooLarge: none — data-scale limits on the class's own booking history / membership, unrelated to any field the descriptor submits.
 		// refusal-courtesy(facet): CapacityBelowSeated: unreachable — the descriptor's InputSchema carries no capacity field (this op-meta covers the reschedule case alone, per the doc comment above), so a Facet submission never supplies new_capacity and the shrink branch that reads the seat cells is never entered.
 		Presentation: &pkgmgr.OpPresentationSpec{
 			Title:       "Reschedule class",
@@ -753,6 +755,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{
 			OperationType: "ReassignSessionSeries",
 			// refusal-courtesy(facet): AnchorMoved, InstructorConflict, NoUpcomingOccurrences, SeriesTooLarge, SeriesWalkBound, SessionInPast, SessionTooLong, SlotGridViolation, StudioConflict, WrongStudio: hide — no lens projects a sessionseries entity (TargetType sessionseries has no browsable row; edge-manifest's edgeEntitySessions carries only session occurrences, per this file's own doc comment above), so Facet never resolves a target and never offers this op.
+			// refusal-courtesy(facet): BookerConflict, BookingWalkBound: none — every occurrence's members move with it and no row Facet offers previews a member's other bookings; the walk bound is a data-scale limit on one occurrence's booking history.
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Move the remaining classes",
 				Description: "Shift every class still to come in this recurring run to a new day and time, keeping their bookings and instructors. Classes that have already happened are left alone.",

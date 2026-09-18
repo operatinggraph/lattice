@@ -1489,9 +1489,36 @@ function promotedBadge(b) {
 // badge must not claim one was sent for a time that has since changed.
 function movedBadge(b) {
   if (!b.movedFor || b.movedFor !== b.startsAt) return "";
-  const d = new Date(b.changeNoticeSentAt);
-  const label = "Told of the move" + (isNaN(d.getTime()) ? "" : " · " + fmtDay(b.changeNoticeSentAt) + " " + fmtTime(b.changeNoticeSentAt));
+  return toldBadge("Told of the move", b.changeNoticeSentAt);
+}
+
+// instructorChangeBadge / roomChangeBadge are movedBadge's twins over the
+// two stamps ReassignSession records on the schedule (instructorChangedAt /
+// studioChangedAt) and the stamps the member was last told (instructorFor /
+// roomFor): shown only while the pair is equal — a further swap or room move
+// advances the stamp, a new notice is pending, and the badge must not claim
+// one was sent for a change that has since been superseded.
+function instructorChangeBadge(b) {
+  if (!b.instructorFor || b.instructorFor !== b.instructorChangedAt) return "";
+  return toldBadge("Told of the instructor change", b.changeNoticeSentAt);
+}
+
+function roomChangeBadge(b) {
+  if (!b.roomFor || b.roomFor !== b.studioChangedAt) return "";
+  return toldBadge("Told of the room change", b.changeNoticeSentAt);
+}
+
+function toldBadge(what, sentAt) {
+  const d = new Date(sentAt);
+  const label = what + (isNaN(d.getTime()) ? "" : " · " + fmtDay(sentAt) + " " + fmtTime(sentAt));
   return '<span class="badge moved">' + esc(label) + "</span>";
+}
+
+// ledByLine says who leads the seat's class — the session's live ledBy walk
+// off wellnessBookings — or that nobody does yet, so a sub or a clear is
+// visible on My Classes even before its notice lands.
+function ledByLine(b) {
+  return '<div class="meta">' + (b.instructorName ? "Led by " + esc(b.instructorName) : "No instructor yet") + "</div>";
 }
 
 // promotedCancelNote is the member-facing half of CancelBooking's late-cancel
@@ -1526,9 +1553,12 @@ function myClassCard(b) {
     (mark ? '<span class="badge ' + esc(mark.badge) + '">' + esc(mark.label) + "</span>" : "") +
     promotedBadge(b) +
     movedBadge(b) +
+    instructorChangeBadge(b) +
+    roomChangeBadge(b) +
     reminderBadge(b) +
     '<div class="who">' + (cancelled ? "Class cancelled" : esc(b.sessionName)) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(b.missingStudio ? "Studio needs reassignment" : b.studioName || shortKey(b.studioKey)) + "</div>") +
+    (cancelled ? "" : ledByLine(b)) +
     '<div class="meta">' + (cancelled ? "The studio called off this class." : esc(fmtRange(b.startsAt, b.endsAt))) + "</div>" +
     (cancelled ? "" : '<div class="meta">' + esc(priceLabel(b.priceCents)) + "</div>") +
     (!cancelled && b.status === "forfeited" ? '<div class="meta">Cancelled inside the late window — class price forfeited.</div>' : "") +
@@ -2837,6 +2867,7 @@ async function stopSeries(se) {
 // refusal-courtesy: ReassignSessionSeries/SessionInPast: none — the submit handler checks only that both fields are filled before confirming; it does not check the new start is in the future.
 // refusal-courtesy: ReassignSessionSeries/InstructorConflict, StudioConflict: none — the form has no preview of the studio's or any occurrence's instructor's existing schedule; a collision surfaces as a toast (the catch block passes e.message through verbatim).
 // refusal-courtesy: ReassignSessionSeries/SeriesTooLarge, SeriesWalkBound: none — data-scale limits on the series' own occurrence count / partOf walk, unrelated to any field this form submits.
+// refusal-courtesy: ReassignSessionSeries/BookerConflict, BookingWalkBound: none — every occurrence's seated and waitlisted members move with it, and the form has no preview of any member's other bookings or of a member seated on two occurrences that would land on one hour; a collision surfaces as a toast naming the class and the member (the catch block passes e.message through verbatim). The walk bound is a data-scale limit on one occurrence's booking history.
 // refusal-courtesy: ReassignSessionSeries/SessionTooLong: none — the form caps only the 15-minute grid (SlotGridViolation above); it enforces no maximum span before submit.
 async function moveSeries(se, anchor, startsAt, endsAt) {
   await opOrThrow(
@@ -3032,6 +3063,8 @@ async function renderReassignControl(se, generation) {
 // refusal-courtesy: ReassignSession/SlotGridViolation: cap — the "New start"/"New end" inputs carry step="900" (renderReassignControl), 15-minute increments.
 // refusal-courtesy: ReassignSession/InstructorConflict, StudioConflict: none — the form has no preview of the studio's or instructor's existing schedule; a collision surfaces as a toast (the catch block passes e.message through verbatim).
 // refusal-courtesy: ReassignSession/SessionTooLong: none — the form caps only the 15-minute grid (SlotGridViolation above); it enforces no maximum span before submit.
+// refusal-courtesy: ReassignSession/BookerConflict: none — a time move carries every seated and waitlisted member's slot cells with the class, and the form has no preview of any member's other bookings; a member already holding the new hour elsewhere refuses the whole move and surfaces as a toast naming that member's hub (the catch block passes e.message through verbatim).
+// refusal-courtesy: ReassignSession/BookingWalkBound, MoveTooLarge: none — data-scale limits on the class's own booking history / membership (the forSession walk's page bound; one batch's mutation ceiling), unrelated to any field this form submits.
 // refusal-courtesy: ReassignSession/InvalidState: none — the "session carries no atStudio link to replace" fault only reaches the operator repair branch, which this form always supplies a chosen studio for (it throws client-side when none is picked); a correctness fault, not a choice this form's controls could gate.
 // refusal-courtesy: ReassignSession/CapacityBelowSeated: cap — the Capacity input's min is reassignCapacityFloor(se) (the row's seated count, se.bookedCount, renderReassignControl) and this function refuses a value under it client-side; the op judges by the highest CLAIMED seat index (seats are never compacted), which the row does not carry, so a shrink that clears the count but cuts under a gap-leaving seat still surfaces as the op's refusal naming that seat.
 async function reassignSession(se) {
@@ -3194,6 +3227,14 @@ async function reassignSession(se) {
       { hub: payload.newStudio, relation: "locatedAt", direction: "out" },
     );
   }
+  // A time move walks the session's own bookings to carry every booker's
+  // slot cells with the class (collect_live_bookers, ddls.go) — session-
+  // hubbed, so it is declared here; the bookers' cells themselves are only
+  // nameable off that walk, so the script reads them live (the harness's
+  // read_drift_baseline names the shape).
+  if (payload.startsAt !== undefined) {
+    enumerations.push({ hub: payload.sessionKey, relation: "forSession", direction: "in" });
+  }
 
   await opOrThrow(
     { operationType: "ReassignSession", class: "session", reads, optionalReads, enumerations, payload },
@@ -3233,6 +3274,8 @@ function rosterCard(b, markable, cancellable, studio) {
     arrearsBadge +
     promotedBadge(b) +
     movedBadge(b) +
+    instructorChangeBadge(b) +
+    roomChangeBadge(b) +
     reminderBadge(b) +
     '<div class="who">' + esc(nameForIdentity(idOf(b.bookerKey))) + "</div>" +
     // A forfeited booking gets neither action: SetBookingAttendance refuses
