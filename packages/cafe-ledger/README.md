@@ -42,6 +42,20 @@ grants a consumer at any scope. Those three are the ops carrying an `OpMetaSpec`
 same reason — all are person-triggered; `CreateAccount` and `DebitAccount` are orchestrator-submitted
 and carry none.
 
+Confinement proves **standing**, never non-ownership: a staffer who also holds a lease at their own
+building passes the `worksAt` walk against their own account. So the staff leg carries a second check,
+**nobody clears their own debt from the desk**: the three verbs that give the house's money up — a
+write-off (`reason: waiver`), a refund (`RefundCafeCharge`) and a payout (`PayoutCafeCredit`) — are
+refused `SelfClearing` when the account's `heldFor` lease's `applicationFor` identity is the actor
+("a staffer may not forgive / refund / pay out their own account — another staffer must"). The holder
+is resolved off the account's own topology, never the payload. The `operator` is **not** exempt: every
+other guard on this leg is about standing, and root has all of it, but this one is about whose money it
+is — an operator who holds a lease is a resident of it. A `payment` credit on one's own account is
+untouched (money coming in is the honor-system fact every resident may record on the self leg anyway),
+and so is a charge. The check runs after confinement and before any balance read, so a refused
+self-clearing never spends a legacy account's replay budget; a staffer at another building is refused
+on confinement first and never sees `SelfClearing`.
+
 ## Key shapes (Contract #1)
 
 ```
@@ -181,7 +195,8 @@ a payout leaves is at most zero, the arrears episode branch never opens — a pa
 backfills a legacy account exactly as a payment does (its cap needs the number just the same), it is
 granted to `operator` and `frontOfHouse` at `scope: any` with **no** consumer grant, it refuses a
 self-scoped submit outright, it can never itself be refunded (`reversesRef` refuses a debit carrying a
-reason), and it is workplace-confined like a payment.
+reason), and it is workplace-confined like a payment — and, like a write-off and a refund, refused
+`SelfClearing` on the actor's own account.
 
 ## Where the ledger is surfaced
 

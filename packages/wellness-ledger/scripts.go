@@ -1070,6 +1070,29 @@ def vertex_alive(state, key):
 SELF_CREDIT_PAGE_LIMIT = 50
 SELF_CREDIT_MAX_PAGES = 10
 
+def require_not_own_account(acct_key, verb):
+    # Nobody clears their own debt from the desk. The staff leg proves STANDING
+    # (the frontOfHouse / operator grant) and nothing about ownership, so a
+    # staffer who is also a member passes it against their own account. This is
+    # the other half: the account's holder is resolved off its OWN heldFor
+    # link (never the payload) and compared with the actor, and a match refuses
+    # the clearing verb. The self leg's ownership proof reads the same link to
+    # prove the account IS the caller's; this proves it is NOT.
+    #
+    # The operator is NOT exempt, on purpose: every other guard on this leg is
+    # about standing, and root has all of it, but this one is about whose money
+    # it is. An operator who is a member is a member. Another staffer clears
+    # it. A Weaver-dispatched refund (wellnessRefundSettlement) passes on the
+    # same terms as any staffer -- the dispatch actor holds no account.
+    # read-posture: (e) relation=heldFor epoch=none -- an account carries
+    # exactly one heldFor link, so this is never a keyspace scan.
+    held_for_page, _ = kv.Links(acct_key, "heldFor", "out", None, 1)
+    for lk in held_for_page:
+        if not lk.isDeleted and lk.targetVertex == op.actor:
+            # No account key in the text: it is toasted verbatim at the
+            # staffer, and a raw vtx key tells them nothing the rule does not.
+            fail("SelfClearing: a staffer may not " + verb + " their own account — another staffer must")
+
 def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refund_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -1229,6 +1252,16 @@ def post_entry(state, op, entry_type, event_class, allow_booking_ref, allow_refu
             fail("NoBalanceToPay: account " + acct_key + " has no outstanding balance to pay")
         if amount_cents > owed_cents:
             fail("PaymentExceedsBalance: amountCents exceeds account " + acct_key + "'s outstanding balance of " + str(owed_cents))
+    elif entry_type == "credit":
+        # The staff leg's ownership check, the mirror image of the self leg's
+        # above. The two verbs that give the studio's money up -- a waiver
+        # (debt forgiven) and a refund (money given back) -- are refused on
+        # the actor's own account. A payment credit records money coming IN
+        # and is untouched, as is every charge.
+        if reason == "waiver":
+            require_not_own_account(acct_key, "forgive")
+        elif reason == "refund":
+            require_not_own_account(acct_key, "refund")
 
     tx_id = nanoid.new()
     tx_key = "vtx.wellnesstransaction." + tx_id

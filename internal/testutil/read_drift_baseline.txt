@@ -168,6 +168,11 @@ read	PayOutBalance	lnk.leaseapp.<id>.applicationFor.identity.<id>
 # appliesToUnit / containedIn chain, so no dispatcher can name it up front.
 read	PayoutCafeCredit	lnk.identity.<id>.worksAt.building.<id>
 read	PayoutCafeCredit	lnk.identity.<id>.worksAt.unit.<id>
+# PayoutCafeCredit's self-clearing refusal (post_entry's require_not_own_account)
+# reads the applicationFor link off the lease the account's own heldFor walk
+# resolved — the same link-shaped class-(e) follow-up CreditCafeAccount's row
+# above records, the key data-derived and unknowable to any dispatcher.
+read	PayoutCafeCredit	lnk.leaseapp.<id>.applicationFor.identity.<id>
 # internal/refractor's own E2E fixture (real-op multiactor race) under-declares
 # the same shape identity-domain's fixtures already fix; internal/refractor is
 # off-limits for this sweep.
@@ -232,6 +237,11 @@ read	ReleaseOrphanedBooking	vtx.session.<id>.schedule
 # chain, so no dispatcher can name it up front.
 read	RefundCafeCharge	lnk.identity.<id>.worksAt.building.<id>
 read	RefundCafeCharge	lnk.identity.<id>.worksAt.unit.<id>
+# RefundCafeCharge's self-clearing refusal (post_entry's require_not_own_account)
+# reads the applicationFor link off the lease the account's own heldFor walk
+# resolved — the same link-shaped class-(e) follow-up CreditCafeAccount's row
+# above records, the key data-derived and unknowable to any dispatcher.
+read	RefundCafeCharge	lnk.leaseapp.<id>.applicationFor.identity.<id>
 read	ReportIssue	lnk.identity.<id>.worksAt.building.<id>
 read	ReportIssue	lnk.identity.<id>.worksAt.unit.<id>
 # RescheduleAppointment reuses SetAppointmentStatus's staff-standing

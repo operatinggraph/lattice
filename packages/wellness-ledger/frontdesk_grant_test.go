@@ -1,12 +1,17 @@
 package wellnessledger_test
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/operatinggraph/lattice/internal/pkgmgr"
 	"github.com/operatinggraph/lattice/internal/processor"
+	"github.com/operatinggraph/lattice/internal/substrate"
 	"github.com/operatinggraph/lattice/internal/testutil"
 )
 
@@ -584,5 +589,84 @@ func TestConsumer_CreditAccountSelfScopeRefundRejected(t *testing.T) {
 	testutil.PublishOp(t, conn, env)
 	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeRejected {
 		t.Fatalf("self-service WellnessCreditAccount reason:refund outcome = %v, want Rejected (AuthDenied)", got)
+	}
+}
+
+// Self-clearing — the staff leg's other half. The frontOfHouse grant proves
+// STANDING and nothing about ownership, so a staffer who is also a member
+// passes it against their own account and could forgive, or refund to
+// themselves, what the studio is owed. post_entry's require_not_own_account
+// resolves the account's holder off its own heldFor link and refuses a waiver
+// and a refund when that holder is the actor.
+
+// fdCreditEnv is one staff-voice WellnessCreditAccount against acctKey with
+// the given payload fields spliced in after accountKey.
+func fdCreditEnv(label, acctKey, fields string) *processor.OperationEnvelope {
+	return &processor.OperationEnvelope{
+		RequestID:     testutil.GenReqID(label),
+		Lane:          processor.LaneDefault,
+		OperationType: "WellnessCreditAccount",
+		Actor:         ledFDActorKey,
+		SubmittedAt:   "2026-07-01T12:00:00Z",
+		Class:         "wellnesstransaction",
+		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `",` + fields + `}`),
+		ContextHint:   &processor.ContextHint{Reads: []string{acctKey}},
+	}
+}
+
+// assertFDRejectedBecause drives env and asserts it was rejected FOR THE
+// STATED REASON — every denial collapses to "rejected", so the outcome alone
+// cannot tell this rule from any other.
+func assertFDRejectedBecause(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
+	cons jetstream.Consumer, env *processor.OperationEnvelope, wantMessage string) {
+	t.Helper()
+	outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	if outcome != processor.OutcomeRejected {
+		t.Fatalf("outcome = %q, want rejected", outcome)
+	}
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, wantMessage) {
+		t.Fatalf("rejected with %+v, want a refusal containing %q", reply.Error, wantMessage)
+	}
+}
+
+// TestFrontDesk_SelfClearing_RefusedOnOwnAccount: the front-desk actor's OWN
+// account (heldFor their identity) refuses their waiver and their refund, and
+// accepts their payment straight after — a payment is money coming in, not a
+// clearing verb.
+func TestFrontDesk_SelfClearing_RefusedOnOwnAccount(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledFDCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdselfclearing")
+
+	seedIdentity(t, ctx, conn, ledFDActorID)
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdscownacct0000001", ledFDActorKey)
+
+	assertFDRejectedBecause(t, ctx, conn, cp, cons,
+		fdCreditEnv("fdscownwaiver000001", acctKey, `"amountCents":2500,"reason":"waiver"`),
+		"SelfClearing: a staffer may not forgive their own account")
+	assertFDRejectedBecause(t, ctx, conn, cp, cons,
+		fdCreditEnv("fdscownrefund000001", acctKey, `"amountCents":2500,"reason":"refund"`),
+		"SelfClearing: a staffer may not refund their own account")
+	testutil.PublishOp(t, conn, fdCreditEnv("fdscownpayment00001", acctKey, `"amountCents":2500,"memo":"Front desk payment"`))
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("the staffer's own payment = %v, want Accepted (a payment is not a clearing verb)", got)
+	}
+}
+
+// TestFrontDesk_SelfClearing_OtherMemberAccepted is the accepting half the
+// refusals are measured against: the SAME front-desk actor waives another
+// member's account — a guard that refused every front-desk waiver would pass
+// the vector above and fail this one.
+func TestFrontDesk_SelfClearing_OtherMemberAccepted(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, ledFDCapDoc())
+	cp, cons := newLedgerPipeline(t, ctx, conn, "fdselfclearingother")
+
+	identityKey := seedIdentity(t, ctx, conn, "WLFDSCQTHER23456789A")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "fdscotheracct000001", identityKey)
+
+	testutil.PublishOp(t, conn, fdCreditEnv("fdscotherwaiver00001", acctKey, `"amountCents":2500,"reason":"waiver"`))
+	if got := testutil.DriveOne(t, ctx, cp, cons, ""); got != processor.OutcomeAccepted {
+		t.Fatalf("front-desk waiver of another member's account = %v, want Accepted", got)
 	}
 }

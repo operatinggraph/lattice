@@ -349,11 +349,15 @@ function identityKeyForPatient(patientKey) {
 }
 
 // actingAsSelf reports whether the signed-in identity IS the patient whose
-// record is on screen — the one case a write submits under CreateAppointment /
-// RescheduleAppointment / SetAppointmentStatus's consumer scope=self grant
-// (authContext.target naming that identity) rather than staff-on-behalf-of.
-// It is derived from who signed in, never declared: a front-desk session is
-// never the patient, and a patient session is never anybody else.
+// record is on screen: the roster row's identifiedBy identityKey against the
+// session's own identity, whatever hat the session wears. A patient session
+// is never anybody else; a front-desk session is that patient exactly when
+// the staffer's own record is on screen. It is derived from who signed in,
+// never declared. Two consumers read it: the writes that submit under a
+// consumer scope=self grant (CreateAppointment / RescheduleAppointment /
+// SetAppointmentStatus, authContext.target naming that identity) rather than
+// staff-on-behalf-of, and renderWaiveControls, which withholds the waive
+// button from a staffer on their own record.
 function actingAsSelf(patientKey) {
   const linked = identityKeyForPatient(patientKey === undefined ? state.patient : patientKey);
   return !!(linked && state.identityId && bareId(linked) === state.identityId);
@@ -4006,6 +4010,7 @@ async function loadLedger() {
   const balanceEl = $("#ledger-balance");
   const list = $("#ledger-list");
   const empty = $("#ledger-empty");
+  renderWaiveControls();
   if (!state.patient) {
     balanceEl.textContent = "";
     list.innerHTML = "";
@@ -4336,6 +4341,8 @@ async function submitLedgerEntry(opType, what, reason) {
   // refusal-courtesy: ClinicCreditAccount/InvalidState: none — no read-model field flags a corrupted .balance aspect class; the account's derived balance is trusted as /api/ledger returns it.
   // refusal-courtesy: ClinicDebitAccount/NoBalanceToPay, PaymentExceedsBalance: unreachable — ClinicDebitAccount dispatches post_entry with entry_type="debit" (scripts.go); is_self_pay requires entry_type=="credit" on the authContextTarget branch (a debit with a target fails AuthDenied before is_self_pay is ever set), so the block these codes live in never runs for a debit
   // refusal-courtesy: ClinicCreditAccount/NoBalanceToPay, PaymentExceedsBalance: cap — a patient paying their own account (actingAsSelf) is stopped before dispatch by selfPayCapMessage against the balance the ledger panel already read (state.ledger.balanceCents), the same pre-dispatch shape the waiver leg runs against a charge's open remainder; the front-desk credit is never capped, matching the script
+  // refusal-courtesy: ClinicCreditAccount/SelfClearing: hide — renderWaiveControls (loadLedger, applyHatGating) hides #ledger-waive and #ledger-waive-target when actingAsSelf(), the selected patient's identifiedBy identityKey against state.identityId — the same link require_not_own_account (post_entry, packages/clinic-ledger/scripts.go) reads — and puts the "your own account — another staffer clears it" note in their place; the payment button posts the default "payment" reason with no reversesRef, which the check ignores
+  // refusal-courtesy: ClinicDebitAccount/SelfClearing: unreachable — require_not_own_account (post_entry, packages/clinic-ledger/scripts.go) runs only on a credit (entry_type == "credit"); ClinicDebitAccount dispatches post_entry with entry_type="debit"
   if (!state.patient) {
     toast("Select a patient first.", "err");
     return;
@@ -6621,16 +6628,41 @@ function applyHatGating() {
   if (chargeBtn) chargeBtn.hidden = !fd;
   const visitSel = $("#ledger-visit");
   if (visitSel) visitSel.hidden = !fd;
-  const waiveBtn = $("#ledger-waive");
-  if (waiveBtn) waiveBtn.hidden = !fd;
-  const waiveTargetSel = $("#ledger-waive-target");
-  if (waiveTargetSel) waiveTargetSel.hidden = !fd;
+  renderWaiveControls();
   for (const id of ["#go-availability", "#go-sites"]) {
     const link = $(id);
     const hint = link && link.closest(".hint");
     if (hint) hint.hidden = !op;
   }
   if (!viewAllowed(state.view)) showView("book");
+}
+
+// renderWaiveControls shows the Waive charge button and its charge picker to
+// the front desk only, and withholds them on the viewer's OWN record —
+// actingAsSelf(): the selected patient's identifiedBy identityKey is the
+// signed-in identity — putting a note in their place. packages/clinic-ledger
+// refuses a staffer's waiver of their own account SelfClearing off the same
+// identifiedBy link, so the desk never offers the button only to have the
+// submit come back refused; the charge and payment buttons stay, since
+// neither is a clearing verb. Called on every hat change (applyHatGating)
+// and on every patient change (loadLedger), the two inputs it reads.
+function renderWaiveControls() {
+  const fd = isFrontDesk();
+  const own = fd && !!state.patient && actingAsSelf();
+  const waiveBtn = $("#ledger-waive");
+  if (waiveBtn) waiveBtn.hidden = !fd || own;
+  const waiveTargetSel = $("#ledger-waive-target");
+  if (waiveTargetSel) waiveTargetSel.hidden = !fd || own;
+  let note = $("#ledger-own-note");
+  if (own && !note && waiveBtn) {
+    note = document.createElement("span");
+    note.id = "ledger-own-note";
+    note.className = "meta";
+    note.textContent = "your own account — another staffer clears it";
+    waiveBtn.insertAdjacentElement("afterend", note);
+  } else if (!own && note) {
+    note.remove();
+  }
 }
 
 function showView(view) {
@@ -6672,6 +6704,8 @@ function init() {
   // refusal-courtesy: ClinicDebitAccount/InvalidState, NoFeeToSettle, WrongAccount, WrongPatient: see submitLedgerEntry
   // refusal-courtesy: ClinicCreditAccount/NoBalanceToPay, PaymentExceedsBalance: see submitLedgerEntry
   // refusal-courtesy: ClinicDebitAccount/NoBalanceToPay, PaymentExceedsBalance: see submitLedgerEntry
+  // refusal-courtesy: ClinicCreditAccount/SelfClearing: see submitLedgerEntry
+  // refusal-courtesy: ClinicDebitAccount/SelfClearing: see submitLedgerEntry
   restorePatient();
   // Who signed in decides every derived affordance (a patient acting on their
   // own record vs the front desk acting on someone's behalf), so it has to be

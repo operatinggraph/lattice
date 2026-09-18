@@ -165,6 +165,20 @@ function idOf(key) {
   return parts[parts.length - 1];
 }
 
+// isOwnAccount answers whether the account held by bookerKey (a lease's
+// resident, the bookerKey column of /api/residents) belongs to the signed-in
+// viewer. Pure: reads state.identityId (the raw NanoID) and nothing else, and
+// answers false when either side is missing — an unresolved roster row or a
+// whoami that never answered must not hide a button from a staffer who is
+// entitled to it. The courtesy half of packages/cafe-ledger's SelfClearing
+// refusal: nobody clears their own debt from the desk, so the clearing verbs
+// (Write off, Refund, Pay out) are withheld on the viewer's own row; the
+// enforcement is the script's own heldFor → applicationFor walk, never this.
+function isOwnAccount(bookerKey) {
+  if (!bookerKey || !state.identityId) return false;
+  return idOf(bookerKey) === state.identityId;
+}
+
 // applicationForOptionalRead returns the OpenTab/Charge/Settle self-scope
 // guard's declared read (packages/cafe-domain/ddls.go): a resident's own
 // submit declares the lease's applicationFor→identity link so the Starlark
@@ -1829,24 +1843,44 @@ function renderFrontDeskArrears(balances, residentsByLease) {
     const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(row.leaseAppKey);
     const li = document.createElement("li");
     li.className = "ledger-entry arrears-row";
-    if (row.balanceCents < 0) {
-      li.innerHTML =
-        escapeHtml(who) + " — in credit " + money(-row.balanceCents) +
-        ' <span class="ledger-entry-actions"><button type="button" class="payout-credit-btn" data-account="' +
-        escapeHtml(row.accountKey || "") + '" data-amount="' + (-row.balanceCents) +
-        '" data-who="' + escapeHtml(who) + '">Pay out</button></span>';
-    } else {
-      li.innerHTML =
-        escapeHtml(who) + " — " + money(row.balanceCents) + " · " + frontDeskArrearsLine(row) +
-        ' <span class="ledger-entry-actions"><button type="button" class="take-payment-btn" data-account="' +
-        escapeHtml(row.accountKey || "") + '" data-amount="' + (+row.balanceCents) +
-        '" data-who="' + escapeHtml(who) + '">Take payment</button>' +
-        '<button type="button" class="writeoff-debt-btn" data-account="' +
-        escapeHtml(row.accountKey || "") + '" data-amount="' + (+row.balanceCents) +
-        '" data-who="' + escapeHtml(who) + '">Write off</button></span>';
-    }
+    li.innerHTML = arrearsRowMarkup(row, who, isOwnAccount(bookerKey));
     list.append(li);
   }
+}
+
+// arrearsRowMarkup renders one arrears row's inner HTML: the resident, the
+// balance and its due/overdue line, and the desk's buttons for it. Pure (no
+// DOM), so the goja pins can run the shipped source. On the viewer's OWN row
+// (own === true) the clearing verbs — Write off on a debtor row, Pay out on a
+// credit row — are withheld and replaced by a note naming the rule, because
+// packages/cafe-ledger refuses them SelfClearing; Take payment stays, since a
+// payment is money coming in and the script accepts it from anyone standing.
+function arrearsRowMarkup(row, who, own) {
+  const ownNote = '<span class="meta">your own account — another staffer clears it</span>';
+  if (row.balanceCents < 0) {
+    return (
+      escapeHtml(who) + " — in credit " + money(-row.balanceCents) +
+      ' <span class="ledger-entry-actions">' +
+      (own
+        ? ownNote
+        : '<button type="button" class="payout-credit-btn" data-account="' +
+          escapeHtml(row.accountKey || "") + '" data-amount="' + (-row.balanceCents) +
+          '" data-who="' + escapeHtml(who) + '">Pay out</button>') +
+      "</span>"
+    );
+  }
+  return (
+    escapeHtml(who) + " — " + money(row.balanceCents) + " · " + frontDeskArrearsLine(row) +
+    ' <span class="ledger-entry-actions"><button type="button" class="take-payment-btn" data-account="' +
+    escapeHtml(row.accountKey || "") + '" data-amount="' + (+row.balanceCents) +
+    '" data-who="' + escapeHtml(who) + '">Take payment</button>' +
+    (own
+      ? ownNote
+      : '<button type="button" class="writeoff-debt-btn" data-account="' +
+        escapeHtml(row.accountKey || "") + '" data-amount="' + (+row.balanceCents) +
+        '" data-who="' + escapeHtml(who) + '">Write off</button>') +
+    "</span>"
+  );
 }
 
 // wireArrearsActions binds ONE delegated click handler to the arrears list
@@ -1883,6 +1917,7 @@ function wireArrearsActions(list) {
 // refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — renderFrontDeskArrears only lists non-zero-balance leases (frontdesk-balances) and only draws the take-payment-btn on the debtor branch (row.balanceCents >= 0); a zero-balance lease never appears in the arrears list at all
 // refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: cap — amountCents is prefilled to exactly row.balanceCents (the balance shown) into a detached, never-rendered descriptor mount (renderOpForm(row, context, document.createElement("div")))
 // refusal-courtesy: CreditCafeAccount/WriteOffExceedsBalance: unreachable — this function always submits reason: "payment" (post_entry, packages/cafe-ledger/scripts.go); the reason=="waiver" branch that raises WriteOffExceedsBalance never runs from here
+// refusal-courtesy: CreditCafeAccount/SelfClearing: unreachable — this function always submits reason: "payment", and require_not_own_account (post_entry, packages/cafe-ledger/scripts.go) runs only for a waiver, refund or payout; a staffer's payment on their own account is accepted, so the Take payment button is drawn on the viewer's own row too
 // refusal-courtesy: CreditCafeAccount/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — this function's context.prefill never sets tabRef (the Weaver-only field only cafeTabSettlement's missing_payment dispatch sets); require_counter_payment (packages/cafe-ledger/scripts.go) only runs when payload.tabRef is present
 async function handleTakePayment(btn) {
   const accountKey = btn.getAttribute("data-account");
@@ -1940,6 +1975,7 @@ async function handleTakePayment(btn) {
 // refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — renderFrontDeskArrears only lists non-zero-balance leases (frontdesk-balances) and only draws the writeoff-debt-btn on the debtor branch (row.balanceCents >= 0); a zero-balance lease never appears in the arrears list at all
 // refusal-courtesy: CreditCafeAccount/WriteOffExceedsBalance: cap — amountCents is prefilled to exactly row.balanceCents (the balance shown) into a detached, never-rendered descriptor mount (renderOpForm(row, context, document.createElement("div")))
 // refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: unreachable — this function always submits reason: "waiver" (post_entry, packages/cafe-ledger/scripts.go); the reason=="waiver" branch raises WriteOffExceedsBalance first, so the plain PaymentExceedsBalance fail below it is never reached from here
+// refusal-courtesy: CreditCafeAccount/SelfClearing: hide — arrearsRowMarkup withholds the writeoff-debt-btn on the viewer's own row (isOwnAccount(residentsByLease[row.leaseAppKey]), the roster's bookerKey against state.identityId) and renders the "your own account — another staffer clears it" note in its place
 // refusal-courtesy: CreditCafeAccount/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — this function's context.prefill never sets tabRef (the Weaver-only field only cafeTabSettlement's missing_payment dispatch sets); require_counter_payment (packages/cafe-ledger/scripts.go) only runs when payload.tabRef is present
 async function handleWriteOffDebt(btn) {
   const accountKey = btn.getAttribute("data-account");
@@ -1992,6 +2028,7 @@ async function handleWriteOffDebt(btn) {
 // landed-ambiguity wording on the throw path.
 // refusal-courtesy: PayoutCafeCredit/InvalidState: none — the account's .balance aspect being a foreign class is a data-integrity fault (post_entry, packages/cafe-ledger/scripts.go), not state any read model exposes
 // refusal-courtesy: PayoutCafeCredit/NoCreditToPayOut: hide — renderFrontDeskArrears (wireArrearsActions) only draws the payout-credit-btn on a row with balanceCents < 0; a debtor/square row gets the Write off button instead
+// refusal-courtesy: PayoutCafeCredit/SelfClearing: hide — arrearsRowMarkup withholds the payout-credit-btn on the viewer's own row (isOwnAccount(residentsByLease[row.leaseAppKey]), the roster's bookerKey against state.identityId) and renders the "your own account — another staffer clears it" note in its place
 // refusal-courtesy: PayoutCafeCredit/PayoutExceedsCredit, PayoutExceedsCash: cap — amountCents is prefilled to exactly -row.balanceCents (the credit shown) into a detached, never-rendered descriptor mount (renderOpForm(row, context, document.createElement("div"))), so the submitted amount never exceeds the credit; and the script holds credit <= cashCents (a credit is only ever posted from cash paid in), so an amount within the credit is within the cash too
 // refusal-courtesy: PayoutCafeCredit/RefundExceedsCharge, RefundExceedsPaid: unreachable — PayoutCafeCredit calls post_entry(..., allow_reverses_ref=False, ...) (packages/cafe-ledger/scripts.go); the reversesRef branch only runs when allow_reverses_ref is True
 // refusal-courtesy: PayoutCafeCredit/NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: unreachable — PayoutCafeCredit calls post_entry(state, op, "debit", ...) (packages/cafe-ledger/scripts.go); is_payment requires entry_type == "credit", so the whole is_payment block these codes live in never runs for a debit
@@ -2384,6 +2421,14 @@ let pendingCafeCharges = []; // { tabKey, name, priceCents, baselineTotalCents }
 // reads residentOwnLeaseRow instead.
 let posTabLimitByLease = {};
 
+// residentViewResidentsByLease is the Resident-view lease picker's own copy
+// of the lease → resident identity join (/api/residents bookerKey per
+// leaseAppKey), filled by loadLeasePickerContext alongside posTabLimitByLease
+// — what renderResident asks isOwnAccount about when the desk is viewing a
+// lease here. The resident's own view never reads it (selfMode draws no
+// refund buttons at all).
+let residentViewResidentsByLease = {};
+
 async function loadResident() {
   const select = document.getElementById("resident-lease");
   const label = document.getElementById("resident-lease-label");
@@ -2393,6 +2438,7 @@ async function loadResident() {
     select.hidden = false;
     const ctx = await loadLeasePickerContext();
     posTabLimitByLease = ctx.tabLimitByLease;
+    residentViewResidentsByLease = ctx.residentsByLease;
     fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, false, ctx.balancesByLease);
   } else {
     label.hidden = true;
@@ -2425,6 +2471,7 @@ async function loadResident() {
 // refusal-courtesy: CreditCafeAccount/NoBalanceToPay: hide — both #record-payment-form (desk) and #self-pay-form (resident) render only when ledger.accountKey exists and (ledger.balanceCents||0) > 0
 // refusal-courtesy: CreditCafeAccount/PaymentExceedsBalance: cap — both forms' amount input is prefilled to ledger.balanceCents/100 and its `max` is set to the same value
 // refusal-courtesy: CreditCafeAccount/WriteOffExceedsBalance: unreachable — neither #record-payment-form's nor #self-pay-form's submit handler ever sets prefill.reason, so it defaults server-side to "payment" (post_entry, packages/cafe-ledger/scripts.go); the reason=="waiver" branch that raises WriteOffExceedsBalance never runs from either form here
+// refusal-courtesy: CreditCafeAccount/SelfClearing: unreachable — neither #record-payment-form's nor #self-pay-form's submit handler ever sets prefill.reason, so both post a "payment" credit, and require_not_own_account (post_entry, packages/cafe-ledger/scripts.go) runs only for a waiver, refund or payout
 // refusal-courtesy: CreditCafeAccount/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — neither #record-payment-form's nor #self-pay-form's submit handler ever sets prefill.tabRef (the Weaver-only field only cafeTabSettlement's missing_payment dispatch sets); require_counter_payment (packages/cafe-ledger/scripts.go) only runs when payload.tabRef is present
 async function renderResident() {
   const body = document.getElementById("resident-body");
@@ -2631,8 +2678,13 @@ async function renderResident() {
             // start. A PayoutCafeCredit debit carries no tabKey either (it
             // settles a credit in cash, not a café purchase), so this
             // predicate already excludes it — a payout is not itself
-            // refundable.
-            const refundable = !selfMode && r.type === "debit" && !!r.tabKey && remaining > 0;
+            // refundable. And never on the viewer's own account: the script
+            // refuses a staffer's refund of their own charge SelfClearing,
+            // so the button is withheld when the picked lease's resident is
+            // the viewer (residentViewResidentsByLease, the desk picker's
+            // roster join).
+            const refundable = !selfMode && !isOwnAccount(residentViewResidentsByLease[leaseAppKey]) &&
+              r.type === "debit" && !!r.tabKey && remaining > 0;
             const receipt = receiptLines(r, tabByKey);
             return (
               '<li class="ledger-entry ' + escapeHtml(r.type) + (r.reversesKey ? " refund" : "") + '">' +
@@ -2939,6 +2991,7 @@ async function renderResident() {
 // refusal-courtesy: RefundCafeCharge/NoCreditToPayOut, PayoutExceedsCash, PayoutExceedsCredit: unreachable — RefundCafeCharge calls post_entry(entry_type="credit", ...) (packages/cafe-ledger/scripts.go); is_payout requires entry_type == "debit", so the payout branch never runs
 // refusal-courtesy: RefundCafeCharge/RefundExceedsCharge: cap — renderResident only draws the refund-charge-btn when remaining (a charge's amountCents minus refundedByCharge, both read off this same ledger list) is > 0, and this function prefills amountCents to that remaining value and sets the field's max to it, so a larger typed amount never leaves the form
 // refusal-courtesy: RefundCafeCharge/RefundExceedsPaid: none — cashCents (the account's cash-floor) is never projected to cmd/cafe-app's read models (ledger.go), so no field here can bound a refund against it
+// refusal-courtesy: RefundCafeCharge/SelfClearing: hide — renderResident draws the refund-charge-btn this function wires only when !isOwnAccount(residentViewResidentsByLease[leaseAppKey]), the picked lease's roster bookerKey against state.identityId, so no Refund button exists on the viewer's own ledger for this function to bind
 // refusal-courtesy: RefundCafeCharge/NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: unreachable — RefundCafeCharge calls post_entry(..., allow_reverses_ref=True, ...) (packages/cafe-ledger/scripts.go); is_payment requires not allow_reverses_ref, so the whole is_payment block these codes live in never runs
 // refusal-courtesy: RefundCafeCharge/CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — RefundCafeCharge calls post_entry(..., allow_tab_ref=False, ...) and refuses any payload.tabRef before reaching post_entry at all (packages/cafe-ledger/scripts.go); require_counter_payment never runs
 async function wireRefundCharge(accountKey, onDone) {

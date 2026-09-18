@@ -1,5 +1,5 @@
 name: wellness-ledger
-version: 0.3.2
+version: 0.4.0
 description: |
   Wellness member payment ledger: the wellnessaccount vertex type (WellnessCreateAccount,
   independently-minted id, one per member identity via a .wellnessLedgerAccount

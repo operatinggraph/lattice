@@ -351,7 +351,10 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"clinic forgave (e.g. a no-show fee waived as a courtesy) — both reduce the derived balance identically, but the " +
 			"ledgerHistory lens projects reason so a reader never mistakes a waiver for money received. reason:\"waiver\" is " +
 			"rejected on a self-scoped (patient) credit — post_entry's own authContextTarget branch — since a patient may pay " +
-			"down their own balance but never forgive it. " +
+			"down their own balance but never forgive it. Nobody clears their own debt from the desk either: a staff " +
+			"waiver, or a reversesRef reversal, against an account whose heldFor patient is identifiedBy the actor is " +
+			"refused SelfClearing, operator included (the rule is about whose money it is, not whose standing); a " +
+			"payment credit and a charge are untouched. " +
 			"ClinicDebitAccount also accepts an optional appointmentRef (vtx.appointment.<NanoID>, validated alive when supplied — " +
 			"UnknownAppointment otherwise): the charge IS the fee that appointment's current status carries. When present, the " +
 			"op reads the appointment's .status (a derive_reads-declared optionalRead) and refuses NoFeeToSettle unless it carries " +
@@ -444,7 +447,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Same shape as a plain payment, but .entry carries reason: \"waiver\" instead of the default \"payment\" — the " +
 					"balance drops identically, but the ledgerHistory lens projects reason so a reader never mistakes forgiven debt for cash " +
 					"collected. Rejects AuthDenied if the caller is a self-scoped patient — only the operator/" +
-					"front-of-house scope=any grant may waive.",
+					"front-of-house scope=any grant may waive — and SelfClearing if that staffer is the account's own " +
+					"patient: another staffer forgives it.",
 			},
 			{
 				Name:    "ClinicCreditAccount — Weaver-dispatched fee reversal (reversesRef)",

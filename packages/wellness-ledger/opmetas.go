@@ -97,6 +97,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			},
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — AuthContext "standing" means Facet never attaches a target to this dispatch, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, scripts.go) only runs when a target is present
 			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column
+			// refusal-courtesy(facet): SelfClearing: unreachable — require_not_own_account (post_entry, scripts.go) runs only on a credit (entry_type == "credit"); WellnessDebitAccount dispatches post_entry with entry_type="debit"
 		},
 		{
 			OperationType: "WellnessCreditAccount",
@@ -127,6 +128,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				// (absence-tolerant: absent until the first evaluation).
 				OptionalReads: []string{"{payload.accountKey}.arrears"},
 			},
+			// refusal-courtesy(facet): SelfClearing: unreachable — this descriptor's InputSchema names no reason field, so a Facet submit posts the default "payment"; require_not_own_account (post_entry, scripts.go) runs only on a waiver or a refund
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — AuthContext "standing" means Facet never attaches a target to this dispatch, so op.authContextTarget is always "" server-side; the self-credit balance-verification block these codes live in (post_entry's authContextTarget branch, scripts.go) only runs when a target is present
 			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column
 		},

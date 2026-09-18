@@ -82,6 +82,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): NoCreditToPayOut, PayoutExceedsCash, PayoutExceedsCredit: unreachable — CreditCafeAccount calls post_entry(entry_type="credit", ...) (scripts.go); is_payout requires entry_type == "debit", so the payout branch never runs
 			// refusal-courtesy(facet): RefundExceedsCharge, RefundExceedsPaid: unreachable — CreditCafeAccount calls post_entry(..., allow_reverses_ref=False, ...) (scripts.go); the reversesRef branch only runs when allow_reverses_ref is True
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: none — amountCents carries no maximum tied to the account's own live balance (InputSchema below), and no edge-manifest entity lens projects that balance as a column an entityRefCandidates picker could filter on, so Facet's generic form offers no dynamic bound
+			// refusal-courtesy(facet): SelfClearing: unreachable — the descriptor dispatches AuthContext "self", and the self leg refuses a waiver AuthDenied (post_entry, scripts.go) before the staff-leg ownership check (require_not_own_account) runs; a payment credit is not a clearing verb
 			// refusal-courtesy(facet): CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — this descriptor's InputSchema names no tabRef (the Weaver-only field only cafeTabSettlement's missing_payment dispatch sets), and require_counter_payment (scripts.go) runs only when payload.tabRef is present
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Pay house tab",
@@ -100,7 +101,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 				"accountKey":  "Your own house-tab account — auto-filled by the client (dispatch.targetField), not user-entered.",
 				"amountCents": "How much you're paying, entered in dollars — e.g. 4.50. Must be more than zero and cannot exceed what you actually owe (server-verified).",
 				"memo":        "Optional free text describing the payment — a reference number, whatever helps you recognise it later.",
-				"reason":      "\"payment\" or \"waiver\" (default \"payment\"). Front-desk/operator only — a self-scoped submit is rejected server-side if set to \"waiver\". A write-off is capped at what is owed exactly as a payment is.",
+				"reason":      "\"payment\" or \"waiver\" (default \"payment\"). Front-desk/operator only — a self-scoped submit is rejected server-side if set to \"waiver\", and so is a write-off of the submitter's own account (SelfClearing: another staffer forgives it). A write-off is capped at what is owed exactly as a payment is.",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "cafetransaction",
@@ -143,6 +144,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): RefundExceedsCharge: none — reversesRef carries no x-entityRef annotation (this file's InputSchema), so Facet renders it as a plain text field, not an entityRefCandidates picker that could drop an exhausted charge
 			// refusal-courtesy(facet): RefundExceedsPaid: none — cashCents (the account's cash-floor) is never projected by any edge-manifest entity lens, so no Facet column could bound a refund against it
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: unreachable — RefundCafeCharge calls post_entry(..., allow_reverses_ref=True, ...) (scripts.go); is_payment requires not allow_reverses_ref, so the whole is_payment block these codes live in never runs
+			// refusal-courtesy(facet): SelfClearing: none — the generic form cannot see the actor's own lease (no entity lens projects the viewer's applicationFor link as a column); the refusal names the rule
 			// refusal-courtesy(facet): CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — RefundCafeCharge refuses any tabRef InvalidArgument before post_entry and calls it with allow_tab_ref=False (scripts.go), so require_counter_payment never runs
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Refund a posted charge",
@@ -215,6 +217,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): NoCreditToPayOut, PayoutExceedsCredit, PayoutExceedsCash: none — accountKey is dispatch.targetField-resolved from context; Facet renders no account picker, and no entity lens projects a per-account credit/cash column entityRefCandidates could filter on
 			// refusal-courtesy(facet): RefundExceedsCharge, RefundExceedsPaid: unreachable — PayoutCafeCredit calls post_entry(..., allow_reverses_ref=False, ...) (scripts.go); the reversesRef branch only runs when allow_reverses_ref is True
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance, WriteOffExceedsBalance: unreachable — PayoutCafeCredit calls post_entry(state, op, "debit", ...) (scripts.go); is_payment requires entry_type == "credit", so the whole is_payment block these codes live in never runs for a debit
+			// refusal-courtesy(facet): SelfClearing: none — the generic form cannot see the actor's own lease (no entity lens projects the viewer's applicationFor link as a column); the refusal names the rule
 			// refusal-courtesy(facet): CounterPaymentAlreadyPosted, CounterPaymentMismatch, NoCounterPayment, TabNotSettled: unreachable — PayoutCafeCredit refuses any tabRef InvalidArgument before post_entry and calls it with allow_tab_ref=False (scripts.go), so require_counter_payment never runs
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Pay out credit",
