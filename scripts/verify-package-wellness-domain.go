@@ -226,7 +226,7 @@ func main() {
 		{canonical: "sessionSeriesHorizon", class: "meta.ddl.aspectType", ops: []string{"CreateSessionSeries", "ExtendSessionSeries", "ReassignSessionSeries", "TombstoneSessionSeries", "StopSessionSeries"}},
 		{canonical: "studioSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries", "ExtendSessionSeries"}},
 		{canonical: "instructorSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateSession", "TombstoneSession", "ReassignSession", "CreateSessionSeries", "TombstoneSessionSeries", "ReassignSessionSeries", "ExtendSessionSeries"}},
-		{canonical: "bookerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking"}},
+		{canonical: "bookerSlotClaim", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking", "ReassignSession", "ReassignSessionSeries"}},
 		{canonical: "bookingStatus", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "JoinWaitlist", "CancelBooking", "SetBookingAttendance", "PromoteWaitlistedBookings"}},
 		{canonical: "sessionSeatClaim", class: "meta.ddl.aspectType", ops: []string{"CreateBooking", "CancelBooking", "ReleaseOrphanedBooking", "PromoteWaitlistedBookings"}},
 		{canonical: "sessionWaitlistClaim", class: "meta.ddl.aspectType", ops: []string{"JoinWaitlist", "CancelBooking", "ReleaseOrphanedBooking", "PromoteWaitlistedBookings"}},

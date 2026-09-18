@@ -77,7 +77,8 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 		{
 			TargetID: WellnessBookingChangeNoticesTarget,
 			Description: "A member whose seat was handed over from the waitlist is told once that they are in. " +
-				"A member whose class was moved to a new time is told once per move.",
+				"A member whose class was moved to a new time, handed to another instructor (or none), or moved to " +
+				"another room is told once per change.",
 			LensRef: "wellnessBookingChangeNotices",
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_promotion_notice": {
@@ -93,6 +94,22 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Operation:     changeNoticeOp,
 					Class:         changeNoticeOpDDL,
 					Params:        map[string]string{"bookingKey": "row.entityKey", "sessionKey": "row.sessionKey", "kind": "moved", "changeRef": "row.startsAt"},
+					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.sessionKey", "row.sessionKey.schedule"},
+					OptionalReads: []string{"row.entityKey.changeNotice"},
+				},
+				"missing_instructor_notice": {
+					Action:        "directOp",
+					Operation:     changeNoticeOp,
+					Class:         changeNoticeOpDDL,
+					Params:        map[string]string{"bookingKey": "row.entityKey", "sessionKey": "row.sessionKey", "kind": "instructor", "changeRef": "row.instructorChangedAt", "instructorName": "row.instructorName"},
+					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.sessionKey", "row.sessionKey.schedule"},
+					OptionalReads: []string{"row.entityKey.changeNotice"},
+				},
+				"missing_room_notice": {
+					Action:        "directOp",
+					Operation:     changeNoticeOp,
+					Class:         changeNoticeOpDDL,
+					Params:        map[string]string{"bookingKey": "row.entityKey", "sessionKey": "row.sessionKey", "kind": "room", "changeRef": "row.studioChangedAt", "studioName": "row.studioName"},
 					Reads:         []string{"row.entityKey", "row.entityKey.status", "row.sessionKey", "row.sessionKey.schedule"},
 					OptionalReads: []string{"row.entityKey.changeNotice"},
 				},

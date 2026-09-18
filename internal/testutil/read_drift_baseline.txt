@@ -197,7 +197,15 @@ read	ReassignLeaseUnit	lnk.identity.<id>.appliedToUnit.unit.<id>
 # (its row below), off the same walk, for the same reason (an occurrence moved
 # elsewhere holds cells on a hub this call never confirmed) — the occurrence id
 # is walk-resolved, undeclarable.
+# ReassignSession and ReassignSessionSeries carry every live booker's slot cells with
+# a moved class (bookerSlotClaim, wellness-domain/ddls.go): the booker hub is the
+# .status.booker value of a booking the forSession walk discovered — two hops off
+# the enumeration, so not the walk's own far endpoint the guard admits, and not a
+# key any dispatcher can name up front (a roster snapshot would be the roster's
+# copy of the membership, not the membership) — category 3 for every dispatcher.
+read	ReassignSession	vtx.identity.<id>.slot<t>
 read	ReassignSessionSeries	lnk.session.<id>.atStudio.studio.<id>
+read	ReassignSessionSeries	vtx.identity.<id>.slot<t>
 # ReassignSessionSeries' front-of-house binder is CreateSessionSeries' workplace
 # walk verbatim (worksAt_covers off the caller-supplied studio) — the same
 # category-2 confinement read the other staff-widened wellness ops carry.
@@ -523,6 +531,9 @@ walk	ReassignSessionSeries	vtx.building.<id> containedIn out
 # that instructor's own slot cells with it — the same link-discovered hub as
 # TombstoneSessionSeries's row below, off the same declared partOf walk.
 walk	ReassignSessionSeries	vtx.session.<id> ledBy out
+# ReassignSessionSeries walks each moved occurrence's bookings to carry their
+# bookers' cells with it — the same link-discovered hub as the ledBy row above.
+walk	ReassignSessionSeries	vtx.session.<id> forSession in
 walk	ReassignSessionSeries	vtx.studio.<id> locatedAt out
 # RecordDepositDeduction's self-scope proof (self_scope_standing,
 # loftspace-ledger): the same two walks CreditAccount's/LoftspaceRecordCharge's

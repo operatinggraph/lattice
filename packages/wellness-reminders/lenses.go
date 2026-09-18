@@ -54,7 +54,7 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "booking",
 				OutputKeyPattern: "wellnessBookingChangeNotices.{actorSuffix}",
-				BodyColumns:      []string{"violating", "missing_promotion_notice", "missing_move_notice", "entityKey", "sessionKey", "bookerKey", "status", "startsAt", "endsAt", "classStartsAt", "promotedAt", "className", "promotedFor", "movedFor", "noticeSentAt"},
+				BodyColumns:      []string{"violating", "missing_promotion_notice", "missing_move_notice", "missing_instructor_notice", "missing_room_notice", "entityKey", "sessionKey", "bookerKey", "status", "startsAt", "endsAt", "classStartsAt", "bookedAt", "promotedAt", "className", "instructorName", "studioName", "instructorChangedAt", "studioChangedAt", "promotedFor", "movedFor", "instructorFor", "roomFor", "noticeSentAt"},
 				EmptyBehavior:    "delete",
 				KeyColumn:        "entityId",
 			},
@@ -224,7 +224,30 @@ RETURN
 //     "your class moved" to a member whose class never moved. Such a seat
 //     stays quiet for every move rather than being told a fiction once:
 //     with no baseline there is nothing to compare the current time against.
-//   - se.schedule.data.startsAt <> null guards BOTH gaps: a tombstoned
+//   - ReassignSession records WHEN who leads or where it meets last changed,
+//     on the schedule it rewrites: .schedule.instructorChangedAt (a swap, a
+//     clear, a first assignment) and .schedule.studioChangedAt (a room move),
+//     each the op's own submittedAt, carried by every later rewrite. A seat
+//     is told of a change made at or after its own claim
+//     (instructorChangedAt >= bookedAt — `>=` keeps a same-second claim told,
+//     true at worst redundantly), once per change: instructorFor is the
+//     stamp the last instructor notice was for, `instructorFor <>
+//     instructorChangedAt` opens the gap, RecordBookingChangeNotice{kind:
+//     instructor, changeRef: row.instructorChangedAt} closes it, a further
+//     swap advances the stamp and reopens it. roomFor / studioChangedAt are
+//     the same over the room. A seat with no bookedAt (claimed before the
+//     stamp existed) stays quiet — the engine's `>=` against a null operand
+//     is false (compareAny, ruleengine/full/values.go), so no `bookedAt <>
+//     null` conjunct is needed or carried; a class whose leader or room
+//     never changed has no stamp and `null <> null` is false.
+//     instructorName / studioName walk the session's live ledBy / atStudio
+//     links so the notice says who leads now and where it meets, coalesced
+//     to ” — the target templates both as Params, and Weaver refuses to
+//     dispatch a gap whose templated column is null (strategist.go's
+//     resolveRowTemplate), so an un-led class (the clear case this gap
+//     exists for) or a room whose studio was since tombstoned must project
+//     a string, never null; the op drops the empty name.
+//   - se.schedule.data.startsAt <> null guards ALL FOUR gaps: a tombstoned
 //     session unbinds the OPTIONAL forSession walk (the rule engine drops a
 //     dead neighbour), so a called-off class projects null startsAt for
 //     every seat until wellness-domain's release drains it. Without the
@@ -246,18 +269,22 @@ RETURN
 // Every operand is stored graph data; the lens reads no clock. `<>` is the
 // engine's two-valued null test (null <> 'x' true, null <> null false), which
 // is what lets the absent-marker case open the gap and the absent-fact case
-// (no promotedAt, no classStartsAt) keep it closed. violating repeats both
-// gap expressions verbatim — the engine has no column references in RETURN.
+// (no promotedAt, no classStartsAt, no stamp) keep it closed. violating
+// repeats all four gap expressions verbatim — the engine has no column
+// references in RETURN.
 //
 // One-row-per-anchor: forSession / bookedBy are 0..1 (CreateBooking /
-// JoinWaitlist write exactly one of each), so the OPTIONAL walks do not fan
-// out. bookerKey / className / noticeSentAt / endsAt are INFORMATIONAL;
+// JoinWaitlist write exactly one of each) and ledBy / atStudio are 0..1 on
+// the session (ReassignSession repoints by tombstone-old + revive-new), so
+// the OPTIONAL walks do not fan out. bookerKey / className / noticeSentAt / endsAt are INFORMATIONAL;
 // entityKey, sessionKey, promotedAt, startsAt and the three bools are
 // load-bearing for dispatch (the target's Params template off them). Built
 // with fmt.Sprintf so the sibling target id comes from its constant; the
 // cypher has no negated relationship pattern, only scalar NOT comparisons.
 var wellnessBookingChangeNoticesSpec = fmt.Sprintf(`MATCH (b:booking {key: $actorKey})
 OPTIONAL MATCH (b)-[:forSession]->(se:session)
+OPTIONAL MATCH (se)-[:ledBy]->(i:instructor)
+OPTIONAL MATCH (se)-[:atStudio]->(st:studio)
 OPTIONAL MATCH (b)-[:bookedBy]->(id:identity)
 RETURN
   b.key AS actorKey,
@@ -268,12 +295,21 @@ RETURN
   se.schedule.data.startsAt AS startsAt,
   se.schedule.data.endsAt AS endsAt,
   b.status.data.classStartsAt AS classStartsAt,
+  b.status.data.bookedAt AS bookedAt,
   b.status.data.promotedAt AS promotedAt,
   b.status.data.className AS className,
+  coalesce(i.profile.data.displayName, '') AS instructorName,
+  coalesce(st.profile.data.name, '') AS studioName,
+  se.schedule.data.instructorChangedAt AS instructorChangedAt,
+  se.schedule.data.studioChangedAt AS studioChangedAt,
   b.changeNotice.data.promotedFor AS promotedFor,
   b.changeNotice.data.movedFor AS movedFor,
+  b.changeNotice.data.instructorFor AS instructorFor,
+  b.changeNotice.data.roomFor AS roomFor,
   b.changeNotice.data.sentAt AS noticeSentAt,
   ((b.status.data.promotedAt <> null) AND (b.changeNotice.data.promotedFor <> b.status.data.promotedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_promotion_notice,
   ((b.status.data.classStartsAt <> null) AND (se.schedule.data.startsAt <> null) AND (se.schedule.data.startsAt <> coalesce(b.changeNotice.data.movedFor, b.status.data.classStartsAt)) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_move_notice,
-  (((b.status.data.promotedAt <> null) AND (b.changeNotice.data.promotedFor <> b.status.data.promotedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) OR ((b.status.data.classStartsAt <> null) AND (se.schedule.data.startsAt <> null) AND (se.schedule.data.startsAt <> coalesce(b.changeNotice.data.movedFor, b.status.data.classStartsAt)) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt))) AS violating`,
+  ((se.schedule.data.instructorChangedAt <> null) AND (se.schedule.data.instructorChangedAt >= b.status.data.bookedAt) AND (b.changeNotice.data.instructorFor <> se.schedule.data.instructorChangedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_instructor_notice,
+  ((se.schedule.data.studioChangedAt <> null) AND (se.schedule.data.studioChangedAt >= b.status.data.bookedAt) AND (b.changeNotice.data.roomFor <> se.schedule.data.studioChangedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) AS missing_room_notice,
+  (((b.status.data.promotedAt <> null) AND (b.changeNotice.data.promotedFor <> b.status.data.promotedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) OR ((b.status.data.classStartsAt <> null) AND (se.schedule.data.startsAt <> null) AND (se.schedule.data.startsAt <> coalesce(b.changeNotice.data.movedFor, b.status.data.classStartsAt)) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) OR ((se.schedule.data.instructorChangedAt <> null) AND (se.schedule.data.instructorChangedAt >= b.status.data.bookedAt) AND (b.changeNotice.data.instructorFor <> se.schedule.data.instructorChangedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt)) OR ((se.schedule.data.studioChangedAt <> null) AND (se.schedule.data.studioChangedAt >= b.status.data.bookedAt) AND (b.changeNotice.data.roomFor <> se.schedule.data.studioChangedAt) AND (se.schedule.data.startsAt <> null) AND (b.status.data.value = 'booked') AND NOT (b.freshnessExpiry.data.byTarget.%[1]s >= se.schedule.data.endsAt))) AS violating`,
 	PastDueBookingsTarget)

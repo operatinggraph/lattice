@@ -33,6 +33,14 @@ type cnBooking struct {
 	endsAt        string // the session's .schedule.endsAt
 	promotedFor   string // .changeNotice.promotedFor
 	movedFor      string // .changeNotice.movedFor
+
+	bookedAt            string // .status.bookedAt (the claim's own instant)
+	instructorChangedAt string // the session's .schedule.instructorChangedAt
+	studioChangedAt     string // the session's .schedule.studioChangedAt
+	instructorFor       string // .changeNotice.instructorFor
+	roomFor             string // .changeNotice.roomFor
+	instructorName      string // seeds an instructor {profile.displayName} the session is ledBy
+	studioName          string // seeds a studio {profile.name} the session is atStudio
 }
 
 // mkChangeNoticeBooking seeds one booking {status, classStartsAt?,
@@ -48,21 +56,40 @@ func (f *remFixture) mkChangeNoticeBooking(t *testing.T, name, sessionName strin
 	if b.promotedAt != "" {
 		status["promotedAt"] = b.promotedAt
 	}
+	if b.bookedAt != "" {
+		status["bookedAt"] = b.bookedAt
+	}
 	f.aspect(t, name, "status", "bookingStatus", status)
 	if sessionName != "" {
 		f.vtx(t, sessionName, "session")
-		f.aspect(t, sessionName, "schedule", "sessionSchedule", map[string]any{
-			"name": "Vinyasa Flow", "startsAt": b.startsAt, "endsAt": b.endsAt, "capacity": 20})
+		sched := map[string]any{"name": "Vinyasa Flow", "startsAt": b.startsAt, "endsAt": b.endsAt, "capacity": 20}
+		if b.instructorChangedAt != "" {
+			sched["instructorChangedAt"] = b.instructorChangedAt
+		}
+		if b.studioChangedAt != "" {
+			sched["studioChangedAt"] = b.studioChangedAt
+		}
+		f.aspect(t, sessionName, "schedule", "sessionSchedule", sched)
 		f.edge(t, "forSession", name, sessionName)
+		if b.instructorName != "" {
+			f.vtx(t, sessionName+"-instr", "instructor")
+			f.aspect(t, sessionName+"-instr", "profile", "instructorProfile", map[string]any{"displayName": b.instructorName})
+			f.edge(t, "ledBy", sessionName, sessionName+"-instr")
+		}
+		if b.studioName != "" {
+			f.vtx(t, sessionName+"-studio", "studio")
+			f.aspect(t, sessionName+"-studio", "profile", "studioProfile", map[string]any{"name": b.studioName})
+			f.edge(t, "atStudio", sessionName, sessionName+"-studio")
+		}
 	}
-	if b.promotedFor != "" || b.movedFor != "" {
-		marker := map[string]any{"sentAt": "2026-06-20T12:00:05Z"}
-		if b.promotedFor != "" {
-			marker["promotedFor"] = b.promotedFor
+	marker := map[string]any{}
+	for field, val := range map[string]string{"promotedFor": b.promotedFor, "movedFor": b.movedFor, "instructorFor": b.instructorFor, "roomFor": b.roomFor} {
+		if val != "" {
+			marker[field] = val
 		}
-		if b.movedFor != "" {
-			marker["movedFor"] = b.movedFor
-		}
+	}
+	if len(marker) > 0 {
+		marker["sentAt"] = "2026-06-20T12:00:05Z"
 		f.aspect(t, name, "changeNotice", "bookingChangeNotice", marker)
 	}
 }
@@ -84,13 +111,21 @@ func (f *remFixture) projectChangeNotices(t *testing.T, bookingName string) map[
 	return out[0].Values
 }
 
-// requireGaps asserts both gap columns and violating in one place, so every
-// vector checks the column it is NOT about too.
+// requireGaps asserts the promotion and move gap columns and violating in one
+// place, so every vector checks the column it is NOT about too; the two stamp
+// gaps are asserted closed (requireStampGaps is their positive form).
 func requireGaps(t *testing.T, v map[string]any, promotion, move bool, why string) {
+	t.Helper()
+	requireAllGaps(t, v, promotion, move, false, false, why)
+}
+
+func requireAllGaps(t *testing.T, v map[string]any, promotion, move, instructor, room bool, why string) {
 	t.Helper()
 	require.Equal(t, promotion, v["missing_promotion_notice"], "missing_promotion_notice: "+why)
 	require.Equal(t, move, v["missing_move_notice"], "missing_move_notice: "+why)
-	require.Equal(t, promotion || move, v["violating"], "violating = either gap: "+why)
+	require.Equal(t, instructor, v["missing_instructor_notice"], "missing_instructor_notice: "+why)
+	require.Equal(t, room, v["missing_room_notice"], "missing_room_notice: "+why)
+	require.Equal(t, promotion || move || instructor || room, v["violating"], "violating = any gap: "+why)
 	_, hasFreshUntil := v["freshUntil"]
 	require.False(t, hasFreshUntil, "the change-notice lens arms no timer — no freshUntil column")
 }

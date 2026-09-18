@@ -133,16 +133,16 @@ func TestPastDueBookings_NoShowFeeIsATypedZero(t *testing.T) {
 // conflict. An explicit CAS is skipped by that retry path, so when both gaps
 // open on one booking and Weaver dispatches both, the loser would be rejected
 // outright and wait out the mark lease instead of re-executing carrying the
-// winner's field. The update still carries the other kind's field forward;
+// winner's field. The update still carries the other kinds' fields forward;
 // the create branch is the absent case.
 func TestRecordBookingChangeNotice_MarkerUpdateIsBare(t *testing.T) {
 	for _, want := range []string{
 		`existing = kv.Read(booking_key + ".changeNotice")`,
 		`marker_mut = {"op": "update", "key": marker_key, "document": marker_doc}`,
 		`marker_mut = {"op": "create", "key": marker_key, "document": marker_doc}`,
-		`marker["promotedFor"] = change_ref`,
-		`marker["movedFor"] = change_ref`,
-		`for field in ["promotedFor", "movedFor"]:`,
+		`marker[KIND_FIELDS[kind]] = change_ref`,
+		`for k in CHANGE_KINDS:`,
+		`KIND_FIELDS = {"promoted": "promotedFor", "moved": "movedFor", "instructor": "instructorFor", "room": "roomFor"}`,
 	} {
 		if !strings.Contains(recordChangeNoticeScript, want) {
 			t.Errorf("recordChangeNoticeScript must contain %q", want)

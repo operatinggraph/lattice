@@ -58,20 +58,24 @@ func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.vertexType",
 		PermittedCommands: []string{changeNoticeOp},
 		Description: "Booking-change notice op handler (wellness-reminders). RecordBookingChangeNotice{bookingKey, " +
-			"sessionKey, kind: promoted|moved, changeRef} tells a member once about one change to their confirmed seat " +
-			"and records that it did: it writes vtx.booking.<NanoID>.changeNotice = {promotedFor?, movedFor?, sentAt} " +
-			"(class bookingChangeNotice) on a LIVE `booked` booking, setting promotedFor = changeRef for kind=promoted " +
-			"or movedFor = changeRef for kind=moved and carrying the other kind's field forward, and emits " +
+			"sessionKey, kind: promoted|moved|instructor|room, changeRef} tells a member once about one change to their " +
+			"confirmed seat and records that it did: it writes vtx.booking.<NanoID>.changeNotice = {promotedFor?, " +
+			"movedFor?, instructorFor?, roomFor?, sentAt} (class bookingChangeNotice) on a LIVE `booked` booking, " +
+			"setting the dispatched kind's field to changeRef (promotedFor / movedFor / instructorFor / roomFor) and " +
+			"carrying the other kinds' fields forward, and emits " +
 			"external.notification off its own outbox (instanceKey = idempotencyKey = externalRef = " +
 			"<bookingKey>:<kind>:<changeRef>) to the bridge's \"notification\" adapter; wellness-domain's " +
 			"RecordBookingChangeNotification records the outcome. It is the directOp the wellnessBookingChangeNotices " +
-			"§10.8 playbook dispatches for both of that lens's gaps (missing_promotion_notice with changeRef = " +
-			"row.promotedAt; missing_move_notice with changeRef = row.startsAt). Reads [bookingKey, bookingKey.status, " +
+			"§10.8 playbook dispatches for all four of that lens's gaps (missing_promotion_notice with changeRef = " +
+			"row.promotedAt; missing_move_notice with changeRef = row.startsAt; missing_instructor_notice with " +
+			"changeRef = row.instructorChangedAt; missing_room_notice with changeRef = row.studioChangedAt). Reads " +
+			"[bookingKey, bookingKey.status, " +
 			"sessionKey, sessionKey.schedule] and optionally [bookingKey.changeNotice]: it liveness-guards the booking " +
 			"(UnknownBooking) and the session (UnknownSession — a class being called off is told by " +
 			"ReleaseOrphanedBooking's own notice, never here), requires .status.value = booked (InvalidState), and " +
 			"re-checks the change against the " +
-			"live aspect — .status.promotedAt = changeRef for a promotion, .schedule.startsAt = changeRef for a move — " +
+			"live aspect — .status.promotedAt = changeRef for a promotion, .schedule.startsAt for a move, " +
+			".schedule.instructorChangedAt for an instructor change, .schedule.studioChangedAt for a room change — " +
 			"refusing StaleChange when the dispatched row has been outrun, so a stale row is refused, not trusted. The " +
 			"marker write is a create when the aspect is absent and a bare update on the hydrated key when it exists " +
 			"(§3.2-conditioned on the step-4 revision, retry-eligible in-process), so a promotion notice and a move " +
@@ -81,16 +85,16 @@ func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 		InputSchema: `{"type":"object","properties":` +
 			`{"bookingKey":{"type":"string","description":"vtx.booking.<NanoID> whose seat changed (required; validated alive and booked). The caller MUST list it and bookingKey.status in ContextHint.Reads."},` +
 			`"sessionKey":{"type":"string","description":"vtx.session.<NanoID> the booking is for (required; validated alive — a called-off class sends nothing from here; its .schedule aspect carries the startsAt the move check and the notice params read). The caller MUST list sessionKey and sessionKey.schedule in ContextHint.Reads."},` +
-			`"kind":{"type":"string","enum":["promoted","moved"],"description":"Which change this notice is for: promoted (the seat was handed over from the waitlist) or moved (the class time changed). Required."},` +
-			`"changeRef":{"type":"string","description":"The value that identifies WHICH change: the .status.promotedAt instant for kind=promoted, the session's current .schedule.startsAt for kind=moved (RFC3339, canonical UTC). Required; refused StaleChange when it no longer matches the live aspect."}},` +
+			`"kind":{"type":"string","enum":["promoted","moved","instructor","room"],"description":"Which change this notice is for: promoted (the seat was handed over from the waitlist), moved (the class time changed), instructor (who leads the class changed — a sub, a clear, or a first assignment) or room (the class moved to another studio). Required."},` +
+			`"changeRef":{"type":"string","description":"The value that identifies WHICH change: the .status.promotedAt instant for kind=promoted, the session's current .schedule.startsAt for kind=moved, its .schedule.instructorChangedAt for kind=instructor, its .schedule.studioChangedAt for kind=room (RFC3339, canonical UTC). Required; refused StaleChange when it no longer matches the live aspect."}},` +
 			`"required":["bookingKey","sessionKey","kind","changeRef"]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.booking.<NanoID> the change-notice marker was written on."}}}`,
 		FieldDescription: map[string]string{
 			"bookingKey": "Full vtx.booking.<NanoID> key whose seat changed. RecordBookingChangeNotice validates it is alive and booked, then writes the .changeNotice aspect on it. The caller MUST list this key and bookingKey.status in ContextHint.Reads.",
 			"sessionKey": "Full vtx.session.<NanoID> key of the class this booking is for. RecordBookingChangeNotice validates it is alive (a called-off class is told by the release's own notice, never here) and reads its .schedule aspect for the startsAt the move check compares and the notice carries. The caller MUST list sessionKey and sessionKey.schedule in ContextHint.Reads.",
-			"kind":       "promoted or moved — which change this notice tells the member about, and which .changeNotice field (promotedFor / movedFor) records it.",
-			"changeRef":  "The change's own identifier, re-checked against the live aspect before anything is sent: .status.promotedAt for promoted, the session's .schedule.startsAt for moved. Recorded verbatim so the lens's equality closes the gap, and a later move (a new startsAt) reopens it.",
+			"kind":       "promoted, moved, instructor or room — which change this notice tells the member about, and which .changeNotice field (promotedFor / movedFor / instructorFor / roomFor) records it.",
+			"changeRef":  "The change's own identifier, re-checked against the live aspect before anything is sent: .status.promotedAt for promoted, the session's .schedule.startsAt for moved, its .schedule.instructorChangedAt for instructor, its .schedule.studioChangedAt for room. Recorded verbatim so the lens's equality closes the gap, and a later change (a new value) reopens it.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
@@ -109,6 +113,14 @@ func recordChangeNoticeVertexTypeDDL() pkgmgr.DDLSpec {
 					"vtx.booking.<NanoID>:moved:2026-10-01T15:00:00Z. Refuses StaleChange if the class has moved again since " +
 					"the row was projected — the next dispatch carries the current time.",
 			},
+			{
+				Name:    "RecordBookingChangeNotice — a class handed to a sub",
+				Payload: map[string]any{"bookingKey": "vtx.booking.<NanoID>", "sessionKey": "vtx.session.<NanoID>", "kind": "instructor", "changeRef": "2026-09-18T20:00:00Z"},
+				ExpectedOutcome: "Validates the booking is alive and booked and that the session's .schedule.instructorChangedAt = " +
+					"changeRef, then writes instructorFor: 2026-09-18T20:00:00Z (carrying the other kinds' fields) and emits the " +
+					"notice keyed vtx.booking.<NanoID>:instructor:2026-09-18T20:00:00Z, naming who leads now (or nobody). A " +
+					"room change is the same with kind=room over .schedule.studioChangedAt.",
+			},
 		},
 	}
 }
@@ -124,29 +136,35 @@ func changeNoticeAspectTypeDDL() pkgmgr.DDLSpec {
 		Class:             "meta.ddl.aspectType",
 		PermittedCommands: []string{changeNoticeOp},
 		Description: "Booking change-notice marker aspect (wellness-reminders). Stored as vtx.booking.<NanoID>.changeNotice " +
-			"(class bookingChangeNotice) = {promotedFor?, movedFor?, sentAt}. Non-sensitive. Written ONLY by " +
+			"(class bookingChangeNotice) = {promotedFor?, movedFor?, instructorFor?, roomFor?, sentAt}. Non-sensitive. Written ONLY by " +
 			"RecordBookingChangeNotice (whose bookingChangeNoticeOp vertexType DDL owns the script) as a create-or-update " +
-			"carrying the other kind's field forward; " +
+			"carrying the other kinds' fields forward; " +
 			"this aspect-type DDL is the step-6 write gate. Declaration-only: no op handler. promotedFor = the " +
 			".status.promotedAt the promotion notice was for (equality closes missing_promotion_notice, once — " +
 			"promotedAt never changes); movedFor = the session startsAt the last move notice was for (equality closes " +
-			"missing_move_notice; a further move reopens it). Created at the first notice, carried per kind, never " +
+			"missing_move_notice; a further move reopens it); instructorFor = the .schedule.instructorChangedAt the last " +
+			"instructor notice was for, roomFor = the .schedule.studioChangedAt the last room notice was for (each " +
+			"equality closes its gap; a further change reopens it). Created at the first notice, carried per kind, never " +
 			"reset; dies with the booking.",
 		Script: aspectDeclarationOnlyScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"promotedFor":{"type":"string","description":"The .status.promotedAt instant (RFC3339, canonical UTC) the promotion notice was for."},` +
 			`"movedFor":{"type":"string","description":"The session startsAt (RFC3339, canonical UTC) the last move notice was for."},` +
-			`"sentAt":{"type":"string","description":"RFC3339 instant the latest notice of either kind was recorded (the op's submittedAt, canonical UTC)."}}}`,
+			`"instructorFor":{"type":"string","description":"The session's .schedule.instructorChangedAt (RFC3339, canonical UTC) the last instructor notice was for."},` +
+			`"roomFor":{"type":"string","description":"The session's .schedule.studioChangedAt (RFC3339, canonical UTC) the last room notice was for."},` +
+			`"sentAt":{"type":"string","description":"RFC3339 instant the latest notice of any kind was recorded (the op's submittedAt, canonical UTC)."}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"promotedFor": "The .status.promotedAt instant the promotion notice was for. promotedFor = promotedAt closes the promotion gap.",
-			"movedFor":    "The session startsAt the last move notice was for. movedFor = the current startsAt closes the move gap; a further ReassignSession reopens it.",
-			"sentAt":      "RFC3339 instant the latest notice of either kind was recorded (op.submittedAt, canonical UTC).",
+			"promotedFor":   "The .status.promotedAt instant the promotion notice was for. promotedFor = promotedAt closes the promotion gap.",
+			"movedFor":      "The session startsAt the last move notice was for. movedFor = the current startsAt closes the move gap; a further ReassignSession reopens it.",
+			"instructorFor": "The session's .schedule.instructorChangedAt the last instructor notice was for. Equality closes the instructor gap; a further swap, clear or assignment reopens it.",
+			"roomFor":       "The session's .schedule.studioChangedAt the last room notice was for. Equality closes the room gap; a further room move reopens it.",
+			"sentAt":        "RFC3339 instant the latest notice of any kind was recorded (op.submittedAt, canonical UTC).",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "booking change-notice marker aspect",
-				Payload:         map[string]any{"promotedFor": "2026-09-16T20:41:00Z", "movedFor": "2026-10-01T15:00:00Z", "sentAt": "2026-09-17T09:00:05Z"},
+				Payload:         map[string]any{"promotedFor": "2026-09-16T20:41:00Z", "movedFor": "2026-10-01T15:00:00Z", "instructorFor": "2026-09-18T20:00:00Z", "sentAt": "2026-09-18T20:00:05Z"},
 				ExpectedOutcome: "Stored as vtx.booking.<NanoID>.changeNotice; written by RecordBookingChangeNotice.",
 			},
 		},
@@ -184,6 +202,17 @@ def parts_of(key, name, want_type):
         fail("InvalidArgument: " + name + ": required vtx." + want_type + ".<NanoID>; got " + key)
     return parts[1], parts[2]
 
+def optional_param(p, name):
+    # A row column the target templates as a param: '' when the walk it
+    # comes from bound nothing (the lens coalesces so Weaver can template
+    # it), read here as absent.
+    if not hasattr(p, name):
+        return None
+    v = getattr(p, name)
+    if v == None or type(v) != type("") or len(v.strip()) == 0:
+        return None
+    return v.strip()
+
 def vertex_alive(state, key):
     if key not in state:
         return False
@@ -194,12 +223,17 @@ def vertex_alive(state, key):
         return False
     return True
 
-CHANGE_KINDS = ["promoted", "moved"]
+# Each kind names the .changeNotice field that records it and the stamp on
+# the session's schedule it is re-checked against (a promotion's stamp is on
+# the booking's own .status instead).
+CHANGE_KINDS = ["promoted", "moved", "instructor", "room"]
+KIND_FIELDS = {"promoted": "promotedFor", "moved": "movedFor", "instructor": "instructorFor", "room": "roomFor"}
+KIND_STAMPS = {"moved": "startsAt", "instructor": "instructorChangedAt", "room": "studioChangedAt"}
 
 def required_kind(p):
     kind = required_string(p, "kind")
     if kind not in CHANGE_KINDS:
-        fail("InvalidArgument: kind: must be one of promoted, moved; got " + kind)
+        fail("InvalidArgument: kind: must be one of promoted, moved, instructor, room; got " + kind)
     return kind
 
 def execute(state, op):
@@ -283,28 +317,32 @@ def execute(state, op):
             if promoted_at != change_ref:
                 fail("StaleChange: " + booking_key + " promotedAt " + promoted_at + " is not the dispatched changeRef " + change_ref)
         else:
-            if starts_at != change_ref:
-                fail("StaleChange: " + session_key + " startsAt " + starts_at + " is not the dispatched changeRef " + change_ref +
-                     "; the class moved again since the row was projected")
+            # moved re-checks startsAt; instructor / room re-check the stamp
+            # ReassignSession recorded for that change. A stamp the schedule
+            # does not carry is a row the graph has outrun (or never had).
+            stamp_field = KIND_STAMPS[kind]
+            stamp = schedule.data.get(stamp_field)
+            if stamp == None:
+                fail("StaleChange: " + session_key + ".schedule carries no " + stamp_field + "; nothing to tell")
+            if stamp != change_ref:
+                fail("StaleChange: " + session_key + " " + stamp_field + " " + stamp + " is not the dispatched changeRef " + change_ref +
+                     "; the class changed again since the row was projected")
 
         sent_at = time.rfc3339_utc(op.submittedAt)
 
-        # The marker carries BOTH kinds' fields: a promotion notice and a move
-        # notice converging on one booking each set their own field and carry
-        # the other's forward, so neither write erases the other's evidence.
+        # The marker carries EVERY kind's field: notices of different kinds
+        # converging on one booking each set their own field and carry the
+        # others' forward, so no write erases another's evidence.
         # read-posture: (d) declared optionalReads at wellnessBookingChangeNotices
         # dispatch (the create-or-update branch below).
         existing = kv.Read(booking_key + ".changeNotice")
         marker = {}
         if existing != None and not existing.isDeleted:
-            for field in ["promotedFor", "movedFor"]:
-                carried = existing.data.get(field)
+            for k in CHANGE_KINDS:
+                carried = existing.data.get(KIND_FIELDS[k])
                 if carried != None:
-                    marker[field] = carried
-        if kind == "promoted":
-            marker["promotedFor"] = change_ref
-        else:
-            marker["movedFor"] = change_ref
+                    marker[KIND_FIELDS[k]] = carried
+        marker[KIND_FIELDS[kind]] = change_ref
         marker["sentAt"] = sent_at
 
         marker_key = booking_key + ".changeNotice"
@@ -338,6 +376,19 @@ def execute(state, op):
         class_name = status.data.get("className")
         if class_name != None:
             params["className"] = class_name
+        # An instructor notice says who leads now; a room notice says where
+        # the class meets. Both arrive off the dispatching row -- the lens's
+        # ledBy / atStudio walks, coalesced to '' so Weaver can template them
+        # -- and the script reads no link of its own. An un-led class names
+        # nobody: the key is omitted, never sent as an empty string.
+        if kind == "instructor":
+            instructor_name = optional_param(p, "instructorName")
+            if instructor_name != None:
+                params["instructorName"] = instructor_name
+        if kind == "room":
+            studio_name = optional_param(p, "studioName")
+            if studio_name != None:
+                params["studioName"] = studio_name
         events.append({"class": "external.notification",
                        "data": {"instanceKey": ext_ref, "adapter": "notification",
                                 "replyOp": "RecordBookingChangeNotification",
