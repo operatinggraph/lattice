@@ -174,12 +174,22 @@ account is reached exactly as `require_no_credit_hold` reaches `.arrears` — `c
 tombstoned → `0` (a legacy account, the ledger's own documented absence); wrong class → `InvalidState` (the credit-hold
 precedent's class check). Signed: a credit balance widens the room. **Accepted window:** a settled tab's debit posts via
 `cafeTabSettlement.missing_charge` seconds after `Settle`; between the two the recorded balance excludes it, so a
-settle-and-reopen inside that window sees the old room once. The refusal reads the recorded fact, never re-derives it.
-`OpenTab` self leg additionally refuses when `balanceCents >= limit` (no line could join). Field name `tabLimitCents`,
-class `cafeHousePolicy` and code `TabLimitExceeded` stay — an installed value is not renamed; the descriptions say what the
-limit now bounds. `Charge` cannot declare the `heldFor` walk (its hub is the tab's own `leaseAppKey`, data-derived —
-`OpDispatchSpec.Enumerations` admits `{actor}` / `{payload.<field>}` only), the same class as the `leaseapp_unit` walk it
-already runs; `OpenTab` already declares it.
+settle-and-reopen inside that window sees the old room again — a resident scripting settle → open → charge-to-limit
+inside the posting latency can stack cycles × limit until the first debit lands, after which `balanceCents >= limit`
+closes the door; the bound is adversarial-only, sized by convergence latency (seconds), and no op-side fact records
+"posted" today (nothing writes it back to the tab or the lease), so the mechanism that would close it is a lens/gap
+column, priced out as not worth a new state for a seconds-wide window. The refusal reads the recorded fact, never
+re-derives it. `OpenTab` self leg additionally refuses when `balanceCents >= limit` (no line could join). Field name
+`tabLimitCents`, class `cafeHousePolicy` and code `TabLimitExceeded` stay — an installed value is not renamed; the
+descriptions say what the limit now bounds. **Declaration:** `OpenTab` declares the `heldFor` walk (payload-direct hub);
+`Charge`'s hub is the tab's own `leaseAppKey` — the café app's self-order submit names it as a literal hub, the descriptor
+form cannot (an enumeration hub refuses `{me.<type>}` at install, `pkgmgr/opdispatchtemplates.go`), so at the Processor
+the walk is link-discovered off the declared `.status` read, the same class as the `leaseapp_unit` walk `Charge` already
+runs, and carries its `read_drift_baseline` row. **FE input:** the app's balance is the statement sum over
+`cafeLedgerHistory` (`/api/ledger.balanceCents`, `frontdesk-balances`), the op's is the account's recorded `.balance`
+cache; equal on every account cafe-ledger ≥ 0.4.0 minted, and on a legacy account carrying no `.balance` the FE withholds
+where the op allows — the safe direction, stated at the courtesy lines rather than projected as a new column for a
+dying class.
 
 ### Fire brief (build note, 2026-09-18) — three café rows in one fire
 
@@ -240,3 +250,35 @@ already runs; `OpenTab` already declares it.
 6. **Adjacent finds:** none at scoping.
 7. **Non-goals:** counting a settled-unposted tab (the accepted window above); a per-day tally; a limit on the desk;
    renaming `tabLimitCents`; server-side ranking in `computeLeases` (names live only in the FE's identity join).
+
+### Build note (2026-09-18) — the exposure fire
+
+Shipped `5b296bbb` (merge `fb335b71`) + `ad1bc19f`; brief `a8639194`. One fire, both increments, three rows. Live on the
+shared stack (cafe-domain 0.19.0 → 0.20.0 diff-applied, `bin/cafe-app` cycled): Riley Chen (balance $45.99, Riverside limit
+$50.00) opened a tab and self-ordered one croissant ($3.50, exposure $49.49); the second was refused `TabLimitExceeded: this
+house limits what a resident may owe on self-service to $50.00; this account owes $45.99, the tab stands at $3.50 and this
+item is $3.50; ask the desk`; Dana Whitfield rang $5.00 past it; after Dana served and settled, the debit posted in ≈6 s
+and Riley's `OpenTab` was refused `… and this account already owes $54.49; pay at the desk before opening a tab`; Dana
+took a $30.00 counter payment (balance $24.49) so self-service stands again. Rendered: the resident card read *Over the
+house limit of $50.00 with $45.99 owed on the account — self-order is closed* over the $8.50 tab, the statement's stamps
+read local (*Sep 18, 2026, 11:05 AM*), the POS picker listed *● Riley Chen — 10 Riverside Walk* first of 58 with 52 rows
+under *Not billable*, and typing *priya* narrowed it to one row and re-rendered her credit-hold card.
+
+**Deviations from the brief.** (1) `cafe_account_for_lease` gained a per-execution memo (the `leaseapp_unit` shape) so
+`OpenTab`'s exposure bound and credit hold walk `heldFor` once. (2) The Charge refusal phrases a credit balance as *in
+credit*. (3) The type-to-find rebuilds the option list from the ranked rows rather than hiding options (WebKit ignores
+`option.hidden` in a native select). (4) The at/over house-limit lines name the balance that filled the room; the
+self-order hint names balance and tab together (both found live, fixed at `ad1bc19f`).
+
+**Close-pass classification.** Cold review (opus): one BLOCKING dissolved on grounding — the reviewer's `{me.leaseapp}`
+enumeration hub is what install refuses, so the drift-baseline row stands, but its premise ("no dispatcher can name it")
+was overstated: the app's self-order submit holds the lease key and now declares the walk (review-over-reach + design-gap,
+`_packages.md` dispatch-declaration entry). SHOULD-FIX: Safari `option.hidden` (implementation-bug, fixed by rebuild);
+the refund dialog's raw `data-posted` stamp (the zone class, fifth sighting, `vertical-apps.md`); four copy sites still
+describing one tab's total (brief-gap — the brief said "the descriptions say what the limit now bounds", the builder
+walked the script's and missed the desk's; fixed); no vector for a tombstoned or foreign-class `.balance` (test-gap,
+added); the FE's balance input is the statement sum, not the op's `.balance` cache (design-gap, ninth sighting of the
+FE-predicate entry — stated at the courtesy line, not projected); the accepted window is per settle-reopen cycle inside
+the posting latency, not "once" (design-gap, body amended); history-narrating test comments (convention, fixed). NITs:
+the double `heldFor` walk (fixed by memo), the credit phrasing (fixed), a Refresh dropping the query (moot under the
+rebuild). CI: `fb335b71` green.

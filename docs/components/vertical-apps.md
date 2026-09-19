@@ -84,7 +84,10 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   it). **Eighth (LoftSpace maintenance, 2026-09-18, caught cold ×3):** two new refreshes read ahead of projection (no
   800 ms defer), a label joined a list not yet loaded (concurrent loads), and a "resides here NOW" boolean was read as
   "ever reported from here" — a new load site mirrors the sibling's defer, runs after the lists it joins, and a projected
-  boolean is read as the fact it records.
+  boolean is read as the fact it records. **Ninth (café house limit, 2026-09-18, caught cold):** the FE applied the op's
+  exact predicate to a DIFFERENT input — the statement sum where the op reads the account's recorded `.balance` cache —
+  equal on every current account and divergent on a legacy one; a courtesy names its input's source beside the op's and
+  states which way they can differ. Same pass, live: the at/over line named the limit and not the balance that filled it.
 - **An op name in any `cmd/<app>` Go comment is a UI reference to `lint-app-op-descriptors`** — a
   rationale comment naming an exemption-less op (the instructor identity bind) reddened `lint-static` after
   a green local run, because the unit's local gate set omitted that lint. Minted: wellness staff-hats
@@ -149,7 +152,9 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   Date; an app that gains a date-only column adds its helper to that shape. Third sighting (clinic `amendedAt`,
   2026-09-16, caught cold): a real instant rendered by its UTC slice on the card and locale in the modal, beside a
   locale `documentedAt` on the same line — the inverse error; an instant renders locale everywhere. Fourth sighting
-  (LoftSpace `reminderSentAt` UTC beside `lateFeeBilledAt` local on one Rent-owed line, 2026-09-18, caught cold).
+  (LoftSpace `reminderSentAt` UTC beside `lateFeeBilledAt` local on one Rent-owed line, 2026-09-18, caught cold). Fifth
+  (café refund dialog reading a `data-posted` attribute raw while the statement row beside it went local, 2026-09-18,
+  caught cold): a `data-*` stamp a click handler DISPLAYS is a render site, and the stamp pin walks the attribute's readers.
 - **A shared refusal-message map serves every hat whose form routes through it — a sentence in the patient's voice
   reaches the desk.** `friendlyBookingRejection` is read by `submitBook` and `submitReschedule` under both hats, and the
   `SelfBookingLimit` text told a refused front-desk mover "You already have an open visit … the front desk can book

@@ -600,7 +600,10 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   the OPTIONAL `ledBy` walk, null on the instructor-CLEARED class the gap existed to tell. **The Params half is RETIRED —
   mechanized as `scripts/lint-gap-params-optional-hop.go`** (the full engine's `OptionalHopColumns` /
   `ReturnColumnGuardsNonNull`; clean = anchor-only, `coalesce`d to a literal, or bound by the gap's own `<> null` /
-  ordering conjunct). The Hub and Reads halves stay a walk.
+  ordering conjunct). The Hub and Reads halves stay a walk. Sighting (café `Charge` heldFor walk, 2026-09-18, caught
+  cold both ways): "cannot be declared" is a claim about EVERY dispatcher and the install vocabulary — the app's own
+  submit held the hub as a literal and could declare it, while the reviewer's `{me.<type>}` hub is what
+  `opdispatchtemplates.go` refuses; a baseline row states which dispatcher cannot and why, and the ones that can, do.
 - **A gap's budget and cadence are derived from its WHOLE loop, not one arm or one window** — a cap summed over
   one arm of a multi-relation sweep under-sizes it (erasure residue caps, 2026-08-24, 2× and 3×); a gap that
   re-opens on a recorded clock lapse mints a successor per window while the prior instance stays live (lease-signing

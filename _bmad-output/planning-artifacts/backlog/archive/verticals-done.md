@@ -2,6 +2,9 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-16 · `71b71bc5` · A house tab has a recorded limit — `SetCafePolicy` on the location, tightest on the chain; self leg refused `TabLimitExceeded`, the desk rings past ([design](../../../docs/reviews/cafe-house-tab-limit-2026-09-16.md)).
+- 2026-09-16 · `1144aec5` · The desk settles and takes the cash at once — `Settle{paidCents}`, `missing_payment` posts the tab-tied credit after the debit; Settle & pay; live ([design](../../../docs/reviews/cafe-counter-payment-2026-09-16.md)).
+- 2026-09-16 · `1144aec5` · The arrears row takes a payment — *Take payment* beside *Write off*, a confirmed `CreditCafeAccount{reason: payment}` prefilled to the balance shown.
 - 2026-09-16 · `6e038e54` · Tab and visit times render as the viewer's local date-time — one `localDateTime` formatter on every card's `openedAt`/`settledAt`/`startsAt`; goja-pinned.
 - 2026-09-16 · `0cfa1e11` · A self-order says when it was ordered and whether it was served — `orderedAt`, `servedAt`, `MarkLineServed`, the desk's Orders panel; live ([design](../../../docs/reviews/cafe-self-order-fulfilment-2026-09-16.md)).
 - 2026-09-16 · `0f769e58` · A self-booking patient holds one open visit per provider per day — `patientSelfDayClaim` on the self path, moved by a reschedule, freed on every terminal transition; `SelfBookingLimit`; desk unrestricted; refused live.
