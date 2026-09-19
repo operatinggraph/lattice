@@ -255,6 +255,80 @@ func TestLeaseAccounts_LeaseWithAccount_ProjectsAccountKey(t *testing.T) {
 	require.Equal(t, "vtx.account."+f.ids["held_acct"], v["accountKey"], "the heldFor hop is walked INBOUND from the lease")
 }
 
+// TestLedgerHistory_LateFee_ProjectsBilledForKey — the late fee's billedFor
+// hop projects the head charge it was billed for; every other row (the
+// charge itself, a payment) projects null.
+func TestLedgerHistory_LateFee_ProjectsBilledForKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "bf_lease", "leaseapp")
+	f.vtx(t, "bf_acct", "account")
+	f.edge(t, "heldFor", "bf_acct", "bf_lease")
+	f.vtx(t, "bf_rent", "transaction")
+	f.aspect(t, "bf_rent", "entry", "transactionEntry", map[string]any{"type": "debit", "amountCents": 240000.0, "postedAt": "2026-09-01T09:00:00Z", "dueAt": "2026-09-01T09:00:00Z"})
+	f.edge(t, "postedTo", "bf_rent", "bf_acct")
+	f.vtx(t, "bf_fee", "transaction")
+	f.aspect(t, "bf_fee", "entry", "transactionEntry", map[string]any{"type": "debit", "amountCents": 5000.0, "postedAt": "2026-09-12T09:00:00Z", "dueAt": "2026-09-12T09:00:00Z", "memo": "Late fee — rent due 2026-09-01"})
+	f.edge(t, "postedTo", "bf_fee", "bf_acct")
+	f.edge(t, "billedFor", "bf_fee", "bf_rent")
+
+	rows := f.project(t, "ledgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["transactionKey"].(string)] = r.Values
+	}
+	require.Equal(t, "vtx.transaction."+f.ids["bf_rent"], byKey["vtx.transaction."+f.ids["bf_fee"]]["billedForKey"], "the fee names the charge it was billed for")
+	require.Nil(t, byKey["vtx.transaction."+f.ids["bf_rent"]]["billedForKey"], "the charge names nothing")
+	require.Nil(t, byKey["vtx.transaction."+f.ids["bf_fee"]]["reversesKey"])
+}
+
+// TestLeaseAccounts_ProjectsTheArrearsColumns — the four arrears columns read
+// straight off the account's own .arrears aspect: dueAt, remindedFor, sentAt
+// and lateFeeAt (the instant the episode's late fee was billed), each null
+// where the aspect carries none, so the landlord ledger, the tenant
+// statement and the portfolio row can say when the rent fell due, when the
+// reminder went out and when the fee was billed.
+func TestLeaseAccounts_ProjectsTheArrearsColumns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.vtx(t, "arr_lease", "leaseapp")
+	f.vtx(t, "arr_acct", "account")
+	f.edge(t, "heldFor", "arr_acct", "arr_lease")
+	f.aspect(t, "arr_acct", "arrears", "loftspaceAccountArrears", map[string]any{
+		"evaluatedAt": "2026-09-12T09:00:00Z", "dueAt": "2026-09-01T09:00:00Z", "remindAt": "2026-09-06T09:00:00Z",
+		"remindedFor": "2026-09-01T09:00:00Z", "sentAt": "2026-09-12T09:00:00Z", "lateFeeAt": "2026-09-12T09:00:00Z",
+	})
+
+	rows := f.project(t, "leaseAccounts", leaseAccountsSpec)
+	require.Len(t, rows, 1)
+	v := rows[0].Values
+	require.Equal(t, "2026-09-01T09:00:00Z", v["arrearsDueAt"])
+	require.Equal(t, "2026-09-01T09:00:00Z", v["arrearsRemindedFor"])
+	require.Equal(t, "2026-09-12T09:00:00Z", v["arrearsReminderSentAt"])
+	require.Equal(t, "2026-09-12T09:00:00Z", v["arrearsLateFeeAt"], "arrearsLateFeeAt is a.arrears.data.lateFeeAt verbatim")
+
+	// An episode reminded for before the lease had a fee term: sentAt without
+	// lateFeeAt, the column null rather than borrowed from sentAt.
+	f.vtx(t, "nofee_lease", "leaseapp")
+	f.vtx(t, "nofee_acct", "account")
+	f.edge(t, "heldFor", "nofee_acct", "nofee_lease")
+	f.aspect(t, "nofee_acct", "arrears", "loftspaceAccountArrears", map[string]any{
+		"evaluatedAt": "2026-09-12T09:00:00Z", "dueAt": "2026-09-01T09:00:00Z", "remindAt": "2026-09-06T09:00:00Z",
+		"remindedFor": "2026-09-01T09:00:00Z", "sentAt": "2026-09-12T09:00:00Z",
+	})
+	for _, r := range f.project(t, "leaseAccounts", leaseAccountsSpec) {
+		if r.Values["leaseAppKey"] == "vtx.leaseapp."+f.ids["nofee_lease"] {
+			require.Equal(t, "2026-09-12T09:00:00Z", r.Values["arrearsReminderSentAt"])
+			require.Nil(t, r.Values["arrearsLateFeeAt"])
+		}
+	}
+}
+
 // TestLedgerHistory_RecurringCharge_ProjectsItsPeriodAndDueDate — a charge
 // whose .entry records the period it bills and its due date (DebitAccount's
 // termed/monthly stamp) projects all three; a plain charge with none
@@ -285,4 +359,39 @@ func TestLedgerHistory_RecurringCharge_ProjectsItsPeriodAndDueDate(t *testing.T)
 	require.Nil(t, plain["periodStart"], "a one-time charge records no period")
 	require.Nil(t, plain["periodEnd"])
 	require.Nil(t, plain["dueAt"])
+}
+
+// TestLoftspaceLedgerHistory_Reverses_ProjectsReversesKey — a credit that
+// reverses a charge carries the charge's key as reversesKey (the outbound
+// reverses hop), a plain charge carries null, and the reversed charge itself
+// reverses nothing — the hop is outbound only. The column is what the
+// statement and the landlord's ledger net the credit against and label the
+// row by.
+func TestLoftspaceLedgerHistory_Reverses_ProjectsReversesKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.mkPostedCharge(t, "rev", 205000, "September rent")
+	f.vtx(t, "rev_credit", "transaction")
+	f.edge(t, "postedTo", "rev_credit", "rev_acct")
+	f.edge(t, "reverses", "rev_credit", "rev_tx")
+	f.aspect(t, "rev_credit", "entry", "transaction", map[string]any{
+		"type": "credit", "amountCents": 205000.0, "memo": "Reversal: rent billed after the lease end", "postedAt": "2026-09-13T00:00:00Z",
+	})
+
+	rows := f.project(t, "ledgerHistory", ledgerHistorySpec)
+	require.Len(t, rows, 2)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["key"].(string)] = r.Values
+	}
+	credit := byKey["vtx.transaction."+f.ids["rev_credit"]]
+	require.NotNil(t, credit)
+	require.Equal(t, "vtx.transaction."+f.ids["rev_tx"], credit["reversesKey"],
+		"the reverses link names the charge this credit corrects")
+	require.Nil(t, credit["clauseKey"], "a reversal authorizes off no clause")
+	debit := byKey["vtx.transaction."+f.ids["rev_tx"]]
+	require.NotNil(t, debit)
+	require.Nil(t, debit["reversesKey"], "the reversed charge itself reverses nothing — the hop is outbound only")
 }

@@ -282,6 +282,13 @@ read	SetBookingAttendance	lnk.identity.<id>.worksAt.building.<id>
 # fixture under-declaration every sibling house-configuration op's row above
 # records (CreateMenuItem/RetireMenuItem/SetMenuItemAvailability/UpdateMenuItem).
 read	SetCafePolicy	lnk.identity.<id>.worksAt.building.<id>
+# SetLateFee's landlord probe (require_manages, packages/lease-signing/
+# scripts.go): the manages link is keyed by the unit the application's own
+# appliesToUnit walk resolves -- the same link-shaped follow-up
+# DecideLeaseApplication's and GiveNotice's rows above carry. Reached only on
+# the platform-validated self path; the shipped app declares the key as an
+# OptionalRead, which serves the read from the snapshot without deciding it.
+read	SetLateFee	lnk.identity.<id>.manages.unit.<id>
 read	SetMenuItemAvailability	lnk.identity.<id>.worksAt.building.<id>
 # SetMenuItemLocation's own staff-standing confinement (require_workplace on
 # the payload's newLocation) reads the caller's worksAt link live, same
@@ -456,6 +463,13 @@ walk	EvaluateCafeArrears	vtx.cafetransaction.<id> reverses out
 # transaction key only exists once that postedTo walk resolves it, so no
 # dispatcher can name it up front.
 walk	EvaluateClinicArrears	vtx.clinictransaction.<id> reverses out
+# arrears_entries (packages/loftspace-ledger/scripts.go) follows reverses off
+# each CREDIT transaction its own bounded postedTo replay discovers, to net a
+# reversal against the specific charge it names (arrears_head's rule) instead
+# of aging by plain FIFO order — the clinic shape exactly, one hop. The
+# transaction key only exists once that postedTo walk resolves it, so no
+# dispatcher can name it up front.
+walk	EvaluateLoftspaceArrears	vtx.transaction.<id> reverses out
 # tenant_for_account (packages/loftspace-ledger/scripts.go) resolves the
 # tenant an arrears reminder addresses TWO hops from the account: the heldFor
 # walk (declared by the loftspaceArrearsReminders playbook) names the lease,

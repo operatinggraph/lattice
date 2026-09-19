@@ -13,6 +13,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	ReturnDeposit          → operator (Weaver's leaseRentSettlement dispatch)
 //	RecordDepositDeduction  → operator, consumer (scope=self — landlord only, see below)
 //	PayOutBalance           → operator, consumer (scope=self — landlord only, see below)
+//	LinkReversal            → operator (the console's repair of a credit posted as a reversal before it could name its charge)
 //	EvaluateLoftspaceArrears                   → operator (Weaver's dispatch actor; the script refuses every other)
 //	RecordLoftspaceArrearsReminderNotification → operator (the bridge's service actor)
 //
@@ -77,7 +78,19 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // is only that the account's lease sits on a unit they manage
 // (heldFor→appliesToUnit→manages), the same management link that confines
 // lease-signing's DecideLeaseApplication and loftspace-domain's
-// SetListingStatus self paths.
+// SetListingStatus self paths. The landlord's credit may also NAME the
+// charge it reverses (CreditAccount's reversesRef, capped at that charge's
+// face); the resident's may not — a reversal retires the charge it names on
+// the arrears head, and the tenant chooses neither the charge nor the
+// amount of their own correction.
+//
+// LinkReversal is the operator's alone: it ties a credit that was posted as
+// a reversal before it could name its charge (a plain CreditAccount with an
+// explanatory memo) to that charge, writing the same reverses link the
+// atomic leg writes. No self grant (the FE offers it to nobody — a landlord
+// reverses through CreditAccount's reversesRef), no console-role
+// counterpart; the operator running it by hand against two transactions the
+// graph proves posted to one account is the whole population.
 //
 // Named LoftspaceCreateAccount rather than the bare CreateAccount this op
 // used before: a standing grant matches on operationType STRING EQUALITY
@@ -191,6 +204,12 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "self",
 			Note:          "Grants a consumer the right to pay out the balance of a lease's account on a unit they MANAGE — the same self_scope_standing proof; a resident standing is refused AuthDenied by the script.",
 			GrantsTo:      []string{"consumer"},
+		},
+		{
+			OperationType: "LinkReversal",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit LinkReversal (ties a credit posted naming nothing to the charge it reverses, writing the reverses link create-only and marking the account's arrears state stale). Operator-only: no self grant, no console-role counterpart — a landlord names the charge on the credit itself (CreditAccount's reversesRef).",
+			GrantsTo:      []string{"operator"},
 		},
 		{
 			OperationType: arrearsOp,

@@ -530,3 +530,140 @@ func TestSupersedeClause_NonActiveClause_Refused(t *testing.T) {
 		t.Fatalf("a refused amendment mints nothing")
 	}
 }
+
+// TestCreateClause_LateFeeShape_PairedBothWays — purpose=lateFee and
+// period=perArrearsEpisode imply each other: a lateFee at any other period
+// would be billed at mint by clauseSatisfaction's one-time arm, and a
+// perArrearsEpisode clause under any other purpose (or none) would be read
+// by the arrears evaluation as no fee and billed by nothing. The positive
+// vector records both on .terms and in the event; every mismatch — lateFee
+// oneTime, lateFee monthly, perArrearsEpisode untagged, perArrearsEpisode
+// tagged deposit, a judgment perArrearsEpisode, a termed or prorated one —
+// is refused InvalidArgument and mints nothing.
+func TestCreateClause_LateFeeShape_PairedBothWays(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "latefeeshape")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASELATEFEEHJKMNP")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctlatefee01", leaseKey)
+	inspectorKey := seedIdentity(t, ctx, conn, "BBLATEFEEYNSPHJKMNPQ")
+
+	clauseKey := submitCreateClause(t, ctx, conn, cp, cons, "createclauselatefee", leaseKey, acctKey,
+		`,"amountCents":5000,"period":"perArrearsEpisode","purpose":"lateFee"`, processor.OutcomeAccepted)
+	terms := readData(t, ctx, conn, clauseKey+".terms")
+	if got, _ := terms["purpose"].(string); got != "lateFee" {
+		t.Fatalf("terms.purpose = %q, want lateFee", got)
+	}
+	if got, _ := terms["period"].(string); got != "perArrearsEpisode" {
+		t.Fatalf("terms.period = %q, want perArrearsEpisode", got)
+	}
+	if got, _ := terms["amountCents"].(float64); got != 5000 {
+		t.Fatalf("terms.amountCents = %v, want 5000", terms["amountCents"])
+	}
+	if got, _ := readData(t, ctx, conn, clauseKey+".status")["state"].(string); got != "active" {
+		t.Fatalf("a fee clause is minted active, got %q", got)
+	}
+	ev := clauseCreatedEvent(t, ctx, conn, testutil.GenReqID("createclauselatefee"))
+	if got, _ := ev["purpose"].(string); got != "lateFee" {
+		t.Fatalf("clause.created event purpose = %q, want lateFee", got)
+	}
+
+	cases := []struct{ name, payload, want string }{
+		{"lateFee-oneTime", `{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"Fee.","amountCents":5000,"purpose":"lateFee"}`, "InvalidArgument: purpose: lateFee is a perArrearsEpisode computational clause; got period oneTime"},
+		{"lateFee-monthly", `{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"Fee.","amountCents":5000,"period":"monthly","purpose":"lateFee"}`, "InvalidArgument: purpose: lateFee is a perArrearsEpisode computational clause; got period monthly"},
+		{"perArrearsEpisode-untagged", `{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"Fee.","amountCents":5000,"period":"perArrearsEpisode"}`, "InvalidArgument: period: perArrearsEpisode is the lateFee clause's cadence; got purpose none"},
+		{"perArrearsEpisode-deposit", `{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"Fee.","amountCents":5000,"period":"perArrearsEpisode","purpose":"deposit"}`, "InvalidArgument: purpose: deposit is a oneTime computational clause"},
+		{"perArrearsEpisode-judgment", `{"leaseAppKey":"` + leaseKey + `","kind":"judgment","inspectorKey":"` + inspectorKey + `","prose":"Fee.","period":"perArrearsEpisode","purpose":"lateFee"}`, "InvalidArgument: period: perArrearsEpisode is computational-only"},
+		{"perArrearsEpisode-termed", `{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"Fee.","amountCents":5000,"period":"perArrearsEpisode","purpose":"lateFee","validFrom":"2026-09-01T00:00:00Z","validUntil":"2027-09-01T00:00:00Z"}`, "InvalidArgument: validFrom: a term is monthly-only"},
+		{"perArrearsEpisode-prorated", `{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"Fee.","rateCents":5000,"periodDays":30,"daysOccupied":10,"period":"perArrearsEpisode","purpose":"lateFee"}`, "InvalidArgument: rateCents: proration is one-time only"},
+		{"unknown-period", `{"leaseAppKey":"` + leaseKey + `","accountKey":"` + acctKey + `","prose":"Fee.","amountCents":5000,"period":"weekly","purpose":"lateFee"}`, "InvalidArgument: period: must be oneTime, monthly or perArrearsEpisode, got weekly"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqID := testutil.GenReqID("createclauselfshape" + string(rune('A'+i)))
+			env := &processor.OperationEnvelope{
+				RequestID:     reqID,
+				Lane:          processor.LaneDefault,
+				OperationType: "CreateClause",
+				Actor:         scActorKey,
+				SubmittedAt:   "2026-07-02T12:00:00Z",
+				Class:         "clause",
+				Payload:       json.RawMessage(tc.payload),
+				ContextHint:   &processor.ContextHint{Reads: []string{leaseKey, acctKey, inspectorKey}},
+			}
+			outcome, reply := testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+			if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, tc.want) {
+				t.Fatalf("%s: want a refusal containing %q, got %v / %+v", tc.name, tc.want, outcome, reply.Error)
+			}
+			if keyExists(t, ctx, conn, "vtx.clause."+nanoIDFromRequestID(reqID)) {
+				t.Fatalf("%s: a refused CreateClause must mint nothing", tc.name)
+			}
+		})
+	}
+}
+
+// TestSupersedeClause_PeriodInheritedWhenOmitted — an amendment that names
+// no period keeps the amended clause's cadence, the way it keeps the
+// purpose: the replacement of a late-fee clause at a new amount is still a
+// perArrearsEpisode lateFee clause (leaseRentSettlement's amendment gap
+// dispatches exactly this, restating the period; a by-hand amendment that
+// omits it lands the same). The pairing guard holds over the inherited pair:
+// an amendment restating period=oneTime on a lateFee clause is refused, and
+// a monthly clause amended without a period stays monthly.
+func TestSupersedeClause_PeriodInheritedWhenOmitted(t *testing.T) {
+	ctx, conn := setupBcEnv(t)
+	cp, cons := newBcPipeline(t, ctx, conn, "supersedeperiod")
+
+	leaseKey := seedLease(t, ctx, conn, "BBLEASESUPPERYQDHJKM")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "createacctsupperiod", leaseKey)
+	feeKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesupperd", leaseKey, acctKey,
+		`,"amountCents":5000,"period":"perArrearsEpisode","purpose":"lateFee"`, processor.OutcomeAccepted)
+
+	// Amount only: the replacement keeps perArrearsEpisode + lateFee.
+	_, newKey := submitSupersede(t, ctx, conn, cp, cons, "supersedeperiod0001", feeKey, leaseKey, acctKey,
+		`,"amountCents":7500`, processor.OutcomeAccepted)
+	newTerms := readData(t, ctx, conn, newKey+".terms")
+	if got, _ := newTerms["period"].(string); got != "perArrearsEpisode" {
+		t.Fatalf("the replacement's terms.period = %q, want the inherited perArrearsEpisode", got)
+	}
+	if got, _ := newTerms["purpose"].(string); got != "lateFee" {
+		t.Fatalf("the replacement's terms.purpose = %q, want the inherited lateFee", got)
+	}
+	if got, _ := newTerms["amountCents"].(float64); got != 7500 {
+		t.Fatalf("the replacement's amountCents = %v, want the amended 7500", newTerms["amountCents"])
+	}
+	if got, _ := readData(t, ctx, conn, feeKey+".status")["state"].(string); got != "superseded" {
+		t.Fatalf("the amended clause's status = %q, want superseded", got)
+	}
+
+	// The gap's own shape — the period restated — lands the same.
+	_, restated := submitSupersede(t, ctx, conn, cp, cons, "supersedeperiod0002", newKey, leaseKey, acctKey,
+		`,"amountCents":8000,"period":"perArrearsEpisode"`, processor.OutcomeAccepted)
+	if got, _ := readData(t, ctx, conn, restated+".terms")["period"].(string); got != "perArrearsEpisode" {
+		t.Fatalf("a restated period is recorded, got %q", got)
+	}
+
+	// Re-shaping a fee as oneTime is refused: the pairing guard reads the
+	// inherited purpose against the supplied period.
+	reply, refused := submitSupersede(t, ctx, conn, cp, cons, "supersedeperiod0003", restated, leaseKey, acctKey,
+		`,"amountCents":8000,"period":"oneTime"`, processor.OutcomeRejected)
+	if reply.Error == nil || !strings.Contains(reply.Error.Message, "InvalidArgument: purpose: lateFee is a perArrearsEpisode computational clause; got period oneTime") {
+		t.Fatalf("a lateFee amended to oneTime must be refused by the pairing guard, got %+v", reply.Error)
+	}
+	if keyExists(t, ctx, conn, refused) {
+		t.Fatalf("a refused amendment mints nothing")
+	}
+	if !keyExists(t, ctx, conn, restated) {
+		t.Fatalf("a refused amendment leaves the amended clause live")
+	}
+
+	// A monthly clause amended with no period stays monthly — the inheritance
+	// is the period's, not perArrearsEpisode's alone.
+	rentKey := submitCreateClause(t, ctx, conn, cp, cons, "createclausesuprent", leaseKey, acctKey,
+		`,"amountCents":250000,"period":"monthly"`, processor.OutcomeAccepted)
+	_, rentNew := submitSupersede(t, ctx, conn, cp, cons, "supersedeperiod0004", rentKey, leaseKey, acctKey,
+		`,"amountCents":260000`, processor.OutcomeAccepted)
+	if got, _ := readData(t, ctx, conn, rentNew+".terms")["period"].(string); got != "monthly" {
+		t.Fatalf("a monthly clause amended without a period stays monthly, got %q", got)
+	}
+}

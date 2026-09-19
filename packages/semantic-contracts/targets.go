@@ -111,6 +111,27 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     row-templated — a link key spans two row columns — so the op's own
 //     derive_reads supplies them server-side (Contract #2 §2.5 class (g)),
 //     whatever this dispatch declares.
+//   - missing_lateFeeClause → directOp(CreateClause) (this package) — the
+//     lease records a late-fee term (.lateFee, SetLateFee's stamp) and no
+//     active clause governing it carries purpose=lateFee. The missing_deposit
+//     shape: accountKey from this same row (the gap waits on the account),
+//     amountCents from lateFeeCents (the recorded integer cents themselves —
+//     SetLateFee refuses anything else, so no lens conversion), period /
+//     purpose / prose literal (period=perArrearsEpisode is the cadence
+//     clauseSatisfaction never bills and loftspace-ledger's arrears
+//     evaluation bills once per episode). Reads the lease and the account,
+//     exactly as missing_deposit does.
+//   - missing_lateFeeAmendment → directOp(SupersedeClause) (this package) —
+//     the active lateFee clause's amount disagrees with the lease's current
+//     term. Params route that clause (row.lateFeeClauseKey, the lens's
+//     max() over the governs fan — non-null whenever the gap is open, the
+//     gap's own conjunct) with the same literal period and prose and the new
+//     amount; Reads routes the clause, its .terms and .status (all three
+//     REQUIRED — SupersedeClause refuses InvalidState when either aspect is
+//     not hydrated, since mint_clause writes both unconditionally), the
+//     lease and the account (mint_clause validates each alive). The
+//     replacement inherits the purpose and period the payload restates;
+//     Target scopes the dispatch to the clause it amends.
 //
 // Cross-checked by TestSemanticContracts_LeaseRentSettlementColumnsMatchLens.
 func WeaverTargets() []pkgmgr.WeaverTargetSpec {
@@ -151,7 +172,9 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 				"lease's tenancy — so a signed lease actually bills its rent, for exactly its term, and a signed " +
 				"renewal mints its own clause for the renewed term. A lease that records a security deposit has a " +
 				"one-time deposit clause minted for it, and once the tenancy has ended a charged deposit is " +
-				"returned as a credit on the lease's account.",
+				"returned as a credit on the lease's account. A lease that records a late-fee term has a " +
+				"perArrearsEpisode lateFee clause minted for it, amended when the term changes, which the " +
+				"ledger's arrears evaluation bills once per spell of unpaid rent.",
 			LensRef: LeaseRentSettlementTarget,
 			Gaps: map[string]pkgmgr.GapActionSpec{
 				"missing_terms": {
@@ -242,7 +265,48 @@ func WeaverTargets() []pkgmgr.WeaverTargetSpec {
 					Reads:         []string{"row.accountKey", "row.leaseAppKey.tenancy", "row.depositClauseKey", "row.depositClauseKey.terms", "row.depositClauseKey.status"},
 					OptionalReads: []string{"row.accountKey.arrears"},
 				},
+				"missing_lateFeeClause": {
+					Action:    "directOp",
+					Operation: "CreateClause",
+					Class:     "clause",
+					Params: map[string]string{
+						"leaseAppKey": "row.leaseAppKey",
+						"accountKey":  "row.accountKey",
+						"amountCents": "row.lateFeeCents",
+						"period":      "perArrearsEpisode",
+						"purpose":     "lateFee",
+						"prose":       lateFeeClauseProse,
+					},
+					Reads: []string{"row.leaseAppKey", "row.accountKey"},
+				},
+				"missing_lateFeeAmendment": {
+					Action:    "directOp",
+					Operation: "SupersedeClause",
+					Class:     "clause",
+					Params: map[string]string{
+						"clauseKey":   "row.lateFeeClauseKey",
+						"leaseAppKey": "row.leaseAppKey",
+						"accountKey":  "row.accountKey",
+						"amountCents": "row.lateFeeCents",
+						"period":      "perArrearsEpisode",
+						"prose":       lateFeeClauseProse,
+					},
+					// Every key SupersedeClause reads is REQUIRED: the amended
+					// clause's root (UnknownClause), its .status (the active
+					// check refuses InvalidState when it is not hydrated) and
+					// its .terms (the purpose/period inheritance refuses
+					// InvalidState the same way — mint_clause writes both
+					// unconditionally, so absence means undeclared), plus the
+					// lease and the account mint_clause validates alive. The
+					// script walks no link, so no Enumerations.
+					Reads:  []string{"row.lateFeeClauseKey", "row.lateFeeClauseKey.terms", "row.lateFeeClauseKey.status", "row.leaseAppKey", "row.accountKey"},
+					Target: "row.lateFeeClauseKey",
+				},
 			},
 		},
 	}
 }
+
+// lateFeeClauseProse is the provision text both late-fee gaps mint — the
+// clause a tenant reads on their statement beside the fee it authorized.
+const lateFeeClauseProse = "Late fee: charged once for each spell of unpaid rent, after the grace period."

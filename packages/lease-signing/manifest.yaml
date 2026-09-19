@@ -1,5 +1,5 @@
 name: lease-signing
-version: 0.43.0
+version: 0.44.0
 description: |
   Loftspace lease-application convergence vertical: the leaseapp vertex type
   (CreateLeaseApplication + SignLease), the leaseApplicationComplete
@@ -66,7 +66,11 @@ description: |
   RecordApplicationLoss (operator-granted) to write .decision = lost on an
   undecided application whose unit leased to someone else, and every liveness
   consumer reads the recorded value, so the winner's later tenancy end and
-  relist revive no rival.
+  relist revive no rival. A landlord records a lease's late-fee term:
+  SetLateFee (landlord manages, or operator) writes .lateFee {amountCents,
+  recordedAt} on an approved, not-ended tenancy, which semantic-contracts
+  mints as the lease's purpose=lateFee clause and loftspace-ledger bills once
+  per arrears episode; the read models project late_fee_cents.
   Depends on identity-domain, service-domain, and orchestration-base.
 depends:
   - identity-domain
@@ -89,6 +93,8 @@ declares:
     - canonicalName: tenancyNotice
       class: meta.ddl.aspectType
     - canonicalName: leaseDeposit
+      class: meta.ddl.aspectType
+    - canonicalName: leaseLateFee
       class: meta.ddl.aspectType
     - canonicalName: leaseServiceInstance
       class: meta.ddl.vertexType
@@ -238,6 +244,12 @@ declares:
     - operationType: RecordApplicationLoss
       scope: any
       grantsTo: [operator]
+    - operationType: SetLateFee
+      scope: any
+      grantsTo: [operator]
+    - operationType: SetLateFee
+      scope: self
+      grantsTo: [consumer]
   weaverTargets:
     - targetId: leaseApplicationComplete
       lensRef: leaseApplicationComplete
@@ -272,6 +284,7 @@ declares:
     - operationType: EndTenancy
     - operationType: GiveNotice
     - operationType: RecordApplicationLoss
+    - operationType: SetLateFee
     - operationType: SetApplicantProfile
     - operationType: SetRenewalTerms
     - operationType: VerifyGuarantor

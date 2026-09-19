@@ -16,6 +16,7 @@ import (
 	"github.com/operatinggraph/lattice/internal/descriptorform"
 	"github.com/operatinggraph/lattice/internal/gateway/auth"
 	"github.com/operatinggraph/lattice/internal/substrate"
+	loftspaceledger "github.com/operatinggraph/lattice/packages/loftspace-ledger"
 )
 
 //go:embed web
@@ -99,14 +100,17 @@ func (s *server) registerRoutes(mux *http.ServeMux) {
 	mux.Handle("/", s.session.RequireSession(inner))
 }
 
-// handleConfig implements GET /api/config: the FE's one bit of runtime
-// configuration, the Gateway base URL it submits writes to browser-direct.
+// handleConfig implements GET /api/config: the FE's runtime configuration —
+// the Gateway base URL it submits writes to browser-direct, and the ledger's
+// arrears grace in days (loftspace-ledger owns the constant, so the "after N
+// days" a fee term renders with is the package's number, never a second copy
+// in the browser).
 func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusBadRequest, "GET required")
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"gatewayUrl": s.gatewayURL})
+	s.writeJSON(w, http.StatusOK, map[string]any{"gatewayUrl": s.gatewayURL, "arrearsGraceDays": loftspaceledger.ArrearsGraceDays})
 }
 
 // writeJSON encodes v as JSON with the given status code.

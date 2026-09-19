@@ -1,5 +1,5 @@
 name: loftspace-ledger
-version: 0.10.0
+version: 0.11.0
 description: |
   Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount,
   independently-minted id, one per lease via a .ledgerAccount guard aspect on
@@ -15,6 +15,10 @@ description: |
   tenancy's whole credit balance out, computed from the account's own
   history;
   LoftspaceRecordCharge is a person's manual charge, never clause-authorized;
+  CreditAccount's optional reversesRef names the charge a credit reverses
+  and writes the reverses link the arrears head nets it against;
+  LinkReversal (operator-only) writes the same link onto a credit posted
+  naming nothing;
   it, CreditAccount, RecordDepositDeduction and PayOutBalance grant a
   consumer scope=self proven off the account's
   own heldFor topology -- a resident paying down their own balance (credit
@@ -27,7 +31,9 @@ description: |
   (minted by evaluation; every posted entry marks it stale, since no balance
   is stored) + the loftspaceArrearsReminders weaver-target convergence lens,
   whose playbook dispatches EvaluateLoftspaceArrears -- that op ages the
-  account with the same plain FIFO the tenant's statement runs, records the
+  account with the same FIFO the tenant's statement runs (a reversal retires
+  the charge it names, capped at its face; every other credit the oldest
+  open charge), records the
   head's own recorded due date (its postedAt when it recorded none) and the
   reminder instant five days after it, and fires ONE external.notification
   per arrears episode to the bridge's "notification" adapter, keyed on
@@ -72,6 +78,7 @@ declares:
     - operationType: ReturnDeposit
     - operationType: RecordDepositDeduction
     - operationType: PayOutBalance
+    - operationType: LinkReversal
     - operationType: EvaluateLoftspaceArrears
     - operationType: RecordLoftspaceArrearsReminderNotification
   permissions:
@@ -111,6 +118,9 @@ declares:
     - operationType: PayOutBalance
       scope: self
       grantsTo: [consumer]
+    - operationType: LinkReversal
+      scope: any
+      grantsTo: [operator]
     - operationType: EvaluateLoftspaceArrears
       scope: any
       grantsTo: [operator]

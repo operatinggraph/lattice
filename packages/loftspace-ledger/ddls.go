@@ -29,13 +29,14 @@ func accountDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName: "account",
 		Class:         "meta.ddl.vertexType",
-		// CreditAccount and PayOutBalance ALSO touch this list: each writes a
-		// bare, content-unchanged update of the account ROOT as a CAS
-		// idempotency anchor for a race no other shared key catches — the
-		// resident's capped self-credit (CreditAccount) and the whole of
-		// PayOutBalance. See make_vtx_update's call sites in
+		// CreditAccount, PayOutBalance and LinkReversal ALSO touch this list:
+		// each writes a bare, content-unchanged update of the account ROOT as
+		// a CAS idempotency anchor for a race no other shared key catches —
+		// the resident's capped self-credit (CreditAccount), the whole of
+		// PayOutBalance, and two LinkReversals naming different charges for
+		// one credit. See make_vtx_update's call sites in
 		// transactionDDLScript for why.
-		PermittedCommands: []string{"LoftspaceCreateAccount", "CreditAccount", "PayOutBalance", arrearsOp},
+		PermittedCommands: []string{"LoftspaceCreateAccount", "CreditAccount", "PayOutBalance", "LinkReversal", arrearsOp},
 		Description: "Ledger account DDL. Vertex shape: vtx.account.<NanoID>, class=account, root data = {} " +
 			"(minimal, D5 — the balance is LENS-derived by summing transactions, never stored). LoftspaceCreateAccount{leaseAppKey} " +
 			"mints the account under its OWN independently-generated NanoID (never reused from the lease — Core KV " +
@@ -50,9 +51,10 @@ func accountDDL() pkgmgr.DDLSpec {
 			"Weaver's loftspaceArrearsReminders playbook rather than by a person: it replays the account's own " +
 			"postedTo history, one page per dispatch — a history longer than one page records its running aggregate " +
 			"and cursor on .arrears.replay and Weaver dispatches the next page through the lens's phase gaps, so " +
-			"the head is computed exactly whatever the history's length — ages it with the same plain FIFO the tenant's statement runs " +
-			"(every credit offsets the oldest still-open charge first; an unapplied credit carries forward as " +
-			"surplus — no entry in this ledger names a charge it reverses, so there is no netting pre-pass), and " +
+			"the head is computed exactly whatever the history's length — ages it with the same FIFO the tenant's statement runs " +
+			"(a credit that names the charge it reverses — the reverses link CreditAccount's reversesRef or LinkReversal " +
+			"writes — retires THAT charge, capped at its face, at the credit's own position in the walk; every other " +
+			"credit offsets the oldest still-open charge first; an unapplied credit carries forward as surplus), and " +
 			"records on the account's .arrears aspect (loftspaceAccountArrears DDL) dueAt — the oldest open " +
 			"charge's OWN recorded due date (the .entry.dueAt DebitAccount stamps from the clause's anniversary " +
 			"grid), or its postedAt when it recorded none (a landlord one-off is due on receipt); never a term " +
@@ -85,7 +87,24 @@ func accountDDL() pkgmgr.DDLSpec {
 			"tenant has gone dead is still evaluated (the arrears fact is about the account), and the " +
 			"notification's params carry leaseAppKey / identityKey only where each resolves. Restricted to " +
 			"Weaver's dispatch actor: the account it names is forwarded into a message a tenant actually " +
-			"receives.",
+			"receives. On the same send commit — and no other — it bills the lease's LATE FEE: it walks the " +
+			"account's inbound chargesTo links for the live clause whose .terms.purpose is lateFee and .status.state " +
+			"is active (semantic-contracts mints it from the lease's .lateFee term, period perArrearsEpisode) and, " +
+			"with one found, posts a debit of that clause's own amountCents in the same batch — vtx.transaction.<NanoID> " +
+			"+ .entry {type: debit, amountCents, postedAt: evaluatedAt, dueAt: evaluatedAt, memo: \"Late fee — rent due " +
+			"<dueAt's UTC day>\"} + postedTo + authorizedBy the clause, the shape DebitAccount posts, + a billedFor link " +
+			"to the head charge (fee → charge; the ledgerHistory and one-bill rows project it as billedForKey, so a " +
+			"reversal of that charge is tied to the fee it leaves owed) — and records lateFeeAt = evaluatedAt on " +
+			".arrears, carried and dropped exactly as sentAt is. The notification's balanceCents is the balance the " +
+			"commit LEAVES (the fee included) and lateFeeCents the fee itself. Once per episode, because the send " +
+			"is: a re-evaluation finds sentAt recorded and bills nothing; a fee term set after the reminder went " +
+			"out — or an amendment committing concurrently with the send — bills from the next episode; no fee " +
+			"clause, no fee; with several live fee clauses the greatest clause key bills (the settlement lens's own " +
+			"max). The fee debit is due on receipt and sits behind the rent in the FIFO, so paying the rent alone " +
+			"leaves the fee as the head of the SAME episode — no second reminder, no second fee. A fee bills on an " +
+			"ended tenancy's arrears exactly as the reminder goes out on them: the account is evaluated whatever " +
+			"the lease's state, and the clause stays active; only NEW fee terms stop at the tenancy's end " +
+			"(SetLateFee refuses TenancyEnded, the settlement lens mints none).",
 		Script: accountDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"leaseAppKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the lease this account is for (LoftspaceCreateAccount; required there, validated alive). The account gets its own independently-minted NanoID; uniqueness (one account per lease) is enforced via the leaseapp's .ledgerAccount guard aspect, not the account's own id."},` +
@@ -110,7 +129,9 @@ func accountDDL() pkgmgr.DDLSpec {
 					"remindedFor = dueAt, and where no reminder has yet gone out in this episode (sentAt absent) ALSO stamps " +
 					"sentAt and emits external.notification keyed <accountKey>:<dueAt>:<headTransactionKey>, with leaseAppKey / identityKey in its " +
 					"params only where the account's own heldFor link resolves to a live lease and that lease's applicationFor " +
-					"link to a live identity. A re-run recomputes the head, finds sentAt already recorded, and sends nothing. " +
+					"link to a live identity — and, where a live purpose=lateFee clause charges the account, posts that " +
+					"clause's amount as a debit authorizedBy it in the same batch and stamps lateFeeAt. A re-run recomputes " +
+					"the head, finds sentAt already recorded, and sends (and bills) nothing. " +
 					"A history past the replay budget (page size × page cap) records historyTooLong and historyBudget instead, " +
 					"carrying what was already recorded and " +
 					"sending nothing. Rejects AuthDenied for any actor but Weaver's dispatch actor and UnknownAccount for an " +
@@ -200,9 +221,9 @@ func accountGuardAspectTypeDDL() pkgmgr.DDLSpec {
 //     postedTo replay writes a CHECKPOINT, replay = {phase, cursor, pages,
 //     entries}: the pages consumed, the cursor to resume from, and every
 //     debit and credit read so far (each keyed by its bare transaction ID,
-//     never its full vtx key, and carrying its own recorded postedAt — no
-//     netting, no total to collapse into, since this ledger has no reverses
-//     relation) — the exact rows the FIFO head is computed from once the
+//     never its full vtx key, and carrying its own recorded postedAt, plus —
+//     on a credit that reverses a charge — the bare id of that charge; no
+//     total to collapse into) — the exact rows the FIFO head is computed from once the
 //     enumeration is exhausted, and a phase that flips
 //     on every page (the lens projects one continuation gap per phase, so
 //     Weaver chains the pages). Every other field is carried verbatim — evaluatedAt still names
@@ -243,9 +264,9 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "loftspaceAccountArrears",
 		Class:             "meta.ddl.aspectType",
-		PermittedCommands: []string{"DebitAccount", "LoftspaceRecordCharge", "CreditAccount", "ReturnDeposit", "PayOutBalance", arrearsOp},
+		PermittedCommands: []string{"DebitAccount", "LoftspaceRecordCharge", "CreditAccount", "ReturnDeposit", "PayOutBalance", "LinkReversal", arrearsOp},
 		Description: "Per-account arrears-episode aspect. Stored as vtx.account.<NanoID>.arrears " +
-			"(class loftspaceAccountArrears) = {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?, stale?, historyTooLong?, historyBudget?, replay?}. " +
+			"(class loftspaceAccountArrears) = {evaluatedAt, dueAt?, remindAt?, remindedFor?, sentAt?, lateFeeAt?, stale?, historyTooLong?, historyBudget?, replay?}. " +
 			"Non-sensitive. dueAt is the FIFO-oldest still-open charge's OWN recorded due date (the .entry.dueAt a " +
 			"clause-authorized rent charge carries from its anniversary grid), or its postedAt when it recorded none " +
 			"(a landlord one-off is due on receipt) — a RECORDED time fact read as the fact it records, never a term " +
@@ -255,7 +276,9 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"its grace — it is what closes the convergence gap; sentAt is the instant the reminder's outbox event was " +
 			"committed (the SEND INTENT — the adapter's delivery outcome is .arrearsNotification), and its ABSENCE is " +
 			"the send condition, which is what makes the notification once-per-EPISODE rather than once-per-head or " +
-			"once-per-convergence-window. historyTooLong means the account's history outran the evaluation's replay " +
+			"once-per-convergence-window. lateFeeAt is the instant the episode's late fee was billed — stamped on the " +
+			"send commit alone, when a live purpose=lateFee clause charges the account, and carried and dropped " +
+			"exactly as sentAt is (the fee is once per episode because the send is). historyTooLong means the account's history outran the evaluation's replay " +
 			"budget, so no head could be computed under it; historyBudget records the budget (in entries) it " +
 			"exhausted. The flag suppresses the timer, and the gap while that budget is at least the current one (the " +
 			"row stays visible but quiet for an operator); a flag recorded under a smaller budget re-opens the gap for " +
@@ -268,16 +291,17 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"without it and every posted entry drops it (a charge that would otherwise write nothing carries the " +
 			"state and marks it stale when a checkpoint is present). " +
 			"stale means what is recorded may no longer describe the account — EVERY posted entry sets it, because " +
-			"this ledger stores no balance for an entry to reason from — and is a request for a fresh " +
+			"this ledger stores no balance for an entry to reason from, and so does LinkReversal, which changes what " +
+			"an already-read credit retires — and is a request for a fresh " +
 			"EvaluateLoftspaceArrears, which rewrites the aspect and so never carries it forward. Written by " +
-			"DebitAccount / LoftspaceRecordCharge / CreditAccount / ReturnDeposit / PayOutBalance (mark stale; drop any checkpoint; mint nothing where absent) and " +
+			"DebitAccount / LoftspaceRecordCharge / CreditAccount / ReturnDeposit / PayOutBalance / LinkReversal (mark stale; drop any checkpoint; mint nothing where absent) and " +
 			"EvaluateLoftspaceArrears (recomputes the head; ends the episode at {evaluatedAt} alone when nothing is " +
 			"owed, and drops a send record that predates the charge that opened the episode it finds — the boundary between an episode paid " +
 			"off and the next one opened before any evaluation ran). Read by the loftspaceArrearsReminders " +
 			"convergence lens and projected for the landlord ledger, the tenant statement and the portfolio list by " +
 			"leaseAccounts. Declaration-only: no op handler.",
 		Script:       aspectDeclarationOnlyScript,
-		InputSchema:  `{"type":"object","properties":{"evaluatedAt":{"type":"string"},"dueAt":{"type":"string"},"remindAt":{"type":"string"},"remindedFor":{"type":"string"},"sentAt":{"type":"string"},"stale":{"type":"boolean"},"historyTooLong":{"type":"boolean"},"historyBudget":{"type":"integer"},"replay":{"type":"object","properties":{"phase":{"type":"string","enum":["` + ArrearsPhaseA + `","` + ArrearsPhaseB + `"]},"cursor":{"type":"string"},"pages":{"type":"integer"},"entries":{"type":"object"}}}}}`,
+		InputSchema:  `{"type":"object","properties":{"evaluatedAt":{"type":"string"},"dueAt":{"type":"string"},"remindAt":{"type":"string"},"remindedFor":{"type":"string"},"sentAt":{"type":"string"},"lateFeeAt":{"type":"string"},"stale":{"type":"boolean"},"historyTooLong":{"type":"boolean"},"historyBudget":{"type":"integer"},"replay":{"type":"object","properties":{"phase":{"type":"string","enum":["` + ArrearsPhaseA + `","` + ArrearsPhaseB + `"]},"cursor":{"type":"string"},"pages":{"type":"integer"},"entries":{"type":"object"}}}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
 			"evaluatedAt":    "RFC3339 instant (canonical UTC) the arrears state was last written by an evaluation. Its ABSENCE is what opens the convergence gap for an account nothing has ever evaluated.",
@@ -285,16 +309,17 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 			"remindAt":       "RFC3339 instant (canonical UTC) the reminder is armed for: dueAt plus the package's grace (5 days). The convergence lens arms its timer here and compares the recorded lapse against it. Absent when the account owes nothing.",
 			"remindedFor":    "The dueAt the last evaluation acknowledged as past its grace. Equal to dueAt closes the convergence gap; different (or absent) leaves it open for a recorded lapse to re-open.",
 			"sentAt":         "RFC3339 instant (canonical UTC) the reminder's outbox event was committed for this arrears episode — the send intent the landlord ledger and the tenant's statement show. Its ABSENCE is what lets the next passed reminder instant send; it is carried across every write of a live episode and dropped only by the evaluation that finds the episode over: no open charge, or an episode whose opening charge posted after this instant (the balance returned to zero and a new charge opened a fresh episode before an evaluation ran); a head that a partial payment moved past the opener stays in the same episode and keeps it.",
-			"stale":          "True when what is recorded may no longer describe the account — every posted entry sets it, since the ledger stores no balance to reason from. Opens the convergence gap; cleared by the evaluation that recomputes the head.",
+			"lateFeeAt":      "RFC3339 instant (canonical UTC) this arrears episode's late fee was billed — the send commit that also stamped sentAt, when a live purpose=lateFee clause charged the account (on an ended tenancy's arrears as on a live one's). The fee debit itself is the transaction posted at that instant, authorizedBy the clause and billedFor the head charge. Carried across every write of a live episode and dropped exactly where sentAt is (the evaluation that finds the episode over, or a send record that predates the episode's opener); absent beside a present sentAt on an episode reminded for before the lease had a fee term (which bills from the next episode) or whose fee clause sat past the chargesTo page bound.",
+			"stale":          "True when what is recorded may no longer describe the account — every posted entry sets it, since the ledger stores no balance to reason from, and LinkReversal sets it because the credit it ties to a charge now retires that charge instead of the oldest open one. Opens the convergence gap; cleared by the evaluation that recomputes the head.",
 			"historyTooLong": "True when the account's postedTo history outran the evaluation's bounded replay budget, so no FIFO head could be computed. Suppresses the freshness timer, and — with a historyBudget at least the current budget — the convergence gap: the row stays in the read model for an operator to see, without re-dispatching an evaluation that cannot succeed. Dropped by the next posted entry (which also marks the state stale), buying exactly one more attempt.",
 			"historyBudget":  "The replay budget, in postedTo entries, the degraded evaluation exhausted (the package's page size × page cap at the time). A recorded budget smaller than the current one — or none — re-opens the convergence gap for exactly one evaluation under the current budget, so a raised budget reaches the accounts the old one parked. Written only beside historyTooLong and dropped with it.",
-			"replay":         "The checkpoint of an evaluation part-way through a history longer than one page of its postedTo replay: {phase: '" + ArrearsPhaseA + "'|'" + ArrearsPhaseB + "', cursor, pages, entries: {txId: {postedAt, type, amountCents, dueAt}}}. phase flips on every page and is the lens's continuation trigger (one gap per phase); cursor resumes the enumeration; pages counts those consumed; entries carries every debit and credit read so far, keyed by its bare transaction ID (never its full vtx key — the checkpoint carries an identity to re-derive from, not a relationship to stand in for one) and its own recorded postedAt — the exact rows the FIFO head is computed from once the enumeration is exhausted, no netting, no total (this ledger has no reverses relation, and the episode-start computation needs each entry's own real timing, not a collapsed sum); dueAt is carried because arrears_head reads it off every debit row to name the head's own recorded due date. Present only between the first page and the last — the finalize page and the degrade write the aspect without it, and every posted entry drops it, because a posted entry changes the set under the cursor. A checkpoint the evaluation cannot resume (a malformed field) is treated as absent: the evaluation restarts at page 1.",
+			"replay":         "The checkpoint of an evaluation part-way through a history longer than one page of its postedTo replay: {phase: '" + ArrearsPhaseA + "'|'" + ArrearsPhaseB + "', cursor, pages, entries: {txId: {postedAt, type, amountCents, dueAt, reversesId?}}}. phase flips on every page and is the lens's continuation trigger (one gap per phase); cursor resumes the enumeration; pages counts those consumed; entries carries every debit and credit read so far, keyed by its bare transaction ID (never its full vtx key — the checkpoint carries an identity to re-derive from, not a relationship to stand in for one) and its own recorded postedAt — the exact rows the FIFO head is computed from once the enumeration is exhausted, no total (the episode-start computation needs each entry's own real timing, not a collapsed sum); dueAt is carried because arrears_head reads it off every debit row to name the head's own recorded due date; reversesId is the bare id of the charge a credit's reverses link names, carried so the head's netting pre-pass retires that charge rather than the oldest open one. Present only between the first page and the last — the finalize page and the degrade write the aspect without it, and every posted entry drops it, because a posted entry changes the set under the cursor. A checkpoint the evaluation cannot resume (a malformed field) is treated as absent: the evaluation restarts at page 1.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "account arrears aspect — overdue past the grace, reminded once",
-				Payload:         map[string]any{"evaluatedAt": "2026-09-15T09:00:00Z", "dueAt": "2026-09-08T00:00:00Z", "remindAt": "2026-09-13T00:00:00Z", "remindedFor": "2026-09-08T00:00:00Z", "sentAt": "2026-09-15T09:00:00Z"},
-				ExpectedOutcome: "Stored as vtx.account.<NanoID>.arrears; written by EvaluateLoftspaceArrears on the commit that also emitted the notification. remindedFor = dueAt closes the gap, so no second reminder goes out for this episode.",
+				Payload:         map[string]any{"evaluatedAt": "2026-09-15T09:00:00Z", "dueAt": "2026-09-08T00:00:00Z", "remindAt": "2026-09-13T00:00:00Z", "remindedFor": "2026-09-08T00:00:00Z", "sentAt": "2026-09-15T09:00:00Z", "lateFeeAt": "2026-09-15T09:00:00Z"},
+				ExpectedOutcome: "Stored as vtx.account.<NanoID>.arrears; written by EvaluateLoftspaceArrears on the commit that also emitted the notification and posted the lease's late fee (the account carried a live purpose=lateFee clause). remindedFor = dueAt closes the gap, so no second reminder — and no second fee — goes out for this episode.",
 			},
 		},
 	}
@@ -302,17 +327,36 @@ func accountArrearsAspectTypeDDL() pkgmgr.DDLSpec {
 
 func transactionDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
-		CanonicalName:     "transaction",
-		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"DebitAccount", "CreditAccount", "LoftspaceRecordCharge", "ReturnDeposit", "RecordDepositDeduction", "PayOutBalance"},
+		CanonicalName: "transaction",
+		Class:         "meta.ddl.vertexType",
+		// EvaluateLoftspaceArrears (the account DDL's op) mints a transaction
+		// too: the late-fee debit it posts on the commit that sends the
+		// reminder, the clause-authorized shape DebitAccount posts, so this
+		// gate admits it.
+		PermittedCommands: []string{"DebitAccount", "CreditAccount", "LoftspaceRecordCharge", "ReturnDeposit", "RecordDepositDeduction", "PayOutBalance", "LinkReversal", arrearsOp},
 		Description: "Ledger transaction DDL. Vertex shape: vtx.transaction.<NanoID>, class=transaction, root data = {} " +
 			"(minimal, D5 — the entry detail is a .entry aspect). DebitAccount{accountKey, amountCents, memo?, clauseRef?, " +
 			"period?} records a charge (rent, a late fee, a deposit) — the orchestrated shape, operator-only, that " +
 			"Weaver's clauseSatisfaction playbook dispatches with a clauseRef; LoftspaceRecordCharge{accountKey, " +
 			"amountCents, memo?} records the same debit entry as a person's manual charge (no clauseRef/period — a " +
 			"vertical-unique name because operationType is a global namespace and cafe-ledger admits its own " +
-			"DebitAccount); CreditAccount{accountKey, amountCents, memo?} " +
-			"records a payment received; ReturnDeposit{leaseAppKey, clauseKey, accountKey} (below) credits a " +
+			"DebitAccount); CreditAccount{accountKey, amountCents, memo?, reversesRef?} " +
+			"records a payment received — or, with reversesRef naming a live debit posted to the same account, the " +
+			"landlord's reversal of that charge: amountCents may not exceed the charge's face (ReversalExceedsCharge), " +
+			"the target must be a debit (NotADebit) on this account (WrongAccount; UnknownTransaction when not live) and never " +
+			"the security deposit's charge (DepositNotReversible, read off its authorizedBy clause's purpose — the deposit is " +
+			"deducted from or returned, never reversed), " +
+			"a resident's self-scoped credit may not carry it (AuthDenied) and a debit op never may (InvalidArgument); " +
+			"the batch then writes the reverses link (credit→debit, the credit is the later-arriving vertex so it is " +
+			"the source — Contract #1 §1.1), which the arrears evaluation and the ledgerHistory lens read to retire " +
+			"THAT charge rather than the oldest open one. LinkReversal{accountKey, creditKey, reversesRef} " +
+			"(operator-only, no screen) writes the same link create-only onto a credit posted naming nothing — " +
+			"both live and posted to the payload account, the credit a credit (NotACredit), the target a debit, the " +
+			"credit within the charge's face, the credit not posted strictly before the charge (ReversalPrecedesCharge; a " +
+			"same-second pair is admitted) and the credit reversing nothing yet (AlreadyLinked) — serialized on the account " +
+			"root's bare update so two links racing one credit cannot both land — and marks " +
+			".arrears stale like a posted entry, since what the credit retires has changed. " +
+			"ReturnDeposit{leaseAppKey, clauseKey, accountKey} (below) credits a " +
 			"charged security deposit back once the tenancy has ended. Each mints a fresh vtx.transaction.<NanoID> + a .entry aspect {type " +
 			"(debit|credit|deduction), kind?, amountCents, memo?, postedAt, periodStart?, periodEnd?, dueAt?} + the postedTo link (transaction→account, the transaction " +
 			"is the later-arriving vertex so it is the source — Contract #1 §1.1). The ledger is APPEND-ONLY — no " +
@@ -419,6 +463,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 			`"leaseAppKey":{"type":"string","description":"ReturnDeposit / PayOutBalance only: vtx.leaseapp.<NanoID> of the lease whose .tenancy.endedAt is the recorded end the return/payout rides (required there; TenancyNotEnded while absent). ReturnDeposit's clause must govern it; PayOutBalance's account must be heldFor it (AccountLeaseMismatch otherwise)."},` +
 			`"amountCents":{"type":"number","description":"The transaction amount in integer cents; required by DebitAccount / LoftspaceRecordCharge / CreditAccount / RecordDepositDeduction, must be > 0. A debit is a charge (increases what the tenant owes); a credit is a payment (decreases it); a deduction moves custody without moving what is owed. ReturnDeposit and PayOutBalance take none — both compute their own amount from the graph's own record."},` +
 			`"memo":{"type":"string","description":"Optional free-text description of the charge or payment (e.g. \"June rent\", \"Late fee\"). Optional."},` +
+			`"reversesRef":{"type":"string","description":"CreditAccount only: vtx.transaction.<NanoID> of the live debit this credit reverses, posted to the same account (WrongAccount otherwise; UnknownTransaction when not live; NotADebit on a credit; DepositNotReversible on the security deposit's charge). amountCents may not exceed its face (ReversalExceedsCharge). Refused on a resident's self-scoped credit (AuthDenied) and on any debit op (InvalidArgument). Writes the reverses link."},` +
+			`"creditKey":{"type":"string","description":"LinkReversal only: vtx.transaction.<NanoID> of the live credit, posted to accountKey, that the link ties to reversesRef (NotACredit otherwise; AlreadyLinked once it reverses anything)."},` +
 			`"reason":{"type":"string","description":"RecordDepositDeduction only, required, 1-200 characters: why the deduction was taken (e.g. \"Carpet cleaning\"). Recorded as the transaction's own memo — the line the statement shows for this deduction."},` +
 			`"clauseRef":{"type":"string","description":"DebitAccount only: vtx.clause.<NanoID> of the semantic-contract clause authorizing this charge (optional, validated alive when supplied). The clause's OWN .terms.amountCents is authoritative — a payload amountCents that disagrees is rejected (AmountMismatch). Writes the authorizedBy audit link and updates the clause's .status."},` +
 			`"period":{"type":"string","description":"DebitAccount only, alongside clauseRef (Fire V3): \"monthly\" keeps the clause active instead of completing it; any other value (or omitted) marks the clause completed, the Fire V1/V2 behavior. chargeValidUntil is stamped unconditionally either way (defense-in-depth — see the DDL description)."}},` +
@@ -431,6 +477,8 @@ func transactionDDL() pkgmgr.DDLSpec {
 			"leaseAppKey": "ReturnDeposit / PayOutBalance only. Full vtx.leaseapp.<NanoID> key of the lease: ReturnDeposit's clause must govern it (ClauseLeaseMismatch otherwise); PayOutBalance's account must be heldFor it (AccountLeaseMismatch otherwise). Either way its .tenancy.endedAt must be recorded (TenancyNotEnded otherwise).",
 			"amountCents": "The transaction amount in integer cents; required by DebitAccount, LoftspaceRecordCharge, CreditAccount and RecordDepositDeduction (a positive number), never by ReturnDeposit or PayOutBalance, which both compute their own amount from the graph's own record. Stored on the .entry aspect and projected verbatim by the ledgerHistory lens. DebitAccount with a clauseRef must match the clause's own .terms.amountCents exactly (AmountMismatch otherwise) — the clause is the authoritative amount, not the payload.",
 			"memo":        "Optional free-text description of the charge or payment (e.g. \"June rent\", \"Late fee — 5 days\"). Stored on the .entry aspect when supplied; projected by the ledgerHistory lens.",
+			"reversesRef": "CreditAccount (the landlord's or the operator's, never a resident's — AuthDenied) and LinkReversal. Full vtx.transaction.<NanoID> key of the live debit the credit reverses: it must be a debit (NotADebit) posted to the payload account (WrongAccount), not the security deposit's charge (DepositNotReversible — read off the charge's authorizedBy clause; the deposit is deducted from or returned, never reversed), and the credit's amountCents may not exceed its face (ReversalExceedsCharge). LinkReversal further refuses a credit that posted strictly before the charge (ReversalPrecedesCharge). Written as the reverses link (credit→debit) the arrears evaluation, the statement and the ledgerHistory lens read.",
+			"creditKey":   "LinkReversal only. Full vtx.transaction.<NanoID> key of the live credit being tied to the charge it reverses: it must be a credit (NotACredit) posted to the payload account (WrongAccount) that reverses nothing yet (AlreadyLinked otherwise).",
 			"reason":      "RecordDepositDeduction only, required, 1-200 characters. Stored verbatim as the deduction transaction's own .entry.memo — the statement's own line for the deduction, with no separate tag hiding it.",
 			"clauseRef":   "DebitAccount only. Full vtx.clause.<NanoID> key of the semantic-contract clause authorizing this charge. When supplied, validates the clause is alive, derives the authoritative amountCents from the clause's own .terms (rejecting AmountMismatch on disagreement with the payload), writes the authorizedBy link (transaction→clause), and updates the clause's .status per the period param.",
 			"period":      "DebitAccount only, alongside clauseRef (Fire V3). \"monthly\" keeps the clause active (recurring) until its term is fully billed; anything else marks .status completed (one-time, Fire V1/V2 default). chargeValidUntil is stamped either way, unconditionally — on the anniversary grid from .terms.validFrom for a termed clause, postedAt + 30 days otherwise.",
@@ -450,6 +498,26 @@ func transactionDDL() pkgmgr.DDLSpec {
 				ExpectedOutcome: "Same shape as DebitAccount, but writes .entry{type: credit, ...} and emits " +
 					"account.credited{accountKey, transactionKey, amountCents}. A payment reduces what the tenant owes " +
 					"(the ledgerHistory-derived balance = sum(debits) − sum(credits)).",
+			},
+			{
+				Name:    "CreditAccount — reverse a charge",
+				Payload: map[string]any{"accountKey": "vtx.account.<NanoID>", "amountCents": 205000, "memo": "Reversal: rent billed after the lease end", "reversesRef": "vtx.transaction.<NanoID>"},
+				ExpectedOutcome: "reversesRef is a live debit of 205000 posted to this account, the caller is the operator or the " +
+					"managing landlord, and 205000 does not exceed its face: commits the credit exactly as a payment would " +
+					"PLUS the reverses link lnk.transaction.<creditId>.reverses.transaction.<debitId>, and marks .arrears " +
+					"stale. The arrears evaluation and the statement then retire THAT charge with this credit, leaving " +
+					"an older open charge as the head. Rejects ReversalExceedsCharge above the face, WrongAccount for a " +
+					"charge on another account, NotADebit for a credit, UnknownTransaction for a dead key, AuthDenied on " +
+					"a resident's self-scoped submit.",
+			},
+			{
+				Name:    "LinkReversal — tie a credit posted naming nothing to the charge it corrects",
+				Payload: map[string]any{"accountKey": "vtx.account.<NanoID>", "creditKey": "vtx.transaction.<NanoID>", "reversesRef": "vtx.transaction.<NanoID>"},
+				ExpectedOutcome: "Both transactions are live and posted to the account, the credit is a credit within the debit's " +
+					"face, and it reverses nothing yet: commits the reverses link create-only and marks .arrears stale, " +
+					"emitting account.reversalLinked{accountKey, creditKey, reversesKey}. Rejects AlreadyLinked once " +
+					"the credit names a charge, NotACredit / NotADebit on the wrong entry types, WrongAccount when " +
+					"either is posted elsewhere, ReversalExceedsCharge above the face.",
 			},
 			{
 				Name:    "ReturnDeposit — credit the security deposit back once the tenancy has ended",

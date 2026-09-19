@@ -6,10 +6,11 @@ package loftspaceledger_test
 // guarantee, the actor guard, the two-hop tenant resolution, the replay-budget
 // degrade, and the bridge's replyOp. Mirrors wellness-ledger's TestArrears_*
 // set (a ledger that likewise stores no balance, so a posted entry never opens
-// or ends an episode itself) minus its refund-netting vectors — no entry in
-// this ledger names a charge it reverses — plus what is LoftSpace's own: the
-// head's recorded due date is the fact aged (its postedAt only when it
-// recorded none), and the reminder waits out a five-day grace after it.
+// or ends an episode itself) and clinic-ledger's reversal-netting vectors (a
+// credit that names the charge it reverses retires THAT charge, on one page
+// or across the page boundary), plus what is LoftSpace's own: the head's
+// recorded due date is the fact aged (its postedAt only when it recorded
+// none), and the reminder waits out a five-day grace after it.
 
 import (
 	"context"
@@ -52,9 +53,11 @@ func arrearsWeaverCapDoc() *processor.CapabilityDoc {
 // arrearsHint is the contextHint the loftspaceArrearsReminders playbook
 // dispatches with (targets.go): the account root, its absence-tolerant
 // .arrears aspect, and the bounded postedTo replay + the heldFor walk that
-// starts the tenant resolution. The per-transaction .entry reads, the lease
-// root read and the lease's applicationFor hop that walk discovers are NOT
-// declared — their keys are data-derived, the class-(e) split.
+// starts the tenant resolution + the inbound chargesTo walk the send commit
+// runs for the account's live late-fee clause. The per-transaction .entry
+// reads, the lease root read, the lease's applicationFor hop and the
+// per-clause .terms / .status reads those walks discover are NOT declared —
+// their keys are data-derived, the class-(e) split.
 func arrearsHint(acctKey string) *processor.ContextHint {
 	return &processor.ContextHint{
 		Reads:         []string{acctKey},
@@ -62,6 +65,7 @@ func arrearsHint(acctKey string) *processor.ContextHint {
 		Enumerations: []processor.EnumerationHint{
 			{Hub: acctKey, Relation: "postedTo", Direction: "in"},
 			{Hub: acctKey, Relation: "heldFor", Direction: "out"},
+			{Hub: acctKey, Relation: "chargesTo", Direction: "in"},
 		},
 	}
 }
@@ -69,9 +73,11 @@ func arrearsHint(acctKey string) *processor.ContextHint {
 // evaluateArrears drives one EvaluateLoftspaceArrears as `actor` at
 // `submittedAt`, asserts the outcome, and returns the reply (for a refusal's
 // message) and the request id (for the outbox the notification rides on).
-// Class is LEFT EMPTY, exactly as Weaver's actuator dispatches a directOp — it
-// relies on the Processor's operationType→class reverse index, which resolves
-// to the account vertexType handler.
+// Class is the account DDL's, exactly as Weaver's actuator dispatches the
+// directOp (the target pins Class: "account", targets.go): the op is
+// permitted by two vertexType DDLs — the account's, whose script handles it,
+// and the transaction's, whose gate admits the late-fee debit it posts — so
+// the Processor's operationType→class reverse index cannot resolve it alone.
 func evaluateArrears(t *testing.T, ctx context.Context, conn *substrate.Conn, cp *processor.CommitPath,
 	cons jetstream.Consumer, label, actor, acctKey, submittedAt string,
 	want processor.MessageOutcome) (*processor.OperationReply, string) {
@@ -83,6 +89,7 @@ func evaluateArrears(t *testing.T, ctx context.Context, conn *substrate.Conn, cp
 		OperationType: "EvaluateLoftspaceArrears",
 		Actor:         actor,
 		SubmittedAt:   submittedAt,
+		Class:         "account",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `"}`),
 		ContextHint:   arrearsHint(acctKey),
 	}
@@ -1105,6 +1112,7 @@ func TestArrears_ForgedSendRefused(t *testing.T) {
 		OperationType: "EvaluateLoftspaceArrears",
 		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-09-03T09:00:00Z",
+		Class:         "account",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","sentAt":"2026-09-02T09:00:00Z","remindedFor":"2026-09-01T09:00:00Z"}`),
 		ContextHint:   arrearsHint(acctKey),
 	}
@@ -1144,6 +1152,7 @@ func TestArrears_TenantResolvedFromAccountState(t *testing.T) {
 		OperationType: "EvaluateLoftspaceArrears",
 		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-09-12T09:00:00Z",
+		Class:         "account",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `","identityKey":"` + stranger + `","leaseAppKey":"vtx.leaseapp.BBARREARSFRGDLEASEHJ"}`),
 		ContextHint:   arrearsHint(acctKey),
 	}
@@ -1807,6 +1816,7 @@ func TestArrears_UndeclaredSubmitterStillHydratesArrears(t *testing.T) {
 		OperationType: "EvaluateLoftspaceArrears",
 		Actor:         bootstrap.WeaverIdentityKey,
 		SubmittedAt:   "2026-08-22T09:00:00Z",
+		Class:         "account",
 		Payload:       json.RawMessage(`{"accountKey":"` + acctKey + `"}`),
 		ContextHint: &processor.ContextHint{
 			Enumerations: []processor.EnumerationHint{
@@ -2015,4 +2025,222 @@ func replayTxIDSuffix(i int) string {
 	const safe = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz123456789"
 	n := len(safe)
 	return string([]byte{safe[i/(n*n)%n], safe[(i/n)%n], safe[i%n]})
+}
+
+// seedReversalAt seeds a credit that reverses the charge reversesID names —
+// the entry plus the reverses link CreditAccount's reversesRef leg (or
+// LinkReversal) writes — at an explicit postedAt, with no op run.
+func seedReversalAt(t *testing.T, ctx context.Context, conn *substrate.Conn,
+	acctKey, txID string, amountCents int, postedAt, reversesID string) {
+	t.Helper()
+	seedEntryAt(t, ctx, conn, acctKey, txID, "credit", amountCents, postedAt, "")
+	seedLink(t, ctx, conn,
+		"lnk.transaction."+txID+".reverses.transaction."+reversesID,
+		"vtx.transaction."+txID, "vtx.transaction."+reversesID, "reverses", "reverses")
+}
+
+// TestArrears_EvaluateNetsAReversalAgainstItsCharge proves arrears_head's
+// netting pre-pass matches the statement's own rule (cmd/loftspace-app's
+// deriveRentArrears), not plain FIFO. The live shape that minted the rule:
+// rent charged 08-06, a $500 payment 09-04, rent charged again 09-05 for a
+// period after the lease end, that charge reversed in full 09-13 by a credit
+// that names it, and the renewed rent charged 09-13. Under plain FIFO the
+// reversal would retire the 08-06 remainder and part of 09-05, leaving 09-05
+// as the head — 13 days overdue instead of 43. The netting reads the
+// reverses link, retires the 09-05 charge specifically, and leaves 08-06 —
+// the rent actually still unpaid — as the head; the balance is unchanged
+// either way.
+func TestArrears_EvaluateNetsAReversalAgainstItsCharge(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsnetrev")
+
+	leaseKey := seedLease(t, ctx, conn, "BBARREARSNETLEASEHJK")
+	acctKey := createAccount(t, ctx, conn, cp, cons, "bbarrnetacct00000001", leaseKey)
+	debitAt(t, ctx, conn, cp, cons, "bbarrnetdebit0000001", acctKey, "2026-08-06T17:01:51Z", 205000)
+	creditAt(t, ctx, conn, cp, cons, "bbarrnetpay000000001", acctKey, "2026-09-04T09:00:00Z", 50000)
+	chargeB := debitAt(t, ctx, conn, cp, cons, "bbarrnetdebit0000002", acctKey, "2026-09-05T17:01:51Z", 205000)
+	postEntryAt(t, ctx, conn, cp, cons, "bbarrnetrev000000001", "CreditAccount", acctKey, "2026-09-13T09:00:00Z", 205000,
+		"Reversal: rent billed 2026-09-05 for a period after the 2026-09-06 lease end")
+	// The reversal above posted naming nothing; the operator ties it to its
+	// charge — the legacy shape LinkReversal exists for.
+	reversalKey := "vtx.transaction." + nanoIDFromRequestID(testutil.GenReqID("bbarrnetrev000000001"))
+	submitTx(t, ctx, conn, cp, cons, "bbarrnetlink00000001", "LinkReversal", ledgerActorKey,
+		map[string]any{"accountKey": acctKey, "creditKey": reversalKey, "reversesRef": chargeB},
+		linkReversalHint(acctKey, reversalKey, chargeB), nil, processor.OutcomeAccepted)
+	debitAt(t, ctx, conn, cp, cons, "bbarrnetdebit0000003", acctKey, "2026-09-13T09:30:00Z", 212500)
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "bbarrneteval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-09-18T09:00:00Z", processor.OutcomeAccepted)
+
+	data := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := data["dueAt"].(string); got != "2026-08-06T17:01:51Z" {
+		t.Fatalf("dueAt = %q, want 2026-08-06T17:01:51Z — the reversal retires the 09-05 charge it names, leaving 08-06 as the head", got)
+	}
+	notif := arrearsNotification(t, ctx, conn, reqID)
+	if notif == nil {
+		t.Fatal("the 08-06 head is past its grace, so the evaluation sends")
+	}
+	params, _ := notif["params"].(map[string]any)
+	if got, _ := params["balanceCents"].(float64); got != 367500 {
+		t.Fatalf("params.balanceCents = %v, want 367500 — netting moves the head, never the balance", got)
+	}
+}
+
+// TestArrears_ReversalOnAnEarlierPageNetsItsCharge proves the netting is
+// exact ACROSS pages — the reason the checkpoint records reversesId beside
+// each credit. The reversed charge sits on page 1 and the credit that
+// reverses it on page 2 (ids chosen to sort on opposite sides of the page
+// boundary), so no single execution sees both. The oldest charge A is older
+// than the reversed charge C: plain FIFO would spend the credit on A and
+// name the first small charge as the head; the netting retires C
+// specifically and leaves A — the charge the tenant actually still owes —
+// as the head, the same rule the statement runs.
+func TestArrears_ReversalOnAnEarlierPageNetsItsCharge(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsxpage")
+
+	leaseKey := seedLease(t, ctx, conn, "BBARREARSXPGLEASEHJK")
+	acctKey := seedAccountHeldFor(t, ctx, conn, "BBARREARSXPGACCTHJKM", leaseKey)
+
+	// Page 1 (30 entries, ids A…, B…, C…): charge A, 28 small charges B, the
+	// charge C the reversal names. Page 2 (1 entry, id z…): the reversal.
+	chargeA := replayTxID('A', 0)
+	chargeC := replayTxID('C', 0)
+	seedEntryAt(t, ctx, conn, acctKey, chargeA, "debit", 1000, "2026-05-01T12:00:00Z", "")
+	for i := 0; i < loftspaceledger.ArrearsPageLimit-2; i++ {
+		postedAt := time.Date(2026, 6, 1+i, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+		seedEntryAt(t, ctx, conn, acctKey, replayTxID('B', i), "debit", 100, postedAt, "")
+	}
+	seedEntryAt(t, ctx, conn, acctKey, chargeC, "debit", 1000, "2026-07-01T12:00:00Z", "")
+	seedReversalAt(t, ctx, conn, acctKey, replayTxID('z', 0), 1000, "2026-07-02T12:00:00Z", chargeC)
+
+	_, req1 := evaluateArrears(t, ctx, conn, cp, cons, "bbarrxpgeval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	first := arrearsData(t, ctx, conn, acctKey)
+	replay := arrearsReplay(t, first)
+	if replay == nil {
+		t.Fatalf("fixture: 31 entries must leave a checkpoint after page 1: %+v", first)
+	}
+	entries, _ := replay["entries"].(map[string]any)
+	if entries[chargeC] == nil || entries[chargeA] == nil {
+		t.Fatalf("fixture: both A and C are on page 1: %v", entries)
+	}
+	for id, e := range entries {
+		if row, _ := e.(map[string]any); row["reversesId"] != nil {
+			t.Fatalf("fixture: the reversal is on page 2, so page 1 records no reversesId, found one on %s", id)
+		}
+	}
+	if arrearsNotification(t, ctx, conn, req1) != nil {
+		t.Fatal("nothing is sent mid-replay")
+	}
+
+	evaluateArrears(t, ctx, conn, cp, cons, "bbarrxpgeval00000002",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-23T09:00:00Z", processor.OutcomeAccepted)
+	final := arrearsData(t, ctx, conn, acctKey)
+	if arrearsReplay(t, final) != nil {
+		t.Fatalf("two pages, two dispatches: %+v", final)
+	}
+	if got, _ := final["dueAt"].(string); got != "2026-05-01T12:00:00Z" {
+		t.Fatalf("dueAt = %q, want 2026-05-01T12:00:00Z — the reversal on page 2 retires charge C on page 1, leaving A as the head; plain FIFO would have spent it on A", got)
+	}
+}
+
+// TestArrears_ReversalPrecedingItsChargeIsAPlainPayment pins the head's
+// position rule on the shape LinkReversal refuses (ReversalPrecedesCharge)
+// but a link seeded directly still presents: a $5 credit posted 08-02 naming
+// a $10 charge posted 08-03, after a $4 charge on 08-01. The walk reads that
+// credit as a PLAIN payment — nothing absorbed, nothing held for its target
+// — so it retires the 08-01 charge and prepays $1 of the 08-03 one, which
+// opens for $9 as the head. Held for its target instead, the credit would
+// leave the 08-01 charge open as the head.
+func TestArrears_ReversalPrecedingItsChargeIsAPlainPayment(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsprecedes")
+
+	leaseKey := seedLease(t, ctx, conn, "BBARREARSPPLLEASEHJK")
+	acctKey := seedAccountHeldFor(t, ctx, conn, "BBARREARSPPLACCTHJKM", leaseKey)
+	chargeD := "BBARREARSPPLTXDHJKMN"
+	seedEntryAt(t, ctx, conn, acctKey, "BBARREARSPPLTXAHJKMN", "debit", 400, "2026-08-01T12:00:00Z", "")
+	seedReversalAt(t, ctx, conn, acctKey, "BBARREARSPPLTXCHJKMN", 500, "2026-08-02T12:00:00Z", chargeD)
+	seedEntryAt(t, ctx, conn, acctKey, chargeD, "debit", 1000, "2026-08-03T12:00:00Z", "")
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "bbarrppleval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	data := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := data["dueAt"].(string); got != "2026-08-03T12:00:00Z" {
+		t.Fatalf("dueAt = %q, want 2026-08-03T12:00:00Z — the 08-02 credit precedes its charge, so it is a plain payment that retires the 08-01 charge; held for its target it would have left 08-01 as the head", got)
+	}
+	params, _ := arrearsNotification(t, ctx, conn, reqID)["params"].(map[string]any)
+	if got, _ := params["balanceCents"].(float64); got != 900 {
+		t.Fatalf("params.balanceCents = %v, want 900", got)
+	}
+}
+
+// TestArrears_ReversalPrecedingItsChargeDoesNotCapTheRealReversal is the
+// second harm of a position-blind pre-pass: a credit posted 08-02 naming a
+// charge posted 08-03 must charge NOTHING against that charge's face, so the
+// later real reversal of it (08-04, in full) still retires it whole and the
+// 08-01 charge stays the head. Position-blind, the early credit would be
+// spent on the 08-01 charge (its target not yet open) AND cap the real
+// reversal at half the face, naming the 08-03 charge the head.
+func TestArrears_ReversalPrecedingItsChargeDoesNotCapTheRealReversal(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearsprecedescap")
+
+	leaseKey := seedLease(t, ctx, conn, "BBARREARSPRCLEASEHJK")
+	acctKey := seedAccountHeldFor(t, ctx, conn, "BBARREARSPRCACCTHJKM", leaseKey)
+	chargeA := "BBARREARSPRCTXAHJKMN"
+	chargeD := "BBARREARSPRCTXDHJKMN"
+	seedEntryAt(t, ctx, conn, acctKey, chargeA, "debit", 1000, "2026-08-01T12:00:00Z", "")
+	seedReversalAt(t, ctx, conn, acctKey, "BBARREARSPRCTXCHJKMN", 500, "2026-08-02T12:00:00Z", chargeD)
+	seedEntryAt(t, ctx, conn, acctKey, chargeD, "debit", 1000, "2026-08-03T12:00:00Z", "")
+	seedReversalAt(t, ctx, conn, acctKey, "BBARREARSPRCTXRHJKMN", 1000, "2026-08-04T12:00:00Z", chargeD)
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "bbarrprceval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	data := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := data["dueAt"].(string); got != "2026-08-01T12:00:00Z" {
+		t.Fatalf("dueAt = %q, want 2026-08-01T12:00:00Z — the 08-02 credit precedes its charge and is a plain payment; the 08-04 reversal retires the 08-03 charge whole", got)
+	}
+	params, _ := arrearsNotification(t, ctx, conn, reqID)["params"].(map[string]any)
+	if got, _ := params["balanceCents"].(float64); got != 500 {
+		t.Fatalf("params.balanceCents = %v, want 500 — the position rule moves the head, never the balance", got)
+	}
+}
+
+// TestArrears_SameSecondReversalSortingBeforeItsChargeIsHeld pins the other
+// half of the position rule: a reversal in the SAME second as its charge
+// (CreditAccount{reversesRef} posted in the charge's own second) whose
+// random key sorts BEFORE the charge's is held for the charge — withheld
+// from the FIFO at the credit and applied when the charge is walked, which
+// then never opens — so the older 08-01 charge stays the head. Spent on the
+// oldest open charge instead (the target not yet open at the credit's
+// position), the reversal would retire 08-01 and name the reversed charge
+// the head. The ids are chosen by hand so the credit sorts first.
+func TestArrears_SameSecondReversalSortingBeforeItsChargeIsHeld(t *testing.T) {
+	ctx, conn := setupLedgerEnv(t)
+	cp, cons := newLedgerPipeline(t, ctx, conn, "arrearssamesec")
+
+	leaseKey := seedLease(t, ctx, conn, "BBARREARSSSCLEASEHJK")
+	acctKey := seedAccountHeldFor(t, ctx, conn, "BBARREARSSSCACCTHJKM", leaseKey)
+	chargeA := "BBARREARSSSCTXAHJKMN"
+	reversedCharge := "BBARREARSSSCTXZHJKMN"
+	reversal := "BBARREARSSSCTXBHJKMN"
+	if !(reversal < reversedCharge) {
+		t.Fatalf("fixture: the reversal's id must sort before its charge's: %s vs %s", reversal, reversedCharge)
+	}
+	seedEntryAt(t, ctx, conn, acctKey, chargeA, "debit", 1000, "2026-08-01T12:00:00Z", "")
+	seedEntryAt(t, ctx, conn, acctKey, reversedCharge, "debit", 1000, "2026-08-05T12:00:00Z", "")
+	seedReversalAt(t, ctx, conn, acctKey, reversal, 1000, "2026-08-05T12:00:00Z", reversedCharge)
+
+	_, reqID := evaluateArrears(t, ctx, conn, cp, cons, "bbarrssceval00000001",
+		bootstrap.WeaverIdentityKey, acctKey, "2026-08-22T09:00:00Z", processor.OutcomeAccepted)
+	data := arrearsData(t, ctx, conn, acctKey)
+	if got, _ := data["dueAt"].(string); got != "2026-08-01T12:00:00Z" {
+		t.Fatalf("dueAt = %q, want 2026-08-01T12:00:00Z — a same-second reversal sorting before its charge is held for that charge, never spent on the oldest one", got)
+	}
+	params, _ := arrearsNotification(t, ctx, conn, reqID)["params"].(map[string]any)
+	if got, _ := params["balanceCents"].(float64); got != 1000 {
+		t.Fatalf("params.balanceCents = %v, want 1000", got)
+	}
 }

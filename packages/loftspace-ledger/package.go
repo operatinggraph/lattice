@@ -87,7 +87,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "loftspace-ledger",
-	Version: "0.10.0",
+	Version: "0.11.0",
 	Description: "Loftspace tenant payment ledger: the account vertex type (LoftspaceCreateAccount, independently-minted " +
 		"id, one per lease via a .ledgerAccount guard aspect on the leaseapp) + the transaction vertex type " +
 		"(DebitAccount/CreditAccount, append-only entries linked to the account via postedTo; DebitAccount's " +
@@ -98,7 +98,9 @@ var Package = pkgmgr.Definition{
 		"a charged, still-held deposit clause (a third entry type, neither debit nor credit, so no balance reader " +
 		"ages it); PayOutBalance pays an ended tenancy's whole credit balance out, computed from the account's own " +
 		"history; LoftspaceRecordCharge is a person's manual " +
-		"charge, never clause-authorized; it, CreditAccount, RecordDepositDeduction and PayOutBalance also grant a consumer scope=self, " +
+		"charge, never clause-authorized; CreditAccount's optional reversesRef names the charge a credit reverses and " +
+		"writes the reverses link the arrears head nets it against, LinkReversal (operator-only) writes the same link " +
+		"onto a credit posted naming nothing; LoftspaceRecordCharge, CreditAccount, RecordDepositDeduction and PayOutBalance also grant a consumer scope=self, " +
 		"ownership-checked off the account's own heldFor topology — a resident paying down their own " +
 		"balance, credit only and amount-capped at the account's own recomputed outstanding balance, or a " +
 		"landlord recording a charge, a payment, a deduction or a payout on a lease of a unit they manage, uncapped) + the " +
@@ -107,7 +109,8 @@ var Package = pkgmgr.Definition{
 		"Also ships the rent-arrears reminder: the account's .arrears episode aspect (minted by evaluation; every " +
 		"posted entry marks it stale, since no balance is stored) + the loftspaceArrearsReminders weaver-target " +
 		"convergence lens, whose §10.8 playbook dispatches EvaluateLoftspaceArrears — that op ages the account with " +
-		"the same plain FIFO the tenant's statement runs, records the head's own recorded due date (its postedAt " +
+		"the same FIFO the tenant's statement runs (a reversal retires the charge it names, capped at its face; every " +
+		"other credit the oldest open charge), records the head's own recorded due date (its postedAt " +
 		"when it recorded none) and the reminder instant five days after it, and fires ONE external.notification " +
 		"per arrears episode to the bridge's \"notification\" adapter, keyed on (accountKey, dueAt, headKey). " +
 		"RecordLoftspaceArrearsReminderNotification records the outcome. Depends lease-signing + orchestration-base.",

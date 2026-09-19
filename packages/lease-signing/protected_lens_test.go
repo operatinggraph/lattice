@@ -171,6 +171,10 @@ func TestLeaseApplicationsRead_ProjectsTenancyColumns(t *testing.T) {
 		"amount":     1500,
 		"recordedAt": "2026-09-15T00:00:00Z",
 	})
+	f.aspect(t, "app", "lateFee", "leaseLateFee", map[string]any{
+		"amountCents": 5000,
+		"recordedAt":  "2026-09-18T15:00:00Z",
+	})
 
 	rows := f.projectRead(t)
 	require.Len(t, rows, 1)
@@ -182,6 +186,22 @@ func TestLeaseApplicationsRead_ProjectsTenancyColumns(t *testing.T) {
 	require.EqualValues(t, 1900, v["tenancy_rent_amount"])
 	require.Nil(t, v["tenancy_ended_at"], "tenancy_ended_at is null on every live row")
 	require.EqualValues(t, 1500, v["deposit_amount"])
+	require.EqualValues(t, 5000, v["late_fee_cents"], "late_fee_cents reads straight off app.lateFee.data.amountCents (SetLateFee's stamp), in cents")
+}
+
+// TestLeaseApplicationsRead_NoLateFee_NullColumn — a lease with no .lateFee
+// projects late_fee_cents null, the absent-term shape the tenant's terms
+// panel renders no fee line for.
+func TestLeaseApplicationsRead_NoLateFee_NullColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newLensFixture(t)
+	f.seedApplication(t, "app", "alice", "unit1")
+
+	rows := f.projectRead(t)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0].Values["late_fee_cents"])
 }
 
 // TestLeaseApplicationsRead_BareShellProducesNoRow — a malformed application with

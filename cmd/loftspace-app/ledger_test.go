@@ -150,6 +150,30 @@ func TestComputeLedgerHistory_ClausePurposeRidesThrough(t *testing.T) {
 	}
 }
 
+// TestComputeLedgerHistory_ReversesKeyRidesThrough — a credit row's
+// reversesKey (the ledgerHistory lens's reverses hop) reaches the wire row;
+// a plain payment and every debit carry none.
+func TestComputeLedgerHistory_ReversesKeyRidesThrough(t *testing.T) {
+	entries := map[string]string{
+		"vtx.transaction.1": `{"transactionKey":"vtx.transaction.1","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"debit","amountCents":205000,"postedAt":"2026-09-05T17:01:51Z"}`,
+		"vtx.transaction.2": `{"transactionKey":"vtx.transaction.2","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"credit","amountCents":205000,"postedAt":"2026-09-13T09:00:00Z","reversesKey":"vtx.transaction.1"}`,
+		"vtx.transaction.3": `{"transactionKey":"vtx.transaction.3","accountKey":"vtx.account.lll","leaseAppKey":"vtx.leaseapp.lll","type":"credit","amountCents":500,"postedAt":"2026-09-14T09:00:00Z"}`,
+	}
+	rows, _ := computeLedgerHistory(keysOf(entries), fakeKV(entries), "vtx.leaseapp.lll")
+	if len(rows) != 3 {
+		t.Fatalf("want 3 rows, got %d", len(rows))
+	}
+	if rows[0].ReversesKey != "" {
+		t.Errorf("debit row reversesKey = %q, want empty", rows[0].ReversesKey)
+	}
+	if rows[1].ReversesKey != "vtx.transaction.1" {
+		t.Errorf("reversal row reversesKey = %q, want vtx.transaction.1", rows[1].ReversesKey)
+	}
+	if rows[2].ReversesKey != "" {
+		t.Errorf("plain payment reversesKey = %q, want empty", rows[2].ReversesKey)
+	}
+}
+
 // TestComputeDepositSummary_HeldReturnedNoneIgnoresOther pins every branch
 // the FE's depositLine reads: a charged-and-unreturned deposit reads held
 // (its own charged figure, no returned date); a charged-and-returned one
@@ -286,7 +310,7 @@ func TestDeriveRentArrears_RecordedWinsOverDerivedHead(t *testing.T) {
 		{TransactionKey: "t1", Type: "debit", AmountCents: 100000, PostedAt: "2026-09-01T00:00:00Z", DueAt: "2026-09-01T00:00:00Z"},
 	}
 	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
-	got := deriveRentArrears(rows, "2026-09-05T00:00:00Z", "", now)
+	got := deriveRentArrears(rows, "2026-09-05T00:00:00Z", "", "", now)
 	if got.DueDate != "2026-09-05T00:00:00Z" {
 		t.Errorf("DueDate = %q, want the RECORDED date, not the head's own dueAt (2026-09-01)", got.DueDate)
 	}
@@ -299,7 +323,7 @@ func TestDeriveRentArrears_NoRecorded_UsesHeadDueAt(t *testing.T) {
 		{TransactionKey: "t1", Type: "debit", AmountCents: 100000, PostedAt: "2026-09-01T00:00:00Z", DueAt: "2026-09-06T00:00:00Z"},
 	}
 	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
-	got := deriveRentArrears(rows, "", "", now)
+	got := deriveRentArrears(rows, "", "", "", now)
 	if got.DueDate != "2026-09-06T00:00:00Z" {
 		t.Errorf("DueDate = %q, want the head's own recorded dueAt", got.DueDate)
 	}
@@ -318,7 +342,7 @@ func TestDeriveRentArrears_IgnoresDeduction(t *testing.T) {
 		{TransactionKey: "t2", Type: "deduction", AmountCents: 999999999, PostedAt: "2026-09-02T00:00:00Z"},
 	}
 	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
-	got := deriveRentArrears(rows, "", "", now)
+	got := deriveRentArrears(rows, "", "", "", now)
 	if got.DueDate != "2026-09-01T00:00:00Z" {
 		t.Errorf("DueDate = %q, want the real debit's own dueAt — the deduction must not become a new head or pay the real one off", got.DueDate)
 	}
@@ -335,7 +359,7 @@ func TestDeriveRentArrears_HeadWithNoDueAt_UsesPostedAt(t *testing.T) {
 		{TransactionKey: "t1", Type: "debit", AmountCents: 100000, PostedAt: "2026-09-01T00:00:00Z"},
 	}
 	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
-	got := deriveRentArrears(rows, "", "", now)
+	got := deriveRentArrears(rows, "", "", "", now)
 	if got.DueDate != "2026-09-01T00:00:00Z" {
 		t.Errorf("DueDate = %q, want the head's own postedAt (due on receipt)", got.DueDate)
 	}
@@ -353,7 +377,7 @@ func TestDeriveRentArrears_PartialPaymentMovesHeadToNextOpenDebit(t *testing.T) 
 		{TransactionKey: "t3", Type: "debit", AmountCents: 50000, PostedAt: "2026-09-01T00:00:00Z", DueAt: "2026-09-01T00:00:00Z"},
 	}
 	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
-	got := deriveRentArrears(rows, "", "", now)
+	got := deriveRentArrears(rows, "", "", "", now)
 	if got.DueDate != "2026-09-01T00:00:00Z" {
 		t.Errorf("DueDate = %q, want t3's dueAt — t1 fully retired, the carried surplus only partly pays t3", got.DueDate)
 	}
@@ -370,7 +394,7 @@ func TestDeriveRentArrears_PaymentToZero_NoDueDate(t *testing.T) {
 		{TransactionKey: "t2", Type: "credit", AmountCents: 100000, PostedAt: "2026-08-05T00:00:00Z"},
 	}
 	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
-	got := deriveRentArrears(rows, "", "", now)
+	got := deriveRentArrears(rows, "", "", "", now)
 	if got.DueDate != "" || got.IsOverdue || got.DaysOverdue != 0 || got.DaysUntilDue != 0 {
 		t.Errorf("got %+v, want the zero value — nothing owed, nothing to age", got)
 	}
@@ -387,7 +411,7 @@ func TestDeriveRentArrears_RecordedStampIgnoredWhenPaidOff(t *testing.T) {
 		{TransactionKey: "t2", Type: "credit", AmountCents: 100000, PostedAt: "2026-08-05T00:00:00Z"},
 	}
 	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
-	got := deriveRentArrears(rows, "2026-08-01T00:00:00Z", "", now)
+	got := deriveRentArrears(rows, "2026-08-01T00:00:00Z", "", "", now)
 	if got.DueDate != "" {
 		t.Errorf("DueDate = %q, want empty — a stale recorded stamp must not outlive the payment that closed the episode", got.DueDate)
 	}
@@ -403,7 +427,7 @@ func TestDeriveRentArrears_ReminderSentAtThreadsFromSource(t *testing.T) {
 	rows := []ledgerEntryRow{
 		{TransactionKey: "t1", Type: "debit", AmountCents: 100000, PostedAt: "2026-09-01T00:00:00Z"},
 	}
-	got := deriveRentArrears(rows, "", source, time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC))
+	got := deriveRentArrears(rows, "", source, "", time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC))
 	if got.ReminderSentAt != source {
 		t.Errorf("ReminderSentAt = %q, want it equal to the source value %q", got.ReminderSentAt, source)
 	}
@@ -425,12 +449,45 @@ func TestDeriveRentArrears_StaleReminderAcrossEpisodeBoundary_Dropped(t *testing
 		{TransactionKey: "b", Type: "debit", AmountCents: 50000, PostedAt: "2026-09-12T00:00:00Z", DueAt: "2026-09-12T00:00:00Z"},
 	}
 	now := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
-	got := deriveRentArrears(rows, "2026-09-01T00:00:00Z", "2026-09-06T00:00:00Z", now)
+	got := deriveRentArrears(rows, "2026-09-01T00:00:00Z", "2026-09-06T00:00:00Z", "", now)
 	if got.ReminderSentAt != "" {
 		t.Errorf("ReminderSentAt = %q, want empty — the reminder (Sep 6) predates the new episode's start (Sep 12)", got.ReminderSentAt)
 	}
 	if got.DueDate != "2026-09-12T00:00:00Z" {
 		t.Errorf("DueDate = %q, want the NEW head's own recorded due (Sep 12) — the stale recorded stamp (Sep 1) must not win", got.DueDate)
+	}
+}
+
+// TestDeriveRentArrears_LateFeeBilledAtThreadsAndDropsWithTheReminder —
+// lateFeeAt is asserted equal to its SOURCE value (the leaseAccounts row's
+// own arrearsLateFeeAt) while the episode it was stamped in is current, and
+// dropped together with the reminder across the episode boundary — the same
+// send commit stamped both, so neither describes a later episode.
+func TestDeriveRentArrears_LateFeeBilledAtThreadsAndDropsWithTheReminder(t *testing.T) {
+	const source = "2026-09-08T00:00:00Z"
+	open := []ledgerEntryRow{
+		{TransactionKey: "t1", Type: "debit", AmountCents: 100000, PostedAt: "2026-09-01T00:00:00Z"},
+	}
+	got := deriveRentArrears(open, "", source, source, time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC))
+	if got.LateFeeBilledAt != source {
+		t.Errorf("LateFeeBilledAt = %q, want it equal to the source value %q", got.LateFeeBilledAt, source)
+	}
+
+	crossed := []ledgerEntryRow{
+		{TransactionKey: "a", Type: "debit", AmountCents: 100000, PostedAt: "2026-09-01T00:00:00Z", DueAt: "2026-09-01T00:00:00Z"},
+		{TransactionKey: "pay", Type: "credit", AmountCents: 100000, PostedAt: "2026-09-10T00:00:00Z"},
+		{TransactionKey: "b", Type: "debit", AmountCents: 50000, PostedAt: "2026-09-12T00:00:00Z", DueAt: "2026-09-12T00:00:00Z"},
+	}
+	got = deriveRentArrears(crossed, "2026-09-01T00:00:00Z", "2026-09-06T00:00:00Z", "2026-09-06T00:00:00Z", time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC))
+	if got.LateFeeBilledAt != "" {
+		t.Errorf("LateFeeBilledAt = %q, want empty — the fee (Sep 6) predates the new episode's start (Sep 12), exactly as the reminder does", got.LateFeeBilledAt)
+	}
+
+	// A fee never billed for a current episode: empty in, empty out — never
+	// borrowed from the reminder.
+	got = deriveRentArrears(open, "", source, "", time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC))
+	if got.LateFeeBilledAt != "" {
+		t.Errorf("LateFeeBilledAt = %q, want empty when no fee was billed", got.LateFeeBilledAt)
 	}
 }
 
@@ -447,7 +504,7 @@ func TestDeriveRentArrears_ReminderKeptWhenAccountNeverSquared(t *testing.T) {
 	}
 	now := time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
 	const reminder = "2026-09-06T00:00:00Z"
-	got := deriveRentArrears(rows, "", reminder, now)
+	got := deriveRentArrears(rows, "", reminder, "", now)
 	if got.ReminderSentAt != reminder {
 		t.Errorf("ReminderSentAt = %q, want it kept (%q) — the account was never square, so this is still the current episode", got.ReminderSentAt, reminder)
 	}
@@ -462,9 +519,134 @@ func TestDeriveRentArrears_ReminderEqualToEpisodeStart_Kept(t *testing.T) {
 	}
 	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
 	const reminder = "2026-09-01T00:00:00Z"
-	got := deriveRentArrears(rows, "", reminder, now)
+	got := deriveRentArrears(rows, "", reminder, "", now)
 	if got.ReminderSentAt != reminder {
 		t.Errorf("ReminderSentAt = %q, want it kept (%q) — equal to the episode start is not STRICTLY earlier", got.ReminderSentAt, reminder)
+	}
+}
+
+// TestDeriveRentArrears_ReversalNetsAgainstItsCharge is the Go half of the
+// rule EvaluateLoftspaceArrears' arrears_head runs (the statement and the
+// console must net the same way), on the live shape that minted it: rent
+// charged 08-06, a $500 payment 09-04, rent charged again 09-05, that charge
+// reversed in full 09-13 by a credit naming it, and the renewed rent charged
+// 09-13. Plain FIFO would spend the reversal on the 08-06 remainder and part
+// of 09-05, naming 09-05 the head (13 days overdue); the netting retires
+// 09-05 specifically and leaves 08-06 — the rent actually unpaid — as the
+// head, 43 days overdue.
+func TestDeriveRentArrears_ReversalNetsAgainstItsCharge(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "aug", Type: "debit", AmountCents: 205000, PostedAt: "2026-08-06T17:01:51Z", DueAt: "2026-08-06T17:01:51Z"},
+		{TransactionKey: "pay", Type: "credit", AmountCents: 50000, PostedAt: "2026-09-04T09:00:00Z"},
+		{TransactionKey: "sep", Type: "debit", AmountCents: 205000, PostedAt: "2026-09-05T17:01:51Z", DueAt: "2026-09-05T17:01:51Z"},
+		{TransactionKey: "rev", Type: "credit", AmountCents: 205000, PostedAt: "2026-09-13T09:00:00Z", ReversesKey: "sep"},
+		{TransactionKey: "renewed", Type: "debit", AmountCents: 212500, PostedAt: "2026-09-13T09:30:00Z", DueAt: "2026-09-13T09:30:00Z"},
+	}
+	now := time.Date(2026, 9, 18, 17, 30, 0, 0, time.UTC)
+	got := deriveRentArrears(rows, "", "", "", now)
+	if got.DueDate != "2026-08-06T17:01:51Z" {
+		t.Fatalf("DueDate = %q, want 2026-08-06T17:01:51Z — the reversal retires the 09-05 charge it names, leaving 08-06 as the head", got.DueDate)
+	}
+	if !got.IsOverdue || got.DaysOverdue != 43 {
+		t.Errorf("IsOverdue/DaysOverdue = %v/%d, want true/43", got.IsOverdue, got.DaysOverdue)
+	}
+}
+
+// TestDeriveRentArrears_ReversalCapsAtFaceAndKeepsTheEpisode — a reversal
+// larger than what is still open of the charge it names (a payment already
+// retired part of it) applies only that remainder to the named charge and
+// FIFOs the rest as a plain payment; a reversal naming a charge that is not
+// in the rows at all is a plain payment. The named charge opened at its own
+// position, so a reversal that squares the account closes the episode the
+// charge opened — the recorded reminder for it is dropped as a finished
+// episode's once a later charge opens a new one.
+func TestDeriveRentArrears_ReversalCapsAtFaceAndKeepsTheEpisode(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "a", Type: "debit", AmountCents: 100000, PostedAt: "2026-08-01T00:00:00Z", DueAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "b", Type: "debit", AmountCents: 100000, PostedAt: "2026-08-02T00:00:00Z", DueAt: "2026-08-02T00:00:00Z"},
+		{TransactionKey: "pay", Type: "credit", AmountCents: 50000, PostedAt: "2026-08-03T00:00:00Z"},
+		{TransactionKey: "rev", Type: "credit", AmountCents: 100000, PostedAt: "2026-08-04T00:00:00Z", ReversesKey: "a"},
+	}
+	now := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+	got := deriveRentArrears(rows, "", "", "", now)
+	if got.DueDate != "2026-08-02T00:00:00Z" {
+		t.Errorf("DueDate = %q, want b's — the payment took 50000 of a, the reversal the remaining 50000, and its other 50000 half-paid b", got.DueDate)
+	}
+
+	closed := []ledgerEntryRow{
+		{TransactionKey: "a", Type: "debit", AmountCents: 100000, PostedAt: "2026-08-01T00:00:00Z", DueAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "rev", Type: "credit", AmountCents: 100000, PostedAt: "2026-08-20T00:00:00Z", ReversesKey: "a"},
+		{TransactionKey: "b", Type: "debit", AmountCents: 20000, PostedAt: "2026-09-01T00:00:00Z", DueAt: "2026-09-01T00:00:00Z"},
+	}
+	got = deriveRentArrears(closed, "2026-08-01T00:00:00Z", "2026-08-07T00:00:00Z", "", time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC))
+	if got.ReminderSentAt != "" || got.DueDate != "2026-09-01T00:00:00Z" {
+		t.Errorf("ReminderSentAt/DueDate = %q/%q, want empty/2026-09-01 — the reversal squared the account, so b opened a new episode and the old send record is dropped", got.ReminderSentAt, got.DueDate)
+	}
+
+	unknown := []ledgerEntryRow{
+		{TransactionKey: "a", Type: "debit", AmountCents: 100000, PostedAt: "2026-08-01T00:00:00Z", DueAt: "2026-08-01T00:00:00Z"},
+		{TransactionKey: "rev", Type: "credit", AmountCents: 100000, PostedAt: "2026-08-04T00:00:00Z", ReversesKey: "elsewhere"},
+	}
+	got = deriveRentArrears(unknown, "", "", "", now)
+	if got.DueDate != "" {
+		t.Errorf("DueDate = %q, want empty — a reversal naming a charge outside the rows is a plain payment and squares a", got.DueDate)
+	}
+}
+
+// TestDeriveRentArrears_ReversalPrecedingItsChargeIsPlain is the Go half of
+// the head's position rule (the op's arrears_head runs the same vectors): a
+// credit that names a charge posted AFTER it is a PLAIN payment — nothing
+// absorbed, nothing held for its target — so it retires the older charge and
+// prepays the named one, which opens for the remainder as the head; held for
+// its target instead, the older charge would stay the head.
+func TestDeriveRentArrears_ReversalPrecedingItsChargeIsPlain(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "a", Type: "debit", AmountCents: 400, PostedAt: "2026-08-01T12:00:00Z", DueAt: "2026-08-01T12:00:00Z"},
+		{TransactionKey: "c", Type: "credit", AmountCents: 500, PostedAt: "2026-08-02T12:00:00Z", ReversesKey: "d"},
+		{TransactionKey: "d", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-03T12:00:00Z", DueAt: "2026-08-03T12:00:00Z"},
+	}
+	now := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	got := deriveRentArrears(rows, "", "", "", now)
+	if got.DueDate != "2026-08-03T12:00:00Z" {
+		t.Fatalf("DueDate = %q, want d's — the 08-02 credit precedes its charge, so it is a plain payment that retires a and prepays d", got.DueDate)
+	}
+}
+
+// TestDeriveRentArrears_ReversalPrecedingItsChargeDoesNotCapTheRealReversal
+// — the early credit also charges NOTHING against its target's face, so the
+// later real reversal of that charge retires it whole and the older charge
+// stays the head. Position-blind, the early credit would be spent on the
+// older charge and cap the real reversal at half, naming the reversed charge
+// the head.
+func TestDeriveRentArrears_ReversalPrecedingItsChargeDoesNotCapTheRealReversal(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "a", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T12:00:00Z", DueAt: "2026-08-01T12:00:00Z"},
+		{TransactionKey: "c", Type: "credit", AmountCents: 500, PostedAt: "2026-08-02T12:00:00Z", ReversesKey: "d"},
+		{TransactionKey: "d", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-03T12:00:00Z", DueAt: "2026-08-03T12:00:00Z"},
+		{TransactionKey: "r", Type: "credit", AmountCents: 1000, PostedAt: "2026-08-04T12:00:00Z", ReversesKey: "d"},
+	}
+	now := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	got := deriveRentArrears(rows, "", "", "", now)
+	if got.DueDate != "2026-08-01T12:00:00Z" {
+		t.Fatalf("DueDate = %q, want a's — the 08-02 credit precedes its charge and is a plain payment; the 08-04 reversal retires d whole", got.DueDate)
+	}
+}
+
+// TestDeriveRentArrears_SameSecondReversalSortingBeforeItsChargeIsHeld — a
+// reversal in the SAME second as its charge whose key sorts BEFORE the
+// charge's is held for the charge (withheld from the FIFO at the credit,
+// applied when the charge is walked, which then never opens), so the older
+// charge stays the head whichever way the random keys sort.
+func TestDeriveRentArrears_SameSecondReversalSortingBeforeItsChargeIsHeld(t *testing.T) {
+	rows := []ledgerEntryRow{
+		{TransactionKey: "a", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-01T12:00:00Z", DueAt: "2026-08-01T12:00:00Z"},
+		{TransactionKey: "b-reversal", Type: "credit", AmountCents: 1000, PostedAt: "2026-08-05T12:00:00Z", ReversesKey: "z-charge"},
+		{TransactionKey: "z-charge", Type: "debit", AmountCents: 1000, PostedAt: "2026-08-05T12:00:00Z", DueAt: "2026-08-05T12:00:00Z"},
+	}
+	now := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	got := deriveRentArrears(rows, "", "", "", now)
+	if got.DueDate != "2026-08-01T12:00:00Z" {
+		t.Fatalf("DueDate = %q, want a's — the same-second reversal sorting before its charge is held for that charge, never spent on a", got.DueDate)
 	}
 }
 

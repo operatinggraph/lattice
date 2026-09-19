@@ -58,9 +58,10 @@ func Lenses() []pkgmgr.LensSpec {
 			Output: &pkgmgr.OutputDescriptorSpec{
 				AnchorType:       "leaseapp",
 				OutputKeyPattern: LeaseRentSettlementTarget + ".{actorSuffix}",
-				BodyColumns: []string{"violating", "missing_terms", "missing_account", "missing_clause", "missing_term", "missing_termShortened", "missing_deposit", "missing_depositReturn", "entityKey", "leaseAppKey", "accountKey",
+				BodyColumns: []string{"violating", "missing_terms", "missing_account", "missing_clause", "missing_term", "missing_termShortened", "missing_deposit", "missing_depositReturn", "missing_lateFeeClause", "missing_lateFeeAmendment", "entityKey", "leaseAppKey", "accountKey",
 					"leaseStart", "termStart", "leaseEnd", "termRentCents", "untermedClauseKey", "overrunClauseKey", "moveOutAt",
-					"depositAmount", "depositCents", "endedAt", "depositClauseCount", "depositClauseKey"},
+					"depositAmount", "depositCents", "endedAt", "depositClauseCount", "depositClauseKey",
+					"lateFeeCents", "lateFeeClauseCount", "lateFeeClauseKey", "lateFeeClauseCents"},
 				EmptyBehavior: "delete",
 				KeyColumn:     "entityId",
 				Freshness:     "auto",
@@ -75,7 +76,9 @@ func Lenses() []pkgmgr.LensSpec {
 // projects a row and needs an agreed rent, then a ledger account, then a
 // recurring monthly rent clause for its CURRENT term — and any monthly clause
 // it already has minted without a term gets one, a recorded security deposit
-// is minted as a one-time clause and returned once the tenancy ends — in its
+// is minted as a one-time clause and returned once the tenancy ends, a
+// recorded late-fee term is minted as a perArrearsEpisode clause and amended
+// when the term changes — in its
 // gap columns: `missing_account`/`missing_clause` mirror cafe-domain's tabSettlement
 // missing_account → missing_charge shape exactly (lenses.go), except the
 // second gap here mints a CLAUSE, not a charge, because rent's actual
@@ -223,6 +226,45 @@ func Lenses() []pkgmgr.LensSpec {
 //     clauseKey: depositClauseKey, accountKey} (loftspace-ledger), which
 //     posts the deposit back as a credit authorizedBy the clause and marks
 //     it returned.
+//   - `missing_lateFeeClause` — the lease records a late-fee term
+//     (l.lateFee.data.amountCents, SetLateFee's stamp — the landlord's own
+//     recorded intent, the way .deposit is DecideLeaseApplication's), the
+//     ledger account exists, the tenancy has not ended, and no LIVE clause
+//     governing this lease carries .terms.purpose = 'lateFee' with
+//     .status.state = 'active' (lateFeeClauseCount, the depositClauseCount
+//     shape narrowed to the active state: a superseded fee clause is
+//     tombstoned and its status marked superseded, and the replacement is
+//     the one that counts). Weaver dispatches CreateClause{leaseAppKey,
+//     accountKey, amountCents: lateFeeCents, period: "perArrearsEpisode",
+//     purpose: "lateFee", prose: <literal>} (this package). lateFeeCents is
+//     the recorded integer-cents figure itself — SetLateFee refuses anything
+//     but a positive integer — so no ×100 conversion sits between the term
+//     and the clause. Closes on the mint; the clause then stays active for
+//     the life of the lease (clauseSatisfaction bills period = oneTime and
+//     monthly alone, so the fee is never charged at mint) and
+//     loftspace-ledger's arrears evaluation posts its amount once per
+//     arrears episode.
+//   - `missing_lateFeeAmendment` — an active lateFee clause governs the
+//     lease (lateFeeClauseKey, the max(CASE …) one-per-pass shape) and its
+//     recorded amount (lateFeeClauseCents, the same CASE over
+//     c.terms.data.amountCents) disagrees with the lease's current term.
+//     Weaver dispatches SupersedeClause{clauseKey: lateFeeClauseKey,
+//     leaseAppKey, accountKey, amountCents: lateFeeCents, period:
+//     "perArrearsEpisode", prose} (this package), which tombstones the
+//     amended clause and mints the replacement at the new amount — after
+//     which the amended clause drops out of the active CASE, the
+//     replacement's amount agrees, and both gaps read false. The gap's own
+//     lateFeeClauseKey <> null conjunct is what lets the dispatch template
+//     the key off the optional governs walk; accountKey <> null states the
+//     account the replacement charges (the mint's own conjunct, restated so
+//     the dispatch never templates a null); lateFeeClauseCount = 1 holds
+//     the amendment shut when an operator hand-mint has left TWO active fee
+//     clauses on one lease — max() would name one of them and the supersede
+//     would leave the other, so the row stays visibly open-but-quiet for an
+//     operator instead of ping-ponging (the arrears evaluation bills the
+//     greatest key, the same max, meanwhile). A fee term set after this
+//     episode's reminder went out bills from the next episode: the
+//     evaluation reads the clause live on the send commit alone.
 //
 // The term the rent clause covers is the lease's CURRENT one. termStart is
 // l.tenancy.data.termStart — the renewed term's start, which SignRenewal
@@ -285,6 +327,10 @@ WITH
   l.notice.data.moveOutAt AS moveOutAt,
   l.deposit.data.amount AS depositAmount,
   l.tenancy.data.endedAt AS endedAt,
+  l.lateFee.data.amountCents AS lateFeeCents,
+  count(DISTINCT CASE WHEN (c.terms.data.purpose = 'lateFee') AND (c.status.data.state = 'active') THEN c.key ELSE null END) AS lateFeeClauseCount,
+  max(CASE WHEN (c.terms.data.purpose = 'lateFee') AND (c.status.data.state = 'active') THEN c.key ELSE null END) AS lateFeeClauseKey,
+  max(CASE WHEN (c.terms.data.purpose = 'lateFee') AND (c.status.data.state = 'active') THEN c.terms.data.amountCents ELSE null END) AS lateFeeClauseCents,
   count(DISTINCT CASE WHEN (c.terms.data.purpose = 'deposit') THEN c.key ELSE null END) AS depositClauseCount,
   max(CASE WHEN (c.terms.data.purpose = 'deposit') AND (c.terms.data.period = 'oneTime') AND (c.terms.data.kind = 'computational') AND (c.status.data.state = 'completed') THEN c.key ELSE null END) AS depositClauseKey,
   count(DISTINCT CASE WHEN (c.terms.data.period = 'monthly') AND (c.terms.data.conditioned <> true) AND (c.terms.data.validFrom = coalesce(l.tenancy.data.termStart, l.tenancy.data.leaseStart)) THEN c.key ELSE null END) AS termClauseCount,
@@ -307,6 +353,10 @@ RETURN
   endedAt,
   depositClauseCount,
   depositClauseKey,
+  lateFeeCents,
+  lateFeeClauseCount,
+  lateFeeClauseKey,
+  lateFeeClauseCents,
   (CASE WHEN termRent = null THEN null ELSE (termRent * 100) END) AS termRentCents,
   (CASE WHEN depositAmount = null THEN null ELSE (depositAmount * 100) END) AS depositCents,
   (requestedRent = null) AS missing_terms,
@@ -316,7 +366,9 @@ RETURN
   ((overrunClauseKey <> null)) AS missing_termShortened,
   ((accountKey <> null) AND (depositAmount <> null) AND (endedAt = null) AND (depositClauseCount = 0)) AS missing_deposit,
   ((accountKey <> null) AND (endedAt <> null) AND (depositClauseKey <> null)) AS missing_depositReturn,
-  ((requestedRent = null) OR ((requestedRent <> null) AND (accountKey = null)) OR ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) OR ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null)) OR ((overrunClauseKey <> null)) OR ((accountKey <> null) AND (depositAmount <> null) AND (endedAt = null) AND (depositClauseCount = 0)) OR ((accountKey <> null) AND (endedAt <> null) AND (depositClauseKey <> null))) AS violating
+  ((accountKey <> null) AND (lateFeeCents <> null) AND (endedAt = null) AND (lateFeeClauseCount = 0)) AS missing_lateFeeClause,
+  ((accountKey <> null) AND (lateFeeClauseKey <> null) AND (lateFeeClauseCount = 1) AND (lateFeeCents <> null) AND (lateFeeClauseCents <> lateFeeCents)) AS missing_lateFeeAmendment,
+  ((requestedRent = null) OR ((requestedRent <> null) AND (accountKey = null)) OR ((requestedRent <> null) AND (accountKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null) AND (termClauseCount = 0) AND (untermedClauseCount = 0)) OR ((untermedClauseKey <> null) AND (leaseStart <> null) AND (leaseEnd <> null)) OR ((overrunClauseKey <> null)) OR ((accountKey <> null) AND (depositAmount <> null) AND (endedAt = null) AND (depositClauseCount = 0)) OR ((accountKey <> null) AND (endedAt <> null) AND (depositClauseKey <> null)) OR ((accountKey <> null) AND (lateFeeCents <> null) AND (endedAt = null) AND (lateFeeClauseCount = 0)) OR ((accountKey <> null) AND (lateFeeClauseKey <> null) AND (lateFeeClauseCount = 1) AND (lateFeeCents <> null) AND (lateFeeClauseCents <> lateFeeCents))) AS violating
 `
 
 // clauseSatisfactionSpec is the one-row-per-clause satisfaction cypher (§3.2
@@ -374,9 +426,17 @@ RETURN
 // authorizing transaction exists, the gap flips false and STAYS false (the
 // row lingers non-violating, which is harmless).
 //
+// The one-time arm bills period = 'oneTime' and nothing else — never
+// "whatever is not monthly": the lens bills only the periods it understands.
+// A perArrearsEpisode clause (the late fee, purpose=lateFee) is billed by
+// loftspace-ledger's arrears evaluation once per arrears episode, and an arm
+// written as period <> 'monthly' would bill it here at mint, at chargeCount =
+// 0, before any rent was ever late. Pinned by TestClauseSatisfaction_
+// PerArrearsEpisode_NeverBilledHere.
+//
 // The monthly rule (`period` is c.terms.data.period, always present — every
-// CreateClause stamps it; period<>'monthly' keeps the chargeCount=0 check
-// above, period='monthly' takes this arm):
+// CreateClause stamps it; period='oneTime' takes the chargeCount=0 check
+// above, period='monthly' takes this arm, any other period neither):
 //
 //   - Every operand is stored graph data, never a clock reading. The term is
 //     the clause's own .terms.validFrom/validUntil (both or neither). The
@@ -468,7 +528,7 @@ RETURN
   validFrom,
   validUntil,
   ((accountKey <> null) AND ((conditioned <> true) OR (condKey <> null)) AND
-   (((period <> 'monthly') AND (chargeCount = 0))
+   (((period = 'oneTime') AND (chargeCount = 0))
     OR ((period = 'monthly')
         AND (((chargeValidUntil = null) AND (validFrom = null)) OR (lapsedAt >= periodStart))
         AND ((validUntil = null) OR (periodStart < validUntil))))
@@ -479,7 +539,7 @@ RETURN
        THEN periodStart ELSE null END AS freshUntil,
   (
     ((accountKey <> null) AND ((conditioned <> true) OR (condKey <> null)) AND
-     (((period <> 'monthly') AND (chargeCount = 0))
+     (((period = 'oneTime') AND (chargeCount = 0))
       OR ((period = 'monthly')
           AND (((chargeValidUntil = null) AND (validFrom = null)) OR (lapsedAt >= periodStart))
           AND ((validUntil = null) OR (periodStart < validUntil)))))

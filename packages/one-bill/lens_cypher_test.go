@@ -213,6 +213,36 @@ func TestOneBill_RentEntries_ProjectsClausePurpose(t *testing.T) {
 	require.Nil(t, plain["clausePurpose"], "a plain charge with no clauseRef must project null, never a default")
 }
 
+// TestOneBill_RentEntries_ProjectsReversesAndBilledForKeys — a reversing
+// credit projects the charge it names (reversesKey) and a late fee the
+// charge it was billed for (billedForKey), the two hops the tenant's
+// combined statement labels rows by; a plain charge projects null for both.
+func TestOneBill_RentEntries_ProjectsReversesAndBilledForKeys(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires NATS")
+	}
+	f := newObFixture(t)
+	f.mkRentTx(t, "renttx", 240000)
+	f.mkRentTx(t, "revtx", 240000)
+	f.edge(t, "reverses", "revtx", "renttx")
+	f.mkRentTx(t, "feetx", 5000)
+	f.edge(t, "billedFor", "feetx", "renttx")
+
+	rows := f.project(t, rentEntriesSpec)
+	require.Len(t, rows, 3)
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		byKey[r.Values["transactionKey"].(string)] = r.Values
+	}
+	rent := "vtx.transaction." + f.ids["renttx"]
+	require.Equal(t, rent, byKey["vtx.transaction."+f.ids["revtx"]]["reversesKey"])
+	require.Nil(t, byKey["vtx.transaction."+f.ids["revtx"]]["billedForKey"])
+	require.Equal(t, rent, byKey["vtx.transaction."+f.ids["feetx"]]["billedForKey"])
+	require.Nil(t, byKey["vtx.transaction."+f.ids["feetx"]]["reversesKey"])
+	require.Nil(t, byKey[rent]["reversesKey"])
+	require.Nil(t, byKey[rent]["billedForKey"])
+}
+
 func TestOneBill_CafeEntries_ProjectsTaggedRow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires NATS")

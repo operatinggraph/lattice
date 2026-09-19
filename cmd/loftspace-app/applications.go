@@ -62,6 +62,11 @@ type protectedApplicationRow struct {
 	// until an approval has recorded one (the unit's listing carried no
 	// depositAmount, or no approval has happened yet).
 	DepositAmount *float64 `json:"depositAmount"`
+	// LateFeeCents is the late-fee term recorded on THIS lease
+	// (.lateFee.amountCents, SetLateFee's stamp, in whole cents) — null until
+	// the landlord has set one. The fee itself bills as a ledger debit on the
+	// arrears reminder's commit; this is the term the lease states.
+	LateFeeCents *int64 `json:"lateFeeCents"`
 	// The recorded notice (GiveNotice) — null until the tenant or landlord
 	// records a move-out date. NoticeMoveOutAt is the date-only fact the
 	// term ends early (midnight-UTC — render by fmtUTCDate, never
@@ -120,7 +125,7 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_available_from, unit_lease_term_months, signed_at, landlord_decision,
        decline_reason, terms_move_in_date, terms_lease_term_months,
        terms_requested_rent, tenancy_lease_start, tenancy_lease_end,
-       tenancy_term_start, tenancy_rent_amount, tenancy_ended_at, deposit_amount,
+       tenancy_term_start, tenancy_rent_amount, tenancy_ended_at, deposit_amount, late_fee_cents,
        notice_move_out_at, notice_given_at, notice_given_by,
        doc_store_name, doc_filename, doc_content_type,
        profile_submitted, income_to_rent_met, employment_verified, reference_count,
@@ -170,7 +175,7 @@ func queryApplications(ctx context.Context, pool pgxBeginner, actorID string) ([
 			&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 			&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 			&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
-			&row.TenancyRentAmount, &row.TenancyEndedAt, &row.DepositAmount,
+			&row.TenancyRentAmount, &row.TenancyEndedAt, &row.DepositAmount, &row.LateFeeCents,
 			&row.NoticeMoveOutAt, &row.NoticeGivenAt, &row.NoticeGivenBy,
 			&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 			&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified, &row.ReferenceCount,
@@ -204,7 +209,7 @@ SELECT entity_key, applicant, unit_key, unit_address, unit_city, unit_region,
        unit_available_from, unit_lease_term_months, signed_at, landlord_decision, decline_reason,
        terms_move_in_date, terms_lease_term_months, terms_requested_rent,
        tenancy_lease_start, tenancy_lease_end, tenancy_term_start,
-       tenancy_rent_amount, tenancy_ended_at, deposit_amount,
+       tenancy_rent_amount, tenancy_ended_at, deposit_amount, late_fee_cents,
        notice_move_out_at, notice_given_at, notice_given_by,
        doc_store_name, doc_filename, doc_content_type,
        profile_submitted, income_to_rent_met, employment_verified, reference_count,
@@ -239,7 +244,7 @@ func queryApplicationByKey(ctx context.Context, pool pgxBeginner, actorID, entit
 		&row.SignedAt, &row.LandlordDecision, &row.DeclineReason,
 		&row.TermsMoveInDate, &row.TermsLeaseTerm, &row.TermsRequestedRent,
 		&row.TenancyLeaseStart, &row.TenancyLeaseEnd, &row.TenancyTermStart,
-		&row.TenancyRentAmount, &row.TenancyEndedAt, &row.DepositAmount,
+		&row.TenancyRentAmount, &row.TenancyEndedAt, &row.DepositAmount, &row.LateFeeCents,
 		&row.NoticeMoveOutAt, &row.NoticeGivenAt, &row.NoticeGivenBy,
 		&row.DocStoreName, &row.DocFilename, &row.DocContentType,
 		&row.ProfileSubmitted, &row.IncomeToRentMet, &row.EmploymentVerified, &row.ReferenceCount,

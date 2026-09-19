@@ -18,7 +18,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //     ownership proof happens server-side (scripts.go's post_entry, off the
 //     account's own heldFor topology), not via a templated OptionalReads
 //     anchor here — the account carries no denormalized lease anchor for a
-//     descriptor client to template ahead of submit.
+//     descriptor client to template ahead of submit. Its optional
+//     reversesRef is the landlord's reversal of a named charge (the
+//     loftspace-app ledger's Reverse control sends it off a debit row); the
+//     script refuses it on the resident leg, so the self-voiced form here
+//     carries the field for the landlord, who also submits self-scoped, and
+//     a resident who fills it meets AuthDenied.
 //   - LoftspaceRecordCharge — a person's manual charge on a lease account:
 //     the landlord's consumer scope=self grant (permissions.go) makes it a
 //     person-facing act, so it needs a descriptor. Voice is self (AuthContext
@@ -62,6 +67,9 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // required_string calls against, and what a CLI operator reads to spell
 // the payload. Its reads need no static declaration here: the transaction
 // DDL's own derive_reads supplies the whole set from the payload keys.
+// LinkReversal is the same shape for the same reasons: the operator's repair
+// of a credit posted as a reversal before it could name its charge, no
+// Dispatch, no screen, its whole read set derived.
 //
 // RecordDepositDeduction and PayOutBalance both grant a consumer scope=self
 // (the landlord — permissions.go), so each needs a full descriptor exactly
@@ -128,24 +136,40 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			InputSchema: `{"type":"object","properties":` +
 				`{"accountKey":{"type":"string","description":"vtx.account.<NanoID> the payment posts to — auto-filled from your lease's own ledger account."},` +
 				`"amountCents":{"type":"integer","description":"Payment amount in integer cents; required, must be a positive number."},` +
-				`"memo":{"type":"string","description":"Optional note (e.g. a check number)."}},` +
+				`"memo":{"type":"string","description":"Optional note (e.g. a check number)."},` +
+				`"reversesRef":{"type":"string","description":"Optional vtx.transaction.<NanoID> of the charge on this account this credit reverses — the landlord's correction, pre-filled from the ledger's debit row. A resident's payment never sends it (AuthDenied)."}},` +
 				`"required":["accountKey","amountCents"]}`,
 			FieldDescriptions: map[string]string{
 				"accountKey":  "Your lease's ledger account — auto-filled by the client (dispatch.targetField), not user-entered.",
 				"amountCents": "The payment amount in integer cents; required, must be a positive number.",
 				"memo":        "Optional note attached to the payment (e.g. a check number).",
+				"reversesRef": "Optional — the charge on this account this credit reverses, pre-filled from the ledger's debit row (not user-entered). The landlord's correction: the charge must be a debit on the same account, never the security deposit's charge (DepositNotReversible), and the amount may not exceed its face (ReversalExceedsCharge). A resident's payment never sends it (AuthDenied).",
 			},
 			Dispatch: &pkgmgr.OpDispatchSpec{
 				Class:       "transaction",
 				AuthContext: "self",
 				TargetField: "accountKey",
 				TargetType:  "account",
-				Reads:       []string{"{payload.accountKey}"},
+				// {payload.reversesRef}: the charge a reversal names, when it
+				// names one — the form module drops the template of an absent
+				// optional field, so a plain payment declares only the account.
+				// Its .entry and postedTo link are the DDL's own derive_reads'
+				// to supply (a suffix hung off an optional field is refused
+				// here on sight).
+				Reads: []string{"{payload.accountKey}", "{payload.reversesRef}"},
 				// The account's own arrears episode state post_entry marks stale
 				// (absence-tolerant: absent until the first evaluation).
 				OptionalReads: []string{"{payload.accountKey}.arrears"},
+				// The named charge's own authorizedBy walk (reversal_target
+				// refuses the deposit's charge off its clause) — a hub that
+				// substitutes to empty on a plain payment is dropped by the
+				// form module, so only a reversal declares it.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{payload.reversesRef}", Relation: "authorizedBy", Direction: "out"},
+				},
 			},
 			// refusal-courtesy(facet): AmountMismatch, TermExhausted: unreachable — CreditAccount's post_entry call hardcodes allow_clause_ref=False (scripts.go), so the clauseRef branch that raises these never runs for any CreditAccount dispatch.
+			// refusal-courtesy(facet): ReversalExceedsCharge, WrongAccount, DepositNotReversible: none — reversesRef is a plain typed field on the generic form, not an x-entityRef picker Facet could drop, and no edge-manifest entity lens projects a transaction's account, face or authorizing clause for the InputSchema to bound amountCents or exclude the deposit charge against.
 			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column.
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: none — AuthContext "self" means every Facet submit of this op is self-scoped, so the self-credit balance-verification block (post_entry's authContextTarget branch, scripts.go) always runs, but amountCents carries no maximum tied to the account's own live balance (InputSchema above), and no edge-manifest entity lens projects that balance as a column Facet could bound against
 		},
@@ -181,6 +205,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): AmountMismatch, TermExhausted: unreachable — LoftspaceRecordCharge's post_entry call hardcodes allow_clause_ref=False (scripts.go), so the clauseRef branch that raises these never runs for any LoftspaceRecordCharge dispatch.
 			// refusal-courtesy(facet): InvalidState: none — accountKey is dispatch.targetField-resolved from the entity being viewed, never picked from a Facet-rendered list; the arrears aspect's wrong class is a data-integrity fault (post_entry, scripts.go), not a lens-projected column.
 			// refusal-courtesy(facet): NoBalanceToPay, PaymentExceedsBalance: unreachable — a debit never enters the balance block: the resident branch refuses it AuthDenied first, the landlord branch has no cap.
+			// refusal-courtesy(facet): ReversalExceedsCharge, WrongAccount, DepositNotReversible: unreachable — a debit op refuses reversesRef InvalidArgument before any reversal target is read, and this descriptor's InputSchema carries no such field.
 		},
 		{
 			OperationType: "ReturnDeposit",
@@ -261,6 +286,19 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			// refusal-courtesy(facet): NoCreditBalance: none — the account's live balance is computed from its own history at dispatch time, not a lens-projected column the generic form could read ahead of submit.
 			// refusal-courtesy(facet): HistoryTooLong: none — an account history long enough to exhaust the replay budget is an operator-visible edge case; no lens column reports it.
 			// refusal-courtesy(facet): InvalidState: none — the account's .arrears aspect carrying a class other than loftspaceAccountArrears is a data-integrity fault (post_entry's arrears_stale_mark), never a lens-projected column.
+		},
+		{
+			OperationType: "LinkReversal",
+			InputSchema: `{"type":"object","properties":` +
+				`{"accountKey":{"type":"string","x-entityRef":"account","description":"vtx.account.<NanoID> both transactions are posted to (WrongAccount otherwise)."},` +
+				`"creditKey":{"type":"string","x-entityRef":"transaction","description":"vtx.transaction.<NanoID> of the live credit being tied to the charge it reverses; it must be a credit (NotACredit) that reverses nothing yet (AlreadyLinked)."},` +
+				`"reversesRef":{"type":"string","x-entityRef":"transaction","description":"vtx.transaction.<NanoID> of the live debit the credit reverses (NotADebit otherwise; DepositNotReversible on the security deposit's charge; ReversalPrecedesCharge when the credit posted strictly before it); the credit's amount may not exceed its face (ReversalExceedsCharge)."}},` +
+				`"required":["accountKey","creditKey","reversesRef"]}`,
+			FieldDescriptions: map[string]string{
+				"accountKey":  "The ledger account both transactions are posted to — each one's own postedTo link must name it (WrongAccount otherwise; UnknownAccount when not live). Its root and .arrears are the DDL's own derive_reads' to hydrate; the root's bare update is what serializes two links racing one credit.",
+				"creditKey":   "The credit posted as a reversal before it could name its charge: a live credit (UnknownTransaction otherwise) of type credit (NotACredit) on this account that reverses nothing yet (AlreadyLinked once it does) and did not post strictly before the charge (ReversalPrecedesCharge; a same-second pair is admitted). The script walks the credit's own reverses links for AlreadyLinked, so a CLI operator declares contextHint.enumerations {hub: creditKey, relation: reverses, direction: out} — an undeclared walk is a live read the read-drift guard names.",
+				"reversesRef": "The charge the credit corrects: a live debit (UnknownTransaction / NotADebit otherwise) on this account whose face the credit's amount does not exceed (ReversalExceedsCharge), and not the security deposit's charge (DepositNotReversible — the deposit is deducted from or returned, never reversed). The script walks the charge's own authorizedBy link to tell a deposit, so a CLI operator declares contextHint.enumerations {hub: reversesRef, relation: authorizedBy, direction: out} beside the reverses walk.",
+			},
 		},
 		{OperationType: arrearsOp},
 	}, notificationOpMetas()...)

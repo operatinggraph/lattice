@@ -37,6 +37,13 @@ type oneBillEntryProjection struct {
 	// PayOutBalance stamps kind:"payout"); empty on every other entry and on
 	// every non-rent source.
 	Kind string `json:"kind"`
+	// ReversesKey is the charge a reversing credit names (rentEntriesSpec's
+	// reverses hop); empty on a plain payment, every debit and every
+	// non-rent source.
+	ReversesKey string `json:"reversesKey"`
+	// BilledForKey is the rent charge a late fee was billed for
+	// (rentEntriesSpec's billedFor hop); empty on every other row.
+	BilledForKey string `json:"billedForKey"`
 }
 
 // oneBillEntryRow is the statement row the FE renders.
@@ -52,6 +59,8 @@ type oneBillEntryRow struct {
 	Source         string `json:"source"`
 	ClausePurpose  string `json:"clausePurpose,omitempty"`
 	Kind           string `json:"kind,omitempty"`
+	ReversesKey    string `json:"reversesKey,omitempty"`
+	BilledForKey   string `json:"billedForKey,omitempty"`
 }
 
 // computeOneBillHistory filters the one-bill-history lens rows to one lease,
@@ -89,6 +98,8 @@ func computeOneBillHistory(keys []string, get kvGetter, leaseAppKey string) ([]o
 			Source:         p.Source,
 			ClausePurpose:  p.ClausePurpose,
 			Kind:           p.Kind,
+			ReversesKey:    p.ReversesKey,
+			BilledForKey:   p.BilledForKey,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -226,7 +237,7 @@ func (s *server) handleOneBillStatement(w http.ResponseWriter, r *http.Request) 
 	}
 	ledgerGet := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
 	rentRows, rentBalance := computeLedgerHistory(ledgerKeys, ledgerGet, leaseAppKey)
-	arrears := deriveRentArrears(rentRows, acctRow.ArrearsDueAt, acctRow.ArrearsReminderSentAt, time.Now().UTC())
+	arrears := deriveRentArrears(rentRows, acctRow.ArrearsDueAt, acctRow.ArrearsReminderSentAt, acctRow.ArrearsLateFeeAt, time.Now().UTC())
 	// The deposit is a rent-account transaction (DebitAccount/ReturnDeposit
 	// both post to the lease's loftspace-ledger account), never a one-bill
 	// entry of its own — so its summary is derived from the SAME rentRows
@@ -244,6 +255,7 @@ func (s *server) handleOneBillStatement(w http.ResponseWriter, r *http.Request) 
 		"daysOverdue":          arrears.DaysOverdue,
 		"daysUntilDue":         arrears.DaysUntilDue,
 		"reminderSentAt":       arrears.ReminderSentAt,
+		"lateFeeBilledAt":      arrears.LateFeeBilledAt,
 		"depositHeldCents":     deposit.DepositHeldCents,
 		"depositChargedCents":  deposit.DepositChargedCents,
 		"depositChargedAt":     deposit.DepositChargedAt,

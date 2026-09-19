@@ -41,11 +41,12 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // hydrated at (Contract #3 §3.2); the account DDL's derive_reads returns the
 // same key whatever a dispatcher declares, so this states the read set and
 // that guarantees it. Enumerations declares the bounded postedTo replay the
-// op runs to recompute the head and the heldFor walk that starts the tenant
-// resolution — both nameable up front off the row's own account; the
-// per-transaction .entry reads, the lease root read and the lease's
-// applicationFor hop the walk discovers are not, which is exactly the
-// class-(e) split. The three entries are identical in every field; they
+// op runs to recompute the head, the heldFor walk that starts the tenant
+// resolution and the inbound chargesTo walk the send commit runs for the
+// account's live late-fee clause — all three nameable up front off the row's
+// own account; the per-transaction .entry reads, the lease root read, the
+// lease's applicationFor hop and the per-clause .terms / .status reads the
+// walks discover are not, which is exactly the class-(e) split. The three entries are identical in every field; they
 // differ only in which column dispatches them, so each gap episode is
 // exactly one dispatch (its mark and dispatch count are cleared by the page
 // it dispatched) and the engine's default retry budget stands.
@@ -95,6 +96,7 @@ func arrearsEvaluationGap() pkgmgr.GapActionSpec {
 		Enumerations: []pkgmgr.EnumerationSpec{
 			{Hub: "row.entityKey", Relation: "postedTo", Direction: "in"},
 			{Hub: "row.entityKey", Relation: "heldFor", Direction: "out"},
+			{Hub: "row.entityKey", Relation: "chargesTo", Direction: "in"},
 		},
 	}
 }

@@ -59,6 +59,7 @@ func ledgerCapDoc() *processor.CapabilityDoc {
 			{OperationType: "ReturnDeposit", Scope: "any"},
 			{OperationType: "RecordDepositDeduction", Scope: "any"},
 			{OperationType: "PayOutBalance", Scope: "any"},
+			{OperationType: "LinkReversal", Scope: "any"},
 			// Deliberately the SAME grant Weaver holds for EvaluateLoftspaceArrears
 			// (arrearsWeaverCapDoc, arrears_test.go). That is what makes the
 			// forged-send vector attributable: the refusal can only come from the

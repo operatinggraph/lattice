@@ -41,9 +41,9 @@ const ArrearsGraceDays = 5
 // dispatches through the lens's two phase gaps (lenses.go). The page, not the
 // history, is what one execution pays for — the same round-trip arithmetic
 // against the Processor's production script wall that sizes
-// clinic-ledger's ArrearsPageLimit / ArrearsMaxPages (scripts.go there);
-// this ledger runs no per-credit netting walk, so the same page limit carries
-// more headroom here, not less.
+// clinic-ledger's ArrearsPageLimit / ArrearsMaxPages (scripts.go there),
+// including the per-credit reverses walk both ledgers run on every credit of
+// a page.
 const (
 	ArrearsPageLimit = 30
 	ArrearsMaxPages  = 20
@@ -76,9 +76,34 @@ ARREARS_PHASE_A = %q
 ARREARS_PHASE_B = %q
 `, ArrearsGraceDays*24, ArrearsPageLimit, ArrearsMaxPages, ArrearsPhaseA, ArrearsPhaseB)
 
+// entryShapePrelude is the ONE implementation of a posted entry's shape,
+// prepended to both DDL scripts (Starlark has no cross-program import): a
+// transaction root, its .entry aspect and the postedTo link to the account,
+// plus the authorizedBy link a clause-authorized entry carries. Every writer
+// of a vtx.transaction — post_entry (DebitAccount / LoftspaceRecordCharge /
+// CreditAccount), ReturnDeposit, RecordDepositDeduction, PayOutBalance in the
+// transaction script and the late-fee posting in EvaluateLoftspaceArrears
+// (the account script) — builds its mutations here, so the statement's
+// ledgerHistory lens, the arrears replay and one-bill's rentEntries all read
+// one shape. Both link keys follow Contract #1 §1.1: the transaction is the
+// later-arriving vertex, so it is the source of both. make_vtx / make_aspect
+// / make_link are each script's own (byte-identical) constructors, bound at
+// call time.
+const entryShapePrelude = `
+def entry_mutations(tx_key, tx_id, acct_key, acct_id, entry_data):
+    return [
+        make_vtx(tx_key, "transaction", {}),
+        make_aspect(tx_key, "entry", "transactionEntry", entry_data),
+        make_link("lnk.transaction." + tx_id + ".postedTo.account." + acct_id, tx_key, acct_key, "postedTo", "postedTo", {}),
+    ]
+
+def authorized_by_mutation(tx_key, tx_id, clause_key, clause_id):
+    return make_link("lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id, tx_key, clause_key, "authorizedBy", "authorizedBy", {})
+`
+
 // accountDDLScript is the account DDL's Starlark, opened by the grace binding
-// above.
-var accountDDLScript = arrearsGracePrelude + accountDDLScriptBody
+// above and the shared entry shape.
+var accountDDLScript = arrearsGracePrelude + entryShapePrelude + accountDDLScriptBody
 
 // accountDDLScriptBody handles LoftspaceCreateAccount. The account gets its OWN
 // independently-minted NanoID — vertex NanoIDs are unique identifiers across
@@ -418,23 +443,29 @@ def require_manages(unit_key, what):
 # script wall) and is unaffected by this one's constants.
 #
 # The aggregate carries every entry EXACTLY, not a sum: unlike clinic-ledger's
-# checkpoint (which nets per-credit reversals against specific debits and so
-# collapses every plain credit into one running total, sortable anywhere ahead
-# of the debits it offsets), this ledger's arrears_head also derives the
-# EPISODE START — the postedAt of the debit that arrived when the open queue
-# was last empty — a quantity that depends on the REAL chronological
-# interleaving of every debit and credit, not only on their totals. Collapsing
-# the credits into one total and resorting it first would still name the right
-# head and balance (a credit total offsets the oldest open debits first
-# whichever page it was read on), but it can retire a debit with a credit that
-# in reality posted AFTER it, which erases the very debit whose postedAt was
-# the episode's start. So every entry — debit or credit — is folded into the
-# aggregate under its own transaction ID and its own postedAt, and arrears_rows
-# hands arrears_head the exact same rows a single, whole-history execution
-# would have: no netting, no algebraic shortcut, no reverses relation to walk
-# (this ledger has none — there is no refund verb, README).
-# No entry in this ledger names another it reverses, so the fold has nothing
-# else to compute.
+# checkpoint (which collapses every plain credit into one running total,
+# sortable anywhere ahead of the debits it offsets), this ledger's
+# arrears_head also derives the EPISODE START — the postedAt of the debit that
+# arrived when the open queue was last empty — a quantity that depends on the
+# REAL chronological interleaving of every debit and credit, not only on their
+# totals. Collapsing the credits into one total and resorting it first would
+# still name the right head and balance (a credit total offsets the oldest
+# open debits first whichever page it was read on), but it can retire a debit
+# with a credit that in reality posted AFTER it, which erases the very debit
+# whose postedAt was the episode's start. So every entry — debit or credit —
+# is folded into the aggregate under its own transaction ID and its own
+# postedAt, and arrears_rows hands arrears_head the exact same rows a single,
+# whole-history execution would have: no algebraic shortcut.
+#
+# The one relation the fold walks is reverses: a credit that names the
+# charge it corrects (CreditAccount's reversesRef, or LinkReversal on a credit
+# posted before it could name one) carries exactly one outbound reverses link
+# to that debit, and the fold records the debit's bare id as the credit's
+# reversesId. arrears_head reads it to retire THAT charge rather than the
+# oldest open one — a reversal of a newer charge must not pay off an older,
+# unrelated one — at the credit's own position in the walk, so the episode
+# start still comes from the real interleaving. A credit that names nothing is
+# a plain payment and carries no reversesId.
 #
 # Keyed by the transaction's bare ID, never its full vtx key: the checkpoint
 # carries an IDENTITY to re-derive from, not a relationship to stand in for
@@ -459,21 +490,25 @@ def require_manages(unit_key, what):
 # smaller one parked, once.
 def arrears_entries(acct_key, cursor, agg):
     # One page of the account's live postedTo entries, folded into agg =
-    # {"entries": {txId: {postedAt, type, amountCents, dueAt}}}: every debit
-    # and every credit recorded under its own transaction ID (never its full
-    # vtx key — the checkpoint carries identity, not a key-list index; see the
-    # comment above this function). dueAt is the entry's OWN recorded due date
-    # (DebitAccount stamps it on a clause-authorized recurring charge from the
-    # clause's anniversary grid; a payment or a landlord one-off records none)
-    # and carries no meaning on a credit — it is kept here (unlike the rest of
-    # the record) because arrears_head reads it off every DEBIT row to name
-    # the head's own recorded due date; dropping it would force arrears_rows
-    # to re-read it live, one round trip per debit, on every finalize. Returns
-    # (agg, next_cursor); next_cursor is None once the enumeration is
-    # exhausted. Keyed by id, not by postedAt: identity is what makes the fold
-    # exact across pages when two entries share a second. An entry missing any
-    # of postedAt/type/amountCents is skipped rather than guessed at, exactly
-    # as the self-credit replay skips it.
+    # {"entries": {txId: {postedAt, type, amountCents, dueAt, reversesId?}}}:
+    # every debit and every credit recorded under its own transaction ID
+    # (never its full vtx key — the checkpoint carries identity, not a
+    # key-list index; see the comment above this function). dueAt is the
+    # entry's OWN recorded due date (DebitAccount stamps it on a
+    # clause-authorized recurring charge from the clause's anniversary grid; a
+    # payment or a landlord one-off records none) and carries no meaning on a
+    # credit — it is kept here (unlike the rest of the record) because
+    # arrears_head reads it off every DEBIT row to name the head's own
+    # recorded due date; dropping it would force arrears_rows to re-read it
+    # live, one round trip per debit, on every finalize. reversesId is the
+    # bare id of the debit a CREDIT's reverses link names — the same identity
+    # argument: arrears_rows rebuilds the full key the pre-pass matches
+    # against the debit rows. Returns (agg, next_cursor); next_cursor is None
+    # once the enumeration is exhausted. Keyed by id, not by postedAt:
+    # identity is what makes the fold exact across pages when two entries
+    # share a second. An entry missing any of postedAt/type/amountCents is
+    # skipped rather than guessed at, exactly as the self-credit replay skips
+    # it.
     #
     # read-posture: (e) relation=postedTo epoch=none -- one page per dispatch;
     # the cursor is carried on the account's .arrears.replay checkpoint and
@@ -501,8 +536,25 @@ def arrears_entries(acct_key, cursor, agg):
         if tx_type != "debit" and tx_type != "credit":
             continue
         _, tx_id = parts_of(lk.sourceVertex, "postedTo source", "transaction")
-        agg["entries"][tx_id] = {"postedAt": tx_posted_at, "type": tx_type,
-                                 "amountCents": tx_amount, "dueAt": tx_entry.data.get("dueAt")}
+        entry = {"postedAt": tx_posted_at, "type": tx_type,
+                 "amountCents": tx_amount, "dueAt": tx_entry.data.get("dueAt")}
+        if tx_type == "credit":
+            # read-posture: (e) relation=reverses epoch=none -- a reversing
+            # credit carries exactly one reverses link, written atomically by
+            # CreditAccount's reversesRef leg or once by LinkReversal onto a
+            # credit that had none (create-only), and never added to
+            # afterward, so a limit of 1 (no cursor loop) is exact, never a
+            # keyspace scan. The limit is not optional: this runs once per
+            # CREDIT on the page, so an unbounded page here is charged at the
+            # 256 default against the script's live-read budget, and a page
+            # of credits blows it with a script error instead of the paged
+            # replay this function's own doc comment promises.
+            reverses_page, _ = kv.Links(lk.sourceVertex, "reverses", "out", None, 1)
+            for lk2 in reverses_page:
+                if not lk2.isDeleted:
+                    _, reverses_id = parts_of(lk2.targetVertex, "reverses target", "transaction")
+                    entry["reversesId"] = reverses_id
+        agg["entries"][tx_id] = entry
     return agg, next_cursor
 
 def arrears_checkpoint(prior):
@@ -541,18 +593,53 @@ def arrears_rows(agg):
     # on needs the same key shape a live kv.Links page would have handed it),
     # carrying its own postedAt — the exact rows a single, whole-history
     # execution would have handed arrears_head, folded page by page instead of
-    # all at once. arrears_head's own FIFO walk, including its episode-start
-    # tracking, runs exactly as it does over a single whole-history read.
+    # all at once. reversesKey is rebuilt from the checkpoint's bare
+    # reversesId the same way (None on a debit and on a credit that names
+    # nothing). arrears_head's own FIFO walk, including its netting pre-pass
+    # and its episode-start tracking, runs exactly as it does over a single
+    # whole-history read.
     rows = []
     for tx_id, e in agg["entries"].items():
+        reverses_key = None
+        if e.get("reversesId") != None:
+            reverses_key = "vtx.transaction." + e["reversesId"]
         rows.append({"postedAt": e["postedAt"], "key": "vtx.transaction." + tx_id, "type": e["type"],
-                     "amountCents": e["amountCents"], "dueAt": e.get("dueAt")})
+                     "amountCents": e["amountCents"], "dueAt": e.get("dueAt"),
+                     "reversesKey": reverses_key})
     return rows
 
 def arrears_head(entries):
     # The FIFO the tenant's own statement runs, reproduced exactly
     # (cmd/loftspace-app's rent-arrears derivation): entries in (postedAt,
-    # transactionKey) order. Credits offset the OLDEST still-open debit first,
+    # transactionKey) order.
+    #
+    # A credit that names the charge it reverses (reversesKey) retires THAT
+    # charge: a pre-pass nets every such credit against the debit it names —
+    # capped at that debit's own face, accumulated across however many
+    # reversing credits name the same debit, in (postedAt, key) order — so a
+    # reversal of a NEWER charge does not pay off an OLDER, unrelated one.
+    # The absorbed amount is applied at the CREDIT's own position in the
+    # walk, to whatever of the named debit is still open there; the rest of
+    # the credit is a plain payment. The named debit therefore opens at its
+    # own position like any other charge and is retired when the reversal
+    # arrives — exactly as a same-day payment would retire it — so the
+    # episode start below keeps its meaning: a charge that opened the queue
+    # from empty opened an episode, and its reversal closes it.
+    #
+    # The pre-pass is position-aware. A reversing credit whose postedAt is
+    # STRICTLY EARLIER than its target's is a plain payment: nothing is
+    # absorbed and nothing is charged against the target's face (LinkReversal
+    # refuses the shape; a link that reaches the walk anyway — seeded, or
+    # written before the refusal — must not spend the credit on the oldest
+    # charge AND cap a later real reversal short). A reversing credit in the
+    # SAME second as its target that sorts before it by key is held as
+    # pending for the target: the walk withholds the absorbed amount from
+    # the FIFO at the credit and applies it when the debit is walked, and a
+    # debit whose pending absorption covers its whole face is not appended —
+    # exactly as a surplus-prepaid debit is not — so a same-second reversal
+    # never retires the oldest charge whichever way the random keys sort.
+    #
+    # Everything else FIFOs: credits offset the OLDEST still-open debit first,
     # and a credit with no open debit to apply to carries its remainder
     # forward as surplus that prepays whichever debits arrive next. The
     # survivor at the front of the queue is the charge that has actually been
@@ -566,14 +653,48 @@ def arrears_head(entries):
     # about which of the two is the head, and so about the due date.
     rows = sorted(entries, key=lambda e: (e["postedAt"], e["key"]))
 
+    debit_amount = {}
+    debit_posted_at = {}
+    debit_position = {}
+    for i in range(len(rows)):
+        r = rows[i]
+        if r["type"] == "debit":
+            debit_amount[r["key"]] = r["amountCents"]
+            debit_posted_at[r["key"]] = r["postedAt"]
+            debit_position[r["key"]] = i
+    absorbed_total = {}
+    absorbed_by_credit = {}
+    held_by_credit = {}
+    for i in range(len(rows)):
+        r = rows[i]
+        if r["type"] != "credit" or r.get("reversesKey") == None:
+            continue
+        target = debit_amount.get(r["reversesKey"])
+        if target == None:
+            continue
+        if r["postedAt"] < debit_posted_at[r["reversesKey"]]:
+            continue
+        remaining = target - absorbed_total.get(r["reversesKey"], 0)
+        absorbed = r["amountCents"]
+        if absorbed > remaining:
+            absorbed = remaining
+        absorbed_by_credit[r["key"]] = absorbed
+        absorbed_total[r["reversesKey"]] = absorbed_total.get(r["reversesKey"], 0) + absorbed
+        if i < debit_position[r["reversesKey"]]:
+            held_by_credit[r["key"]] = True
+
     open_debits = []
     surplus = 0
     balance_cents = 0
     episode_start = None
+    pending = {}
     for r in rows:
         amount = r["amountCents"]
         if r["type"] == "debit":
             balance_cents += amount
+            amount -= pending.get(r["key"], 0)
+            if amount <= 0:
+                continue
             if surplus >= amount:
                 surplus -= amount
                 continue
@@ -585,6 +706,31 @@ def arrears_head(entries):
         elif r["type"] == "credit":
             balance_cents -= amount
             remaining = amount
+            absorbed = absorbed_by_credit.get(r["key"], 0)
+            if absorbed > 0 and held_by_credit.get(r["key"]):
+                # The named charge is walked later in this same second: hold
+                # the absorbed amount for it and hand only the rest to the
+                # FIFO below.
+                pending[r["reversesKey"]] = pending.get(r["reversesKey"], 0) + absorbed
+                remaining -= absorbed
+            elif absorbed > 0:
+                # Retire the named charge first, by what is still open of it
+                # here — a plain payment may already have paid part of it
+                # down — and hand whatever the reversal could not apply to
+                # the FIFO below as an ordinary payment.
+                kept = []
+                for d in open_debits:
+                    if d["key"] == r["reversesKey"] and absorbed > 0:
+                        applied = absorbed
+                        if applied > d["remaining"]:
+                            applied = d["remaining"]
+                        d["remaining"] -= applied
+                        remaining -= applied
+                        absorbed = 0
+                        if d["remaining"] <= 0:
+                            continue
+                    kept.append(d)
+                open_debits = kept
             # Starlark has no while: each pass either zeroes the remainder or
             # retires one open debit, so len+1 passes is an exact bound, not a
             # budget that can run out mid-walk.
@@ -716,6 +862,73 @@ def tenant_for_account(acct_key):
         return lease_key, None
     return lease_key, identity
 
+# The clauses charging one account: its rent clause per term (a renewal adds
+# one and leaves the original), the deposit, a fee or two — a handful, so one
+# page covers every lease this vertical writes and the cap is a claim about
+# every writer of the relation (mint_clause alone writes chargesTo). A
+# superseded clause's chargesTo link is NOT tombstoned (SupersedeClause
+# tombstones the clause root and marks its status; the links stay), so every
+# amendment of the fee term — and of the rent — consumes a slot for the life
+# of the account. A further page is walked, never assumed empty, up to the
+# page cap; past the bound the episode bills NO fee — quiet, never a refusal
+# (the reminder still goes out), and recorded by lateFeeAt's absence beside
+# a present sentAt.
+LATE_FEE_CLAUSE_PAGE_LIMIT = 20
+MAX_LATE_FEE_CLAUSE_PAGES = 3
+
+def late_fee_clause(acct_key):
+    # The account's LIVE late-fee clause, as {"key", "id", "amountCents"}, or
+    # None when no active clause charging this account carries
+    # purpose=lateFee. Resolved from the account's own inbound chargesTo
+    # links -- never from the payload, and never from the lease's .lateFee
+    # term: the clause is the record of what the lease agreed and what the
+    # statement's authorizedBy chain names, and its amount is the producer of
+    # the fee's amount. Read cheapest-to-exclude first per candidate: the
+    # .terms purpose (most clauses are not a fee), then the .status state
+    # (a superseded clause is tombstoned and marked superseded in one batch,
+    # so an active status is a live clause), then the root's own liveness.
+    # With several live fee clauses (an operator hand-mint beside the lens's
+    # own) the GREATEST clause key wins — the same max(c.key) the settlement
+    # lens's lateFeeClauseKey selects, so the op and the lens name one clause.
+    cursor = None
+    best = None
+    for _page in range(MAX_LATE_FEE_CLAUSE_PAGES):
+        # read-posture: (e) relation=chargesTo epoch=none -- bounded by the
+        # page constants above; a clause minted concurrently with this
+        # evaluation is next episode's fee, never this one's.
+        page, cursor = kv.Links(acct_key, "chargesTo", "in", cursor, LATE_FEE_CLAUSE_PAGE_LIMIT)
+        for lk in page:
+            if lk.isDeleted:
+                continue
+            clause_key = lk.sourceVertex
+            # read-posture: (e) per-candidate follow-up reads off the
+            # chargesTo enumeration above (data-derived keys -- the clause is
+            # unknown until the walk resolves it).
+            terms = kv.Read(clause_key + ".terms")
+            if terms == None or terms.isDeleted or terms.data.get("purpose") != "lateFee":
+                continue
+            # read-posture: (e) per-candidate follow-up read off the same
+            # enumeration.
+            status = kv.Read(clause_key + ".status")
+            if status == None or status.isDeleted or status.data.get("state") != "active":
+                continue
+            if not vertex_live(clause_key):
+                continue
+            amount = terms.data.get("amountCents")
+            if amount == None or type(amount) == type("") or amount <= 0:
+                # A fee clause with no positive fixed amount is a shape
+                # mint_clause refuses; a seeded one bills nothing rather
+                # than a nonsense figure.
+                continue
+            parts = clause_key.split(".")
+            if len(parts) != 3 or parts[0] != "vtx" or parts[1] != "clause":
+                continue
+            if best == None or clause_key > best["key"]:
+                best = {"key": clause_key, "id": parts[2], "amountCents": amount}
+        if cursor == None:
+            return best
+    return best
+
 def derive_reads(op):
     # Contract #2 §2.5 class (g), for the same reason transactionDDLScript's
     # own derive_reads exists: the .arrears write below is a bare update
@@ -766,7 +979,7 @@ def execute(state, op):
             fail("AuthDenied: EvaluateLoftspaceArrears is restricted to Weaver's dispatch actor; got " + op.actor)
 
         acct_key = required_string(p, "accountKey")
-        parts_of(acct_key, "accountKey", "account")
+        _, acct_id = parts_of(acct_key, "accountKey", "account")
 
         # Liveness guard: never mint arrears state (or a 4-segment aspect key)
         # on an absent or tombstoned account. The root is hydrated whatever the
@@ -858,7 +1071,7 @@ def execute(state, op):
             # loop.
             data = {"evaluatedAt": evaluated_at, "historyTooLong": True,
                     "historyBudget": ARREARS_PAGE_LIMIT * ARREARS_MAX_PAGES}
-            for carried in ["dueAt", "remindAt", "remindedFor", "sentAt"]:
+            for carried in ["dueAt", "remindAt", "remindedFor", "sentAt", "lateFeeAt"]:
                 carried_value = prior.get(carried)
                 if carried_value != None:
                     data[carried] = carried_value
@@ -921,6 +1134,11 @@ def execute(state, op):
         # re-dispatch forever.
         data = {"evaluatedAt": evaluated_at}
         events = []
+        fee_mutations = []
+        # The fee this commit bills, folded into the evaluated balance the
+        # event reports: the balance the commit LEAVES, never the one it
+        # found.
+        billed_fee_cents = 0
 
         if head != None:
             # dueAt is the head's own recorded due date (arrears_head), and
@@ -935,6 +1153,11 @@ def execute(state, op):
             data["remindAt"] = remind_at
             reminded_for = prior.get("remindedFor")
             sent_at = prior.get("sentAt")
+            # lateFeeAt is the instant this episode's late fee was billed —
+            # stamped on the send commit alone (below), carried and dropped
+            # exactly with sentAt: it records that THIS episode has been
+            # charged its fee, and means nothing about another.
+            late_fee_at = prior.get("lateFeeAt")
             # The EPISODE BOUNDARY. This ledger stores no balance, so nothing
             # ends an episode at the entry that pays it off: a payment to
             # zero and a fresh charge can both post before any evaluation
@@ -964,6 +1187,7 @@ def execute(state, op):
             if sent_at != None and sent_at < episode_start:
                 sent_at = None
                 reminded_for = None
+                late_fee_at = None
             if remind_at <= evaluated_at:
                 # The head's grace has run out. remindedFor records THIS due
                 # date whatever else happens: it is the conjunct the
@@ -992,6 +1216,8 @@ def execute(state, op):
                 # outcome lands on .arrearsNotification (notifications.go).
                 if sent_at != None:
                     data["sentAt"] = sent_at
+                    if late_fee_at != None:
+                        data["lateFeeAt"] = late_fee_at
                 else:
                     data["sentAt"] = evaluated_at
                     # Keyed on (accountKey, dueAt, headKey): a redelivery of
@@ -1007,8 +1233,55 @@ def execute(state, op):
                     # transactional outbox — no Loom pattern, the bridge's
                     # dispatch path is fully generic.
                     ext_ref = acct_key + ":" + due_at + ":" + head["key"]
+                    # The late fee, billed on THIS commit and no other: once
+                    # per episode, because the send is once per episode — a
+                    # re-evaluation finds sentAt recorded and never reaches
+                    # here, and a fee term set after the reminder went out
+                    # bills from the next episode. The clause is the
+                    # account's own live purpose=lateFee clause, resolved off
+                    # its chargesTo links; its .terms.amountCents is the
+                    # amount, never a payload or a lens column. The debit is
+                    # the clause-authorized shape DebitAccount posts (the
+                    # shared entry_mutations + authorized_by_mutation), due
+                    # on receipt (dueAt = postedAt = this instant), so the
+                    # fee itself is never re-gridded or reminded for as rent,
+                    # plus a billedFor link to the head — "fee billedFor
+                    # charge", the fee the later-arriving vertex and so the
+                    # source (Contract #1 §1.1) — so a reversal of the charge
+                    # this fee was billed for is tied to the fee it leaves
+                    # owed (the landlord's ledger reads the link). It is not
+                    # in the FIFO this evaluation computed: the head it names
+                    # is the rent's, the next lapse or posted entry
+                    # re-evaluates with the fee in the queue, and the episode
+                    # continues (the queue never emptied), so neither a
+                    # second reminder nor a second fee follows when the rent
+                    # alone is paid and the fee becomes the head. Resolved
+                    # BEFORE the notification's params are built: the tenant
+                    # is told the balance the commit leaves, fee included,
+                    # and the fee itself as lateFeeCents.
+                    fee = late_fee_clause(acct_key)
+                    fee_cents = 0
+                    if fee != None:
+                        fee_cents = fee["amountCents"]
+                        fee_id = nanoid.new()
+                        fee_key = "vtx.transaction." + fee_id
+                        fee_entry = {"type": "debit", "amountCents": fee_cents,
+                                     "postedAt": evaluated_at, "dueAt": evaluated_at,
+                                     "memo": "Late fee — rent due " + due_at[:10]}
+                        fee_mutations = entry_mutations(fee_key, fee_id, acct_key, acct_id, fee_entry)
+                        fee_mutations.append(authorized_by_mutation(fee_key, fee_id, fee["key"], fee["id"]))
+                        head_id = head["key"].split(".")[2]
+                        fee_mutations.append(make_link("lnk.transaction." + fee_id + ".billedFor.transaction." + head_id,
+                                                       fee_key, head["key"], "billedFor", "billedFor", {}))
+                        events.append({"class": "account.debited",
+                                       "data": {"accountKey": acct_key, "transactionKey": fee_key,
+                                                "amountCents": fee_cents, "clauseKey": fee["key"],
+                                                "billedForKey": head["key"]}})
+                        data["lateFeeAt"] = evaluated_at
+                        billed_fee_cents = fee_cents
                     notif_params = {"accountKey": acct_key, "reminderType": "loftspaceRentArrears",
-                                    "dueAt": due_at, "balanceCents": balance_cents}
+                                    "dueAt": due_at, "balanceCents": balance_cents + fee_cents,
+                                    "lateFeeCents": fee_cents}
                     if lease_key != None:
                         notif_params["leaseAppKey"] = lease_key
                     if identity_key != None:
@@ -1028,9 +1301,11 @@ def execute(state, op):
                     data["remindedFor"] = reminded_for
                 if sent_at != None:
                     data["sentAt"] = sent_at
+                    if late_fee_at != None:
+                        data["lateFeeAt"] = late_fee_at
         # head == None: nothing is owed, so the episode is over and
-        # {evaluatedAt} alone is written — dueAt, remindAt, remindedFor, sentAt
-        # and stale all go with it, which is what lets the NEXT charge open a
+        # {evaluatedAt} alone is written — dueAt, remindAt, remindedFor, sentAt,
+        # lateFeeAt and stale all go with it, which is what lets the NEXT charge open a
         # clean episode rather than inherit this one's send record. An episode
         # ends ONLY in this op: post_entry has no balance to reason from, so a
         # payment to zero marks the state stale and this recomputation is
@@ -1050,10 +1325,13 @@ def execute(state, op):
             mutations = [make_aspect(acct_key, "arrears", "loftspaceAccountArrears", data)]
         else:
             mutations = [make_aspect_update(acct_key, "arrears", "loftspaceAccountArrears", data)]
+        mutations += fee_mutations
 
         events.append({"class": "account.arrearsEvaluated",
                        "data": {"accountKey": acct_key, "dueAt": data.get("dueAt"),
-                                "sentAt": data.get("sentAt"), "balanceCents": balance_cents}})
+                                "sentAt": data.get("sentAt"), "lateFeeAt": data.get("lateFeeAt"),
+                                "balanceCents": balance_cents + billed_fee_cents,
+                                "lateFeeCents": billed_fee_cents}})
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": acct_key}}
 
@@ -1187,7 +1465,7 @@ def execute(state, op):
 // own derive_reads is what guarantees the key is hydrated whatever the
 // submitter declared — so concurrent entries against one account serialize
 // on it and retry rather than dropping a mark.
-var transactionDDLScript = fmt.Sprintf(`
+var transactionDDLScript = entryShapePrelude + fmt.Sprintf(`
 def make_vtx(key, cls, data):
     return {"op": "create", "key": key,
             "document": {"class": cls, "isDeleted": False, "data": data}}
@@ -1288,10 +1566,11 @@ def vertex_alive(state, key):
 def carry_arrears(doc):
     # Every field of the account's recorded arrears state, copied forward,
     # with ONE exception. The mark post_entry adds is an ADDITION to that
-    # state, never a rewrite of it: the send record (remindedFor, sentAt) is
-    # what stops a second notification going out for an episode already
-    # reminded for, and dropping it while marking the state stale would send
-    # twice for one debt.
+    # state, never a rewrite of it: the send record (remindedFor, sentAt, and
+    # lateFeeAt — the instant this episode's late fee was billed) is what
+    # stops a second notification, or a second fee, going out for an episode
+    # already reminded for, and dropping it while marking the state stale
+    # would send (and bill) twice for one debt.
     #
     # historyTooLong (with the historyBudget recorded beside it) is the first
     # exception, and only this script drops it. It records that an evaluation
@@ -1577,6 +1856,151 @@ def account_balance_cents(acct_key):
             break
     return owed_cents, budget_exhausted
 
+def reverses_link_key(credit_id, debit_id):
+    # The one deterministic key both writers of the relation mint: the credit
+    # (later-arriving) is the source, the debit it corrects the target
+    # (Contract #1 §1.1) — "this credit reverses that charge". CreditAccount
+    # writes it atomically beside the credit; LinkReversal writes it
+    # create-only onto a credit posted naming nothing. Named in one place so
+    # the two can never disagree on the shape the arrears walk and the
+    # ledgerHistory lens rebuild the far endpoint from.
+    return "lnk.transaction." + credit_id + ".reverses.transaction." + debit_id
+
+def reversal_target(state, reverses_key, acct_id):
+    # The charge a reversal names, proven from the graph's own record: a live
+    # vtx.transaction whose .entry is a debit, posted to THIS account (its
+    # postedTo link key is deterministic from the two payload keys, so the
+    # DDL's own derive_reads hydrates it — a credit on one account naming a
+    # debit on another would retire that debit from a statement it never
+    # paid) and not a security deposit (the deposit has its own verbs —
+    # RecordDepositDeduction / ReturnDeposit — and a reversal would leave the
+    # deposit held on the statement while ReturnDeposit refunds it again at
+    # tenancy end). Returns (debitId, faceCents, postedAt); the caller
+    # compares the face and the instant against the credit it is tying to
+    # the charge.
+    _, reverses_id = parts_of(reverses_key, "reversesRef", "transaction")
+    # The root, its .entry and the postedTo link below are all read from the
+    # hydrated state: this script's own derive_reads(op) returns them as
+    # optionalReads for a well-formed reversesRef (Contract #2 §2.5 class (g))
+    # whatever the submitter declared, so absence here is the fact it looks
+    # like, never an undeclared key.
+    if not vertex_alive(state, reverses_key):
+        fail("UnknownTransaction: " + reverses_key)
+    entry_key = reverses_key + ".entry"
+    if not vertex_alive(state, entry_key):
+        fail("UnknownTransaction: " + reverses_key + " carries no live .entry")
+    entry = state[entry_key].data
+    if entry.get("type") != "debit":
+        fail("NotADebit: " + reverses_key + " is not a charge; only a debit can be reversed")
+    face = entry.get("amountCents")
+    if face == None:
+        fail("UnknownTransaction: " + reverses_key + " records no amountCents")
+    if not vertex_alive(state, "lnk.transaction." + reverses_id + ".postedTo.account." + acct_id):
+        fail("WrongAccount: reversesRef " + reverses_key + " is not posted to this account")
+    posted_at = entry.get("postedAt")
+    if posted_at == None:
+        fail("UnknownTransaction: " + reverses_key + " records no postedAt")
+    # read-posture: (e) relation=authorizedBy epoch=none -- a clause-authorized
+    # charge carries exactly one authorizedBy link, written in its own batch
+    # and never added to, so a page of one is exact, never a keyspace scan; a
+    # landlord one-off carries none. Last, after every cheaper refusal above.
+    authorized_page, _ = kv.Links(reverses_key, "authorizedBy", "out", None, 1)
+    for lk in authorized_page:
+        if lk.isDeleted:
+            continue
+        # read-posture: (e) per-candidate follow-up read off the enumeration
+        # above -- the clause is unknown until the walk resolves it.
+        terms = kv.Read(lk.targetVertex + ".terms")
+        if terms != None and not terms.isDeleted and terms.data.get("purpose") == "deposit":
+            fail("DepositNotReversible: " + reverses_key + " is the security deposit charge; a deposit is deducted from (RecordDepositDeduction) or returned (ReturnDeposit), never reversed")
+    return reverses_id, face, posted_at
+
+def link_reversal(state, op):
+    # Ties a credit that was posted as a reversal before it could name the
+    # charge it corrects — a plain CreditAccount with an explanatory memo —
+    # to that charge, by writing the same reverses link CreditAccount's
+    # reversesRef leg writes atomically. Operator-only (permissions.go: one
+    # scope=any grant, no self grant, no task minted for it, no screen), so
+    # no authContext target ever reaches this branch; every proof below is
+    # the graph's own record. It re-states every guard the atomic writer
+    # runs: both transactions live and posted to the payload account, the
+    # credit a credit, the target a debit, the credit's amount within the
+    # charge's face — and two of its own: the credit names nothing yet, and
+    # the credit did not post strictly before the charge (the arrears walk
+    # reads a credit that precedes its charge as a plain payment, so a link
+    # that named an earlier credit would record a reversal the head could
+    # never honour; a same-second pair is admitted — real time cannot order
+    # them, and the walk holds the reversal for the charge).
+    p = op.payload
+    acct_key = required_string(p, "accountKey")
+    _, acct_id = parts_of(acct_key, "accountKey", "account")
+    credit_key = required_string(p, "creditKey")
+    _, credit_id = parts_of(credit_key, "creditKey", "transaction")
+    reverses_key = required_string(p, "reversesRef")
+
+    if not vertex_alive(state, acct_key):
+        fail("UnknownAccount: " + acct_key)
+    # The credit root, its .entry and its postedTo link to the payload account
+    # are read from the hydrated state: this script's own derive_reads(op)
+    # returns them as optionalReads for LinkReversal (Contract #2 §2.5 class
+    # (g)) whatever the submitter declared.
+    if not vertex_alive(state, credit_key):
+        fail("UnknownTransaction: " + credit_key)
+    credit_entry_key = credit_key + ".entry"
+    if not vertex_alive(state, credit_entry_key):
+        fail("UnknownTransaction: " + credit_key + " carries no live .entry")
+    credit_entry = state[credit_entry_key].data
+    if credit_entry.get("type") != "credit":
+        fail("NotACredit: " + credit_key + " is not a credit; only a credit can reverse a charge")
+    credit_cents = credit_entry.get("amountCents")
+    if credit_cents == None:
+        fail("UnknownTransaction: " + credit_key + " records no amountCents")
+    if not vertex_alive(state, "lnk.transaction." + credit_id + ".postedTo.account." + acct_id):
+        fail("WrongAccount: creditKey " + credit_key + " is not posted to this account")
+
+    reverses_id, reverses_face, reverses_posted_at = reversal_target(state, reverses_key, acct_id)
+    if credit_cents > reverses_face:
+        fail("ReversalExceedsCharge: the credit's " + str(credit_cents) + " exceeds the " + str(reverses_face) + " charged by " + reverses_key)
+    credit_posted_at = credit_entry.get("postedAt")
+    if credit_posted_at == None:
+        fail("UnknownTransaction: " + credit_key + " records no postedAt")
+    if credit_posted_at < reverses_posted_at:
+        fail("ReversalPrecedesCharge: " + credit_key + " posted " + credit_posted_at + ", before the " + reverses_posted_at + " charge it would reverse")
+
+    # read-posture: (e) relation=reverses epoch=none -- a reversing credit
+    # carries exactly one reverses link and this op is the only writer that
+    # adds one after the fact, so a page of one is exact, never a keyspace
+    # scan. This read is the named refusal; the serialization is the account
+    # root's bare update below.
+    reverses_page, _ = kv.Links(credit_key, "reverses", "out", None, 1)
+    for lk in reverses_page:
+        if not lk.isDeleted:
+            fail("AlreadyLinked: " + credit_key + " already reverses " + lk.targetVertex)
+
+    link_key = reverses_link_key(credit_id, reverses_id)
+    # The link's create-only write guards only its OWN key, which embeds the
+    # debit id — two LinkReversals naming DIFFERENT charges for one credit
+    # mint two different keys and would both land past the AlreadyLinked
+    # read above. The account root's bare, content-unchanged update
+    # (make_vtx_update) is the shared serialization anchor: the root is
+    # hydrated whatever the submitter declared (derive_reads), so the update
+    # is auto-conditioned on that revision (Contract #3 §3.2) and the loser
+    # of two concurrent links re-hydrates, re-executes, and meets
+    # AlreadyLinked — the resident self-credit's own CAS idiom in post_entry.
+    mutations = [make_link(link_key, credit_key, reverses_key, "reverses", "reverses", {}),
+                 make_vtx_update(acct_key, "account", state[acct_key].data)]
+    # The enumerated set's MEANING changed under the recorded head: the
+    # credit the last evaluation spent on the oldest open charge now retires
+    # the one it names. Marked stale exactly as a posted entry marks it, so
+    # the evaluation recomputes.
+    mutations += arrears_stale_mark(acct_key)
+    events = [{"class": "account.reversalLinked",
+               "data": {"accountKey": acct_key, "creditKey": credit_key, "reversesKey": reverses_key}}]
+    # The link is the one thing this op mints, so it is the principal key
+    # (the reply constraint admits only a key inside the write footprint).
+    return {"mutations": mutations, "events": events,
+            "response": {"primaryKey": link_key}}
+
 def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     p = op.payload
     acct_key = required_string(p, "accountKey")
@@ -1625,6 +2049,13 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
         # RESIDENT: credit only, never a charge on their own lease.
         if entry_type != "credit":
             fail("AuthDenied: a resident may only credit (pay down) their own account, not charge it")
+        # A reverses link is the creditor's correction of a charge, and the
+        # arrears head retires the named charge on its strength: a resident
+        # who could name their own rent here would retire the charge of
+        # their choosing with a payment of their choosing. Tested by presence
+        # so a refused reversal never reaches the balance walk below.
+        if hasattr(p, "reversesRef") and getattr(p, "reversesRef") != None:
+            fail("AuthDenied: a resident may only pay down their own account, not reverse a charge on it")
 
         # Amount trust: nothing on this platform verifies a self-submitted
         # payment actually happened (no payment-rail integration -- out of
@@ -1648,6 +2079,26 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     # already confirmed the manages link before returning it. Both
     # directions are allowed and neither is capped -- the landlord is the
     # creditor.
+
+    # reversesRef (CreditAccount only): the charge this credit corrects,
+    # written as a reverses link (credit tx -> the reversed debit tx) that
+    # the arrears evaluation and the statement net the credit against — so
+    # the reversal retires THAT charge, never the oldest open one. The
+    # landlord's console sends it from a debit row of the same ledger; a
+    # plain payment omits it and gets the plain shape. The resident leg above
+    # refused it before any read; the operator and landlord legs prove it
+    # here, in the order the checks cost: the target's own record first,
+    # then its custody, then its face.
+    reverses_key = None
+    reverses_id = None
+    if entry_type == "credit":
+        reverses_key = optional_string(p, "reversesRef")
+        if reverses_key != None:
+            reverses_id, reverses_face, _ = reversal_target(state, reverses_key, acct_id)
+            if amount_cents > reverses_face:
+                fail("ReversalExceedsCharge: amountCents " + str(amount_cents) + " exceeds the " + str(reverses_face) + " charged by " + reverses_key)
+    elif hasattr(p, "reversesRef") and getattr(p, "reversesRef") != None:
+        fail("InvalidArgument: reversesRef: only valid on a credit (a reversal), not a debit (a charge)")
 
     # clauseRef (DebitAccount only — the semantic-contracts Executable Paper
     # consumer, Contract #10 §10.8): the clause this charge is authorized by.
@@ -1678,6 +2129,13 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
             clause_amount = state[terms_key].data.get("amountCents")
             if clause_amount == None:
                 fail("InvalidArgument: clauseRef: clause " + clause_key + " carries no fixed amountCents (a judgment clause has none)")
+            # A late-fee clause (purpose=lateFee, period=perArrearsEpisode)
+            # is billed by EvaluateLoftspaceArrears on the commit that sends
+            # the reminder, once per arrears episode — clauseSatisfaction
+            # never dispatches it and a hand-submitted charge against it
+            # would bill a fee outside any episode.
+            if state[terms_key].data.get("purpose") == "lateFee":
+                fail("InvalidArgument: clauseRef: a late-fee clause is billed by the arrears evaluation, never charged directly")
             if clause_amount != amount_cents:
                 fail("AmountMismatch: payload amountCents disagrees with clause " + clause_key + "'s authoritative amountCents")
             amount_cents = clause_amount
@@ -1767,11 +2225,6 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
             due_at = clause_due
         entry_data["dueAt"] = due_at
 
-    # postedTo: the transaction (later-arriving) is the source, the
-    # pre-existing account is the target (Contract #1 §1.1). Reads as
-    # "this transaction posted to this account."
-    posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
-
     # Root data minimal (D5): {} on root. The charge/payment fact is the
     # .entry aspect; the account root is otherwise untouched (append-only
     # ledger) — EXCEPT on the resident's own capped self-credit, where a bare
@@ -1788,22 +2241,26 @@ def post_entry(state, op, entry_type, event_class, allow_clause_ref):
     # fresh total instead of landing independently. The landlord/operator
     # paths are uncapped and stay untouched — nothing they compute depends on
     # a stale read racing another writer the same way.
-    mutations = [
-        make_vtx(tx_key, "transaction", {}),
-        make_aspect(tx_key, "entry", "transactionEntry", entry_data),
-        make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
-    ]
+    mutations = entry_mutations(tx_key, tx_id, acct_key, acct_id, entry_data)
     if standing == "resident":
         mutations.append(make_vtx_update(acct_key, "account", state[acct_key].data))
+    # reverses: the credit (later-arriving) is the source, the pre-existing
+    # debit transaction is the target (Contract #1 §1.1) — "this credit
+    # reverses that charge". Written atomically with the credit, so a credit
+    # that names a charge can never exist without its link; LinkReversal
+    # (below) is the other writer of this key, for a credit that was posted
+    # naming nothing, and writes it create-only onto a credit that still has
+    # none.
+    if reverses_key != None:
+        mutations.append(make_link(reverses_link_key(tx_id, reverses_id), tx_key, reverses_key,
+                                   "reverses", "reverses", {}))
     events = [{"class": event_class,
                "data": {"accountKey": acct_key, "transactionKey": tx_key, "amountCents": amount_cents}}]
 
     if clause_key != None:
-        # authorizedBy: the transaction (later-arriving) is the source, the
-        # pre-existing clause is the target (Contract #1 §1.1) — the "why was
-        # I charged this?" chain of custody back to the authorizing clause.
-        authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
-        mutations.append(make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}))
+        # authorizedBy — the "why was I charged this?" chain of custody back
+        # to the authorizing clause.
+        mutations.append(authorized_by_mutation(tx_key, tx_id, clause_key, clause_id))
 
         # chargeValidUntil is stamped UNCONDITIONALLY, regardless of which
         # branch below fires. .terms.data.period exists but is deliberately
@@ -2029,19 +2486,11 @@ def return_deposit(state, op):
         entry_data = {"type": "credit", "amountCents": net_cents, "postedAt": posted_at,
                       "memo": "Security deposit returned"}
 
-        # postedTo / authorizedBy: the transaction (later-arriving) is the
-        # source of both (Contract #1 §1.1) — the same chain of custody
-        # DebitAccount recorded for the charge, so the statement tells the
-        # return from a payment by the clause it names.
-        posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
-        authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
-
-        mutations += [
-            make_vtx(tx_key, "transaction", {}),
-            make_aspect(tx_key, "entry", "transactionEntry", entry_data),
-            make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
-            make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}),
-        ]
+        # postedTo / authorizedBy — the same chain of custody DebitAccount
+        # recorded for the charge, so the statement tells the return from a
+        # payment by the clause it names.
+        mutations += entry_mutations(tx_key, tx_id, acct_key, acct_id, entry_data)
+        mutations.append(authorized_by_mutation(tx_key, tx_id, clause_key, clause_id))
         # A credit moves the FIFO the arrears evaluation ages, exactly as
         # every post_entry credit does. A zero-net return posts no
         # transaction, so it moves no FIFO and needs no mark.
@@ -2153,12 +2602,6 @@ def record_deposit_deduction(state, op):
     posted_at = time.rfc3339_utc(op.submittedAt)
     entry_data = {"type": "deduction", "amountCents": amount_cents, "postedAt": posted_at, "memo": reason}
 
-    # postedTo / authorizedBy: the transaction (later-arriving) is the source
-    # of both (Contract #1 §1.1) — the same chain of custody DebitAccount and
-    # ReturnDeposit record.
-    posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
-    authorized_by_lnk = "lnk.transaction." + tx_id + ".authorizedBy.clause." + clause_id
-
     deductions_data = {"totalCents": total_so_far + amount_cents, "count": count_so_far + 1, "lastRecordedAt": posted_at}
     if deductions_doc == None:
         # First deduction on this clause: CREATE. make_aspect's own create-only
@@ -2173,11 +2616,10 @@ def record_deposit_deduction(state, op):
         # both land and the running total stays exact.
         deductions_mutation = make_aspect_update(clause_key, "deductions", "depositDeductions", deductions_data)
 
-    mutations = [
-        make_vtx(tx_key, "transaction", {}),
-        make_aspect(tx_key, "entry", "transactionEntry", entry_data),
-        make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
-        make_link(authorized_by_lnk, tx_key, clause_key, "authorizedBy", "authorizedBy", {}),
+    # postedTo / authorizedBy — the same chain of custody DebitAccount and
+    # ReturnDeposit record.
+    mutations = entry_mutations(tx_key, tx_id, acct_key, acct_id, entry_data) + [
+        authorized_by_mutation(tx_key, tx_id, clause_key, clause_id),
         deductions_mutation,
     ]
     # No .arrears stale mark: a deduction moves no FIFO at all (it is neither
@@ -2249,7 +2691,6 @@ def pay_out_balance(state, op):
     # not).
     entry_data = {"type": "debit", "kind": "payout", "amountCents": payout_cents,
                   "postedAt": posted_at, "memo": "Balance paid out to the tenant"}
-    posted_to_lnk = "lnk.transaction." + tx_id + ".postedTo.account." + acct_id
 
     # The account root's own bare update (unchanged data) is the CAS anchor:
     # two concurrent PayOutBalance submissions on a never-evaluated account
@@ -2261,10 +2702,7 @@ def pay_out_balance(state, op):
     # loser re-hydrates, re-executes account_balance_cents against the
     # winner's now-posted payout debit, and finds NoCreditBalance instead of
     # paying the same credit out twice.
-    mutations = [
-        make_vtx(tx_key, "transaction", {}),
-        make_aspect(tx_key, "entry", "transactionEntry", entry_data),
-        make_link(posted_to_lnk, tx_key, acct_key, "postedTo", "postedTo", {}),
+    mutations = entry_mutations(tx_key, tx_id, acct_key, acct_id, entry_data) + [
         make_vtx_update(acct_key, "account", state[acct_key].data),
     ]
     # A debit moves the FIFO the arrears evaluation ages, exactly as every
@@ -2383,6 +2821,33 @@ def derive_reads(op):
         if len(keys) == 0:
             return {}
         return {"optionalReads": keys}
+    if ot == "LinkReversal":
+        # The account root and its .arrears (the stale mark is the same bare
+        # update every entry op makes), the credit and the charge it is tied
+        # to — each root with its .entry — and the two deterministic postedTo
+        # links that prove both are posted to the payload account. Every key
+        # is built from the three payload keys, so no dispatcher can be the
+        # one that forgot it.
+        keys = []
+        acct_key = optional_string(op.payload, "accountKey")
+        credit_key = optional_string(op.payload, "creditKey")
+        reverses_key = optional_string(op.payload, "reversesRef")
+        has_acct = is_account_key(acct_key)
+        has_credit = is_vertex_key(credit_key, "transaction")
+        has_reverses = is_vertex_key(reverses_key, "transaction")
+        if has_acct:
+            keys += [acct_key, acct_key + ".arrears"]
+        if has_credit:
+            keys += [credit_key, credit_key + ".entry"]
+            if has_acct:
+                keys.append("lnk.transaction." + credit_key.split(".")[2] + ".postedTo.account." + acct_key.split(".")[2])
+        if has_reverses:
+            keys += [reverses_key, reverses_key + ".entry"]
+            if has_acct:
+                keys.append("lnk.transaction." + reverses_key.split(".")[2] + ".postedTo.account." + acct_key.split(".")[2])
+        if len(keys) == 0:
+            return {}
+        return {"optionalReads": keys}
     if ot != "DebitAccount" and ot != "LoftspaceRecordCharge" and ot != "CreditAccount":
         return {}
     # optional_string, never required_string: a missing or malformed
@@ -2392,7 +2857,20 @@ def derive_reads(op):
     acct_key = optional_string(op.payload, "accountKey")
     if not is_account_key(acct_key):
         return {}
-    return {"optionalReads": [acct_key, acct_key + ".arrears"]}
+    keys = [acct_key, acct_key + ".arrears"]
+    if ot == "CreditAccount":
+        # The charge a reversal names: its root, its .entry (the face the
+        # credit is capped at, and the debit type it must carry) and the
+        # postedTo link that proves it is a charge on THIS account
+        # (WrongAccount otherwise) -- the link key spans two payload fields,
+        # so no dispatcher can template it; the derivation is what declares
+        # it. A malformed reversesRef derives nothing here and post_entry's
+        # own parts_of raises the clean InvalidArgument.
+        reverses_key = optional_string(op.payload, "reversesRef")
+        if is_vertex_key(reverses_key, "transaction"):
+            keys += [reverses_key, reverses_key + ".entry",
+                     "lnk.transaction." + reverses_key.split(".")[2] + ".postedTo.account." + acct_key.split(".")[2]]
+    return {"optionalReads": keys}
 
 def execute(state, op):
     ot = op.operationType
@@ -2438,6 +2916,13 @@ def execute(state, op):
         # workplace-exempt: (per-call-site) pay_out_balance's own
         # self_scope_standing call carries the discharge.
         return pay_out_balance(state, op)
+
+    if ot == "LinkReversal":
+        # Operator-only (permissions.go: one scope=any grant, no self grant,
+        # no task minted for it, no screen), so no authContext target ever
+        # reaches this branch; every custody it proves is the graph's own
+        # record (postedTo on both transactions, off the payload account).
+        return link_reversal(state, op)
 
     fail("transaction DDL: unknown operationType: " + ot)
 `, RecurringChargePeriod)

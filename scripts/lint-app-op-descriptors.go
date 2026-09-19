@@ -296,7 +296,16 @@ var appOpCeilings = map[string]int{
 	// prompt(), the same hand-built-form-for-a-described-op shape GiveNotice
 	// and the two ledger controls above already established, not a new
 	// descriptor-catalog gap.
-	"cmd/loftspace-app": 22,
+	// 23: SetLateFee (docs/reviews/loftspace-ledger-reversal-and-late-fee-2026-09-18.md
+	// decision 5) — the landlord applications card's own "Set late fee"
+	// control (renderSetLateFeeControl / submitSetLateFee, app.js): an
+	// inline dollars field the handler converts to the whole cents the op
+	// takes and bounds before submit (a static InputSchema minimum cannot
+	// refuse a fraction of a cent, and the descriptor's field is cents, not
+	// the dollars a landlord types), prefilled from the row's own recorded
+	// term — the same hand-built-form-for-a-described-op shape the two
+	// ledger controls above established, not a new descriptor-catalog gap.
+	"cmd/loftspace-app": 23,
 	// 13: CreateUnclaimedIdentity backs the new-guest modal's submit
 	// (submitNewGuest, app.js), reusing loftspace-app's/clinic-app's own
 	// hand-built new-identity ceremony for the same op — a hardcoded literal

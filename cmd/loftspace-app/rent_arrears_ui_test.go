@@ -20,6 +20,8 @@ var rentArrearsUIDecls = []*regexp.Regexp{
 	regexp.MustCompile(`(?s)\nconst UTC_MONTH_ABBR = \[.*?\];\n`),
 	regexp.MustCompile(`(?s)\nfunction fmtUTCDate\(s\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction moneyAmount\(n\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction localDateTime\(iso\) \{\n.*?\n\}\n`),
+	regexp.MustCompile(`(?s)\nfunction lateFeeBilledSuffix\(row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction rentBalanceLine\(data\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction rentAgeText\(row\) \{\n.*?\n\}\n`),
 	regexp.MustCompile(`(?s)\nfunction depositLine\(data\) \{\n.*?\n\}\n`),
@@ -191,9 +193,21 @@ func TestRentBalanceLine_EverySuffix(t *testing.T) {
 			"Balance owed: $3300 · rent due Sep 22, 2026 · due in 7 days",
 		},
 		{
+			// reminderSentAt is an INSTANT (the send commit's own), rendered
+			// localDateTime — the fixture's 17:01Z is 10:01 in the pinned
+			// zone; goja's toLocaleString spells the rest browser-independently
+			// enough that the pin holds the clock, not the whole string.
 			"reminder clause appended after overdue",
-			map[string]interface{}{"balanceCents": 5000.0, "dueDate": "2026-09-08T00:00:00Z", "isOverdue": true, "daysOverdue": 7.0, "reminderSentAt": "2026-09-13T00:00:00Z"},
-			"Balance owed: $50 · rent due Sep 8, 2026 · 7 days overdue · a reminder was sent Sep 13, 2026",
+			map[string]interface{}{"balanceCents": 5000.0, "dueDate": "2026-09-08T00:00:00Z", "isOverdue": true, "daysOverdue": 7.0, "reminderSentAt": "2026-09-13T17:01:51Z"},
+			"Balance owed: $50 · rent due Sep 8, 2026 · 7 days overdue · a reminder was sent <local>",
+		},
+		{
+			// lateFeeBilledAt is an instant too, rendered localDateTime beside
+			// the reminder's — two clauses on one line name their instants in
+			// ONE zone, never a UTC slice next to a local one.
+			"late fee clause appended after the reminder",
+			map[string]interface{}{"balanceCents": 10000.0, "dueDate": "2026-09-08T00:00:00Z", "isOverdue": true, "daysOverdue": 7.0, "reminderSentAt": "2026-09-13T17:01:51Z", "lateFeeBilledAt": "2026-09-13T17:01:51Z"},
+			"Balance owed: $100 · rent due Sep 8, 2026 · 7 days overdue · a reminder was sent <local> · late fee billed <local>",
 		},
 		{
 			"credit balance",
@@ -245,7 +259,30 @@ func TestRentBalanceLine_EverySuffix(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := callRentBalanceLine(t, vm, tc.data); got != tc.want {
+			got := callRentBalanceLine(t, vm, tc.data)
+			if strings.Contains(tc.want, "<local>") {
+				// Each <local> is an instant rendered in the viewer's zone:
+				// the literal fragments around it are exact and in order, every
+				// rendered clock is 10:01 (17:01Z in America/Los_Angeles) —
+				// one per placeholder — and the UTC 17:01 never appears.
+				rest := got
+				fragments := strings.Split(tc.want, "<local>")
+				ordered := strings.HasPrefix(rest, fragments[0])
+				rest = strings.TrimPrefix(rest, fragments[0])
+				for _, frag := range fragments[1:] {
+					idx := strings.Index(rest, frag)
+					if idx < 0 {
+						ordered = false
+						break
+					}
+					rest = rest[idx+len(frag):]
+				}
+				if !ordered || strings.Count(got, "10:01") != len(fragments)-1 || strings.Contains(got, "17:01") {
+					t.Errorf("rentBalanceLine(%v) = %q, want %q with every instant in the viewer's zone", tc.data, got, tc.want)
+				}
+				return
+			}
+			if got != tc.want {
 				t.Errorf("rentBalanceLine(%v) = %q, want %q", tc.data, got, tc.want)
 			}
 		})
