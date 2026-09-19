@@ -88,6 +88,7 @@ func DDLs() []pkgmgr.DDLSpec {
 		tenantNameAspectDDL(),
 		tenancyNoticeAspectDDL(),
 		leaseDepositAspectDDL(),
+		leaseLateFeeAspectDDL(),
 		leaseServiceInstanceDDL(),
 		leaseServiceReplyDDL(),
 		leaseServiceDispatchDDL(),
@@ -110,7 +111,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 	return pkgmgr.DDLSpec{
 		CanonicalName:     "leaseapp",
 		Class:             "meta.ddl.vertexType",
-		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy", "GiveNotice", "RecordApplicationLoss"},
+		PermittedCommands: []string{"CreateLeaseApplication", "SignLease", "WithdrawLeaseApplication", "DecideLeaseApplication", "SetApplicantProfile", "BackfillLeaseTerms", "ReassignLeaseUnit", "EndTenancy", "GiveNotice", "RecordApplicationLoss", "SetLateFee"},
 		Description: "Lease-application DDL. Vertex shape: vtx.leaseapp.<NanoID>, class=leaseapp, root data = {} " +
 			"(minimal, D5 — the application status/gaps are LENS-computed, not stored). The application's applicant " +
 			"is a LINK (applicationFor → identity: the later-arriving leaseapp is the source, the pre-existing " +
@@ -282,7 +283,21 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"same batch (the applicant off the application's own applicationFor link — a declared enumeration; tombstoned under " +
 			"CAS when alive) so the applicant may re-apply to the relisted unit afresh; the idempotent no-op arm leaves an " +
 			"already-recorded loss's guard alone, and WithdrawLeaseApplication still accepts a lost application without " +
-			"touching the guard (decided applications never free it).",
+			"touching the guard (decided applications never free it). " +
+			"SetLateFee{leaseAppKey, amountCents} records the lease's late-fee term — .lateFee {amountCents, recordedAt} " +
+			"on the leaseapp (leaseLateFee DDL), create-or-update — by the landlord of its unit (the consumer scope=self " +
+			"grant, bound by require_manages on the application's own appliesToUnit unit, the DecideLeaseApplication " +
+			"shape) or an operator. amountCents is a positive whole number of cents, at most 100000000 (InvalidArgument " +
+			"otherwise); the " +
+			"application must carry a .tenancy (NotApproved — a fee is a term of a lease, not of an offer; the aspect " +
+			"is a declared optionalReads, absent on every undecided application) whose endedAt is unset (TenancyEnded). " +
+			"semantic-contracts' leaseRentSettlement reads the term to mint the lease's purpose=lateFee " +
+			"perArrearsEpisode clause (missing_lateFeeClause) and to amend it when the amount changes " +
+			"(missing_lateFeeAmendment); loftspace-ledger's arrears evaluation bills that clause once per arrears " +
+			"episode, on the commit that sends the reminder, so a term set after this episode's reminder went out — or an " +
+			"amendment committing concurrently with the send — bills from the next episode. No removal verb: the fee " +
+			"stays a term of the lease until amended. Emits " +
+			"leaseapp.lateFeeSet{leaseAppKey, amountCents, recordedAt}.",
 		Script: leaseAppDDLScript,
 		InputSchema: `{"type":"object","properties":` +
 			`{"applicant":{"type":"string","description":"vtx.identity.<NanoID> of the applicant this application is for (CreateLeaseApplication: required, validated alive; WithdrawLeaseApplication: required, verified via the applicationFor link, to free the per-(applicant, unit) guard link)."},` +
@@ -306,7 +321,8 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			`"guarantorRelationship":{"type":"string","description":"The guarantor's relationship to the applicant, e.g. parent (SetApplicantProfile; optional, only with hasGuarantor). SENSITIVE — stored in .profile, never projected."},` +
 			`"guarantorAnnualIncome":{"type":"number","description":"The guarantor's gross annual income (SetApplicantProfile; optional, only with hasGuarantor, > 0). SENSITIVE — stored in .profile, NEVER projected; only the derived guarantorIncomeToRentMet boolean (in .applicationSignals) reaches the read model."},` +
 			`"coApplicantName":{"type":"string","description":"The co-applicant's name (SetApplicantProfile; optional, only with hasCoApplicant). SENSITIVE — a third party's identifier, stored in .underwritingParties, never projected."},` +
-			`"coApplicantContact":{"type":"string","description":"The co-applicant's contact (email / phone) (SetApplicantProfile; optional, only with hasCoApplicant). SENSITIVE — a third party's identifier, stored in .underwritingParties, never projected."}},` +
+			`"coApplicantContact":{"type":"string","description":"The co-applicant's contact (email / phone) (SetApplicantProfile; optional, only with hasCoApplicant). SENSITIVE — a third party's identifier, stored in .underwritingParties, never projected."},` +
+			`"amountCents":{"type":"integer","description":"The late fee in integer cents (SetLateFee; required, > 0). Recorded verbatim on .lateFee.amountCents and templated verbatim into the fee clause's amountCents by leaseRentSettlement — no dollars, no fraction."}},` +
 			`"required":[]}`,
 		OutputSchema: `{"type":"object","properties":` +
 			`{"primaryKey":{"type":"string","description":"vtx.leaseapp.<NanoID> of the created or signed application (the operation's principal key)."}}}`,
@@ -316,6 +332,7 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 			"moveInDate":            "Optional requested move-in date — RFC3339, or a bare YYYY-MM-DD read as midnight UTC; stored normalized to the RFC3339 instant, and a value that parses as neither is refused. A date whose UTC calendar day is before the unit's listing.availableFrom's UTC calendar day is refused MoveInBeforeAvailable, at CreateLeaseApplication and again at the first approve (the listing's date may have been floored since); a date ON the available day is admitted whatever the listing's time of day. When supplied, CreateLeaseApplication writes the .terms aspect {moveInDate, leaseTermMonths, requestedRent?} and requires leaseTermMonths. The first approve signs the lease on these terms (leaseStart = moveInDate), never clamped.",
 			"leaseTermMonths":       "Requested lease term in months — a whole number ≥ 1 (a zero, negative or fractional count is refused InvalidTerms at CreateLeaseApplication, and again at the first approve if a stored value fails the test). Required when moveInDate is supplied; written to the .terms aspect and signed on at the first approve (leaseEnd = moveInDate + this many calendar months).",
 			"requestedRent":         "Optional monthly rent the applicant offers, > 0 with at most two decimals when supplied (zero or negative is refused InvalidTerms, a third decimal InvalidArgument — the ledger keeps whole cents). Written to the .terms aspect when supplied (only meaningful alongside moveInDate); the first approve records it as .tenancy.rentAmount, falling back to the unit's listed rent where it is absent or non-positive.",
+			"amountCents":           "SetLateFee only, and required there: the late fee charged once per spell of unpaid rent, a positive whole number of cents at most 100000000 (a zero, negative, fractional, non-numeric or larger value is refused InvalidArgument). Written to .lateFee {amountCents, recordedAt} create-or-update; leaseRentSettlement mints (or amends) the lease's purpose=lateFee clause at exactly this figure.",
 			"leaseAppId":            "Optional bare NanoID (no dots / key segments) for the application vertex (vtx.leaseapp.<leaseAppId>) created by CreateLeaseApplication. Supplied by a caller that must know the key before commit (the write-ahead seam). Absent → minted with nanoid.new().",
 			"leaseAppKey":           "Full vtx.leaseapp.<NanoID> key of the application to act on. SignLease validates it is alive and writes the .signature aspect (flipping missing_signature false); WithdrawLeaseApplication validates it is alive and soft-deletes it; DecideLeaseApplication validates it is alive and writes the .decision aspect; SetApplicantProfile validates it is alive and writes the .profile / .underwritingParties / .applicationSignals aspects in one batch; BackfillLeaseTerms validates it is alive and upserts the .terms aspect's requestedRent from the application's own unit's listed rent; ReassignLeaseUnit validates it is alive and re-points its appliesToUnit link at newUnitKey; EndTenancy validates it is alive and rewrites its .tenancy aspect with endedAt = leaseEnd (the .tenancy is a required declared read too); RecordApplicationLoss validates it is alive and writes .decision {value: lost, decidedAt} once its unit has leased to another applicant (the .decision is a declared optionalReads). The caller lists it in ContextHint.Reads.",
 			"newUnitKey":            "Full vtx.unit.<NanoID> key of the unit ReassignLeaseUnit re-points the application at (required, validated alive). The operator names the unit directly — the application's OWN appliesToUnit / applicationFor links, never payload fields, are what the op reads to find the CURRENT unit and the applicant.",
@@ -507,6 +524,19 @@ func leaseAppDDL() pkgmgr.DDLSpec {
 					"Operator-only (Weaver's service actor via leaseApplicationComplete's missing_lossRecorded gap, or by hand via the CLI " +
 					"under the primordial admin, as EndTenancy). " +
 					"Rejects a non-existent application (UnknownLeaseApplication).",
+			},
+			{
+				Name:    "SetLateFee — record the lease's late-fee term",
+				Payload: map[string]any{"leaseAppKey": "vtx.leaseapp.<NanoID>", "amountCents": 5000},
+				ExpectedOutcome: "Resolves the unit from the application's own appliesToUnit link and binds the caller to it — a " +
+					"landlord on the self path must manage it (AuthDenied otherwise), staff on the standing path must worksAt a " +
+					"location covering it; an operator is exempt. Reads the application's .tenancy (declared optionalReads): " +
+					"rejects NotApproved when absent (an undecided application) and TenancyEnded when it records endedAt. " +
+					"Otherwise writes .lateFee {amountCents: 5000, recordedAt: <op.submittedAt, canonical UTC>} — a create " +
+					"conditioned on the declared absence, or a bare update of the present aspect (OCC on the hydrated " +
+					"revision) when a term was already set. Emits leaseapp.lateFeeSet{leaseAppKey, amountCents, " +
+					"recordedAt}. Returns primaryKey. Rejects a non-positive, fractional or non-numeric amountCents " +
+					"(InvalidArgument) and a non-existent application (UnknownLeaseApplication).",
 			},
 		},
 		Effects: map[string][]json.RawMessage{
@@ -930,6 +960,51 @@ func leaseDepositAspectDDL() pkgmgr.DDLSpec {
 				Name:            "lease-deposit aspect",
 				Payload:         map[string]any{"amount": 1500, "recordedAt": "2027-02-14T09:30:00Z"},
 				ExpectedOutcome: "Stored as vtx.leaseapp.<NanoID>.deposit, written CREATE-ONLY by DecideLeaseApplication on the first approve, alongside .tenancy. leaseApplicationsRead / landlordLeaseApplicationsRead now project depositAmount.",
+			},
+		},
+	}
+}
+
+// leaseLateFeeAspectDDL declares the leaseapp's .lateFee aspect — the
+// late-fee term a landlord records on a lease with SetLateFee, create-or-
+// update. Its own aspect, for the reason .deposit is: .tenancy has two
+// whole-aspect writers and SignRenewal rewrites it from a fixed field list.
+// Read by semantic-contracts' leaseRentSettlement, whose missing_lateFeeClause
+// mints the lease's purpose=lateFee perArrearsEpisode clause at this amount
+// and whose missing_lateFeeAmendment supersedes that clause when the amount
+// changes; loftspace-ledger's arrears evaluation bills the clause (never this
+// aspect) once per arrears episode. Not sensitive: a cents figure and when
+// it was recorded.
+func leaseLateFeeAspectDDL() pkgmgr.DDLSpec {
+	return pkgmgr.DDLSpec{
+		CanonicalName:     "leaseLateFee",
+		Class:             "meta.ddl.aspectType",
+		PermittedCommands: []string{"SetLateFee"},
+		Description: "Late-fee term aspect (lease-signing). Stored as vtx.leaseapp.<NanoID>.lateFee (class leaseLateFee) " +
+			"= {amountCents, recordedAt}: the fee the lease charges once per spell of unpaid rent, in integer cents, " +
+			"as its landlord (or an operator) last recorded it with SetLateFee — created on the first set, rewritten " +
+			"whole on every later one (recordedAt = that op's submittedAt, canonical-UTC RFC3339). Only a lease " +
+			"with a live tenancy carries it (SetLateFee refuses NotApproved / TenancyEnded), and nothing removes it. " +
+			"Read by the leaseApplicationsRead / landlordLeaseApplicationsRead read models (late_fee_cents) and by " +
+			"semantic-contracts' leaseRentSettlement lens, whose missing_lateFeeClause gap mints the purpose=lateFee " +
+			"perArrearsEpisode clause for this amount once the lease has its ledger account and whose " +
+			"missing_lateFeeAmendment gap supersedes that clause when this amount changes; loftspace-ledger's " +
+			"EvaluateLoftspaceArrears bills the CLAUSE, never this aspect, on the commit that sends the arrears " +
+			"reminder. Declaration-only: no op handler.",
+		Script: aspectDeclarationOnlyScript,
+		InputSchema: `{"type":"object","properties":` +
+			`{"amountCents":{"type":"integer"},"recordedAt":{"type":"string"}},` +
+			`"required":["amountCents","recordedAt"]}`,
+		OutputSchema: `{"type":"object"}`,
+		FieldDescription: map[string]string{
+			"amountCents": "The late fee in integer cents, > 0, exactly as SetLateFee's payload supplied it — the figure leaseRentSettlement templates verbatim into the fee clause's amountCents.",
+			"recordedAt":  "When the term was last set — the SetLateFee op's own submittedAt, canonical UTC; rewritten on every amendment.",
+		},
+		Examples: []pkgmgr.ExampleSpec{
+			{
+				Name:            "lease-late-fee aspect",
+				Payload:         map[string]any{"amountCents": 5000, "recordedAt": "2026-09-18T15:00:00Z"},
+				ExpectedOutcome: "Stored as vtx.leaseapp.<NanoID>.lateFee by SetLateFee. leaseApplicationsRead / landlordLeaseApplicationsRead now project late_fee_cents = 5000; leaseRentSettlement mints (or amends) the lease's purpose=lateFee clause at 5000 cents.",
 			},
 		},
 	}

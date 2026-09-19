@@ -114,20 +114,21 @@ type portfolioPulseResult struct {
 
 // landlordLeaseBalance is one arrears row: an occupied lease with a positive
 // (owed-to-landlord) running balance, most-overdue-first. DueDate/IsOverdue/
-// DaysOverdue/DaysUntilDue/ReminderSentAt are the same rent-age fields
-// /api/ledger and /api/one-bill carry (deriveRentArrears, ledger.go) — the
-// recorded leaseAccounts row wins when it has a stamp, else the ledger's own
-// FIFO head.
+// DaysOverdue/DaysUntilDue/ReminderSentAt/LateFeeBilledAt are the same
+// rent-age fields /api/ledger and /api/one-bill carry (deriveRentArrears,
+// ledger.go) — the recorded leaseAccounts row wins when it has a stamp, else
+// the ledger's own FIFO head.
 type landlordLeaseBalance struct {
-	LeaseAppKey    string `json:"leaseAppKey"`
-	UnitAddress    string `json:"unitAddress"`
-	ApplicantName  string `json:"applicantName"`
-	BalanceCents   int64  `json:"balanceCents"`
-	DueDate        string `json:"dueDate"`
-	IsOverdue      bool   `json:"isOverdue"`
-	DaysOverdue    int    `json:"daysOverdue"`
-	DaysUntilDue   int    `json:"daysUntilDue"`
-	ReminderSentAt string `json:"reminderSentAt,omitempty"`
+	LeaseAppKey     string `json:"leaseAppKey"`
+	UnitAddress     string `json:"unitAddress"`
+	ApplicantName   string `json:"applicantName"`
+	BalanceCents    int64  `json:"balanceCents"`
+	DueDate         string `json:"dueDate"`
+	IsOverdue       bool   `json:"isOverdue"`
+	DaysOverdue     int    `json:"daysOverdue"`
+	DaysUntilDue    int    `json:"daysUntilDue"`
+	ReminderSentAt  string `json:"reminderSentAt,omitempty"`
+	LateFeeBilledAt string `json:"lateFeeBilledAt,omitempty"`
 }
 
 // computeLandlordLeaseBalances derives each occupied (signed) lease's running
@@ -159,12 +160,13 @@ func computeLandlordLeaseBalances(rows []protectedLandlordRow, ledgerKeys []stri
 			row.ApplicantName = *r.ApplicantName
 		}
 		acct := acctByLease[r.EntityKey]
-		arrears := deriveRentArrears(rentRows, acct.ArrearsDueAt, acct.ArrearsReminderSentAt, now)
+		arrears := deriveRentArrears(rentRows, acct.ArrearsDueAt, acct.ArrearsReminderSentAt, acct.ArrearsLateFeeAt, now)
 		row.DueDate = arrears.DueDate
 		row.IsOverdue = arrears.IsOverdue
 		row.DaysOverdue = arrears.DaysOverdue
 		row.DaysUntilDue = arrears.DaysUntilDue
 		row.ReminderSentAt = arrears.ReminderSentAt
+		row.LateFeeBilledAt = arrears.LateFeeBilledAt
 		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool {

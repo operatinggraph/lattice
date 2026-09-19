@@ -488,12 +488,24 @@ function signOut() {
 // calls the Gateway's POST /v1/operations directly with a Bearer token, so the
 // Processor sees + authorizes the REAL verified actor. Reads are unaffected —
 // they stay on this app's own read boundary (readauth.go).
-let gatewayURLCache = null;
+let appConfigCache = null;
+// loadAppConfig reads GET /api/config once — the Gateway base URL and the
+// ledger's arrears grace in days — and caches the body; every reader below
+// goes through it, so the page makes one config round trip.
+async function loadAppConfig() {
+  if (appConfigCache) return appConfigCache;
+  appConfigCache = await appGet("/api/config");
+  return appConfigCache;
+}
 async function gatewayURL() {
-  if (gatewayURLCache) return gatewayURLCache;
-  const body = await appGet("/api/config");
-  gatewayURLCache = body.gatewayUrl;
-  return gatewayURLCache;
+  return (await loadAppConfig()).gatewayUrl;
+}
+// arrearsGraceDays is the ledger's grace as the config reported it, or null
+// before the config has loaded — a fee line then names "the grace period"
+// rather than inventing a number the browser does not own.
+function arrearsGraceDays() {
+  const days = appConfigCache && appConfigCache.arrearsGraceDays;
+  return typeof days === "number" && days > 0 ? days : null;
 }
 
 // isTransientAuthLag reports whether a rejected reply is the known,
@@ -1599,6 +1611,91 @@ function entryMemoSuffix(e) {
   return " — " + customerMemo(e.memo);
 }
 
+// reversedCents sums the credits in rows that name t as the charge they
+// reverse (reversesKey === t.transactionKey, the ledgerHistory lens's
+// reverses hop) — what earlier reversals have already absorbed of the
+// charge. Zero for a credit, a deduction, or a charge nothing names.
+function reversedCents(t, rows) {
+  if (!t || t.type !== "debit") return 0;
+  let sum = 0;
+  for (const r of rows || []) {
+    if (r && r.type === "credit" && r.reversesKey === t.transactionKey) sum += Number(r.amountCents) || 0;
+  }
+  return sum;
+}
+
+// reversibleCents is what a fresh reversal of the charge t may still name:
+// its face less what earlier reversals naming it already absorbed, floored
+// at zero — the op's own cap (CreditAccount refuses ReversalExceedsCharge
+// above the face, and the arrears netting caps the SUM at the face), so the
+// Reverse control is offered exactly where the op would accept it, and the
+// amount it sends is never typed. The security deposit's charge
+// (clausePurpose === "deposit") is never reversible — the op refuses it
+// DepositNotReversible, because the deposit has its own verbs (deduct,
+// return) and a reversal would leave it "held" on the statement — so it
+// reads 0 here too.
+function reversibleCents(t, rows) {
+  if (!t || t.type !== "debit" || t.clausePurpose === "deposit") return 0;
+  const left = (Number(t.amountCents) || 0) - reversedCents(t, rows);
+  return left > 0 ? left : 0;
+}
+
+// reversalRowSuffix renders a reversing credit's " · reverses the charge of
+// <when>" clause off the charge it names (reversesKey), resolved through
+// byKey — a Map of the same response's rows by transactionKey — to that
+// charge's own postedAt, rendered localDateTime like every instant on this
+// panel. A credit naming a charge the response does not hold (the row fell
+// outside this lease's rows, or is gone) still reads "reverses a charge"
+// rather than silently dropping the fact; a plain payment and every debit
+// read "".
+function reversalRowSuffix(t, byKey) {
+  if (!t || t.type !== "credit" || !t.reversesKey) return "";
+  const rt = byKey && typeof byKey.get === "function" ? byKey.get(t.reversesKey) : undefined;
+  if (rt && rt.postedAt) return " · reverses the charge of " + localDateTime(rt.postedAt);
+  return " · reverses a charge";
+}
+
+// billedForRowSuffix renders a late fee's " · late fee for the charge of
+// <when>" clause off the charge it was billed for (billedForKey, the
+// ledgerHistory / one-bill billedFor hop), resolved through byKey — a Map of
+// the same response's rows by transactionKey — to that charge's own
+// postedAt, rendered localDateTime like every instant on this panel. A fee
+// naming a charge the response does not hold still reads "late fee for a
+// charge" rather than silently dropping the fact; every other row reads "".
+function billedForRowSuffix(t, byKey) {
+  if (!t || !t.billedForKey) return "";
+  const bt = byKey && typeof byKey.get === "function" ? byKey.get(t.billedForKey) : undefined;
+  if (bt && bt.postedAt) return " · late fee for the charge of " + localDateTime(bt.postedAt);
+  return " · late fee for a charge";
+}
+
+// billedForReversedHint is the line the landlord's Reverse control carries
+// on a late-fee row whose charge has been fully reversed: the charge the
+// fee was billed for (billedForKey) has reversals covering its whole face
+// (reversibleCents(charge, rows) === 0 — the op's own cap, the same
+// predicate that hides the charge's own Reverse), while the fee itself is
+// still unreversed (its own reversibleCents > 0). "" on any other row: a fee
+// whose charge still stands, a fee already reversed, a charge, a payment, a
+// fee whose charge is not among the rows (nothing to judge it by).
+function billedForReversedHint(t, rows, byKey) {
+  if (!t || t.type !== "debit" || !t.billedForKey) return "";
+  const charge = byKey && typeof byKey.get === "function" ? byKey.get(t.billedForKey) : undefined;
+  if (!charge || charge.type !== "debit") return "";
+  if (reversibleCents(charge, rows) > 0 || reversibleCents(t, rows) <= 0) return "";
+  return "The charge this fee was billed for has been reversed.";
+}
+
+// lateFeeBilledSuffix renders a Rent-owed row's (or a statement's) " · late
+// fee billed <when>" clause off lateFeeBilledAt — the account's recorded
+// instant this episode's late fee was posted (leaseAccounts' arrearsLateFeeAt,
+// threaded through deriveRentArrears with the reminder it was stamped
+// beside), rendered localDateTime like every instant on this panel. "" for
+// an episode never charged one.
+function lateFeeBilledSuffix(row) {
+  if (!row || !row.lateFeeBilledAt) return "";
+  return " · late fee billed " + localDateTime(row.lateFeeBilledAt);
+}
+
 function customerMemo(memo) {
   if (!memo) return memo;
   // derived-key: not a key derivation — this alphabet builds a regex to
@@ -1670,9 +1767,13 @@ function rentBalanceLine(data) {
   } else if (data && data.dueDate) {
     line += " · due today";
   }
+  // reminderSentAt is an instant (the send commit), rendered localDateTime
+  // like the late-fee instant beside it — never a UTC slice next to a
+  // local one on the same line.
   if (data && data.reminderSentAt) {
-    line += " · a reminder was sent " + fmtUTCDate(data.reminderSentAt);
+    line += " · a reminder was sent " + localDateTime(data.reminderSentAt);
   }
+  line += lateFeeBilledSuffix(data);
   if (data && Number(data.depositHeldCents) > 0) {
     const attributable = Math.min(cents, Number(data.depositHeldCents));
     line += " · of which up to " + moneyAmount(attributable / 100) + " is the security deposit";
@@ -2303,6 +2404,23 @@ function fmtRentLine(offeredRent, listingRent, currency) {
   return rent;
 }
 
+// lateFeeTermText renders a lease's recorded late-fee term (lateFeeCents,
+// the leaseApplicationsRead / landlordLeaseApplicationsRead late_fee_cents
+// column — whole cents, SetLateFee's stamp) as "$X after N days": the fee
+// the ledger bills once per spell of unpaid rent on the commit that sends
+// the arrears reminder, which waits out the grace. graceDays is the ledger's
+// own number (arrearsGraceDays, off /api/config) or null, in which case the
+// line names "the grace period" rather than a number the browser made up.
+// null for a lease with no term. Pure and DOM-free so it is goja-testable.
+function lateFeeTermText(lateFeeCents, currency, graceDays) {
+  if (typeof lateFeeCents !== "number" || !(lateFeeCents > 0)) return null;
+  const amount = fmtMoney(lateFeeCents / 100, currency);
+  const after = typeof graceDays === "number" && graceDays > 0
+    ? `after ${graceDays} ${graceDays === 1 ? "day" : "days"}`
+    : "after the grace period";
+  return `${amount} ${after}`;
+}
+
 // renderLeaseTermsPanel builds the "Lease terms" panel. Once DecideLeaseApplication
 // has recorded a .tenancy it states the RECORDED lease (the fact, not the ask):
 // start/end, the current term's start after a renewal, and the rent actually
@@ -2336,6 +2454,7 @@ function renderLeaseTermsPanel(row) {
     if (row.tenancyTermStart) addTerm("Current term", "from " + fmtUTCDate(row.tenancyTermStart));
     if (typeof row.tenancyRentAmount === "number") addTerm("Rent", `${fmtMoney(row.tenancyRentAmount, row.unitCurrency)} / month`);
     if (typeof row.depositAmount === "number") addTerm("Security deposit", fmtMoney(row.depositAmount, row.unitCurrency));
+    addTerm("Late fee", lateFeeTermText(row.lateFeeCents, row.unitCurrency, arrearsGraceDays()));
     head = row.tenancyEndedAt ? "Lease ended " + fmtUTCDate(row.tenancyEndedAt) : "Lease terms";
   } else {
     // Pre-approval — states what the signature commits to.
@@ -4076,9 +4195,11 @@ async function openLedgerAccount(leaseAppKey) {
 //
 // One row of the loftspace-ledger `ledgerHistory` lens per posted transaction,
 // read via GET /api/ledger?leaseAppKey= (P5 — a lens read model, never Core
-// KV). The account key is deterministic (vtx.account.<same NanoID as the
-// lease>) so the server derives it even before any transaction — or the
-// account itself — exists; the FE never guesses it independently.
+// KV). The account key is independently minted (never derived from the
+// lease's NanoID), so the server resolves it through the `leaseAccounts`
+// read model — a lease with no account yet reads accountKey empty — and the
+// FE never guesses it independently; openLedgerAccount above reads the fresh
+// key off the ACCEPTED reply alone.
 
 // renderLedgerPanel builds a collapsible ledger section for a signed/leased
 // application: a toggle reveals the transaction history + running balance.
@@ -4146,13 +4267,29 @@ async function refreshLedgerBody(body, leaseAppKey, canRecord, tenancyEndedAt) {
   } else {
     const list = document.createElement("ul");
     list.className = "ledger-list";
+    const byKey = new Map(txs.map((t) => [t.transactionKey, t]));
     for (const t of txs) {
       const li = document.createElement("li");
       const { sign, cls } = entrySignAndClass(t);
       li.className = "ledger-entry" + (cls ? " " + cls : "");
       li.textContent =
         fmtDate(t.postedAt) + " · " + sign + moneyAmount(t.amountCents / 100) + depositRowTag(t) +
-        entryMemoSuffix(t);
+        entryMemoSuffix(t) + reversalRowSuffix(t, byKey) + billedForRowSuffix(t, byKey);
+      // The landlord's correction of a charge: offered on a debit whose face
+      // exceeds what earlier reversals naming it absorbed (the op's own cap),
+      // and only where the panel can record at all. A late fee whose charge
+      // has been reversed out carries the hint beside its control — the fee
+      // is left owed with nothing but this link tying it to the reversal.
+      if (canRecord && data.accountKey && reversibleCents(t, txs) > 0) {
+        const hint = billedForReversedHint(t, txs, byKey);
+        if (hint) {
+          const note = document.createElement("div");
+          note.className = "hint";
+          note.textContent = hint;
+          li.append(note);
+        }
+        li.append(renderReverseControl(leaseAppKey, data.accountKey, t, txs, body, canRecord, tenancyEndedAt));
+      }
       // "Why was I charged this?" (Fire V4) — a semantic-contracts clause
       // authorized this transaction (t.clauseProse from the ledgerHistory
       // lens's optional authorizedBy hop); a plain human-recorded charge
@@ -4289,6 +4426,10 @@ async function refreshStatementBody(body, leaseAppKey, noticeMoveOutAt) {
     none.textContent = "No charges or payments recorded yet.";
     body.append(none);
   } else {
+    // The whole statement's rows by key, so a reversing credit names the
+    // charge it corrects across period groups (the charge and its reversal
+    // can sit in different months).
+    const byKey = new Map(entries.map((e) => [e.transactionKey, e]));
     for (const g of groupOneBillEntriesByPeriod(entries)) {
       const period = document.createElement("div");
       period.className = "ledger-period";
@@ -4309,12 +4450,125 @@ async function refreshStatementBody(body, leaseAppKey, noticeMoveOutAt) {
         const badge = ONE_BILL_SOURCE_BADGES[e.source] || "🏠 Rent";
         li.textContent =
           fmtDate(e.postedAt) + " · " + badge + " · " + sign + moneyAmount(e.amountCents / 100) + depositRowTag(e) +
-          entryMemoSuffix(e);
+          entryMemoSuffix(e) + reversalRowSuffix(e, byKey) + billedForRowSuffix(e, byKey);
         list.append(li);
       }
       period.append(list);
       body.append(period);
     }
+  }
+}
+
+// renderReverseControl builds one debit row's "Reverse" control: a button
+// that reveals an inline consequence line naming the amount the reversal
+// will credit (the charge's face less what earlier reversals naming it
+// already absorbed — reversibleCents, never typed), an optional memo, and an
+// explicit Confirm — never window.confirm(), the same shape the Give-notice
+// control takes for an irreversible submit. Confirm posts
+// CreditAccount{accountKey, amountCents, memo?, reversesRef: the row's own
+// transactionKey} through submitReversal.
+function renderReverseControl(leaseAppKey, accountKey, tx, txs, body, canRecord, tenancyEndedAt) {
+  const wrap = document.createElement("div");
+  wrap.className = "ledger-reverse";
+  const cents = reversibleCents(tx, txs);
+
+  const open = document.createElement("button");
+  open.className = "ghost";
+  open.textContent = "Reverse";
+  const form = document.createElement("div");
+  form.className = "ledger-record-form";
+  form.hidden = true;
+  const line = document.createElement("span");
+  line.textContent =
+    "Credit " + moneyAmount(cents / 100) + " back against this charge of " + localDateTime(tx.postedAt) +
+    " — the statement will retire this charge, not the oldest one.";
+  const memo = document.createElement("input");
+  memo.type = "text";
+  memo.placeholder = "Memo (optional — shown to the resident)";
+  const confirmBtn = document.createElement("button");
+  confirmBtn.textContent = "Confirm reversal";
+  const cancel = document.createElement("button");
+  cancel.className = "ghost";
+  cancel.textContent = "Cancel";
+
+  open.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+  });
+  cancel.addEventListener("click", () => {
+    form.hidden = true;
+  });
+  confirmBtn.addEventListener("click", async () => {
+    confirmBtn.disabled = cancel.disabled = open.disabled = true;
+    try {
+      const landed = await submitReversal(accountKey, tx, cents, memo.value.trim() || undefined);
+      if (landed) {
+        body.dataset.loaded = "";
+        await refreshLedgerBody(body, leaseAppKey, canRecord, tenancyEndedAt);
+      }
+    } finally {
+      confirmBtn.disabled = cancel.disabled = open.disabled = false;
+    }
+  });
+
+  form.append(line, memo, confirmBtn, cancel);
+  wrap.append(open, form);
+  return wrap;
+}
+
+// submitReversal posts the landlord's reversal of one charge: a CreditAccount
+// naming the charge (reversesRef) for cents — reversibleCents of the row,
+// the op's own cap — through landlordSubmit()'s authContext (target = the
+// signed-in landlord), the shape the package's consumer scope=self grant
+// authorizes; the script proves the landlord manages the unit the account's
+// lease sits on, that the charge is a debit on this same account, and the
+// cap. reads declares the account and the charge; the charge's .entry and
+// its postedTo link are the DDL's own derive_reads' to supply. Returns true
+// once the reply confirmed the write. The throw path stages sent/confirmed
+// exactly as withdrawApplication's: a credit stands once recorded, so a
+// transport throw after the submit says the write may have landed and what
+// to check, and never invites a bare retry (a second reversal is a second
+// credit).
+// refusal-courtesy: CreditAccount/ReversalExceedsCharge: cap — amountCents is never typed: reversibleCents(tx, txs) = the charge's face less the reversals already naming it, the op's own cap, and renderReverseControl offers nothing at 0.
+// refusal-courtesy: CreditAccount/WrongAccount: unreachable — reversesRef is the row's own transactionKey from this lease's /api/ledger rows (the same accountKey the response carries), never typed.
+// refusal-courtesy: CreditAccount/UnknownTransaction, NotADebit: unreachable — the control renders only on a debit row this same response just projected; a charge tombstoned under the click surfaces as the toast.
+// refusal-courtesy: CreditAccount/AuthDenied: none — the control is offered on the landlord console alone (canRecord), and the script's resident proof answers first, so a landlord who is ALSO this lease's tenant meets the resident refusal here; the toast names it.
+// refusal-courtesy: CreditAccount/DepositNotReversible: hide — reversibleCents returns 0 on a clausePurpose === "deposit" row, so refreshLedgerBody never renders the control on the deposit charge; the deposit's own Deduct / Pay out controls sit in renderLedgerRecordForm.
+// refusal-courtesy: CreditAccount/AmountMismatch, TermExhausted, InvalidState, NoBalanceToPay, PaymentExceedsBalance: see renderLedgerRecordForm
+async function submitReversal(accountKey, tx, cents, memo) {
+  let sent = false;
+  let confirmed = false;
+  try {
+    sent = true;
+    const reply = await submitOp(
+      {
+        operationType: "CreditAccount",
+        class: "transaction",
+        reads: [accountKey, tx.transactionKey],
+        // The script walks the charge's own authorizedBy link to refuse a
+        // deposit reversal (DepositNotReversible) — the (e) walk a caller
+        // declares, since the hub is the payload's own reversesRef.
+        enumerations: [{ hub: tx.transactionKey, relation: "authorizedBy", direction: "out" }],
+        payload: { accountKey, amountCents: cents, memo, reversesRef: tx.transactionKey },
+      },
+      landlordSubmit()
+    );
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not reverse the charge — " + msg, "err");
+      return false;
+    }
+    confirmed = true;
+    toast("Charge reversed.", "ok");
+    return true;
+  } catch (e) {
+    if (!sent) {
+      toast("Could not reverse the charge: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Charge reversed, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the reversal reached the server — it may have landed; reopen the ledger and check for the credit before reversing again. " + e.message, "err");
+    }
+    return false;
   }
 }
 
@@ -4338,6 +4592,8 @@ async function refreshStatementBody(body, leaseAppKey, noticeMoveOutAt) {
 // refusal-courtesy: LoftspaceRecordCharge/InvalidState: none — the same wrong-class .arrears fault post_entry refuses for CreditAccount above; not a lens-projected column, so no form can pre-check it, and the toast shows the refusal.
 // refusal-courtesy: CreditAccount/NoBalanceToPay, PaymentExceedsBalance: none — reachable only when the acting landlord is ALSO the lease's applicant (the script's resident proof answers first and caps the credit at the balance); the landlord branch has no cap, and the toast names the balance the resident branch reports.
 // refusal-courtesy: LoftspaceRecordCharge/NoBalanceToPay, PaymentExceedsBalance: unreachable — a debit never enters the balance block: the resident branch refuses it AuthDenied before the block, the landlord branch has no cap.
+// refusal-courtesy: CreditAccount/ReversalExceedsCharge, WrongAccount, DepositNotReversible: unreachable — the Record payment form sends no reversesRef, so post_entry never reads a reversal target here; a reversal goes through submitReversal, which declares its own courtesy.
+// refusal-courtesy: LoftspaceRecordCharge/ReversalExceedsCharge, WrongAccount, DepositNotReversible: unreachable — a debit op refuses reversesRef InvalidArgument before any target is read, and this form sends none.
 // refusal-courtesy: RecordDepositDeduction/ClauseAccountMismatch: none — accountKey and clauseKey are both auto-filled from the row's own data (data.accountKey, data.depositClauseKey), never picked from an unrelated list; a mismatch here is a data-integrity fault, not a bindable input.
 // refusal-courtesy: RecordDepositDeduction/DepositNotHeld: hide — the "Deduct from deposit" control only renders while depositHeldCents > 0 and depositClauseKey is set, so the clause is charged and not yet returned whenever the form is offered.
 // refusal-courtesy: RecordDepositDeduction/DeductionExceedsDeposit: cap — deductAmount.max is set to (depositHeldCents/100).toFixed(2), and the click handler refuses client-side (a bare input's max attribute enforces nothing on its own).
@@ -4542,6 +4798,7 @@ function renderTenantLedgerPanel(leaseAppKey) {
 // refusal-courtesy: CreditAccount/AmountMismatch, InvalidState, TermExhausted: see renderLedgerRecordForm
 // refusal-courtesy: CreditAccount/NoBalanceToPay: hide — the form is only appended when owed > 0 && data.accountKey; a $0 or missing-account balance returns before it is built
 // refusal-courtesy: CreditAccount/PaymentExceedsBalance: cap — amount.max is set to (owed/100).toFixed(2) and prefilled with the same value
+// refusal-courtesy: CreditAccount/ReversalExceedsCharge, WrongAccount, DepositNotReversible: unreachable — the tenant's Pay form sends no reversesRef, and the script's resident leg refuses one AuthDenied before any target is read
 async function refreshTenantLedgerBody(body, leaseAppKey) {
   body.textContent = "Loading…";
   let data;
@@ -5059,8 +5316,9 @@ function renderPortfolioArrears(rows, available) {
     age.className = "portfolio-arrears-age";
     let ageText = rentAgeText(row);
     if (row.reminderSentAt) {
-      ageText += (ageText ? " · " : "") + "reminder sent " + fmtUTCDate(row.reminderSentAt);
+      ageText += (ageText ? " · " : "") + "reminder sent " + localDateTime(row.reminderSentAt);
     }
+    ageText += lateFeeBilledSuffix(row);
     age.textContent = ageText;
     li.appendChild(who);
     li.appendChild(amount);
@@ -5472,6 +5730,19 @@ function renderRLSApplicantRow(a, unit) {
       deposit.textContent = `Security deposit ${fmtMoney(a.depositAmount, a.unitCurrency)}`;
       row.append(deposit);
     }
+    const feeText = lateFeeTermText(a.lateFeeCents, a.unitCurrency, arrearsGraceDays());
+    if (feeText) {
+      const fee = document.createElement("div");
+      fee.className = "applicant-note";
+      fee.textContent = "Late fee " + feeText;
+      row.append(fee);
+    }
+    // Set late fee — the landlord's own path into SetLateFee, admitted
+    // through the script's manages walk on this application's unit. Offered
+    // on a live, approved lease only: the op refuses NotApproved without a
+    // tenancy and TenancyEnded once it has ended, both of which this gate
+    // already excludes.
+    row.append(renderSetLateFeeControl(a, () => loadLandlordRLS()));
   }
 
   // End lease early — the landlord's own path into the SAME GiveNotice op
@@ -6068,6 +6339,141 @@ async function decideApplication(a, decision) {
   }
 }
 
+// renderSetLateFeeControl builds a landlord row's "Set late fee" control: a
+// button that reveals an inline amount field (dollars, whole cents) and an
+// explicit Confirm — never window.prompt(), the shape the Reverse control
+// takes — posting SetLateFee{leaseAppKey, amountCents} through
+// submitSetLateFee. Prefilled with the recorded term when there is one, so
+// an amendment starts from the fee the lease states; the consequence line
+// says when the new figure bills from.
+function renderSetLateFeeControl(a, onDone) {
+  const wrap = document.createElement("div");
+  wrap.className = "ledger-reverse";
+
+  const open = document.createElement("button");
+  open.className = "ghost";
+  open.textContent = typeof a.lateFeeCents === "number" ? "Change late fee" : "Set late fee";
+  const form = document.createElement("div");
+  form.className = "ledger-record-form";
+  form.hidden = true;
+  const line = document.createElement("span");
+  line.textContent =
+    "Charged once for each spell of unpaid rent, after the grace period. " +
+    "A fee set after a reminder has already gone out applies from the next spell.";
+  const amount = document.createElement("input");
+  amount.type = "number";
+  amount.step = "0.01";
+  amount.min = "0.01";
+  amount.max = "1000000";
+  amount.placeholder = "Late fee ($)";
+  if (typeof a.lateFeeCents === "number") amount.value = (a.lateFeeCents / 100).toFixed(2);
+  const confirmBtn = document.createElement("button");
+  confirmBtn.textContent = "Confirm late fee";
+  const cancel = document.createElement("button");
+  cancel.className = "ghost";
+  cancel.textContent = "Cancel";
+
+  open.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+  });
+  cancel.addEventListener("click", () => {
+    form.hidden = true;
+  });
+  confirmBtn.addEventListener("click", async () => {
+    const cents = lateFeeCentsFromInput(amount.value);
+    if (cents === null) {
+      toast("Enter a late fee above $0.00 and at most $1,000,000, in whole cents.", "err");
+      return;
+    }
+    confirmBtn.disabled = cancel.disabled = open.disabled = true;
+    try {
+      const landed = await submitSetLateFee(a, cents);
+      if (landed) {
+        form.hidden = true;
+        setTimeout(onDone, 800);
+      }
+    } finally {
+      confirmBtn.disabled = cancel.disabled = open.disabled = false;
+    }
+  });
+
+  form.append(line, amount, confirmBtn, cancel);
+  wrap.append(open, form);
+  return wrap;
+}
+
+// lateFeeCentsFromInput converts the fee field's dollars to the whole cents
+// SetLateFee takes, or null for anything that is not a positive amount with
+// at most two decimals and at most LATE_FEE_MAX_CENTS — the op's own
+// InvalidArgument bounds, enforced before submit (a bare number input's
+// min/max/step attributes enforce nothing on their own). Pure so it is
+// goja-testable.
+function lateFeeCentsFromInput(value) {
+  const dollars = Number(String(value === undefined || value === null ? "" : value).trim());
+  if (!(dollars > 0) || !isFinite(dollars)) return null;
+  const cents = Math.round(dollars * 100);
+  if (Math.abs(dollars * 100 - cents) > 1e-6) return null;
+  if (cents > LATE_FEE_MAX_CENTS) return null;
+  return cents;
+}
+
+// LATE_FEE_MAX_CENTS mirrors SetLateFee's own upper bound (one million
+// dollars, lease-signing's LATE_FEE_MAX_CENTS): a fee, never a rent.
+const LATE_FEE_MAX_CENTS = 100000000;
+
+// submitSetLateFee posts the landlord's late-fee term: SetLateFee{leaseAppKey,
+// amountCents} through landlordSubmit()'s authContext (target = the
+// signed-in landlord), the shape the package's consumer scope=self grant
+// authorizes; the script proves the landlord manages the unit the
+// application's own appliesToUnit link names. reads declares the
+// application and its .tenancy (the NotApproved / TenancyEnded facts);
+// optionalReads its .lateFee (absent on a first set — the declared absence
+// conditions the create) and the landlord's own manages link (the probe's
+// read, served from the snapshot; the bind is the script's whatever is
+// declared), the shape the Resolve control declares. Returns true once the
+// reply confirmed the write. The throw path stages sent/confirmed as
+// decideApplication's: a recorded term stands, so a transport throw after
+// the submit says the write may have landed and what to check.
+// refusal-courtesy: SetLateFee/NotApproved: hide — renderSetLateFeeControl is appended only under a.landlordApproved && a.tenancyLeaseStart, the row's own recorded tenancy.
+// refusal-courtesy: SetLateFee/TenancyEnded: hide — the same gate requires !a.tenancyEndedAt, the row's own recorded end.
+async function submitSetLateFee(a, cents) {
+  const leaseAppKey = a.leaseAppKey || a.entityKey;
+  const optionalReads = [leaseAppKey + ".lateFee"];
+  if (a.unitKey) optionalReads.push(...manageLinkKey(a.unitKey));
+  let sent = false;
+  let confirmed = false;
+  try {
+    sent = true;
+    const reply = await submitOp(
+      {
+        operationType: "SetLateFee",
+        class: "leaseapp",
+        reads: [leaseAppKey, leaseAppKey + ".tenancy"],
+        optionalReads,
+        payload: { leaseAppKey, amountCents: cents },
+      },
+      landlordSubmit()
+    );
+    if (reply && reply.status === "rejected") {
+      const msg = reply.error ? `${reply.error.code}: ${reply.error.message}` : "rejected";
+      toast("Could not set the late fee — " + msg, "err");
+      return false;
+    }
+    confirmed = true;
+    toast("Late fee set.", "ok");
+    return true;
+  } catch (e) {
+    if (!sent) {
+      toast("Could not set the late fee: " + e.message, "err");
+    } else if (confirmed) {
+      toast("Late fee set, but the screen did not refresh — reload. " + e.message, "err");
+    } else {
+      toast("Could not confirm the late fee reached the server — it may have landed; reload and check the lease's terms before setting it again. " + e.message, "err");
+    }
+    return false;
+  }
+}
+
 // ---- Post / edit a listing (landlord) ----
 
 function openPostListing() {
@@ -6590,6 +6996,10 @@ function init() {
     if (e.target === $("#photos-overlay")) closeManagePhotos();
   });
 
+  // The config round trip starts first so the ledger's grace is known by the
+  // time any application card renders a fee term; a card that beats it names
+  // "the grace period" and the next render names the number.
+  loadAppConfig().catch(() => {});
   loadListings();
   // loadWhoami gates the surface and paints the first view; loadIdentities then
   // resolves keys to names and repaints the who-bar itself, so nothing here

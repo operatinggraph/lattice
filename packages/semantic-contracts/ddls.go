@@ -61,8 +61,12 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"(Fire V3, §7 — no float division, no platform rounding UDF needed since the divide happens here, " +
 			"Processor-side, in Starlark bignum ints); the result is stored as the clause's own amountCents and " +
 			"behaves exactly like a flat one-time fee thereafter — proration is a one-time-only archetype (period " +
-			"must be oneTime). `period` (computational only) is \"oneTime\" (default, one charge ever) or " +
-			"\"monthly\" (Fire V3 recurring): a monthly clause re-arms after each charge via the .status aspect's " +
+			"must be oneTime). `period` (computational only) is \"oneTime\" (default, one charge ever), " +
+			"\"monthly\" (Fire V3 recurring) or \"perArrearsEpisode\" (the late fee's cadence: billed by " +
+			"loftspace-ledger's arrears evaluation once per spell of unpaid rent, on the commit that sends the " +
+			"reminder — never by clauseSatisfaction, whose one-time arm bills period=oneTime alone; " +
+			"purpose=lateFee and period=perArrearsEpisode imply each other, refused apart, computational only, no " +
+			"term, no proration): a monthly clause re-arms after each charge via the .status aspect's " +
 			"chargeValidUntil (DebitAccount-stamped) — the clauseSatisfaction lens treats it as due again once a " +
 			"recorded lapse reaches chargeValidUntil, mirroring the lease-signing bgcheck-freshness pattern " +
 			"(validUntil decay, not a stored transaction count). A monthly clause may carry a TERM — validFrom + " +
@@ -130,7 +134,7 @@ func clauseDDL() pkgmgr.DDLSpec {
 			`"prose":{"type":"string","description":"The human-readable provision text (the legal paragraph the signer agreed to); required, non-empty."},` +
 			`"accountKey":{"type":"string","description":"vtx.account.<NanoID> this clause charges (required + validated alive when kind=computational)."},` +
 			`"amountCents":{"type":"number","description":"The flat one-time (or recurring-per-period) charge amount in integer cents, when kind=computational and no rateCents/periodDays/daysOccupied proration trio is supplied (required, must be > 0, in that case)."},` +
-			`"period":{"type":"string","description":"computational only: \"oneTime\" (default) or \"monthly\" (Fire V3 recurring fee). A prorated clause (rateCents/periodDays/daysOccupied) must be oneTime."},` +
+			`"period":{"type":"string","description":"computational only: \"oneTime\" (default), \"monthly\" (Fire V3 recurring fee) or \"perArrearsEpisode\" (the lateFee clause's cadence, billed by the ledger's arrears evaluation once per arrears episode; required with purpose=lateFee and refused with any other purpose). A prorated clause (rateCents/periodDays/daysOccupied) must be oneTime."},` +
 			`"purpose":{"type":"string","description":"Optional token (^[a-z][a-zA-Z0-9]{0,31}$) naming what the clause is for, recorded on .terms.purpose — the shape filter a lens reads a purpose-built clause back by (leaseRentSettlement's deposit gaps read \"deposit\"). Omit for a clause with no purpose."},` +
 			`"validFrom":{"type":"string","description":"Optional (monthly only, together with validUntil): RFC3339 start of the clause's term — the first period's due date. Normalized to canonical UTC. Refused on a oneTime clause or without validUntil."},` +
 			`"validUntil":{"type":"string","description":"Optional (monthly only, together with validFrom): RFC3339 end of the clause's term, exclusive; must be after validFrom. No period starting at or after it is ever billed."},` +
@@ -149,8 +153,8 @@ func clauseDDL() pkgmgr.DDLSpec {
 			"prose":            "The legal paragraph a signer agreed to. Stored verbatim on the .prose aspect; never interpreted — the machine terms are the separate .terms aspect.",
 			"accountKey":       "Full vtx.account.<NanoID> key of the ledger account this clause charges. CreateClause validates it is alive and writes the chargesTo link (clause→account); the account key also flows into the clauseSatisfaction lens as the directOp target.",
 			"amountCents":      "The flat charge amount in integer cents when no proration trio is supplied; required (kind=computational), must be a positive whole number of cents (a float within a millionth of an integer is coerced to it; a fractional cent is refused). Stored on the .terms aspect and flows type-preserved into the DebitAccount directOp's amountCents param when the clause is unsatisfied.",
-			"period":           "computational only: \"oneTime\" (default) or \"monthly\". A monthly clause re-arms via the .status aspect's chargeValidUntil after each debit instead of completing once — on its term's anniversary grid when it carries validFrom/validUntil.",
-			"purpose":          "Optional token, ^[a-z][a-zA-Z0-9]{0,31}$ (InvalidArgument otherwise), recorded verbatim on .terms.purpose when supplied and absent otherwise. Names what the clause is FOR so a lens can tell it apart from any other clause of the same period — leaseRentSettlement mints the security deposit with \"deposit\" and returns it by the same token; \"deposit\" is refused on anything but a oneTime computational clause. SupersedeClause inherits the amended clause's token and refuses a payload naming a different one — the purpose never changes across an amendment.",
+			"period":           "computational only: \"oneTime\" (default), \"monthly\" or \"perArrearsEpisode\". A monthly clause re-arms via the .status aspect's chargeValidUntil after each debit instead of completing once — on its term's anniversary grid when it carries validFrom/validUntil. A perArrearsEpisode clause (purpose=lateFee, and only that purpose) is never billed by clauseSatisfaction: loftspace-ledger's arrears evaluation posts its amount once per arrears episode, on the commit that sends the reminder, and the clause stays active across episodes. SupersedeClause keeps the amended clause's period when the payload names none.",
+			"purpose":          "Optional token, ^[a-z][a-zA-Z0-9]{0,31}$ (InvalidArgument otherwise), recorded verbatim on .terms.purpose when supplied and absent otherwise. Names what the clause is FOR so a lens can tell it apart from any other clause of the same period — leaseRentSettlement mints the security deposit with \"deposit\" and returns it by the same token, and mints the late fee with \"lateFee\" (period=perArrearsEpisode, each implying the other) for the ledger's arrears evaluation to bill; \"deposit\" is refused on anything but a oneTime computational clause. SupersedeClause inherits the amended clause's token and refuses a payload naming a different one — the purpose never changes across an amendment.",
 			"validFrom":        "Optional, monthly only, with validUntil: the term's start (RFC3339, canonicalized to UTC). Stored on .terms; the clauseSatisfaction lens bills the first period once a recorded lapse reaches it, and DebitAccount computes every later due date from it.",
 			"validUntil":       "Optional, monthly only, with validFrom: the term's exclusive end (RFC3339, canonicalized to UTC; must be after validFrom). Stored on .terms; no period starting at or after it is billed, and the clause completes once its next due reaches it.",
 			"clauseKey":        "SupersedeClause: full vtx.clause.<NanoID> key of the live, ACTIVE clause being amended (ClauseNotActive once charged or returned; its .status is a required read). BackfillClauseTerm: the live, untermed, monthly computational clause to stamp a term onto (AlreadyTermed if it has one). ShortenClauseTerm: the live, already-termed monthly clause to shorten (NotTermed if it carries no term yet).",
@@ -369,8 +373,10 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 			"true iff CreateClause received a conditionedOnKey — an explicit flag (not inferred from the " +
 			"conditionedOn link's liveness) because a tombstoned condition TARGET makes the lens's optional match " +
 			"resolve null exactly like \"never conditioned\" would; only this flag lets the lens tell the two " +
-			"apart. `period` (Fire V3) is \"oneTime\" (default) or \"monthly\" (computational only) — the " +
-			"clauseSatisfaction lens's recurring gate reads this column, not a stored charge count. `purpose` is " +
+			"apart. `period` (Fire V3) is \"oneTime\" (default), \"monthly\" or \"perArrearsEpisode\" (computational only) — the " +
+			"clauseSatisfaction lens's recurring gate reads this column, not a stored charge count, and bills only " +
+			"the two periods it knows: a perArrearsEpisode clause (purpose=lateFee, each implying the other) is " +
+			"billed by loftspace-ledger's arrears evaluation once per arrears episode, never here. `purpose` is " +
 			"the optional token CreateClause records when supplied (^[a-z][a-zA-Z0-9]{0,31}$) — what the clause is " +
 			"FOR, the mark a lens tells a purpose-built clause apart by where period alone cannot: " +
 			"leaseRentSettlement's deposit gaps read purpose=deposit, and loftspace-ledger's ledgerHistory projects " +
@@ -397,7 +403,7 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 			"kind":         "\"computational\" (auto-debit, default) or \"judgment\" (open-a-Task, Fire V2).",
 			"conditioned":  "True iff CreateClause received a conditionedOnKey. The clauseSatisfaction lens's conditioning gate reads this flag, not the link's liveness.",
 			"amountCents":  "The charge amount in integer cents — either the flat CreateClause payload value, or (Fire V3) the once-computed prorated result. Absent for kind=judgment.",
-			"period":       "\"oneTime\" (default) or \"monthly\" (Fire V3, computational only). The clauseSatisfaction lens's missing_charge gate branches on this column.",
+			"period":       "\"oneTime\" (default), \"monthly\" or \"perArrearsEpisode\" (Fire V3, computational only). The clauseSatisfaction lens's missing_charge gate branches on this column and bills oneTime and monthly alone; perArrearsEpisode (the lateFee clause) is billed by the ledger's arrears evaluation once per arrears episode.",
 			"purpose":      "Optional token (^[a-z][a-zA-Z0-9]{0,31}$) naming what the clause is for, verbatim from CreateClause. leaseRentSettlement's missing_deposit / missing_depositReturn gaps filter on purpose=deposit; ledgerHistory projects it as clausePurpose. Absent when none was supplied.",
 			"validFrom":    "Monthly only, with validUntil: the term's start, canonical RFC3339 UTC — the first period's due date and the origin of every later anniversary. Absent on an untermed clause (leaseRentSettlement's missing_term gap, when the lease has a .tenancy).",
 			"validUntil":   "Monthly only, with validFrom: the term's exclusive end, canonical RFC3339 UTC. No period starting at or after it is billed. ShortenClauseTerm may cap it down to a recorded early move-out (never below validFrom).",
@@ -436,6 +442,11 @@ func clauseTermsAspectTypeDDL() pkgmgr.DDLSpec {
 				Name:            "clause terms aspect — prorated (Fire V3)",
 				Payload:         map[string]any{"kind": "computational", "conditioned": false, "amountCents": 2833, "period": "oneTime", "basis": "daysOccupied", "rateCents": 5000, "periodDays": 30, "daysOccupied": 17},
 				ExpectedOutcome: "Stored as vtx.clause.<NanoID>.terms; amountCents=2833 was computed once by CreateClause ((5000*17)/30, exact integer floor division), the rest is audit trail.",
+			},
+			{
+				Name:            "late-fee clause terms",
+				Payload:         map[string]any{"kind": "computational", "conditioned": false, "amountCents": 5000, "period": "perArrearsEpisode", "purpose": "lateFee"},
+				ExpectedOutcome: "The lease's late-fee term as leaseRentSettlement's missing_lateFeeClause mints it from the leaseapp's .lateFee. clauseSatisfaction never bills it (period is neither oneTime nor monthly); EvaluateLoftspaceArrears posts a $50.00 debit authorizedBy this clause on the commit that sends the arrears reminder, once per episode.",
 			},
 		},
 	}

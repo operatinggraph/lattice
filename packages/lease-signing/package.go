@@ -97,6 +97,17 @@
 //     NoticeGiven, leaseExpiry opens no cycle, and the three read models
 //     project the notice. See docs/reviews/loftspace-tenancy-notice-2026-09-15.md.
 //
+//   - SetLateFee (leaseapp DDL; operator any + consumer self — the landlord
+//     via the manages link on the application's own unit, the
+//     DecideLeaseApplication probe): a landlord records the lease's late-fee
+//     term as .lateFee {amountCents, recordedAt}, create-or-update, on an
+//     approved, not-ended tenancy (NotApproved / TenancyEnded otherwise).
+//     semantic-contracts' leaseRentSettlement mints the purpose=lateFee
+//     perArrearsEpisode clause from it and amends the clause when the amount
+//     changes; loftspace-ledger's arrears evaluation bills that clause once
+//     per arrears episode. The two protected read models project
+//     late_fee_cents. See docs/reviews/loftspace-ledger-reversal-and-late-fee-2026-09-18.md.
+//
 //   - RecordApplicationLoss (leaseapp DDL, operator-granted), dispatched by
 //     leaseApplicationComplete's missing_lossRecorded gap: a losing rival's
 //     loss recorded on the application as .decision = lost, the third
@@ -114,7 +125,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "lease-signing",
-	Version: "0.43.0",
+	Version: "0.44.0",
 	Description: "Loftspace lease-application convergence vertical: the leaseapp vertex type + CreateLeaseApplication/SignLease, " +
 		"the leaseApplicationComplete actorAggregate convergence lens (§10.2 keyColumn), the leaseApplicationsRead " +
 		"protected Postgres read model (Contract #6 §6.14 RLS — the applicant-self read boundary, D1.3 Fire 2; carries " +
@@ -164,7 +175,10 @@ var Package = pkgmgr.Definition{
 		"losing rival's loss is a recorded fact, not a live derivation: leaseApplicationComplete's missing_lossRecorded gap " +
 		"dispatches RecordApplicationLoss (operator-granted) to write .decision = lost on an undecided application whose " +
 		"unit leased to someone else, and every liveness consumer reads the recorded value, so the winner's later tenancy " +
-		"end and relist revive no rival. An approved lease moves the tenant in: leaseApplicationComplete's " +
+		"end and relist revive no rival. A landlord records a lease's late-fee term: SetLateFee (landlord manages, or " +
+		"operator) writes .lateFee {amountCents, recordedAt} on an approved, not-ended tenancy, which " +
+		"semantic-contracts mints as the lease's purpose=lateFee clause and loftspace-ledger bills once per arrears " +
+		"episode; the read models project late_fee_cents. An approved lease moves the tenant in: leaseApplicationComplete's " +
 		"missing_residence gap dispatches a cross-package directOp WireResidesIn (service-location, operator-granted via " +
 		"Weaver's service actor) the instant the term exists, wiring the applicant's residesIn link to the leased unit; " +
 		"tenancyEnd's missing_residenceUnwired gap dispatches the mirror UnwireResidesIn once the term ends, unless " +

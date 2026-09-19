@@ -64,6 +64,7 @@ func (f *lensFixture) seedManagedApplication(t *testing.T, appName, applicantNam
 	f.aspect(t, appName, "signature", "signature", map[string]any{"signedAt": "2026-07-15T00:00:00Z"})
 	f.aspect(t, appName, "decision", "decision", map[string]any{"value": "approved"})
 	f.aspect(t, appName, "deposit", "leaseDeposit", map[string]any{"amount": 1000, "recordedAt": "2026-07-15T00:00:00Z"})
+	f.aspect(t, appName, "lateFee", "leaseLateFee", map[string]any{"amountCents": 5000, "recordedAt": "2026-09-18T15:00:00Z"})
 	f.edge(t, "applicationFor", appName, applicantName)
 	f.edge(t, "appliesToUnit", appName, unitName)
 	// manages: landlord (source) -> unit (target), class "manages"
@@ -112,6 +113,7 @@ func TestLandlordLeaseApplicationsRead_ProjectsManagingLandlordAnchor(t *testing
 	require.EqualValues(t, 12, v["terms_lease_term_months"])
 	require.EqualValues(t, 4100, v["terms_requested_rent"])
 	require.EqualValues(t, 1000, v["deposit_amount"])
+	require.EqualValues(t, 5000, v["late_fee_cents"], "late_fee_cents reads straight off app.lateFee.data.amountCents, the landlord's own recorded term")
 
 	// The headline: authz_anchors is exactly [larry's bare NanoID].
 	require.Equal(t, []string{f.ids["larry"]}, anchorStrings(t, v["authz_anchors"]),

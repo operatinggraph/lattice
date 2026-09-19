@@ -278,10 +278,25 @@ RETURN
 // dependency on semantic-contracts: the cypher matches a vertex by class
 // label at read time, same as any other package's lens matching a
 // cross-package link.
+//
+// The reverses hop is OPTIONAL too: a credit that names the charge it
+// reverses (CreditAccount's reversesRef, or LinkReversal after the fact)
+// carries exactly one, and every other row carries none. reversesKey is the
+// column the statement and the landlord's ledger net the credit against
+// (cmd/loftspace-app's deriveRentArrears) and label the row by — the same
+// name clinic-ledger's history projects.
+// The billedFor hop is OPTIONAL the same way: the late fee
+// EvaluateLoftspaceArrears posts carries exactly one, to the rent charge it
+// was billed for (the episode's head), and every other row carries none.
+// billedForKey is what lets the statement say which charge a fee is for, and
+// the landlord's ledger say that the charge a fee was billed for has since
+// been reversed.
 const ledgerHistorySpec = `MATCH (t:transaction)
 MATCH (t)-[:postedTo]->(a:account)
 MATCH (a)-[:heldFor]->(l:leaseapp)
 OPTIONAL MATCH (t)-[:authorizedBy]->(c:clause)
+OPTIONAL MATCH (t)-[:reverses]->(rt:transaction)
+OPTIONAL MATCH (t)-[:billedFor]->(bt:transaction)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -297,7 +312,9 @@ RETURN
   t.entry.data.dueAt AS dueAt,
   c.key AS clauseKey,
   c.prose.data.text AS clauseProse,
-  c.terms.data.purpose AS clausePurpose`
+  c.terms.data.purpose AS clausePurpose,
+  rt.key AS reversesKey,
+  bt.key AS billedForKey`
 
 // leaseAccountsSpec projects one row per lease — the anchor is the leaseapp
 // (not the account), so a lease with no ledger account yet still gets a row
@@ -306,13 +323,13 @@ RETURN
 // OPTIONAL MATCH: the heldFor hop legitimately has no match for a lease that
 // has never had a charge/payment.
 //
-// The three arrears columns come off the account's own .arrears aspect and are
+// The four arrears columns come off the account's own .arrears aspect and are
 // INFORMATIONAL — this lens drives no convergence. They are here because the
 // landlord ledger, the tenant statement and the portfolio list all need to say
-// WHEN the rent fell due and WHEN a reminder went out, and this is already the
-// per-lease row all three read; the alternative was a second bucket keyed by
-// account for three scalars. They are null for a lease with no account, and
-// for an account nothing has yet aged.
+// WHEN the rent fell due, WHEN a reminder went out and WHEN the episode's late
+// fee was billed, and this is already the per-lease row all three read; the
+// alternative was a second bucket keyed by account for four scalars. They are
+// null for a lease with no account, and for an account nothing has yet aged.
 const leaseAccountsSpec = `MATCH (l:leaseapp)
 OPTIONAL MATCH (l)<-[:heldFor]-(a:account)
 RETURN
@@ -321,4 +338,5 @@ RETURN
   a.key AS accountKey,
   a.arrears.data.dueAt AS arrearsDueAt,
   a.arrears.data.remindedFor AS arrearsRemindedFor,
-  a.arrears.data.sentAt AS arrearsReminderSentAt`
+  a.arrears.data.sentAt AS arrearsReminderSentAt,
+  a.arrears.data.lateFeeAt AS arrearsLateFeeAt`

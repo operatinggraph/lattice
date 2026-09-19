@@ -463,6 +463,10 @@ def enforce_workplace(location_keys, what):
 
 LEASEAPP_UNIT_PAGE_LIMIT = 10
 
+# The most a late-fee term may be: one million dollars, in cents. A term is
+# a fee for one spell of unpaid rent, never a rent.
+LATE_FEE_MAX_CENTS = 100000000
+
 def vertex_live(key):
     # Is this vertex present AND not tombstoned? The standalone form of the
     # vertex test worksAt_covers performs inline at every node of its bounded
@@ -1991,6 +1995,112 @@ def execute(state, op):
         mutations = [make_aspect(app_key, "decision", "decision", lost)] + free_applied_to_unit_guard(app_key, unit_key)
         events = [{"class": "leaseapp.applicationLost",
                    "data": {"leaseAppKey": app_key, "unitKey": unit_key}}]
+        return {"mutations": mutations, "events": events,
+                "response": {"primaryKey": app_key}}
+
+    if ot == "SetLateFee":
+        # The late fee is a term of the LEASE, recorded by its landlord:
+        # .lateFee = {amountCents, recordedAt} on the leaseapp, create-or-
+        # update. semantic-contracts' leaseRentSettlement reads it to mint
+        # the lease's purpose=lateFee clause (and to amend that clause when
+        # the amount changes), and loftspace-ledger's arrears evaluation
+        # bills the clause once per arrears episode, on the commit that sends
+        # the reminder — so a term set after this episode's reminder went out
+        # bills from the next episode. No removal verb: a fee stays a term of
+        # the lease until amended.
+        app_key = required_string(p, "leaseAppKey")
+        parts_of(app_key, "leaseAppKey", "leaseapp")
+
+        # Confinement first, the DecideLeaseApplication shape: whichever path
+        # authorized this write, it is bound to the application's OWN unit —
+        # a landlord on the self path must manage it (require_manages), staff
+        # on the standing path must worksAt a location covering it — resolved
+        # from the application's own appliesToUnit link, never a payload
+        # field. It answers ahead of the liveness check so a caller who
+        # manages nothing cannot use a denial to learn that an application
+        # exists.
+        fee_unit = leaseapp_unit(app_key)
+        # workplace-exempt: (ownership-bound) this IS the ownership proof --
+        # the acting landlord must manage the unit the application's own link
+        # names, so the validated scope=self path never reaches the write
+        # unconfined.
+        require_manages(fee_unit, "cannot set a late fee on application " + app_key)
+        if not vertex_alive(state, app_key):
+            fail("UnknownLeaseApplication: " + app_key)
+        # workplace-exempt: (ownership-bound) require_manages above binds the
+        # scope=self path to this same unit; the standing path is bound by
+        # the worksAt walk here, as DecideLeaseApplication's is. NOTE the
+        # OTHER validated path: workplace_exempt() keys on
+        # op.authTargetValidated, which a TASK grant also sets -- and
+        # require_manages returns early there, because a task's target is
+        # the task's resource, not the acting identity. This op carries an
+        # op-meta, so a CreateTask forOperation it would reach the write
+        # with BOTH confinements off. No playbook mints one today; add a
+        # resource bind here before any does.
+        if not workplace_exempt():
+            # workplace-exempt: (ownership-bound) same discharge as the
+            # pre-gate above -- re-stated because the intervening statement
+            # puts it out of annotation range.
+            require_workplace([fee_unit], "cannot set a late fee on application " + app_key)
+
+        # A positive integer number of cents: the figure the settlement lens
+        # templates verbatim into CreateClause's amountCents (no ×100 sits
+        # between the term and the clause), so a fraction or a non-number is
+        # refused here, at the mint, never left for the lens to trip on.
+        # Bounded above at one million dollars — a late fee, not a rent —
+        # so a mistyped figure (cents typed as dollars×100 twice over) is
+        # refused rather than minted as a clause the tenant is billed.
+        amount_cents = require_number(p, "amountCents")
+        if type(amount_cents) == type(0.0):
+            if amount_cents != int(amount_cents):
+                fail("InvalidArgument: amountCents: required positive whole number of cents")
+            amount_cents = int(amount_cents)
+        if amount_cents <= 0:
+            fail("InvalidArgument: amountCents: required positive whole number of cents")
+        if amount_cents > LATE_FEE_MAX_CENTS:
+            fail("InvalidArgument: amountCents: at most " + str(LATE_FEE_MAX_CENTS))
+
+        # A fee is a term of a LEASE, not of an offer: the application must
+        # carry the .tenancy DecideLeaseApplication's first approve stamps,
+        # and that tenancy must not have ended. Read from hydration — .tenancy
+        # is a declared OptionalRead (absent on every undecided application),
+        # so its absence here IS the not-approved fact, exactly as
+        # ReassignLeaseUnit reads it.
+        # read-posture: (d) declared optionalReads at SetLateFee dispatch --
+        # absent on an application never approved.
+        tenancy_key = app_key + ".tenancy"
+        tenancy = state[tenancy_key] if tenancy_key in state else None
+        if tenancy == None or tenancy.isDeleted:
+            fail("NotApproved: application " + app_key + " has no recorded tenancy; a late fee is a term of a lease, not of an application")
+        # Any recorded endedAt ends it, whatever its shape (GiveNotice's own
+        # refusal): a malformed stamp is still the recorded fact that the
+        # tenancy ended, never a reason to fall open.
+        ended_at = tenancy.data.get("endedAt")
+        if ended_at != None:
+            fail("TenancyEnded: lease " + app_key + " ended on " + str(ended_at)[:10] + " (UTC); no late fee can be set on it")
+
+        recorded_at = time.rfc3339_utc(op.submittedAt)
+        fee = {"amountCents": amount_cents, "recordedAt": recorded_at}
+        # Create-or-update, OCC on the declared optional read: absent, a
+        # CREATE conditioned on the step-4 observed absence (a concurrent
+        # first set conflicts and the loser re-hydrates onto the update arm);
+        # present, a BARE update auto-conditioned on the hydrated revision
+        # (Contract #3 §3.2) — the retry-eligible shape, never an explicit
+        # pin, so two landlords of one unit racing the same term serialize
+        # and the later write wins on a fresh read rather than hard-
+        # conflicting. Its class is this package's leaseLateFee (ddls.go).
+        # Absence decides the verb, not liveness: a create is refused against
+        # a tombstone (Contract #3 §3.3), so any document under the key —
+        # nothing tombstones .lateFee today — takes the reviving update.
+        # read-posture: (d) declared optionalReads at SetLateFee dispatch --
+        # absent on every lease that has never had a fee set.
+        existing = kv.Read(app_key + ".lateFee")
+        if existing == None:
+            mutations = [make_aspect(app_key, "lateFee", "leaseLateFee", fee)]
+        else:
+            mutations = [make_aspect_upsert(app_key, "lateFee", "leaseLateFee", fee)]
+        events = [{"class": "leaseapp.lateFeeSet",
+                   "data": {"leaseAppKey": app_key, "amountCents": amount_cents, "recordedAt": recorded_at}}]
         return {"mutations": mutations, "events": events,
                 "response": {"primaryKey": app_key}}
 

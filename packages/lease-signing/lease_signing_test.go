@@ -118,6 +118,7 @@ func lsCapDoc() *processor.CapabilityDoc {
 			{OperationType: "EndTenancy", Scope: "any"},
 			{OperationType: "GiveNotice", Scope: "any"},
 			{OperationType: "RecordApplicationLoss", Scope: "any"},
+			{OperationType: "SetLateFee", Scope: "any"},
 		},
 		ServiceAccess:   []processor.ServiceAccessEntry{},
 		EphemeralGrants: []processor.EphemeralGrant{},

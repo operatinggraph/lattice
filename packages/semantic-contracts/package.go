@@ -17,7 +17,10 @@
 //     for — the mark a lens tells a purpose-built clause apart by where
 //     period alone cannot (the security deposit is purpose=deposit).
 //     `kind=computational` (default) charges a ledger account (chargesTo
-//     link) — `period` selects "oneTime" (default) or "monthly" (recurring),
+//     link) — `period` selects "oneTime" (default), "monthly" (recurring)
+//     or "perArrearsEpisode" (the purpose=lateFee clause, each implying the
+//     other, billed by loftspace-ledger's arrears evaluation once per spell
+//     of unpaid rent and never by clauseSatisfaction),
 //     a monthly clause may carry a term (validFrom/validUntil, both or
 //     neither) it bills one calendar-month period at a time within, and the
 //     amount is either a flat amountCents or, given
@@ -85,7 +88,12 @@
 //     missing_depositReturn → directOp(ReturnDeposit) (loftspace-ledger),
 //     once the lease's .tenancy records endedAt and the deposit clause is
 //     completed (charged), credits the deposit back on the lease's account
-//     and marks the clause returned, which closes the gap.
+//     and marks the clause returned, which closes the gap. Its two late-fee
+//     gaps: missing_lateFeeClause → directOp(CreateClause) mints a
+//     perArrearsEpisode purpose=lateFee clause for the amount the lease's
+//     .lateFee aspect records (SetLateFee, lease-signing);
+//     missing_lateFeeAmendment → directOp(SupersedeClause) re-mints it when
+//     the recorded term changes.
 //
 // loftspace-ledger's DebitAccount op accepts an optional clauseRef: when
 // present it writes the lnk.transaction.authorizedBy.clause audit link and
@@ -111,7 +119,7 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 // Package is the static, install-time bundle.
 var Package = pkgmgr.Definition{
 	Name:    "semantic-contracts",
-	Version: "0.7.3",
+	Version: "0.8.0",
 	Description: "LoftSpace 'Executable Paper' reference package (fixed/one-time, conditioned, judgment, " +
 		"recurring monthly — termed to a calendar-month period grid or untermed — and prorated computational " +
 		"clauses, plus self-amendment and early shortening): the clause vertex type " +
@@ -126,7 +134,9 @@ var Package = pkgmgr.Definition{
 		"directOp(BackfillLeaseTerms), missing_account → directOp(LoftspaceCreateAccount), missing_clause → " +
 		"directOp(CreateClause) with the term, missing_term → directOp(BackfillClauseTerm), " +
 		"missing_termShortened → directOp(ShortenClauseTerm), missing_deposit → directOp(CreateClause) with " +
-		"purpose=deposit, missing_depositReturn → directOp(ReturnDeposit), dollars→cents conversion in the lens). " +
+		"purpose=deposit, missing_depositReturn → directOp(ReturnDeposit), missing_lateFeeClause → " +
+		"directOp(CreateClause) with purpose=lateFee period=perArrearsEpisode, missing_lateFeeAmendment → " +
+		"directOp(SupersedeClause), dollars→cents conversion in the lens). " +
 		"Depends lease-signing + loftspace-ledger.",
 	Depends:       []string{"lease-signing", "loftspace-ledger"},
 	DDLs:          DDLs(),

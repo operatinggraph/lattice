@@ -81,11 +81,21 @@ func Lenses() []pkgmgr.LensSpec {
 // only the rent source carries it. kind is the entry's own recorded
 // provenance (loftspace-ledger's PayOutBalance stamps kind:"payout" on the
 // debit that pays a credit balance out — no clause authorizes it, so no
-// other column would tell it apart); null on every other entry.
+// other column would tell it apart); null on every other entry. The second
+// OPTIONAL MATCH walks reverses to the charge a reversing credit names
+// (CreditAccount's reversesRef / LinkReversal, loftspace-ledger) exactly as
+// ledgerHistorySpec does, so the tenant's combined statement reads "reverses
+// the charge of <when>" off reversesKey the way the landlord's ledger does;
+// null on every plain payment and every debit. The third walks billedFor to
+// the rent charge a late fee was billed for (EvaluateLoftspaceArrears'
+// posting), so the combined statement reads "late fee for the charge of
+// <when>" off billedForKey; null on every other row.
 const rentEntriesSpec = `MATCH (t:transaction)
 MATCH (t)-[:postedTo]->(a:account)
 MATCH (a)-[:heldFor]->(l:leaseapp)
 OPTIONAL MATCH (t)-[:authorizedBy]->(c:clause)
+OPTIONAL MATCH (t)-[:reverses]->(rt:transaction)
+OPTIONAL MATCH (t)-[:billedFor]->(bt:transaction)
 RETURN
   t.key AS key,
   t.key AS transactionKey,
@@ -100,6 +110,8 @@ RETURN
   t.entry.data.periodEnd AS periodEnd,
   t.entry.data.dueAt AS dueAt,
   c.terms.data.purpose AS clausePurpose,
+  rt.key AS reversesKey,
+  bt.key AS billedForKey,
   'rent' AS source`
 
 // cafeEntriesSpec re-projects cafe-ledger's posted transactions tagged

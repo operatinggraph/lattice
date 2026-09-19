@@ -170,13 +170,14 @@ def next_anniversary_after(valid_from, d):
     # The start of the period after the one containing d.
     return time.rfc3339_add_months(valid_from, period_index(valid_from, d) + 1)
 
-def mint_clause(state, p, inherited_purpose):
+def mint_clause(state, p, inherited_purpose, inherited_period):
     # Shared by CreateClause and SupersedeClause (Fire V4): builds a fresh
     # clause vertex + its aspects/links from the same payload shape. Returns
     # {"clause_key", "clause_id", "mutations", "event_data"} — the caller
     # decides the event class and whether to fold in amendment mutations.
-    # inherited_purpose is the amended clause's own token, used when the
-    # payload names none (SupersedeClause); None everywhere else.
+    # inherited_purpose / inherited_period are the amended clause's own
+    # token and period, each used when the payload names none
+    # (SupersedeClause); None everywhere else.
     lease_key = required_string(p, "leaseAppKey")
     _, lease_id = parts_of(lease_key, "leaseAppKey", "leaseapp")
     prose = required_string(p, "prose")
@@ -192,13 +193,22 @@ def mint_clause(state, p, inherited_purpose):
     # period (Fire V3): computational-only recurrence selector. A
     # prorated amount (rateCents/periodDays/daysOccupied) is one-time-only
     # — recurring proration is not a shape this fire builds.
+    # perArrearsEpisode is the late fee's cadence: billed by the ledger's
+    # arrears evaluation once per spell of unpaid rent, never by
+    # clauseSatisfaction (whose one-time arm bills period = oneTime alone).
+    # An amendment that names no period keeps the amended clause's, the
+    # way it keeps the purpose.
     period = optional_string(p, "period")
     if period == None:
+        period = inherited_period
+    if period == None:
         period = "oneTime"
-    if period != "oneTime" and period != "monthly":
-        fail("InvalidArgument: period: must be oneTime or monthly, got " + period)
+    if period != "oneTime" and period != "monthly" and period != "perArrearsEpisode":
+        fail("InvalidArgument: period: must be oneTime, monthly or perArrearsEpisode, got " + period)
     if period == "monthly" and kind != "computational":
         fail("InvalidArgument: period: monthly recurrence is computational-only")
+    if period == "perArrearsEpisode" and kind != "computational":
+        fail("InvalidArgument: period: perArrearsEpisode is computational-only")
 
     # The term: validFrom/validUntil, both or neither, canonical UTC, a
     # monthly-only fact (a oneTime clause bills once and has no period grid
@@ -250,6 +260,19 @@ def mint_clause(state, p, inherited_purpose):
     # ReturnDeposit to refuse after the lens has picked it.
     if purpose == "deposit" and (period != "oneTime" or kind != "computational"):
         fail("InvalidArgument: purpose: deposit is a oneTime computational clause; got period " + period + ", kind " + kind)
+    # The late fee is ONE shape too, in both directions: purpose=lateFee is
+    # the perArrearsEpisode clause and perArrearsEpisode is the lateFee
+    # clause. A lateFee billed oneTime would be charged at mint by
+    # clauseSatisfaction; a perArrearsEpisode clause with any other purpose
+    # would be read by the arrears evaluation as no fee at all and billed by
+    # nothing — either way a clause that says one thing and bills another.
+    if purpose == "lateFee" and period != "perArrearsEpisode":
+        fail("InvalidArgument: purpose: lateFee is a perArrearsEpisode computational clause; got period " + period)
+    if period == "perArrearsEpisode" and purpose != "lateFee":
+        recorded = purpose
+        if recorded == None:
+            recorded = "none"
+        fail("InvalidArgument: period: perArrearsEpisode is the lateFee clause's cadence; got purpose " + recorded)
     acct_key = None
     acct_id = None
     amount_cents = None
@@ -344,7 +367,7 @@ def execute(state, op):
     p = op.payload
 
     if ot == "CreateClause":
-        minted = mint_clause(state, p, None)
+        minted = mint_clause(state, p, None, None)
         events = [{"class": "clause.created", "data": minted["event_data"]}]
         return {"mutations": minted["mutations"], "events": events,
                 "response": {"primaryKey": minted["clause_key"]}}
@@ -398,7 +421,12 @@ def execute(state, op):
             if recorded == None:
                 recorded = "none"
             fail("InvalidArgument: purpose: a superseding clause keeps the amended clause's purpose (" + recorded + "); mint a new clause to change it")
-        minted = mint_clause(state, p, inherited)
+        # The period rides the same read: a payload that names none keeps
+        # the amended clause's cadence (a late-fee amendment stays
+        # perArrearsEpisode without restating it), and the purpose/period
+        # pairing guards in mint_clause hold over the inherited pair exactly
+        # as over a supplied one.
+        minted = mint_clause(state, p, inherited, state[old_terms_key].data.get("period"))
         new_key = minted["clause_key"]
         new_id = minted["clause_id"]
 

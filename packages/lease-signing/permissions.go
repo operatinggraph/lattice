@@ -32,6 +32,8 @@ import "github.com/operatinggraph/lattice/internal/pkgmgr"
 //	ReassignLeaseUnit               → operator
 //	EndTenancy                      → operator
 //	RecordApplicationLoss           → operator
+//	SetLateFee                      → operator
+//	SetLateFee (self)               → consumer
 //
 // The orchestrator-submitted ops are operator-driven (the same operator-grant
 // idiom service-domain / orchestration-base use):
@@ -240,6 +242,18 @@ func Permissions() []pkgmgr.PermissionSpec {
 			Scope:         "any",
 			Note:          "Grants the operator (Weaver's service actor) the right to submit RecordApplicationLoss — the directOp leaseApplicationComplete's missing_lossRecorded gap dispatches once an undecided application's unit has leased to another applicant (the EndTenancy precedent); an operator may also run it by hand via the CLI under the primordial admin. Never a person-facing action: the loss is recorded on the application as .decision = lost, the op refuses UnitNotLeased against a unit that is not leased, and any recorded decision makes it a no-op.",
 			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "SetLateFee",
+			Scope:         "any",
+			Note:          "Grants the operator the right to submit SetLateFee (record a lease's late-fee term by hand — the same operator model as DecideLeaseApplication).",
+			GrantsTo:      []string{"operator"},
+		},
+		{
+			OperationType: "SetLateFee",
+			Scope:         "self",
+			Note:          "Grants a landlord the right to record the late-fee term of a lease on a unit they MANAGE (the acting identity is signed in as itself; the script walks the application's own appliesToUnit link to the unit and requires the acting identity's manages link, the DecideLeaseApplication probe).",
+			GrantsTo:      []string{"consumer"},
 		},
 	}
 }
@@ -722,6 +736,61 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 					{Hub: "{payload.leaseAppKey}", Relation: "applicationFor", Direction: "out"},
 				},
 			},
+		},
+		{
+			// SetLateFee carries the DecideLeaseApplication grant pair —
+			// operator at scope=any and consumer (the landlord) at scope=self
+			// — and its descriptor names the SELF path (the dual-grant idiom
+			// above): the shipped loftspace-app hand-builds the landlord's
+			// submission (landlordSubmit's target = the signed-in landlord),
+			// and a "standing" descriptor would tell a descriptor-driven
+			// client to send no target, putting a landlord on the staff path
+			// and refused. The landlord's manages probe is a class-(e)
+			// follow-up off the application's own appliesToUnit walk
+			// (require_manages, scripts.go), so it is not a declarable read;
+			// the walk itself is the declared enumeration. .tenancy is an
+			// OPTIONAL read on purpose: it is absent on every undecided
+			// application, and its absence is the NotApproved refusal the
+			// script reads from hydration; .lateFee is absent on every lease
+			// that has never had a fee set — the declared absence is what
+			// conditions the first set's create.
+			OperationType: "SetLateFee",
+			Presentation: &pkgmgr.OpPresentationSpec{
+				Title:       "Set a late fee",
+				ShortLabel:  "Late fee",
+				Description: "Record the fee this lease charges once for each spell of unpaid rent, after the grace period. A fee set after the reminder went out — or an amendment committing concurrently with the send — bills from the next spell.",
+				Icon:        "clipboard",
+				Tone:        "primary",
+				SubmitLabel: "Save late fee",
+				Group:       "My units",
+			},
+			InputSchema: `{"type":"object","properties":` +
+				`{"leaseAppKey":{"type":"string","x-entityRef":"leaseapp","description":"vtx.leaseapp.<NanoID> of the lease the fee is a term of."},` +
+				`"amountCents":{"type":"integer","minimum":1,"maximum":100000000,"title":"Late fee (cents)","description":"The fee in whole cents, charged once per spell of unpaid rent. Must be a positive integer, at most 100000000 (one million dollars)."}},` +
+				`"required":["leaseAppKey","amountCents"]}`,
+			FieldDescriptions: map[string]string{
+				"leaseAppKey": "The lease the fee is a term of — filled from the lease in view, not typed. You must manage its unit, and it must carry a live tenancy (approved, not ended).",
+				"amountCents": "The late fee in whole cents, at most 100000000 (one million dollars). REPLACES the recorded term; the lease's fee clause is amended to match, and the new figure bills from the next spell of unpaid rent.",
+			},
+			Dispatch: &pkgmgr.OpDispatchSpec{
+				Class:       "leaseapp",
+				AuthContext: "self",
+				TargetField: "leaseAppKey",
+				TargetType:  "leaseapp",
+				Reads:       []string{"{payload.leaseAppKey}"},
+				OptionalReads: []string{
+					"{payload.leaseAppKey}.tenancy",
+					"{payload.leaseAppKey}.lateFee",
+				},
+				// The operator-role exemption walks the actor's own holdsRole
+				// links (actor_holds_operator); the confinement's subject is
+				// the unit off the application's own appliesToUnit link.
+				Enumerations: []pkgmgr.EnumerationSpec{
+					{Hub: "{actor}", Relation: "holdsRole", Direction: "out"},
+					{Hub: "{payload.leaseAppKey}", Relation: "appliesToUnit", Direction: "out"},
+				},
+			},
+			// refusal-courtesy(facet): NotApproved, TenancyEnded: none — no VisibleWhen or entity lens column projects a leaseapp's tenancy or its end (edge-manifest's selfAnchors carries the leaseapp key alone), so Facet offers Set a late fee on every leaseapp row; the refusal names the state.
 		},
 		{
 			OperationType: "SetApplicantProfile",

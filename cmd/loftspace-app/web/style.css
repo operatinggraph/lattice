@@ -425,6 +425,9 @@ button.ghost.danger:hover { background: var(--red); color: #fff; }
 .ledger-record-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ledger-record-form input { flex: 1; min-width: 100px; }
 .ledger-record-form button { padding: 5px 12px; font-size: 12px; white-space: nowrap; }
+.ledger-reverse { margin-top: 4px; font-family: var(--sans, inherit); color: inherit; }
+.ledger-reverse > button { padding: 2px 8px; font-size: 11px; }
+.ledger-reverse .ledger-record-form { margin-top: 4px; font-size: 12px; }
 .ledger-period + .ledger-period { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 .ledger-period-header {
   font-size: 12px;

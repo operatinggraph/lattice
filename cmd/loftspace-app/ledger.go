@@ -42,6 +42,14 @@ type ledgerEntryProjection struct {
 	// balance out — no clause authorizes it, so no other column would tell
 	// it apart); empty on every other entry.
 	Kind string `json:"kind"`
+	// ReversesKey is the charge a credit reverses (the ledgerHistory lens's
+	// optional reverses hop — CreditAccount's reversesRef, or LinkReversal
+	// after the fact); empty on every debit and on a plain payment.
+	ReversesKey string `json:"reversesKey"`
+	// BilledForKey is the rent charge a late fee was billed for (the
+	// ledgerHistory lens's optional billedFor hop — EvaluateLoftspaceArrears'
+	// posting); empty on every other row.
+	BilledForKey string `json:"billedForKey"`
 }
 
 // ledgerEntryRow is the payment-history row the FE renders.
@@ -58,6 +66,16 @@ type ledgerEntryRow struct {
 	ClauseProse    string `json:"clauseProse,omitempty"`
 	ClausePurpose  string `json:"clausePurpose,omitempty"`
 	Kind           string `json:"kind,omitempty"`
+	// ReversesKey names the charge this credit reverses — what the FE's
+	// Reverse control nets a debit's remaining face against and what the
+	// credit row's "reverses the charge of …" label resolves; empty on a
+	// debit and on a plain payment.
+	ReversesKey string `json:"reversesKey,omitempty"`
+	// BilledForKey names the charge a late fee was billed for — what the fee
+	// row's "late fee for the charge of …" label resolves, and what the
+	// landlord's Reverse control reads to say that charge has been reversed;
+	// empty on every other row.
+	BilledForKey string `json:"billedForKey,omitempty"`
 }
 
 // computeLedgerHistory filters the ledgerHistory lens rows to one lease, sorts
@@ -97,6 +115,8 @@ func computeLedgerHistory(keys []string, get kvGetter, leaseAppKey string) ([]le
 			ClauseProse:    p.ClauseProse,
 			ClausePurpose:  p.ClausePurpose,
 			Kind:           p.Kind,
+			ReversesKey:    p.ReversesKey,
+			BilledForKey:   p.BilledForKey,
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -202,16 +222,19 @@ func readAllOrFail(keys []string, get rawGetter) (map[string][]byte, error) {
 // lens — one per lease, AccountKey empty until LoftspaceCreateAccount has opened one.
 // The account carries its OWN independently-minted NanoID (never derived
 // from the lease's — see packages/loftspace-ledger/scripts.go), so this lens
-// read is the only way to resolve it. The three Arrears columns come
+// read is the only way to resolve it. The four Arrears columns come
 // straight off the account's own `.arrears` aspect (EvaluateLoftspaceArrears'
 // stamp) — empty for an account nothing has evaluated yet, or one with
-// nothing owed.
+// nothing owed. ArrearsLateFeeAt is the instant the episode's late fee was
+// billed (the send commit that also stamped sentAt), empty for an episode
+// never charged one.
 type leaseAccountProjection struct {
 	LeaseAppKey           string `json:"leaseAppKey"`
 	AccountKey            string `json:"accountKey"`
 	ArrearsDueAt          string `json:"arrearsDueAt"`
 	ArrearsRemindedFor    string `json:"arrearsRemindedFor"`
 	ArrearsReminderSentAt string `json:"arrearsReminderSentAt"`
+	ArrearsLateFeeAt      string `json:"arrearsLateFeeAt"`
 }
 
 // findLeaseAccountRow scans the leaseAccounts lens rows for the one matching
@@ -269,11 +292,12 @@ func resolveLeaseAccount(keys []string, get kvGetter, leaseAppKey string) string
 // row. Shared by /api/ledger, /api/one-bill and /api/portfolio-pulse — the
 // three surfaces that render a lease's rent age.
 type rentArrearsProjection struct {
-	DueDate        string `json:"dueDate"`
-	IsOverdue      bool   `json:"isOverdue"`
-	DaysOverdue    int    `json:"daysOverdue"`
-	DaysUntilDue   int    `json:"daysUntilDue"`
-	ReminderSentAt string `json:"reminderSentAt"`
+	DueDate         string `json:"dueDate"`
+	IsOverdue       bool   `json:"isOverdue"`
+	DaysOverdue     int    `json:"daysOverdue"`
+	DaysUntilDue    int    `json:"daysUntilDue"`
+	ReminderSentAt  string `json:"reminderSentAt"`
+	LateFeeBilledAt string `json:"lateFeeBilledAt"`
 }
 
 // deriveRentArrears computes a lease's rent-balance age from its own
@@ -282,8 +306,19 @@ type rentArrearsProjection struct {
 // them in). It FIFO-ages the ledger exactly as EvaluateLoftspaceArrears
 // does: debits open the queue, credits retire the oldest still-open debit
 // first, and any credit surplus carries forward to prepay whatever opens
-// next. Unlike the wellness/café ledgers this ledger writes no `reverses`
-// credit, so there is no netting pre-pass — the FIFO runs plain.
+// next.
+//
+// A credit that names the charge it reverses (ReversesKey) retires that
+// charge specifically: a pre-pass nets every such credit against the debit
+// it names — capped at that debit's own amount, accumulated across however
+// many reversing credits name the same debit, in the rows' own (postedAt,
+// key) order — before the FIFO walk ever runs, so a reversal of a NEWER
+// charge does not pay off an OLDER, unrelated one. The absorbed amount is
+// applied at the CREDIT's own position in the walk, to whatever of the named
+// debit is still open there; the rest of the credit FIFOs as a plain
+// payment. The named debit therefore opens at its own position like any
+// other charge and is retired when the reversal arrives — exactly as a
+// same-day payment would — so the episode start keeps its meaning below.
 //
 // The head of the open-debit queue is the oldest unpaid charge; its due
 // date is its own recorded dueAt (DebitAccount's stamp), or its postedAt
@@ -306,9 +341,56 @@ type rentArrearsProjection struct {
 // together in that case (the recorded stamp predates the episode, so the
 // derived head's own due wins) — never partway, since both came off the
 // same stale evaluation. Equal to the episode start still counts as
-// belonging to it (dropped only when STRICTLY earlier).
-func deriveRentArrears(rows []ledgerEntryRow, recordedDueAt, reminderSentAt string, now time.Time) rentArrearsProjection {
+// belonging to it (dropped only when STRICTLY earlier). lateFeeAt — the
+// account's recorded instant this episode's late fee was billed, stamped on
+// the same send commit as reminderSentAt — rides the same rule: carried with
+// the send record, dropped with it at the boundary, never on its own.
+func deriveRentArrears(rows []ledgerEntryRow, recordedDueAt, reminderSentAt, lateFeeAt string, now time.Time) rentArrearsProjection {
+	debitAmount := make(map[string]int64)
+	debitPostedAt := make(map[string]string)
+	debitPosition := make(map[string]int)
+	for i, r := range rows {
+		if r.Type == "debit" {
+			debitAmount[r.TransactionKey] = r.AmountCents
+			debitPostedAt[r.TransactionKey] = r.PostedAt
+			debitPosition[r.TransactionKey] = i
+		}
+	}
+	// The pre-pass is position-aware: a reversing credit posted STRICTLY
+	// EARLIER than its target is a plain payment (nothing absorbed, nothing
+	// charged against the target's face), and one in the SAME second that
+	// sorts before its target by key is HELD for the target — withheld from
+	// the FIFO at the credit and applied when the debit is walked, so a
+	// same-second reversal never retires the oldest charge whichever way the
+	// random keys sort. The op's arrears_head runs the identical rule.
+	absorbedTotal := make(map[string]int64)
+	absorbedByCredit := make(map[string]int64)
+	heldByCredit := make(map[string]bool)
+	for i, r := range rows {
+		if r.Type != "credit" || r.ReversesKey == "" {
+			continue
+		}
+		target, ok := debitAmount[r.ReversesKey]
+		if !ok {
+			continue
+		}
+		if r.PostedAt < debitPostedAt[r.ReversesKey] {
+			continue
+		}
+		remaining := target - absorbedTotal[r.ReversesKey]
+		absorbed := r.AmountCents
+		if absorbed > remaining {
+			absorbed = remaining
+		}
+		absorbedByCredit[r.TransactionKey] = absorbed
+		absorbedTotal[r.ReversesKey] += absorbed
+		if i < debitPosition[r.ReversesKey] {
+			heldByCredit[r.TransactionKey] = true
+		}
+	}
+
 	type openDebit struct {
+		key       string
 		postedAt  string
 		dueAt     string
 		remaining int64
@@ -316,10 +398,14 @@ func deriveRentArrears(rows []ledgerEntryRow, recordedDueAt, reminderSentAt stri
 	var open []openDebit
 	var surplus int64
 	var episodeStart string
+	pending := make(map[string]int64)
 	for _, r := range rows {
 		switch r.Type {
 		case "debit":
-			amount := r.AmountCents
+			amount := r.AmountCents - pending[r.TransactionKey]
+			if amount <= 0 {
+				continue
+			}
 			wasSquare := len(open) == 0
 			if surplus >= amount {
 				surplus -= amount
@@ -330,9 +416,38 @@ func deriveRentArrears(rows []ledgerEntryRow, recordedDueAt, reminderSentAt stri
 			if wasSquare {
 				episodeStart = r.PostedAt
 			}
-			open = append(open, openDebit{postedAt: r.PostedAt, dueAt: r.DueAt, remaining: amount})
+			open = append(open, openDebit{key: r.TransactionKey, postedAt: r.PostedAt, dueAt: r.DueAt, remaining: amount})
 		case "credit":
 			remaining := r.AmountCents
+			if absorbed := absorbedByCredit[r.TransactionKey]; absorbed > 0 && heldByCredit[r.TransactionKey] {
+				// The named charge is walked later in this same second: hold
+				// the absorbed amount for it and hand only the rest to the
+				// FIFO below.
+				pending[r.ReversesKey] += absorbed
+				remaining -= absorbed
+			} else if absorbed > 0 {
+				// Retire the named charge first, by what is still open of it
+				// here — a plain payment may already have paid part of it
+				// down — and hand the rest to the FIFO below as an ordinary
+				// payment. The queue stays in (postedAt, key) order: an
+				// entry retired from the middle is removed, never reordered.
+				kept := open[:0]
+				for _, d := range open {
+					if d.key == r.ReversesKey {
+						applied := absorbed
+						if applied > d.remaining {
+							applied = d.remaining
+						}
+						d.remaining -= applied
+						remaining -= applied
+						if d.remaining <= 0 {
+							continue
+						}
+					}
+					kept = append(kept, d)
+				}
+				open = kept
+			}
 			for remaining > 0 && len(open) > 0 {
 				if open[0].remaining > remaining {
 					open[0].remaining -= remaining
@@ -358,6 +473,7 @@ func deriveRentArrears(rows []ledgerEntryRow, recordedDueAt, reminderSentAt stri
 		if reminderSentAt != "" && reminderSentAt < episodeStart {
 			reminderSentAt = ""
 			recordedDueAt = ""
+			lateFeeAt = ""
 		}
 		if recordedDueAt != "" {
 			dueDate = recordedDueAt
@@ -366,11 +482,12 @@ func deriveRentArrears(rows []ledgerEntryRow, recordedDueAt, reminderSentAt stri
 
 	isOverdue, daysOverdue, daysUntilDue := computeRentOverdue(dueDate, now)
 	return rentArrearsProjection{
-		DueDate:        dueDate,
-		IsOverdue:      isOverdue,
-		DaysOverdue:    daysOverdue,
-		DaysUntilDue:   daysUntilDue,
-		ReminderSentAt: reminderSentAt,
+		DueDate:         dueDate,
+		IsOverdue:       isOverdue,
+		DaysOverdue:     daysOverdue,
+		DaysUntilDue:    daysUntilDue,
+		ReminderSentAt:  reminderSentAt,
+		LateFeeBilledAt: lateFeeAt,
 	}
 }
 
@@ -509,7 +626,7 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 	}
 	get := func(key string) ([]byte, bool) { v, ok := ledgerValues[key]; return v, ok }
 	rows, balance := computeLedgerHistory(keys, get, leaseAppKey)
-	arrears := deriveRentArrears(rows, acctRow.ArrearsDueAt, acctRow.ArrearsReminderSentAt, time.Now().UTC())
+	arrears := deriveRentArrears(rows, acctRow.ArrearsDueAt, acctRow.ArrearsReminderSentAt, acctRow.ArrearsLateFeeAt, time.Now().UTC())
 	deposit := computeDepositSummary(rows)
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"leaseAppKey":          leaseAppKey,
@@ -521,6 +638,7 @@ func (s *server) handleLedger(w http.ResponseWriter, r *http.Request) {
 		"daysOverdue":          arrears.DaysOverdue,
 		"daysUntilDue":         arrears.DaysUntilDue,
 		"reminderSentAt":       arrears.ReminderSentAt,
+		"lateFeeBilledAt":      arrears.LateFeeBilledAt,
 		"depositHeldCents":     deposit.DepositHeldCents,
 		"depositChargedCents":  deposit.DepositChargedCents,
 		"depositChargedAt":     deposit.DepositChargedAt,
