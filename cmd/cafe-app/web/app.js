@@ -432,8 +432,11 @@ function houseLimitLine(limitCents, totalCents, balanceCents) {
   const balance = balanceCents || 0;
   const exposure = balance + total;
   const balancePhrase = balance > 0 ? "owes " + money(balance) + " · " : balance < 0 ? "in credit " + money(-balance) + " · " : "";
-  if (exposure > limitCents) return "Over the house limit of " + money(limitCents) + " — self-order is closed";
-  if (exposure === limitCents) return "At the house limit of " + money(limitCents) + " — self-order is closed";
+  // At or over, the balance is named beside the limit so an $8.50 tab
+  // reading "over $50.00" says what put it there.
+  const withBalance = balance > 0 ? " with " + money(balance) + " owed on the account" : "";
+  if (exposure > limitCents) return "Over the house limit of " + money(limitCents) + withBalance + " — self-order is closed";
+  if (exposure === limitCents) return "At the house limit of " + money(limitCents) + withBalance + " — self-order is closed";
   return "House limit " + money(limitCents) + " · " + balancePhrase + money(limitCents - exposure) + " left";
 }
 
@@ -2697,13 +2700,14 @@ async function renderResident() {
             (itemsHasAvailable ? '<button id="self-order-submit" type="submit">Add to Tab</button>' : "") +
             "</form>" +
             (itemsHasAvailable ? "" : (itemsHasOnMenu
-              // The room is exhausted by the balance alone when the tab
-              // itself is still empty (openDisplayTotal === 0) and the
-              // balance is what ate it (balanceCents > 0) — "your tab" would
-              // name the wrong thing to pay down.
-              ? (openDisplayTotal === 0 && balanceCents > 0
-                  ? '<p class="meta">Your balance is at the house limit of ' + escapeHtml(money(limitCents)) + " — ask the desk.</p>"
-                  : '<p class="meta">Your tab is at the house limit of ' + escapeHtml(money(limitCents)) + " — ask the desk.</p>")
+              // Names what filled the room: the balance alone when the tab
+              // is still empty, the balance and the tab together when both
+              // count (balanceCents > 0), the tab alone otherwise — "your
+              // tab" alone would name the wrong thing to pay down.
+              ? '<p class="meta">' + (openDisplayTotal === 0 && balanceCents > 0
+                  ? "Your balance is at the house limit of "
+                  : balanceCents > 0 ? "Your balance and tab are at the house limit of " : "Your tab is at the house limit of ") +
+                  escapeHtml(money(limitCents)) + " — ask the desk.</p>"
               : '<p class="meta">Nothing on the menu right now.</p>'))
           : '<p class="meta">No menu items available yet.</p>') +
         "</div>"

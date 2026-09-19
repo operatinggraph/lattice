@@ -129,9 +129,12 @@ func TestHouseLimitLine_UnderAtOver(t *testing.T) {
 		// balance $6.00 (600c) + total $3.50 (350c) under a $50 (5000c) limit.
 		`houseLimitLine(5000, 350, 600)`: "House limit $50.00 · owes $6.00 · $40.50 left",
 		// balance $10.00 (1000c) == limit — "at", not "under".
-		`houseLimitLine(1000, 0, 1000)`: "At the house limit of $10.00 — self-order is closed",
-		// balance $10.00 + total $0.01 over a $10.00 limit — "over".
-		`houseLimitLine(1000, 1, 1000)`: "Over the house limit of $10.00 — self-order is closed",
+		`houseLimitLine(1000, 0, 1000)`: "At the house limit of $10.00 with $10.00 owed on the account — self-order is closed",
+		// balance $10.00 + total $0.01 over a $10.00 limit — "over", naming the balance.
+		`houseLimitLine(1000, 1, 1000)`: "Over the house limit of $10.00 with $10.00 owed on the account — self-order is closed",
+		// a credit cannot put the exposure at the limit by itself, so a tab over
+		// the limit under a credit names the limit alone.
+		`houseLimitLine(900, 1400, -200)`: "Over the house limit of $9.00 — self-order is closed",
 		// a $2.00 (200c) credit widens the room under a $9.00 limit.
 		`houseLimitLine(900, 450, -200)`: "House limit $9.00 · in credit $2.00 · $6.50 left",
 	} {
