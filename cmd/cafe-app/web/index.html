@@ -26,6 +26,7 @@
   <section id="view-pos" role="tabpanel">
     <div class="panel-controls">
       <label for="pos-lease">Lease</label>
+      <input id="pos-lease-search" type="search" class="lease-search" placeholder="Find a resident…" autocomplete="off" aria-label="Find a resident by name or unit" />
       <select id="pos-lease"></select>
       <button id="pos-refresh" class="ghost">Refresh</button>
       <span class="summary" id="pos-summary"></span>
@@ -95,7 +96,7 @@
             <input type="text" id="house-limit-dollars" inputmode="decimal" placeholder="50.00" />
           </div>
         </div>
-        <p class="meta">A resident's own order that would take their tab past this is refused; the desk may ring past it. 0 closes self-service tabs at this house.</p>
+        <p class="meta">A resident's own order that would take what they owe (balance plus tab) past this is refused; the desk may ring past it. 0 closes self-service tabs at this house.</p>
         <div class="panel-actions">
           <button type="submit" id="house-limit-submit">Save house limit</button>
         </div>
@@ -106,6 +107,7 @@
   <section id="view-resident" role="tabpanel" hidden>
     <div class="panel-controls">
       <label id="resident-lease-label" for="resident-lease">Lease</label>
+      <input id="resident-lease-search" type="search" class="lease-search" placeholder="Find a resident…" autocomplete="off" aria-label="Find a resident by name or unit" hidden />
       <select id="resident-lease"></select>
       <button id="resident-refresh" class="ghost">Refresh</button>
     </div>

@@ -118,9 +118,11 @@ func leaseTenancyEnds(rows []leaseWorkplaceProjection) map[string]tenancyEnd {
 // Each row also carries tabLimitCents — the lease's effective house tab
 // limit, joined from cafeHousePolicies over the lease's coveringLocations
 // (leaseHouseLimits, policies.go; null when no covering location records a
-// policy) — the resident-readable half of the TabLimitExceeded fact the
-// resident's own Charge / OpenTab refuse on, and the figure the POS card
-// warns the desk with.
+// policy). The limit bounds the resident's open EXPOSURE at the house — the
+// recorded café ledger balance (/api/ledger's balanceCents) plus the open
+// tab's own total, not the tab alone — the resident-readable half of the
+// TabLimitExceeded fact the resident's own Charge / OpenTab refuse on, and
+// the figure the POS card warns the desk with.
 //
 // Each row also carries leaseEnd and endedAt, joined from cafe-domain's
 // cafeLeaseWorkplaces lens by leaseAppKey (leaseTenancyEnds) — the

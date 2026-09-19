@@ -89,7 +89,7 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 		{
 			OperationType: "OpenTab",
 			// refusal-courtesy(facet): CreditHold, InvalidState, LeaseNotApproved, OpenTabAlreadyExists, TenancyEnded: none — leaseAppKey is dispatch.contextParams-resolved ({me.leaseapp}); OpenTab declares no dispatch.targetType and renders no field, so Facet offers no lease picker to hide or drop any of these against
-			// refusal-courtesy(facet): TabLimitExceeded: none — the house's .cafePolicy is projected by cafeHousePolicies (lenses.go), not by any edge-manifest lens Facet reads, so the generic form cannot see a closed house; the refusal toast names the desk
+			// refusal-courtesy(facet): TabLimitExceeded: none — the house's .cafePolicy is projected by cafeHousePolicies (lenses.go) and the lease's café balance by cafe-ledger's read models, neither by any edge-manifest lens Facet reads, so the generic form cannot see a closed house or a balance already at the limit; the refusal toast names the limit, the balance owed and the desk
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Open a house tab",
 				Description: "Start a café tab billed to your lease.",
@@ -130,7 +130,8 @@ func OpMetas() []pkgmgr.OpMetaSpec {
 			OperationType: "Charge",
 			// refusal-courtesy(facet): ItemUnavailable: drop — entityRefCandidates (cmd/facet/web/app.js) drops menuitem rows edgeEntityMenuItemsTail (packages/edge-manifest/lenses.go) projects available:false
 			// refusal-courtesy(facet): TabNotOpen: hide — edgeEntityTabsTail (packages/edge-manifest/lenses.go) projects only tabs whose .status.value = "open", so Facet's tab browse never lists a settled tab as a Charge target
-			// refusal-courtesy(facet): TabLimitExceeded: none — the house limit (cafeHousePolicies, lenses.go) and the tab's running total are not projected by the edge-manifest lenses Facet's menu picker reads, so the generic form cannot cap the pick; the refusal toast names the limit, the tab's total and the desk
+			// refusal-courtesy(facet): InvalidState: none — the café account's balance aspect carrying a class other than cafeAccountBalance is a data-integrity fault (house_exposure_balance, packages/cafe-domain/ddls.go), not state any lens Facet reads exposes
+			// refusal-courtesy(facet): TabLimitExceeded: none — the house limit (cafeHousePolicies, lenses.go), the lease's café balance (cafe-ledger's read models) and the tab's running total are not projected by the edge-manifest lenses Facet's menu picker reads, so the generic form cannot cap the pick; the refusal toast names the limit, the balance owed, the tab's total and the desk
 			Presentation: &pkgmgr.OpPresentationSpec{
 				Title:       "Order an item",
 				Description: "Add a menu item to your open tab.",
