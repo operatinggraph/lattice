@@ -87,7 +87,7 @@ main { padding: 18px; max-width: 1000px; margin: 0 auto; }
 
 input, select, button, textarea { font-family: inherit; }
 
-input[type="number"], input[type="text"], select, textarea {
+input[type="number"], input[type="text"], input[type="search"], select, textarea {
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--text);
@@ -96,6 +96,7 @@ input[type="number"], input[type="text"], select, textarea {
   font-size: 13px;
 }
 select { min-width: 220px; }
+.lease-search { width: 160px; }
 
 button {
   background: var(--accent-dim);

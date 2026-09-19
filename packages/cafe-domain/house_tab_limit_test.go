@@ -417,3 +417,254 @@ func TestCharge_SelfHouseLimit_DegenerateChainValues(t *testing.T) {
 		t.Fatalf("third self-order under a repaired $9.00 unit policy = %v (%s), want Rejected with TabLimitExceeded (SetCafePolicy on a unit binds)", got, msg)
 	}
 }
+
+// seedAccountBalance seeds the cafe-ledger .balance aspect on a café account
+// the way CreateAccount mints it and the entry ops carry it — the recorded
+// figure house_exposure_balance reads.
+func seedAccountBalance(t *testing.T, ctx context.Context, conn *substrate.Conn, acctKey string, balanceCents int) {
+	t.Helper()
+	seedAspect(t, ctx, conn, acctKey, "balance", "cafeAccountBalance", map[string]any{"balanceCents": balanceCents, "cashCents": 0})
+}
+
+// TestCharge_SelfRefusedOverExposure is the exposure green bar: the house
+// limit bounds the resident's open exposure, the recorded ledger balance plus
+// the tab. With a $10.00 limit and $6.00 already owed, a $4.00 self-order
+// lands (exactly the limit) and a $4.50 one is refused TabLimitExceeded
+// naming the limit, the balance and the item; the desk rings past it.
+func TestCharge_SelfRefusedOverExposure(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargeexpo")
+
+	tabKey, itemKey, appFor, _, buildingKey := houseFixture(t, ctx, conn, cp, cons,
+		"BBCAFEHXPLEASEHJKMNP", "BBCAFEHXPUNJTHJKMNPQ", "BBCAFEHXPBLDGHJKMNPQ", "cdchargeexpo00")
+	leaseKey := "vtx.leaseapp.BBCAFEHXPLEASEHJKMNP"
+	acctKey := seedCafeAccount(t, ctx, conn, "BBCAFEHXPACCTHJKMNPQ", leaseKey)
+	seedAccountBalance(t, ctx, conn, acctKey, 600)
+	mustSetCafePolicy(t, ctx, conn, cp, cons, "cdchargeexpopol00001", buildingKey, 1000)
+	fourDollarItem := createMenuItem(t, ctx, conn, cp, cons, "cdchargeexpoitm00002", "Scone", 400, buildingKey)
+
+	got, msg := selfOrderExpect(t, ctx, conn, cp, cons, "cdchargeexpoord00001", tabKey, itemKey, appFor)
+	if got != processor.OutcomeRejected || !strings.Contains(msg, "TabLimitExceeded") {
+		t.Fatalf("a $4.50 self-order over a $6.00 balance under a $10.00 limit = %v (%s), want Rejected with TabLimitExceeded", got, msg)
+	}
+	for _, want := range []string{"$10.00", "$6.00", "$4.50"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("TabLimitExceeded message %q should name %s", msg, want)
+		}
+	}
+	if got := tabTotal(t, ctx, conn, tabKey); got != 0 {
+		t.Fatalf("totalCents after the refused order = %v, want 0 (nothing written)", got)
+	}
+
+	selfOrder(t, ctx, conn, cp, cons, "cdchargeexpoord00002", tabKey, fourDollarItem, appFor, "2026-07-18T12:11:00Z")
+	if got := tabTotal(t, ctx, conn, tabKey); got != 400 {
+		t.Fatalf("totalCents after the $4.00 order = %v, want 400 (balance + tab exactly at the limit is allowed)", got)
+	}
+	got, msg = selfOrderExpect(t, ctx, conn, cp, cons, "cdchargeexpoord00003", tabKey, fourDollarItem, appFor)
+	if got != processor.OutcomeRejected || !strings.Contains(msg, "TabLimitExceeded") {
+		t.Fatalf("a second $4.00 self-order at the limit = %v (%s), want Rejected with TabLimitExceeded", got, msg)
+	}
+
+	staffCharge(t, ctx, conn, cp, cons, "cdchargeexpostf00001", tabKey, 500, "2026-07-18T12:12:00Z")
+	if got := tabTotal(t, ctx, conn, tabKey); got != 900 {
+		t.Fatalf("totalCents after the desk's charge = %v, want 900 (the staff leg is never limited)", got)
+	}
+}
+
+// TestCharge_SelfCreditWidensRoom proves the balance is read signed: a
+// $2.50 credit under an $11.00 limit admits three $4.50 self-orders (the
+// third landing at exactly the limit net of the credit), where a zero
+// balance would refuse the third.
+func TestCharge_SelfCreditWidensRoom(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargecredit")
+
+	tabKey, itemKey, appFor, _, buildingKey := houseFixture(t, ctx, conn, cp, cons,
+		"BBCAFEHCRLEASEHJKMNP", "BBCAFEHCRUNJTHJKMNPQ", "BBCAFEHCRBLDGHJKMNPQ", "cdchargecredit")
+	leaseKey := "vtx.leaseapp.BBCAFEHCRLEASEHJKMNP"
+	acctKey := seedCafeAccount(t, ctx, conn, "BBCAFEHCRACCTHJKMNPQ", leaseKey)
+	seedAccountBalance(t, ctx, conn, acctKey, -250)
+	mustSetCafePolicy(t, ctx, conn, cp, cons, "cdchargecreditpol001", buildingKey, 1100)
+
+	selfOrder(t, ctx, conn, cp, cons, "cdchargecreditord001", tabKey, itemKey, appFor, "2026-07-18T12:10:00Z")
+	selfOrder(t, ctx, conn, cp, cons, "cdchargecreditord002", tabKey, itemKey, appFor, "2026-07-18T12:11:00Z")
+	selfOrder(t, ctx, conn, cp, cons, "cdchargecreditord003", tabKey, itemKey, appFor, "2026-07-18T12:12:00Z")
+	if got := tabTotal(t, ctx, conn, tabKey); got != 1350 {
+		t.Fatalf("totalCents after three orders = %v, want 1350 (a $2.50 credit widens the $11.00 room to $13.50)", got)
+	}
+	got, msg := selfOrderExpect(t, ctx, conn, cp, cons, "cdchargecreditord004", tabKey, itemKey, appFor)
+	if got != processor.OutcomeRejected || !strings.Contains(msg, "TabLimitExceeded") {
+		t.Fatalf("fourth self-order = %v (%s), want Rejected with TabLimitExceeded", got, msg)
+	}
+}
+
+// TestCharge_SelfHouseLimit_LegacyAccountReadsZero proves an account that
+// carries no live .balance (minted before the aspect existed) bounds only
+// the tab, exactly as a lease with no account: the exposure reads 0.
+func TestCharge_SelfHouseLimit_LegacyAccountReadsZero(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargelegacy")
+
+	tabKey, itemKey, appFor, _, buildingKey := houseFixture(t, ctx, conn, cp, cons,
+		"BBCAFEHLGLEASEHJKMNP", "BBCAFEHLGUNJTHJKMNPQ", "BBCAFEHLGBLDGHJKMNPQ", "cdchargelegacy")
+	seedCafeAccount(t, ctx, conn, "BBCAFEHLGACCTHJKMNPQ", "vtx.leaseapp.BBCAFEHLGLEASEHJKMNP")
+	mustSetCafePolicy(t, ctx, conn, cp, cons, "cdchargelegacypol001", buildingKey, 900)
+
+	selfOrder(t, ctx, conn, cp, cons, "cdchargelegacyord001", tabKey, itemKey, appFor, "2026-07-18T12:10:00Z")
+	selfOrder(t, ctx, conn, cp, cons, "cdchargelegacyord002", tabKey, itemKey, appFor, "2026-07-18T12:11:00Z")
+	if got := tabTotal(t, ctx, conn, tabKey); got != 900 {
+		t.Fatalf("totalCents after two orders = %v, want 900 (no .balance reads as nothing owed)", got)
+	}
+	got, msg := selfOrderExpect(t, ctx, conn, cp, cons, "cdchargelegacyord003", tabKey, itemKey, appFor)
+	if got != processor.OutcomeRejected || !strings.Contains(msg, "TabLimitExceeded") {
+		t.Fatalf("third self-order = %v (%s), want Rejected with TabLimitExceeded", got, msg)
+	}
+}
+
+// TestOpenTab_SelfRefusedWhenBalanceAtLimit proves the OpenTab half of the
+// exposure bound: a balance already at a $10.00 limit refuses the resident's
+// own OpenTab (a tab no line could join) and mints nothing, the desk opens
+// the same lease's tab, and a balance one cent under the limit lets the
+// resident open one.
+func TestOpenTab_SelfRefusedWhenBalanceAtLimit(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "opentabexpo")
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	leaseID := "BBCAFEHVXLEASEHJKMNP"
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, leaseID, domainConsumerID)
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEHVXUNJTHJKMNPQ")
+	buildingKey := "vtx.building.BBCAFEHVXBLDGHJKMNPQ"
+	seedVertex(t, ctx, conn, buildingKey, "building", map[string]any{})
+	testutil.SeedLink(t, ctx, conn, "lnk.unit.BBCAFEHVXUNJTHJKMNPQ.containedIn.building.BBCAFEHVXBLDGHJKMNPQ", "containedIn", unitKey, buildingKey)
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	acctKey := seedCafeAccount(t, ctx, conn, "BBCAFEHVXACCTHJKMNPQ", leaseKey)
+	seedAccountBalance(t, ctx, conn, acctKey, 1000)
+	mustSetCafePolicy(t, ctx, conn, cp, cons, "cdopentabexpopol0001", buildingKey, 1000)
+
+	applicationForLnk := "lnk.leaseapp." + leaseID + ".applicationFor.identity." + domainConsumerID
+	selfOpen := func(label string) (processor.MessageOutcome, *processor.OperationReply) {
+		env := &processor.OperationEnvelope{
+			RequestID:     testutil.GenReqID(label),
+			Lane:          processor.LaneDefault,
+			OperationType: "OpenTab",
+			Actor:         domainConsumerKey,
+			SubmittedAt:   "2026-07-07T12:00:00Z",
+			Class:         "tab",
+			Payload:       json.RawMessage(`{"leaseAppKey":"` + leaseKey + `"}`),
+			ContextHint: &processor.ContextHint{
+				Reads:         []string{leaseKey},
+				OptionalReads: []string{leaseKey + ".cafeOpenTab", applicationForLnk, leaseKey + ".decision", leaseKey + ".tenancy"},
+				Enumerations: []processor.EnumerationHint{
+					{Hub: leaseKey, Relation: "heldFor", Direction: "in"},
+				},
+			},
+			AuthContext: &processor.AuthContext{Target: domainConsumerKey},
+		}
+		return testutil.SubmitAndAwaitReply(t, ctx, conn, cp, cons, env)
+	}
+	outcome, reply := selfOpen("cdopentabexposlf0001")
+	if outcome != processor.OutcomeRejected || reply.Error == nil || !strings.Contains(reply.Error.Message, "TabLimitExceeded") {
+		t.Fatalf("self OpenTab with the balance at the limit = %v (%+v), want Rejected with TabLimitExceeded", outcome, reply.Error)
+	}
+	for _, want := range []string{"$10.00"} {
+		if !strings.Contains(reply.Error.Message, want) {
+			t.Fatalf("TabLimitExceeded message %q should name %s", reply.Error.Message, want)
+		}
+	}
+	if keyExists(t, ctx, conn, leaseKey+".cafeOpenTab") {
+		t.Fatalf("a refused self OpenTab claimed the lease's open-tab guard")
+	}
+
+	seedAccountBalance(t, ctx, conn, acctKey, 999)
+	outcome, reply = selfOpen("cdopentabexposlf0002")
+	if outcome != processor.OutcomeAccepted {
+		t.Fatalf("self OpenTab one cent under the limit = %v (%+v), want Accepted", outcome, reply.Error)
+	}
+}
+
+// TestOpenTab_StaffOpensPastBalanceLimit proves the staff leg of the
+// OpenTab exposure bound is unrestricted: with the balance at the limit the
+// desk opens the lease's tab.
+func TestOpenTab_StaffOpensPastBalanceLimit(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "opentabexpostf")
+
+	seedIdentity(t, ctx, conn, domainConsumerID)
+	leaseID := "BBCAFEHVSLEASEHJKMNP"
+	leaseKey := seedLeaseWithApplicant(t, ctx, conn, leaseID, domainConsumerID)
+	unitKey := seedLocation(t, ctx, conn, "BBCAFEHVSUNJTHJKMNPQ")
+	buildingKey := "vtx.building.BBCAFEHVSBLDGHJKMNPQ"
+	seedVertex(t, ctx, conn, buildingKey, "building", map[string]any{})
+	testutil.SeedLink(t, ctx, conn, "lnk.unit.BBCAFEHVSUNJTHJKMNPQ.containedIn.building.BBCAFEHVSBLDGHJKMNPQ", "containedIn", unitKey, buildingKey)
+	seedAppliesToUnit(t, ctx, conn, leaseKey, unitKey)
+	acctKey := seedCafeAccount(t, ctx, conn, "BBCAFEHVSACCTHJKMNPQ", leaseKey)
+	seedAccountBalance(t, ctx, conn, acctKey, 5000)
+	mustSetCafePolicy(t, ctx, conn, cp, cons, "cdopentabexpostfpol1", buildingKey, 1000)
+
+	openTabAcceptedFor(t, ctx, conn, cp, cons, "cdopentabexpostf0001", leaseKey, "the desk opens a tab over a balance past the limit; only self-service is bounded")
+}
+
+// TestCharge_SelfHouseLimit_TombstonedBalanceReadsZero proves a tombstoned
+// .balance is read as no recorded balance, exactly as an absent one: under a
+// $9.00 limit two $4.50 self-orders land regardless of the figure the dead
+// document carries.
+func TestCharge_SelfHouseLimit_TombstonedBalanceReadsZero(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargetomb")
+
+	tabKey, itemKey, appFor, _, buildingKey := houseFixture(t, ctx, conn, cp, cons,
+		"BBCAFEHTBLEASEHJKMNP", "BBCAFEHTBUNJTHJKMNPQ", "BBCAFEHTBBLDGHJKMNPQ", "cdchargetomb00")
+	acctKey := seedCafeAccount(t, ctx, conn, "BBCAFEHTBACCTHJKMNPQ", "vtx.leaseapp.BBCAFEHTBLEASEHJKMNP")
+	doc, _ := json.Marshal(map[string]any{
+		"class": "cafeAccountBalance", "isDeleted": true,
+		"vertexKey": acctKey, "localName": "balance", "data": map[string]any{"balanceCents": 5000, "cashCents": 0},
+	})
+	if _, err := conn.KVPut(ctx, testutil.HarnessCoreBucket, acctKey+".balance", doc); err != nil {
+		t.Fatalf("seed tombstoned .balance: %v", err)
+	}
+	mustSetCafePolicy(t, ctx, conn, cp, cons, "cdchargetombpol00001", buildingKey, 900)
+
+	selfOrder(t, ctx, conn, cp, cons, "cdchargetombord00001", tabKey, itemKey, appFor, "2026-07-18T12:10:00Z")
+	selfOrder(t, ctx, conn, cp, cons, "cdchargetombord00002", tabKey, itemKey, appFor, "2026-07-18T12:11:00Z")
+	if got := tabTotal(t, ctx, conn, tabKey); got != 900 {
+		t.Fatalf("totalCents after two orders = %v, want 900 (a tombstoned .balance reads as nothing owed)", got)
+	}
+}
+
+// TestCharge_SelfHouseLimit_ForeignBalanceClassRefused proves the class
+// check: a live .balance document of any class other than cafeAccountBalance
+// is a data-integrity fault the self-order refuses InvalidState, writing
+// nothing, rather than a figure to bound on — or to ignore.
+func TestCharge_SelfHouseLimit_ForeignBalanceClassRefused(t *testing.T) {
+	ctx, conn := setupDomainEnv(t)
+	testutil.SeedCapDoc(t, ctx, conn, domainCapDoc())
+	testutil.SeedCapDoc(t, ctx, conn, domainConsumerCapDoc())
+	cp, cons := newDomainPipeline(t, ctx, conn, "chargeclass")
+
+	tabKey, itemKey, appFor, _, buildingKey := houseFixture(t, ctx, conn, cp, cons,
+		"BBCAFEHFCLEASEHJKMNP", "BBCAFEHFCUNJTHJKMNPQ", "BBCAFEHFCBLDGHJKMNPQ", "cdchargeclass0")
+	acctKey := seedCafeAccount(t, ctx, conn, "BBCAFEHFCACCTHJKMNPQ", "vtx.leaseapp.BBCAFEHFCLEASEHJKMNP")
+	seedAspect(t, ctx, conn, acctKey, "balance", "somethingElse", map[string]any{"balanceCents": 0})
+	mustSetCafePolicy(t, ctx, conn, cp, cons, "cdchargeclasspol0001", buildingKey, 900)
+
+	got, msg := selfOrderExpect(t, ctx, conn, cp, cons, "cdchargeclassord0001", tabKey, itemKey, appFor)
+	if got != processor.OutcomeRejected || !strings.Contains(msg, "InvalidState") {
+		t.Fatalf("self-order over a foreign-class .balance = %v (%s), want Rejected with InvalidState", got, msg)
+	}
+	if got := tabTotal(t, ctx, conn, tabKey); got != 0 {
+		t.Fatalf("totalCents after the refused order = %v, want 0 (nothing written)", got)
+	}
+}

@@ -407,24 +407,34 @@ function tabLimitOf(row) {
   return row && typeof row.tabLimitCents === "number" ? row.tabLimitCents : null;
 }
 
-// tabLimitRemaining is the room left under the house limit for a tab at
-// totalCents — null when the house records no limit. Clamped at 0: a tab
-// the desk rang past the limit leaves the resident no room, not a negative.
-function tabLimitRemaining(limitCents, totalCents) {
+// tabLimitRemaining is the room left under the house limit for a resident's
+// open EXPOSURE at the house — the recorded ledger balance (balanceCents,
+// signed: a credit widens the room) plus the tab's own totalCents, so a tab
+// settled without paying still counts once its debit posts. null when the
+// house records no limit. Clamped at 0:
+// an exposure the desk rang past the limit leaves the resident no room, not
+// a negative.
+function tabLimitRemaining(limitCents, totalCents, balanceCents) {
   if (typeof limitCents !== "number") return null;
-  return Math.max(0, limitCents - (totalCents || 0));
+  return Math.max(0, limitCents - (balanceCents || 0) - (totalCents || 0));
 }
 
 // houseLimitLine is the one sentence every tab card says about the house
-// limit: the limit and the room left while under it, and "at" / "over" the
-// limit once the tab reaches or passes it (the desk can ring past it; the
-// resident cannot). "" when the house records no limit.
-function houseLimitLine(limitCents, totalCents) {
+// limit: the limit, the recorded balance when it is non-zero ("owes …" for
+// a debt, "in credit …" for a credit that widens the room), and the room
+// left under it — or "at" / "over" the limit once the balance plus the tab
+// (the same exposure tabLimitRemaining bounds) reaches or passes it (the
+// desk can ring past it; the resident cannot). "" when the house records no
+// limit.
+function houseLimitLine(limitCents, totalCents, balanceCents) {
   if (typeof limitCents !== "number") return "";
   const total = totalCents || 0;
-  if (total > limitCents) return "Over the house limit of " + money(limitCents) + " — self-order is closed";
-  if (total === limitCents) return "At the house limit of " + money(limitCents) + " — self-order is closed";
-  return "House limit " + money(limitCents) + " · " + money(limitCents - total) + " left";
+  const balance = balanceCents || 0;
+  const exposure = balance + total;
+  const balancePhrase = balance > 0 ? "owes " + money(balance) + " · " : balance < 0 ? "in credit " + money(-balance) + " · " : "";
+  if (exposure > limitCents) return "Over the house limit of " + money(limitCents) + " — self-order is closed";
+  if (exposure === limitCents) return "At the house limit of " + money(limitCents) + " — self-order is closed";
+  return "House limit " + money(limitCents) + " · " + balancePhrase + money(limitCents - exposure) + " left";
 }
 
 // counterPaymentLine renders a settled tab's paidAtSettleCents (cash the
@@ -569,12 +579,13 @@ function chargeLinesBlock(lines, memo, voidableTabKey, tabOpen) {
 // out". Shared by the self-order and POS pickers (renderResident,
 // renderOpenTabCard) so the two forms never drift.
 // menuOptions renders the picker's options. remainingCents, when a number,
-// is the room left under the house tab limit (tabLimitRemaining): an
-// available item priced above it is rendered disabled inside an "Over your
-// tab limit" optgroup — the resident-self Charge's own TabLimitExceeded
-// conjunct (totalCents + priceCents > limit, packages/cafe-domain/ddls.go),
-// applied to the same item price the op derives. The POS picker passes no
-// bound: the staff leg is never limited.
+// is the room left under the house tab limit for the resident's open
+// EXPOSURE (tabLimitRemaining: limit − balance − total): an available item
+// priced above it is rendered disabled inside an "Over your tab limit"
+// optgroup — the resident-self Charge's own TabLimitExceeded conjunct
+// (balanceCents + totalCents + amountCents > limit, packages/cafe-domain/
+// ddls.go), applied to the same item price the op derives. The POS picker
+// passes no bound: the staff leg is never limited.
 function menuOptions(items, remainingCents) {
   const bounded = typeof remainingCents === "number";
   const available = items.filter((it) => it.available !== false && !(bounded && it.priceCents > remainingCents));
@@ -834,7 +845,11 @@ async function loadLeases() {
 // landlord-approval status (/api/residents) and unit address
 // (/api/frontdesk-lease-details) for the staff-facing lease pickers (POS +
 // front desk's resident-view picker) — the same best-effort,
-// degrade-to-lease-key join frontDeskCard already does.
+// degrade-to-lease-key join frontDeskCard already does. Also resolves
+// openTabByLease (/api/tabs, no leaseAppKey — every tab this hat can see) so
+// fillLeaseSelect's rankLeaseOptions can put a lease with money on the
+// counter right now at the top of the picker; loaded here, before either
+// caller renders, so the picker is ranked on its very first paint.
 async function loadLeasePickerContext() {
   let residentsByLease = {};
   let approvedByLease = {};
@@ -852,11 +867,16 @@ async function loadLeasePickerContext() {
     const ld = await appGet("/api/frontdesk-lease-details");
     (ld.leaseDetails || []).forEach((d) => { leaseDetailsByLease[d.leaseAppKey] = d; });
   } catch (_) { /* front-desk not installed / unreachable — unit address just doesn't show */ }
+  const openTabByLease = {};
+  try {
+    const ts = await appGet("/api/tabs");
+    (ts.tabs || []).forEach((t) => { if (t.status === "open") openTabByLease[t.leaseAppKey] = true; });
+  } catch (_) { /* tabs unreachable — picker just isn't ranked by open-tab */ }
   // Each lease's house-tab balance (/api/frontdesk-balances — at most one row
   // per leaseAppKey, only non-zero balances), the picker's arrears badge and
   // the Open Tab gate's input. Best-effort, same degrade-to-hidden posture.
   const { balances, balancesByLease } = await loadBalances();
-  return { residentsByLease, approvedByLease, leaseDetailsByLease, balances, balancesByLease, tabLimitByLease };
+  return { residentsByLease, approvedByLease, leaseDetailsByLease, balances, balancesByLease, tabLimitByLease, openTabByLease };
 }
 
 // loadBalances reads /api/frontdesk-balances into both the list the arrears
@@ -875,12 +895,86 @@ async function loadBalances() {
   return { balances, balancesByLease };
 }
 
-// fillLeaseSelect renders every pickable lease. When gateOnApproval is true
-// it disables one the landlord hasn't approved yet
-// (approvedByLease[leaseAppKey] === false) — OpenTab itself rejects
-// LeaseNotApproved, but a disabled, badged option tells staff why before
-// they even try, instead of a raw error toast. A lease this app can't
-// resolve approval for (roster unreachable, or a lease absent from
+// rankLeaseOptions orders a lease picker's rows the way a desk wants to scan
+// them: a lease with an open tab first (there is money on the counter right
+// now), then every other billable lease, and every non-billable lease
+// (disabled — awaiting landlord approval, or a lease that ended) trailing,
+// never mixed with the leases the desk can actually act on. Within each of
+// those three groups, sorted by the rendered resident name (who,
+// case-insensitive) and then by lease key, so two residents sharing a name
+// still land in a stable order. Pure — no DOM — so a goja pin can prove the
+// ranking without fillLeaseSelect's markup. rows: {leaseAppKey, who,
+// disabled, open, label}.
+function rankLeaseOptions(rows) {
+  const bucket = (r) => (r.disabled ? 2 : r.open ? 0 : 1);
+  return rows.slice().sort((a, b) => {
+    const ba = bucket(a);
+    const bb = bucket(b);
+    if (ba !== bb) return ba - bb;
+    const wa = (a.who || "").toLowerCase();
+    const wb = (b.who || "").toLowerCase();
+    if (wa !== wb) return wa < wb ? -1 : 1;
+    if (a.leaseAppKey === b.leaseAppKey) return 0;
+    return a.leaseAppKey < b.leaseAppKey ? -1 : 1;
+  });
+}
+
+// renderLeaseOptions rebuilds a lease picker's <option> elements from an
+// already-ranked row list ({leaseAppKey, who, disabled, open, label}) —
+// shared by fillLeaseSelect (the full roster) and applyLeaseSearch (a
+// query-narrowed subset), so search renders the SAME markup a plain load
+// would: an "● " marker on an open-tab option (already folded into the
+// row's own label), every disabled row inside a trailing "Not billable"
+// optgroup. prevValue is reselected when it is still among rows; otherwise
+// no option is marked selected, and the select's own default-selection
+// behavior (the HTML spec's own rule for a <select> with no <option
+// selected>) picks the first non-disabled option.
+function renderLeaseOptions(select, rows, prevValue) {
+  select.innerHTML = "";
+  if (!rows.length) {
+    const opt = document.createElement("option");
+    opt.textContent = "(no leases)";
+    opt.value = "";
+    select.appendChild(opt);
+    return;
+  }
+  let group = null;
+  for (const row of rows) {
+    const opt = document.createElement("option");
+    opt.value = row.leaseAppKey;
+    opt.textContent = row.label;
+    opt.disabled = row.disabled;
+    if (row.disabled) {
+      if (!group) {
+        group = document.createElement("optgroup");
+        group.label = "Not billable";
+        select.appendChild(group);
+      }
+      group.appendChild(opt);
+    } else {
+      select.appendChild(opt);
+    }
+  }
+  if (prevValue && rows.some((r) => r.leaseAppKey === prevValue)) select.value = prevValue;
+}
+
+// fillLeaseSelect renders every pickable lease, ranked by rankLeaseOptions:
+// a lease with an open tab (openTabByLease[leaseAppKey] true) first, marked
+// with a leading "● ", then every other billable lease by resident name,
+// then every disabled lease inside a trailing "Not billable" optgroup, so
+// the common case (act on a lease) never has to be scrolled past the rare
+// one (a lease nothing can be done with yet). The ranked rows are stashed
+// on the select itself (select._leaseRows) so a type-to-find query
+// (applyLeaseSearch) can narrow them without re-fetching, and — when the
+// picker already carries a query (a Refresh mid-search) — that query is
+// re-applied immediately rather than silently dropping back to the
+// unfiltered list.
+//
+// When gateOnApproval is true a lease the landlord hasn't approved yet
+// (approvedByLease[leaseAppKey] === false) is disabled — OpenTab itself
+// rejects LeaseNotApproved, but a disabled, badged option tells staff why
+// before they even try, instead of a raw error toast. A lease this app
+// can't resolve approval for (roster unreachable, or a lease absent from
 // /api/residents entirely) stays selectable — this picker only blocks on
 // POSITIVE evidence of non-approval, never on its absence. Callers that
 // don't gate on OpenTab (e.g. the Resident tab's front-desk picker, which
@@ -892,43 +986,41 @@ async function loadBalances() {
 // also carries arrearsBadge(balancesByLease[leaseAppKey]) — a debtor is
 // never disabled here, since picking the lease is how the desk sees why it
 // is held and where to take the payment.
-function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, approvedByLease, gateOnApproval, balancesByLease) {
+function fillLeaseSelect(select, leases, residentsByLease, leaseDetailsByLease, approvedByLease, gateOnApproval, balancesByLease, openTabByLease) {
   const prev = select.value;
-  select.innerHTML = "";
-  if (!leases.length) {
-    const opt = document.createElement("option");
-    opt.textContent = "(no leases)";
-    opt.value = "";
-    select.appendChild(opt);
-    return;
-  }
-  for (const l of leases) {
-    const opt = document.createElement("option");
-    opt.value = l.leaseAppKey;
+  const rows = leases.map((l) => {
     const bookerKey = residentsByLease && residentsByLease[l.leaseAppKey];
     const who = bookerKey ? nameForIdentity(idOf(bookerKey)) : shortKey(l.leaseAppKey);
     const detail = leaseDetailsByLease && leaseDetailsByLease[l.leaseAppKey];
     const unit = detail && detail.unitAddress ? " — " + detail.unitAddress : "";
     const approved = approvedByLease && approvedByLease[l.leaseAppKey];
+    let disabled = false;
+    let label;
     if (gateOnApproval && approved === false) {
-      opt.disabled = true;
-      opt.textContent = who + unit + " (awaiting landlord approval)";
+      disabled = true;
+      label = who + unit + " (awaiting landlord approval)";
     } else if (gateOnApproval && tenancyEnded(detail, new Date())) {
-      opt.disabled = true;
+      disabled = true;
       // The calendar date of the UTC stamp, the same slice the refusal
       // toasts — a local rendering of a midnight-UTC term end names the
       // day before in every zone west of Greenwich. Names the recorded
       // endedAt (an early move-out, or the term run out) when set; else
       // falls back to the projected leaseEnd.
       const endDate = detail.endedAt || detail.leaseEnd;
-      opt.textContent = who + unit + " (lease ended " + endDate.slice(0, 10) + ")";
+      label = who + unit + " (lease ended " + endDate.slice(0, 10) + ")";
     } else {
-      opt.textContent = who + unit + (l.accountKey ? "" : " (no café account yet)");
+      label = who + unit + (l.accountKey ? "" : " (no café account yet)");
     }
-    opt.textContent += arrearsBadge(balancesByLease && balancesByLease[l.leaseAppKey]);
-    select.appendChild(opt);
-  }
-  if (prev && leases.some((l) => l.leaseAppKey === prev)) select.value = prev;
+    label += arrearsBadge(balancesByLease && balancesByLease[l.leaseAppKey]);
+    const open = !!(openTabByLease && openTabByLease[l.leaseAppKey]);
+    if (open) label = "● " + label;
+    return { leaseAppKey: l.leaseAppKey, who, disabled, open, label };
+  });
+  const ranked = rankLeaseOptions(rows);
+  select._leaseRows = ranked;
+  renderLeaseOptions(select, ranked, prev);
+  const input = leaseSearchInputBySelect.get(select);
+  if (input && input.value.trim()) applyLeaseSearch(select, input);
 }
 
 // tenancyEnded reports whether a lease-details row's tenancy has ended —
@@ -948,6 +1040,51 @@ function tenancyEnded(detail, now) {
   const end = new Date(detail.leaseEnd).getTime();
   if (isNaN(end)) return false;
   return now.getTime() >= end;
+}
+
+// leaseSearchQuery narrows a ranked row list to the rows whose rendered
+// label contains `query` as a case-insensitive substring (name or unit are
+// both part of the label) — an empty or whitespace-only query matches
+// every row. Pure — no DOM — so a goja pin can prove the filter without
+// exercising renderLeaseOptions.
+function leaseSearchQuery(rows, query) {
+  const q = (query || "").trim().toLowerCase();
+  if (!q) return rows;
+  return rows.filter((r) => r.label.toLowerCase().includes(q));
+}
+
+// leaseSearchInputBySelect associates each lease picker's <select> with its
+// own type-to-find <input>, so fillLeaseSelect (a fresh load or a Refresh)
+// can re-apply whatever query is already typed instead of silently
+// dropping back to the unfiltered list.
+const leaseSearchInputBySelect = new Map();
+
+// applyLeaseSearch rebuilds `select`'s options from its own ranked row list
+// (select._leaseRows, stashed by fillLeaseSelect) narrowed by `input`'s
+// current query, via renderLeaseOptions — rebuilding the option elements
+// rather than hiding them, since `option.hidden` / `optgroup.hidden` is a
+// no-op inside a native <select> popup on WebKit. When the option that was
+// selected is not among the filtered rows, renderLeaseOptions leaves no
+// option marked selected, so the select's own default-selection behavior
+// (no <option selected> ⇒ the first non-disabled option) picks the next
+// one — detected here by comparing select.value before and after, which
+// then fires the select's own "change" handler so the rendered card never
+// lags what the picker shows.
+function applyLeaseSearch(select, input) {
+  const rows = select._leaseRows || [];
+  const filtered = leaseSearchQuery(rows, input.value);
+  const prev = select.value;
+  renderLeaseOptions(select, filtered, prev);
+  if (select.value !== prev) select.dispatchEvent(new Event("change"));
+}
+
+// wireLeaseSearch wires a lease picker's type-to-find input to narrow its
+// select by name or unit as the desk types — no debounce: a client-side
+// filter over at most a few hundred already-ranked rows runs well within a
+// keystroke.
+function wireLeaseSearch(input, select) {
+  leaseSearchInputBySelect.set(select, input);
+  input.addEventListener("input", () => applyLeaseSearch(select, input));
 }
 
 // openTabGate decides what a lease's Open Tab control does from its balance
@@ -1031,18 +1168,19 @@ async function loadPos() {
   const [leases, ctx] = await Promise.all([loadLeases(), loadLeasePickerContext()]);
   posResidentsByLease = ctx.residentsByLease;
   posTabLimitByLease = ctx.tabLimitByLease;
-  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, true, ctx.balancesByLease);
+  fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, true, ctx.balancesByLease, ctx.openTabByLease);
   await renderPos();
 }
 
 // refusal-courtesy: OpenTab/CreditHold: hide — renderCreditHoldPanel replaces the Open Tab button when openTabGate(balance) === "hold"
 // refusal-courtesy: OpenTab/InvalidState: none — the arrears aspect's wrong class is a data-integrity fault (require_no_credit_hold, packages/cafe-domain/ddls.go), not state loadBalances exposes
+// refusal-courtesy: Charge/InvalidState: none — the café account's balance aspect of the wrong class is a data-integrity fault (house_exposure_balance, packages/cafe-domain/ddls.go), not state loadBalances exposes
 // refusal-courtesy: OpenTab/LeaseNotApproved, TenancyEnded: disable — fillLeaseSelect (loadPos, gateOnApproval=true) disables the lease option when approvedByLease is false or tenancyEnded(detail, now) is true
 // refusal-courtesy: OpenTab/OpenTabAlreadyExists: hide — the Open Tab button only renders on the `!open` branch (tabs.find(t => t.status === "open") absent)
 // refusal-courtesy: Charge/ItemUnavailable: disable — menuOptions renders a sold-out item (available === false) inside a disabled "Sold out today" optgroup
 // refusal-courtesy: Charge/TabNotOpen: hide — the catalog/off-menu charge forms only render inside renderOpenTabCard, itself only rendered on the `open` branch
-// refusal-courtesy: Charge/TabLimitExceeded: unreachable — the POS forms submit on the staff leg (no authContext), and the script applies house_tab_limit only when is_self (packages/cafe-domain/ddls.go); the desk is warned by renderOpenTabCard's houseLimitLine, never refused
-// refusal-courtesy: OpenTab/TabLimitExceeded: unreachable — open-tab-btn submits on the staff leg (no authContext), and the script applies the closed-house check only inside the authContextTarget branch (packages/cafe-domain/ddls.go)
+// refusal-courtesy: Charge/TabLimitExceeded: unreachable — the POS forms submit on the staff leg (no authContext), and the script applies the exposure bound (balanceCents + totalCents + amountCents > limit) only when is_self (packages/cafe-domain/ddls.go); the desk is warned by renderOpenTabCard's houseLimitLine, never refused
+// refusal-courtesy: OpenTab/TabLimitExceeded: unreachable — open-tab-btn submits on the staff leg (no authContext), and the script applies the closed-house (limit 0) and over-exposure (balanceCents >= limit) checks only inside the authContextTarget branch (packages/cafe-domain/ddls.go)
 // refusal-courtesy: Settle/TabNotOpen: hide — settle-btn only renders inside renderOpenTabCard, itself only rendered on the `open` branch
 // refusal-courtesy: Settle/PaidMismatchesTab: see settlePayEnvelope
 // refusal-courtesy: Settle/UnservedLines: disable — renderOpenTabCard renders settle-btn/settle-pay-btn disabled while unservedLineCount(tab) > 0, with the count as the hint
@@ -1120,7 +1258,8 @@ async function renderPos() {
     return;
   }
   const items = (menu && menu.menu) || [];
-  body.innerHTML = renderOpenTabCard(open, items, posTabLimitByLease[leaseAppKey]);
+  const openBalance = balances[leaseAppKey];
+  body.innerHTML = renderOpenTabCard(open, items, posTabLimitByLease[leaseAppKey], (openBalance && openBalance.balanceCents) || 0);
   body.querySelectorAll("[data-void-line]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const lineId = btn.dataset.voidLine;
@@ -1305,15 +1444,17 @@ function renderCreditHoldPanel(who, balance) {
 }
 
 // renderOpenTabCard is the POS's open-tab card. limitCents is the lease's
-// effective house tab limit (tabLimitOf, off /api/residents) — the card says
-// it, and flags the tab at or over it, so the desk knows the resident can no
-// longer self-order; the desk's own Ring Up / Add Charge stay offered, since
-// the staff leg is never limited.
-function renderOpenTabCard(tab, items, limitCents) {
+// effective house tab limit (tabLimitOf, off /api/residents), balanceCents
+// its recorded ledger balance — the card says the limit and the balance
+// when non-zero, and flags the resident's open EXPOSURE (balance + tab) at
+// or over it, so the desk knows the resident can no longer self-order; the
+// desk's own Ring Up / Add Charge stay offered, since the staff leg is
+// never limited.
+function renderOpenTabCard(tab, items, limitCents, balanceCents) {
   const catalog = items || [];
   const catalogHasAvailable = catalog.some((it) => it.available !== false);
-  const limitLine = houseLimitLine(limitCents, tab.totalCents);
-  const atLimit = typeof limitCents === "number" && (tab.totalCents || 0) >= limitCents;
+  const limitLine = houseLimitLine(limitCents, tab.totalCents, balanceCents);
+  const atLimit = typeof limitCents === "number" && (balanceCents || 0) + (tab.totalCents || 0) >= limitCents;
   const unserved = unservedLineCount(tab);
   const settleAttrs = settleButtonAttrs(unserved, "Mark served or void every unserved order first");
   return (
@@ -2355,7 +2496,7 @@ function housePolicyCurrentLine(policy, locationKey, policies) {
   let line;
   if (!policy) line = "No house tab limit recorded at " + where + " — residents may self-order any total.";
   else if (policy.tabLimitCents === 0) line = "Self-service tabs are closed at " + where + " (limit $0.00).";
-  else line = "House tab limit at " + where + ": " + money(policy.tabLimitCents) + " per tab.";
+  else line = "House tab limit at " + where + ": " + money(policy.tabLimitCents) + " on what a resident may owe on self-service — balance plus open tab.";
   const own = policy ? policy.tabLimitCents : Infinity;
   let tighter = null;
   (policies || []).forEach((p) => {
@@ -2432,17 +2573,20 @@ let residentViewResidentsByLease = {};
 async function loadResident() {
   const select = document.getElementById("resident-lease");
   const label = document.getElementById("resident-lease-label");
+  const search = document.getElementById("resident-lease-search");
   const leases = await loadLeases();
   if (isFrontDesk()) {
     label.hidden = false;
     select.hidden = false;
+    search.hidden = false;
     const ctx = await loadLeasePickerContext();
     posTabLimitByLease = ctx.tabLimitByLease;
     residentViewResidentsByLease = ctx.residentsByLease;
-    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, false, ctx.balancesByLease);
+    fillLeaseSelect(select, leases, ctx.residentsByLease, ctx.leaseDetailsByLease, ctx.approvedByLease, false, ctx.balancesByLease, ctx.openTabByLease);
   } else {
     label.hidden = true;
     select.hidden = true;
+    search.hidden = true;
     residentOwnLeaseAppKey = leases.length ? leases[0].leaseAppKey : "";
     residentOwnLeaseRow = null;
     if (residentOwnLeaseAppKey) {
@@ -2457,12 +2601,13 @@ async function loadResident() {
 
 // refusal-courtesy: OpenTab/CreditHold: hide — renderResident shows the "account is on hold" panel instead of the Open Tab button when openTabGate(ledger) === "hold"
 // refusal-courtesy: OpenTab/InvalidState: none — the arrears aspect's wrong class is a data-integrity fault (require_no_credit_hold, packages/cafe-domain/ddls.go), not state /api/ledger exposes
+// refusal-courtesy: Charge/InvalidState: none — the café account's balance aspect of the wrong class is a data-integrity fault (house_exposure_balance, packages/cafe-domain/ddls.go), not state /api/ledger exposes
 // refusal-courtesy: OpenTab/LeaseNotApproved: hide — loadResident resolves residentOwnLeaseRow from /api/residents before the first render, and this function renders the "awaiting landlord approval" panel, no button, when its approved field is false
 // refusal-courtesy: OpenTab/OpenTabAlreadyExists: hide — the Open Tab button only renders on the `!open` branch (tabs.tabs.find(t => t.status === "open") absent)
 // refusal-courtesy: OpenTab/TenancyEnded: hide — residentOpenTabAllowed hides Open Tab once residentOwnLeaseRow's endedAt is recorded or its leaseEnd column (cafeLeaseWorkplaces, packages/cafe-domain/lenses.go, joined onto /api/residents by cmd/cafe-app/residents.go) is past, and this function renders the "your lease ended" panel, no button, in its place
 // refusal-courtesy: Charge/ItemUnavailable: disable — menuOptions renders a sold-out item (available === false) inside a disabled "Sold out today" optgroup on the self-order-form select
-// refusal-courtesy: Charge/TabLimitExceeded: disable — menuOptions(items, tabLimitRemaining(limitCents, openDisplayTotal)) renders an item priced above the room left under the lease's tabLimitCents (/api/residents, the same minimum-policy rule house_tab_limit applies) inside a disabled "Over your tab limit" optgroup on the self-order-form select, and hides the Add to Tab button once nothing fits
-// refusal-courtesy: OpenTab/TabLimitExceeded: hide — this function renders the "self-service tabs are closed" panel, no button, when the lease's tabLimitCents (residentOwnLeaseRow, /api/residents) is 0, the only value the script refuses OpenTab on
+// refusal-courtesy: Charge/TabLimitExceeded: disable — menuOptions(items, tabLimitRemaining(limitCents, openDisplayTotal, balanceCents)) renders an item priced above the room left under the resident's open EXPOSURE (the recorded ledger balance plus the tab's own total, against the lease's tabLimitCents from /api/residents — the same bound the op's Charge refusal applies) inside a disabled "Over your tab limit" optgroup on the self-order-form select, and hides the Add to Tab button once nothing fits. The FE's balanceCents is the statement sum (/api/ledger.balanceCents, cafeLedgerHistory); the op reads the account's recorded .balance cache (house_exposure_balance, packages/cafe-domain/ddls.go) — equal on every account a cafe-ledger >= 0.4.0 install minted, and on a legacy account carrying no .balance the FE reads 0 (withholds, over-refuses) while the op also reads 0 (allows): the FE's disagreement, when it happens, is always the safe direction, never a false "allowed"
+// refusal-courtesy: OpenTab/TabLimitExceeded: hide — this function renders the "self-service tabs are closed" / "pay at the desk" panel, no button, when the lease's tabLimitCents (residentOwnLeaseRow, /api/residents) is 0 or the ledger's balanceCents is at or past it, the two values the script refuses OpenTab's self leg on
 // refusal-courtesy: Charge/TabNotOpen: hide — self-order-form only renders inside the `if (open)` branch
 // refusal-courtesy: Settle/TabNotOpen: hide — resident-settle-btn only renders inside the `if (open)` branch
 // refusal-courtesy: Settle/PaidMismatchesTab: unreachable — resident-settle-btn submits no paidCents, and the script only raises the code when the field is present
@@ -2513,9 +2658,12 @@ async function renderResident() {
   // The lease's house tab limit: the resident's own /api/residents row in
   // self mode, the picker's copy when the desk is viewing a lease here.
   const limitCents = selfMode ? tabLimitOf(residentOwnLeaseRow) : tabLimitOf({ tabLimitCents: posTabLimitByLease[leaseAppKey] });
+  // The recorded ledger balance — the other half of the resident's open
+  // EXPOSURE the house limit bounds, alongside the tab's own total.
+  const balanceCents = (ledger && ledger.balanceCents) || 0;
   const parts = [];
   if (open) {
-    const limitLine = houseLimitLine(limitCents, openDisplayTotal);
+    const limitLine = houseLimitLine(limitCents, openDisplayTotal, balanceCents);
     // Counted over openDisplayLines, not open — a self-order this session
     // just submitted shows as a {pending: true} overlay before the tab's own
     // lines catch up, and unservedLineCount counts a pending line as
@@ -2532,9 +2680,10 @@ async function renderResident() {
     if (selfMode) {
       const items = (menu && menu.menu) || [];
       // The room left under the house limit bounds the picker the way the
-      // op bounds the Charge: an item that would take the tab past the limit
-      // is offered disabled, and once nothing fits the button goes too.
-      const remaining = tabLimitRemaining(limitCents, openDisplayTotal);
+      // op bounds the Charge: an item that would take the resident's open
+      // exposure (balance + tab) past the limit is offered disabled, and
+      // once nothing fits the button goes too.
+      const remaining = tabLimitRemaining(limitCents, openDisplayTotal, balanceCents);
       const itemsHasAvailable = items.some((it) => it.available !== false && !(remaining !== null && it.priceCents > remaining));
       const itemsHasOnMenu = items.some((it) => it.available !== false);
       parts.push(
@@ -2548,7 +2697,13 @@ async function renderResident() {
             (itemsHasAvailable ? '<button id="self-order-submit" type="submit">Add to Tab</button>' : "") +
             "</form>" +
             (itemsHasAvailable ? "" : (itemsHasOnMenu
-              ? '<p class="meta">Your tab is at the house limit of ' + escapeHtml(money(limitCents)) + " — ask the desk.</p>"
+              // The room is exhausted by the balance alone when the tab
+              // itself is still empty (openDisplayTotal === 0) and the
+              // balance is what ate it (balanceCents > 0) — "your tab" would
+              // name the wrong thing to pay down.
+              ? (openDisplayTotal === 0 && balanceCents > 0
+                  ? '<p class="meta">Your balance is at the house limit of ' + escapeHtml(money(limitCents)) + " — ask the desk.</p>"
+                  : '<p class="meta">Your tab is at the house limit of ' + escapeHtml(money(limitCents)) + " — ask the desk.</p>")
               : '<p class="meta">Nothing on the menu right now.</p>'))
           : '<p class="meta">No menu items available yet.</p>') +
         "</div>"
@@ -2601,6 +2756,19 @@ async function renderResident() {
       '<div class="panel">' +
       "<h2>No open tab</h2>" +
       '<p class="lead">Self-service tabs are closed at this house — ask the desk to open a tab for you.</p>' +
+      "</div>"
+    );
+  } else if (selfMode && limitCents !== null && balanceCents >= limitCents) {
+    // The resident's recorded balance alone already meets or exceeds the
+    // house limit (no line could join): the op refuses OpenTab on the same
+    // balanceCents >= limit conjunct, so the button would only toast; the
+    // desk can still open and ring a tab for them; the resident's own
+    // self-pay form further down this view, or a counter payment, lifts the
+    // balance below the limit first.
+    parts.push(
+      '<div class="panel">' +
+      "<h2>No open tab</h2>" +
+      '<p class="lead">Your account owes ' + escapeHtml(money(balanceCents)) + " against a house limit of " + escapeHtml(money(limitCents)) + " — pay your balance (below, or at the desk) to open a tab.</p>" +
       "</div>"
     );
   } else if (selfMode) {
@@ -2693,10 +2861,10 @@ async function renderResident() {
               (r.type === "debit" && r.reason === "payout" ? '<span class="badge-refund">Paid out</span>' : "") +
               (r.type === "debit" ? "+" : "−") + money(r.amountCents) +
               (r.memo ? " — " + escapeHtml(customerMemo(r.memo)) : "") +
-              " (" + escapeHtml(r.postedAt) + ")" +
+              " (" + escapeHtml(localDateTime(r.postedAt)) + ")" +
               (r.reversesKey
                 ? ' <span class="refund-of">reverses the charge of ' +
-                  (reversed ? escapeHtml(reversed.postedAt) : "an earlier charge") +
+                  (reversed ? escapeHtml(localDateTime(reversed.postedAt)) : "an earlier charge") +
                   "</span>"
                 : "") +
               (refunded > 0
@@ -2938,6 +3106,10 @@ async function renderResident() {
               class: "tab",
               reads: [open.tabKey, open.tabKey + ".status", menuItemKey, menuItemKey + ".price"],
               optionalReads: [applicationForOptionalRead(leaseAppKey)],
+              // The self leg's exposure bound walks the lease's café
+              // account the same way OpenTab's own envelope above does
+              // (house_exposure_balance, packages/cafe-domain/ddls.go).
+              enumerations: [{ hub: leaseAppKey, relation: "heldFor", direction: "in" }],
               payload: { tabKey: open.tabKey, menuItemKey },
             },
             "add the item to your tab",
@@ -3032,7 +3204,7 @@ async function wireRefundCharge(accountKey, onDone) {
     btn.addEventListener("click", () => {
       host.innerHTML =
         '<form id="refund-form" style="margin-top:12px;">' +
-        '<p class="meta">Refunding the charge of ' + escapeHtml(btn.getAttribute("data-posted")) + ".</p>" +
+        '<p class="meta">Refunding the charge of ' + escapeHtml(localDateTime(btn.getAttribute("data-posted"))) + ".</p>" +
         '<div id="refund-fields"></div>' +
         '<div class="panel-actions">' +
         '<button id="refund-submit" type="submit">Refund</button>' +
@@ -3119,6 +3291,7 @@ function init() {
   });
   document.getElementById("pos-lease").addEventListener("change", renderPos);
   document.getElementById("pos-refresh").addEventListener("click", () => { leasesCache = null; loadPos(); });
+  wireLeaseSearch(document.getElementById("pos-lease-search"), document.getElementById("pos-lease"));
   document.getElementById("frontdesk-refresh").addEventListener("click", loadFrontDesk);
   document.getElementById("menu-refresh").addEventListener("click", loadManageMenu);
   document.getElementById("add-menu-item-form").addEventListener("submit", async (ev) => {
@@ -3187,6 +3360,7 @@ function init() {
   });
   document.getElementById("resident-lease").addEventListener("change", renderResident);
   document.getElementById("resident-refresh").addEventListener("click", () => { leasesCache = null; loadResident(); });
+  wireLeaseSearch(document.getElementById("resident-lease-search"), document.getElementById("resident-lease"));
   document.getElementById("sign-out").addEventListener("click", signOut);
 
   // Who signed in decides every derived affordance (staff vs. resident), so

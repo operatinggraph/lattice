@@ -10,15 +10,17 @@ import (
 
 // The house tab limit's FE rules, lifted out of the embedded app.js the way
 // web_hold_test.go lifts openTabGate: tabLimitOf / tabLimitRemaining /
-// houseLimitLine are pure functions of a residents row and a total,
-// menuOptions' bound is a pure function of the items and the room left, and
-// housePolicyCurrentLine of a policy row. The assertions below are about the
-// rule that ships, and the picker's "over the limit" test is the script's
-// own TabLimitExceeded conjunct (totalCents + priceCents > limit,
-// packages/cafe-domain/ddls.go) on the same item price the op derives.
+// houseLimitLine are pure functions of a residents row, a total and a
+// balance, menuOptions' bound is a pure function of the items and the room
+// left, and housePolicyCurrentLine of a policy row. The assertions below
+// are about the rule that ships, and the picker's "over the limit" test is
+// the script's own TabLimitExceeded conjunct (balanceCents + totalCents +
+// priceCents > limit, packages/cafe-domain/ddls.go) on the same item price
+// the op derives — the limit bounds the resident's open EXPOSURE (the
+// recorded ledger balance plus the tab), not the tab alone.
 var tabLimitOfDecl = regexp.MustCompile(`(?s)\nfunction tabLimitOf\(row\) \{\n.*?\n\}\n`)
-var tabLimitRemainingDecl = regexp.MustCompile(`(?s)\nfunction tabLimitRemaining\(limitCents, totalCents\) \{\n.*?\n\}\n`)
-var houseLimitLineDecl = regexp.MustCompile(`(?s)\nfunction houseLimitLine\(limitCents, totalCents\) \{\n.*?\n\}\n`)
+var tabLimitRemainingDecl = regexp.MustCompile(`(?s)\nfunction tabLimitRemaining\(limitCents, totalCents, balanceCents\) \{\n.*?\n\}\n`)
+var houseLimitLineDecl = regexp.MustCompile(`(?s)\nfunction houseLimitLine\(limitCents, totalCents, balanceCents\) \{\n.*?\n\}\n`)
 var housePolicyCurrentLineDecl = regexp.MustCompile(`(?s)\nfunction housePolicyCurrentLine\(policy, locationKey, policies\) \{\n.*?\n\}\n`)
 var parseDollarsOrZeroDecl = regexp.MustCompile(`(?s)\nfunction parseDollarsOrZero\(s\) \{\n.*?\n\}\n`)
 var shortKeyDecl = regexp.MustCompile(`(?s)\nfunction shortKey\(key\) \{\n.*?\n\}\n`)
@@ -85,14 +87,22 @@ func TestTabLimitOf_NullIsNoLimitZeroIsClosed(t *testing.T) {
 		`String(tabLimitRemaining(900, 450))`:         "450",
 		`String(tabLimitRemaining(900, 900))`:         "0",
 		`String(tabLimitRemaining(900, 1400))`:        "0",
-		`String(parseDollarsOrZero("0"))`:             "0",
-		`String(parseDollarsOrZero("50"))`:            "5000",
-		`String(parseDollarsOrZero("12.34"))`:         "1234",
-		`String(parseDollarsOrZero("12.345"))`:        "null",
-		`String(parseDollarsOrZero("0.005"))`:         "null",
-		`String(parseDollarsOrZero(""))`:              "null",
-		`String(parseDollarsOrZero("-1"))`:            "null",
-		`String(parseDollarsOrZero("abc"))`:           "null",
+		// balance 0 leaves the room a bare total/limit comparison gives.
+		`String(tabLimitRemaining(900, 450, 0))`: "450",
+		// balance 600 + total 0 + limit 1000 → $4.00 (400c) left.
+		`String(tabLimitRemaining(1000, 0, 600))`: "400",
+		// balance 1000 >= limit 1000 → no room.
+		`String(tabLimitRemaining(1000, 0, 1000))`: "0",
+		// credit -200 widens the room: 1000 - (-200) - 0 = 1200.
+		`String(tabLimitRemaining(1000, 0, -200))`: "1200",
+		`String(parseDollarsOrZero("0"))`:          "0",
+		`String(parseDollarsOrZero("50"))`:         "5000",
+		`String(parseDollarsOrZero("12.34"))`:      "1234",
+		`String(parseDollarsOrZero("12.345"))`:     "null",
+		`String(parseDollarsOrZero("0.005"))`:      "null",
+		`String(parseDollarsOrZero(""))`:           "null",
+		`String(parseDollarsOrZero("-1"))`:         "null",
+		`String(parseDollarsOrZero("abc"))`:        "null",
 	} {
 		if got := evalString(t, vm, expr); got != want {
 			t.Errorf("%s = %s, want %s", expr, got, want)
@@ -101,7 +111,10 @@ func TestTabLimitOf_NullIsNoLimitZeroIsClosed(t *testing.T) {
 }
 
 // TestHouseLimitLine_UnderAtOver pins the card sentence in its three
-// states, and that a house with no limit says nothing at all.
+// states, that a house with no limit says nothing at all, and that a
+// non-zero recorded balance is named in the sentence and joins the total
+// against the limit: "owes" for a debt, "in credit" for a credit that
+// widens the room, silent at balance 0.
 func TestHouseLimitLine_UnderAtOver(t *testing.T) {
 	vm := houseLimitVM(t)
 	for expr, want := range map[string]string{
@@ -111,6 +124,16 @@ func TestHouseLimitLine_UnderAtOver(t *testing.T) {
 		`houseLimitLine(900, 900)`:  "At the house limit of $9.00 — self-order is closed",
 		`houseLimitLine(900, 1400)`: "Over the house limit of $9.00 — self-order is closed",
 		`houseLimitLine(0, 0)`:      "At the house limit of $0.00 — self-order is closed",
+		// balance 0 says nothing about a balance at all.
+		`houseLimitLine(900, 450, 0)`: "House limit $9.00 · $4.50 left",
+		// balance $6.00 (600c) + total $3.50 (350c) under a $50 (5000c) limit.
+		`houseLimitLine(5000, 350, 600)`: "House limit $50.00 · owes $6.00 · $40.50 left",
+		// balance $10.00 (1000c) == limit — "at", not "under".
+		`houseLimitLine(1000, 0, 1000)`: "At the house limit of $10.00 — self-order is closed",
+		// balance $10.00 + total $0.01 over a $10.00 limit — "over".
+		`houseLimitLine(1000, 1, 1000)`: "Over the house limit of $10.00 — self-order is closed",
+		// a $2.00 (200c) credit widens the room under a $9.00 limit.
+		`houseLimitLine(900, 450, -200)`: "House limit $9.00 · in credit $2.00 · $6.50 left",
 	} {
 		if got := evalString(t, vm, expr); got != want {
 			t.Errorf("%s = %q, want %q", expr, got, want)
@@ -153,6 +176,24 @@ const items = [
 			t.Errorf("%s: with no bound nothing is disabled for price:\n%s", expr, unbounded)
 		}
 	}
+	// A $6.00 (600c) recorded balance eats into the room under a $10.00
+	// (1000c) limit before any item price is considered —
+	// tabLimitRemaining(1000, 0, 600) = 400c ($4.00) — so a $4.00 item is
+	// offered (equal allowed) and a $4.01 one is disabled.
+	if _, err := vm.RunString(`
+const exposureItems = [
+  { menuItemKey: "vtx.menuitem.d", name: "Cortado", priceCents: 400, available: true },
+  { menuItemKey: "vtx.menuitem.e", name: "Scone", priceCents: 401, available: true },
+];`); err != nil {
+		t.Fatal(err)
+	}
+	exposureBounded := evalString(t, vm, `menuOptions(exposureItems, tabLimitRemaining(1000, 0, 600))`)
+	if !strings.Contains(exposureBounded, `<option value="vtx.menuitem.d">Cortado — $4.00</option>`) {
+		t.Errorf("an item priced exactly at the exposure-adjusted room left must stay offered:\n%s", exposureBounded)
+	}
+	if !strings.Contains(exposureBounded, `<option value="vtx.menuitem.e" disabled>Scone — $4.01 — over the limit</option>`) {
+		t.Errorf("an item priced a cent above the exposure-adjusted room left must be disabled:\n%s", exposureBounded)
+	}
 }
 
 // TestHousePolicyCurrentLine pins the Manage Menu panel's sentence: no
@@ -175,12 +216,12 @@ const own = { locationKey: "vtx.building.x", tabLimitCents: 5000, name: "Riversi
 		`housePolicyCurrentLine(null, "")`:                                                               "",
 		`housePolicyCurrentLine(null, "vtx.building.BBCAFEHPQLBLDGHJKMNP")`:                              "No house tab limit recorded at BBCAFE…KMNP — residents may self-order any total.",
 		`housePolicyCurrentLine({ tabLimitCents: 0, name: "Riverside" }, "vtx.building.x")`:              "Self-service tabs are closed at Riverside (limit $0.00).",
-		`housePolicyCurrentLine({ tabLimitCents: 5000, name: "Riverside" }, "vtx.building.x")`:           "House tab limit at Riverside: $50.00 per tab.",
-		`housePolicyCurrentLine({ tabLimitCents: 5000, name: "" }, "vtx.building.BBCAFEHPQLBLDGHJKMNP")`: "House tab limit at BBCAFE…KMNP: $50.00 per tab.",
+		`housePolicyCurrentLine({ tabLimitCents: 5000, name: "Riverside" }, "vtx.building.x")`:           "House tab limit at Riverside: $50.00 on what a resident may owe on self-service — balance plus open tab.",
+		`housePolicyCurrentLine({ tabLimitCents: 5000, name: "" }, "vtx.building.BBCAFEHPQLBLDGHJKMNP")`: "House tab limit at BBCAFE…KMNP: $50.00 on what a resident may owe on self-service — balance plus open tab.",
 		`housePolicyCurrentLine(null, "vtx.building.x", [estateCap])`:                                    "No house tab limit recorded at x — residents may self-order any total. A tighter limit of $9.00 at The Estate binds here.",
-		`housePolicyCurrentLine(own, "vtx.building.x", [own, estateCap])`:                                "House tab limit at Riverside: $50.00 per tab. A tighter limit of $9.00 at The Estate binds here.",
-		`housePolicyCurrentLine(own, "vtx.building.x", [own, estateClosed])`:                             "House tab limit at Riverside: $50.00 per tab. Self-service tabs are closed by the policy at The Estate (limit $0.00), which binds here.",
-		`housePolicyCurrentLine(own, "vtx.building.x", [own, looser])`:                                   "House tab limit at Riverside: $50.00 per tab.",
+		`housePolicyCurrentLine(own, "vtx.building.x", [own, estateCap])`:                                "House tab limit at Riverside: $50.00 on what a resident may owe on self-service — balance plus open tab. A tighter limit of $9.00 at The Estate binds here.",
+		`housePolicyCurrentLine(own, "vtx.building.x", [own, estateClosed])`:                             "House tab limit at Riverside: $50.00 on what a resident may owe on self-service — balance plus open tab. Self-service tabs are closed by the policy at The Estate (limit $0.00), which binds here.",
+		`housePolicyCurrentLine(own, "vtx.building.x", [own, looser])`:                                   "House tab limit at Riverside: $50.00 on what a resident may owe on self-service — balance plus open tab.",
 	} {
 		if got := evalString(t, vm, expr); got != want {
 			t.Errorf("%s = %q, want %q", expr, got, want)

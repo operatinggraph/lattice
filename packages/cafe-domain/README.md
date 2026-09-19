@@ -1,6 +1,6 @@
 # cafe-domain
 
-The Café house-tab POS session domain (v0.19.0) — a short-lived `tab` per resident visit
+The Café house-tab POS session domain (v0.20.0) — a short-lived `tab` per resident visit
 (`OpenTab`/`Charge`/`VoidCharge`/`Settle`), settled onto `cafe-ledger`'s append-only house-tab account via a
 Weaver playbook, never a direct cross-package write — plus the `menuitem` self-order catalog a resident's
 own `Charge` binds against, and staff-workplace write confinement for both.
@@ -152,9 +152,13 @@ confinement) writes `.cafePolicy {tabLimitCents}` on the location (a non-negativ
 write: the caller declares `<locationKey>.cafePolicy` — absent mints it, present OCC-upserts it, tombstoned
 OCC-revives it. The effective limit for a tab is the **tightest** `tabLimitCents` on the tab's lease's unit
 and its `containedIn` ancestors (`house_tab_limit`, the `location_covers` walk reading one aspect per node),
-so a property-wide cap stays a cap under a looser building policy. On the **resident-self leg only**,
-`Charge` refuses `TabLimitExceeded` when `totalCents + amountCents` would pass the limit (equal is allowed)
-and `OpenTab` refuses it when the limit is `0`; the staff leg is never limited — the desk rings past the
+so a property-wide cap stays a cap under a looser building policy. The limit bounds the resident's **open
+exposure** at the house — the lease's recorded café balance (cafe-ledger's `.balance.balanceCents`, signed:
+a credit widens the room; `0` with no account or no live `.balance`; reached by the credit hold's `heldFor`
+walk, `house_exposure_balance`) plus the open tab. On the **resident-self leg only**, `Charge` refuses
+`TabLimitExceeded` when `balanceCents + totalCents + amountCents` would pass the limit (equal is allowed)
+and `OpenTab` refuses it when the limit is `0` or the balance alone already reaches it; a settled tab's debit
+counts once `cafeTabSettlement` has posted it. The staff leg is never limited — the desk rings past the
 limit and is warned by its own read model. `cafeHousePolicies` projects one row per location carrying a
 policy; `cmd/cafe-app` composes each lease's limit from `cafeLeaseWorkplaces.coveringLocations` ∩ those
 rows with the same minimum rule (`/api/residents.tabLimitCents`, null = no limit).

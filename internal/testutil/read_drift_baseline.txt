@@ -386,6 +386,15 @@ walk	CancelRenewal	vtx.renewal.<id> renews out
 # that hop resolves -- the same shape VoidCharge's confinement walk carries.
 walk	Charge	vtx.building.<id> containedIn out
 walk	Charge	vtx.leaseapp.<id> appliesToUnit out
+# house_exposure_balance's walk to the tab's lease's café account (the
+# resident-self leg's TabLimitExceeded guard): the hub is the tab's own
+# leaseAppKey, resolved at the Processor only by the declared .status read --
+# the same link-discovered shape as the appliesToUnit row above. The café
+# app's own self-order submit names it as a literal hub (it holds the lease
+# key client-side); the descriptor form cannot, since an enumeration hub
+# refuses {me.<type>} at install (pkgmgr opdispatchtemplates.go). OpenTab
+# declares the identical walk because its hub is payload-direct.
+walk	Charge	vtx.leaseapp.<id> heldFor in
 walk	Charge	vtx.menuitem.<id> servedAt out
 # house_tab_limit's walk up the tab's unit chain (the resident-self leg's
 # TabLimitExceeded guard) reaches the property level a building is contained

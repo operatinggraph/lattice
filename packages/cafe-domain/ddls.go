@@ -52,9 +52,10 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"café account carries an arrears episode a reminder has gone out for (cafe-ledger's .arrears.sentAt, reached by a live heldFor " +
 			"walk from the lease — never a caller-declared read — and dropped by cafe-ledger only when the balance returns to zero; overdue-but-unreminded " +
 			"is not a hold; enforced on the staff and resident-self legs alike), rejects TabLimitExceeded on the resident-self leg " +
-			"alone when the house's recorded tab limit is 0 (self-service tabs closed — the tightest .cafePolicy.tabLimitCents " +
-			"on the lease's unit and its containedIn ancestors, a live walk; a chain recording no policy has no limit; the " +
-			"staff leg is never limited), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
+			"alone when the house's recorded limit is 0 (self-service tabs closed — the tightest .cafePolicy.tabLimitCents " +
+			"on the lease's unit and its containedIn ancestors, a live walk; a chain recording no policy has no limit) or when " +
+			"the lease's recorded café balance (cafe-ledger's .balance.balanceCents, reached by the same heldFor walk; 0 with no " +
+			"account or no live .balance) already reaches the limit — a tab no line could join; the staff leg is never limited), rejects OpenTabAlreadyExists if the lease already has an open tab (the per-lease " +
 			"cafeOpenTabGuard aspect on the leaseapp, mirroring cafe-ledger's cafeLedgerAccountGuard: a class-(d) " +
 			"optionalReads dedup — create the guard fresh on a lease's first-ever tab, OCC-revive it from its prior " +
 			"tombstone on a later one), mints the tab, writes .status {value: open, totalCents: 0, openedAt, " +
@@ -74,9 +75,11 @@ func tabVertexTypeDDL() pkgmgr.DDLSpec {
 			"the tab's own building (location_covers against the item's servedAt link) whichever caller names it, " +
 			"and rejects ItemUnavailable if the item's own .price.available reads false (SetMenuItemAvailability, " +
 			"the menuItem vertexType DDL) — a sold-out item is sold out whether it is self-ordered or POS-picked. " +
-			"A resident-self Charge is additionally refused TabLimitExceeded when the tab's running total plus this " +
-			"line would exceed the house's recorded tab limit (the tightest .cafePolicy.tabLimitCents on the tab's unit " +
-			"chain, SetCafePolicy; equal is allowed; no policy on the chain means no limit); the staff leg rings past " +
+			"A resident-self Charge is additionally refused TabLimitExceeded when the resident's open exposure — the lease's " +
+			"recorded café balance (cafe-ledger's .balance.balanceCents, signed, reached by the heldFor walk; 0 with no account " +
+			"or no live .balance) plus the tab's running total plus this line — would exceed the house's recorded limit (the " +
+			"tightest .cafePolicy.tabLimitCents on the tab's unit chain, SetCafePolicy; equal is allowed; no policy on the " +
+			"chain means no limit); a settled tab's debit counts once it has posted; the staff leg rings past " +
 			"the limit freely — the desk is warned by its own read model, never refused. " +
 			"Every Charge also appends the charged item's name (the menu item's own .price.name, or the caller's " +
 			"optional description for an off-menu charge, defaulting to \"Off-menu charge\") to .status.itemsMemo, a " +
@@ -447,7 +450,7 @@ func menuItemVertexTypeDDL() pkgmgr.DDLSpec {
 			"name":          "Menu item display name (CreateMenuItem / UpdateMenuItem; required, non-empty string), stored on the .price aspect.",
 			"priceCents":    "The item's price in integer cents; required, must be a positive number (CreateMenuItem / UpdateMenuItem).",
 			"locationKey":   "Full vtx.<locationType>.<NanoID> key (unit|building|property — the class equals the key type) of the place that serves this item (CreateMenuItem; required, validated alive + an admitted location type segment). Becomes the servedAt link, which is what makes the item reachable from a resident of that place. For SetCafePolicy: the location whose .cafePolicy is recorded (required, validated the same way).",
-			"tabLimitCents": "The house's self-service tab limit in whole cents (SetCafePolicy; required non-negative integer, InvalidArgument otherwise). Stored as .cafePolicy.tabLimitCents on the location; 0 means self-service tabs are closed at this house. A resident's own Charge is refused TabLimitExceeded once the tab's total would pass the tightest limit on its unit chain; OpenTab is refused at 0. The desk is never limited.",
+			"tabLimitCents": "The house's self-service tab limit in whole cents (SetCafePolicy; required non-negative integer, InvalidArgument otherwise). Stored as .cafePolicy.tabLimitCents on the location; 0 means self-service tabs are closed at this house. The limit bounds what a resident may owe the house on self-service: a resident's own Charge is refused TabLimitExceeded once the lease's recorded café balance plus the tab's total would pass the tightest limit on its unit chain; OpenTab is refused at 0 or once the balance alone reaches the limit. The desk is never limited.",
 			"menuItemId":    "Optional bare NanoID (no dots / key segments) for the new item (vtx.menuitem.<menuItemId>). Absent → minted with nanoid.new() (CreateMenuItem).",
 			"menuItemKey":   "Full vtx.menuitem.<NanoID> key of an existing item (RetireMenuItem / SetMenuItemAvailability / SetMenuItemLocation / UpdateMenuItem; required, validated alive + class=menuitem).",
 			"newLocation":   "Full vtx.<locationType>.<NanoID> key (unit|building|property) the item should now be served at (SetMenuItemLocation; required, validated alive + an admitted location type segment). Replaces the item's servedAt link.",
@@ -539,13 +542,13 @@ func cafeHousePolicyAspectTypeDDL() pkgmgr.DDLSpec {
 		InputSchema:  `{"type":"object","properties":{"tabLimitCents":{"type":"integer","minimum":0}}}`,
 		OutputSchema: `{"type":"object"}`,
 		FieldDescription: map[string]string{
-			"tabLimitCents": "The house's self-service tab limit in whole cents (non-negative integer; 0 = self-service tabs closed; the aspect absent = no limit recorded). A resident's own Charge is refused TabLimitExceeded once the tab's totalCents plus the line would exceed the tightest limit on the tab's unit chain; a resident's OpenTab is refused at 0.",
+			"tabLimitCents": "The house's self-service tab limit in whole cents (non-negative integer; 0 = self-service tabs closed; the aspect absent = no limit recorded). The limit bounds the resident's open exposure — the lease's recorded café balance (.balance.balanceCents, signed) plus the open tab: a resident's own Charge is refused TabLimitExceeded once balance plus totalCents plus the line would exceed the tightest limit on the tab's unit chain; a resident's OpenTab is refused at 0 or once the balance alone reaches the limit.",
 		},
 		Examples: []pkgmgr.ExampleSpec{
 			{
 				Name:            "house policy aspect — a $50 self-service tab limit",
 				Payload:         map[string]any{"tabLimitCents": 5000},
-				ExpectedOutcome: "Stored as vtx.building.<NanoID>.cafePolicy; written by SetCafePolicy. A resident of any unit inside the building self-orders up to $50.00 per tab; the desk rings past it.",
+				ExpectedOutcome: "Stored as vtx.building.<NanoID>.cafePolicy; written by SetCafePolicy. A resident of any unit inside the building self-orders until their recorded café balance plus the open tab reaches $50.00; the desk rings past it.",
 			},
 		},
 	}
@@ -1166,7 +1169,7 @@ def leaseapp_unit(lease_key, memo=None):
         memo[lease_key] = unit
     return unit
 
-def cafe_account_for_lease(lease_key):
+def cafe_account_for_lease(lease_key, memo=None):
     # The café account held for this lease, or None where no live one exists
     # -- a lease whose settlement has never minted one (cafeTabSettlement's
     # missing_account gap fires on the FIRST settle, so a first-ever tab has
@@ -1187,6 +1190,19 @@ def cafe_account_for_lease(lease_key):
     # and the final None below is unreachable; a copy of this walk into a
     # relation with wider fan-in must fail closed on exhaustion the way
     # actor_holds_operator does, not answer "no account".
+    #
+    # memo, when given, is the same per-execution dict shape leaseapp_unit
+    # takes: the caller creates it fresh inside its own execute() arm, so an
+    # OpenTab that resolves the same lease's account for the credit hold and
+    # the exposure bound walks heldFor once.
+    if memo != None and lease_key in memo:
+        return memo[lease_key]
+    acct = cafe_account_walk(lease_key)
+    if memo != None:
+        memo[lease_key] = acct
+    return acct
+
+def cafe_account_walk(lease_key):
     cursor = None
     for _page in range(MAX_LIVE_LINK_PAGES):
         # read-posture: (e) relation=heldFor epoch=none -- a leaseapp carries
@@ -1203,7 +1219,7 @@ def cafe_account_for_lease(lease_key):
             return None
     return None
 
-def require_no_credit_hold(lease_key):
+def require_no_credit_hold(lease_key, memo=None):
     # The credit hold: a lease whose café account carries an arrears episode
     # a reminder has already gone out for opens no new tab. cafe-ledger's
     # EvaluateCafeArrears writes .arrears.sentAt the moment it sends the
@@ -1216,7 +1232,7 @@ def require_no_credit_hold(lease_key):
     # not the caller's. The state is reached by the walk above rather than a
     # caller-declared read: a hold that rested on the submitter's declaration
     # would be a hold the submitter could decline to declare.
-    acct_key = cafe_account_for_lease(lease_key)
+    acct_key = cafe_account_for_lease(lease_key, memo)
     if acct_key == None:
         return
     # read-posture: (e) per-candidate follow-up read off the enumeration
@@ -1233,6 +1249,40 @@ def require_no_credit_hold(lease_key):
     sent_at = arrears.data.get("sentAt")
     if sent_at != None:
         fail("CreditHold: this lease's café account owes a balance a reminder went out for on " + str(sent_at)[:10] + "; the balance must be paid or written off before a new tab opens")
+
+def house_exposure_balance(lease_key, memo=None):
+    # The lease's recorded café balance in signed cents -- what the resident
+    # already owes the house (positive) or is owed back (negative) -- the
+    # ledger half of the exposure the house limit bounds. cafe-ledger keeps
+    # vtx.cafeaccount.<id>.balance.balanceCents in lockstep with every
+    # posted entry; this reads that recorded fact and never re-derives it,
+    # so a settled tab whose debit has not yet posted (cafeTabSettlement's
+    # missing_charge, seconds after Settle) is not counted until it has.
+    # 0 where the lease has no café account (a first-ever tab), and 0 where
+    # the account carries no live .balance -- an account minted before the
+    # aspect existed, which the ledger itself reads as "unknown until the
+    # next payment recomputes it". Reached the way require_no_credit_hold
+    # reaches .arrears: the account resolves from the graph, never from the
+    # payload, so a caller has nothing to omit that would read another
+    # lease's balance as its own.
+    acct_key = cafe_account_for_lease(lease_key, memo)
+    if acct_key == None:
+        return 0
+    # read-posture: (e) per-candidate follow-up read off the heldFor walk
+    # above -- the account is unknown until the walk resolves it, so its
+    # .balance key is data-derived and undeclarable client-side.
+    balance = kv.Read(acct_key + ".balance")
+    if balance == None or balance.isDeleted:
+        return 0
+    # The CLASS, not just the key: cafe-ledger is the sole writer of a
+    # .balance aspect and writes exactly this class, so a document of any
+    # other class here is a fault to refuse, never a figure to bound on.
+    if not hasattr(balance, "class") or getattr(balance, "class") != "cafeAccountBalance":
+        fail("InvalidState: this lease's café account balance aspect is not a cafeAccountBalance")
+    cents = balance.data.get("balanceCents")
+    if type(cents) != type(0):
+        return 0
+    return cents
 
 def class_of(state, key):
     if key not in state:
@@ -1439,6 +1489,10 @@ def execute(state, op):
         # clinic-domain's CreateAppointment uses). Empty for the standing
         # operator grant (scope=any never sets authContext), so this check is
         # a no-op there — operator keeps opening tabs on behalf of any lease.
+        # account_memo threads the lease's resolved café account across the
+        # exposure bound below and the credit hold further down, so the
+        # heldFor walk runs once per execution (the leaseapp_unit memo shape).
+        account_memo = {}
         # authcontext-target: (ownership) the target must be the lease's own
         # applicant (applicationFor), so a forged one only fails closed.
         if op.authContextTarget != "":
@@ -1452,14 +1506,23 @@ def execute(state, op):
             if application_for == None or application_for.isDeleted:
                 fail("AuthDenied: a resident may only open a tab for their own lease")
 
-            # House tab limit, resident-self leg only: a limit of 0 means the
-            # house has closed self-service tabs, so a tab that could hold
-            # nothing is refused up front rather than at its first Charge.
-            # Any positive limit binds at Charge, not here (a fresh tab is
-            # at $0). The staff leg is never limited -- the desk opens and
-            # rings what it decides, warned by its own read model.
-            if house_tab_limit(leaseapp_unit(lease_key)) == 0:
+            # House limit, resident-self leg only: the limit bounds what the
+            # resident may owe the house -- the recorded ledger balance plus
+            # the open tab. A limit of 0 means the house has closed
+            # self-service tabs, and a balance already at or past the limit
+            # leaves a fresh tab no room for a single line; either way a tab
+            # that could hold nothing is refused up front rather than at its
+            # first Charge. Under the limit, the room binds at Charge. The
+            # staff leg is never limited -- the desk opens and rings what it
+            # decides, warned by its own read model.
+            limit = house_tab_limit(leaseapp_unit(lease_key))
+            if limit == 0:
                 fail("TabLimitExceeded: self-service tabs are closed at this house (the recorded limit is $0.00); ask the desk")
+            if limit != None:
+                owed = house_exposure_balance(lease_key, account_memo)
+                if owed >= limit:
+                    fail("TabLimitExceeded: this house limits what a resident may owe on self-service to " + dollars(limit) +
+                         " and this account already owes " + dollars(owed) + "; pay at the desk before opening a tab")
 
         # read-posture: (d) declared in contextHint.optionalReads by the
         # caller — absent is the ordinary not-yet-decided case, mirroring
@@ -1498,7 +1561,7 @@ def execute(state, op):
 
         # Credit hold: refused on every leg once the lease's café account has
         # been reminded of an outstanding balance (require_no_credit_hold).
-        require_no_credit_hold(lease_key)
+        require_no_credit_hold(lease_key, account_memo)
 
         # One open tab per lease, guarded by a deterministic aspect on the
         # LEASEAPP (not the tab — the tab's own id is independent and
@@ -1660,19 +1723,31 @@ def execute(state, op):
 
         new_total = existing.data.get("totalCents") + amount_cents
 
-        # House tab limit, resident-self leg only: the tab's running total
-        # plus this line may not pass the tightest .cafePolicy.tabLimitCents
-        # on the tab's unit chain (house_tab_limit; equal is allowed; a chain
-        # recording no policy has no limit). The staff leg rings past the
-        # limit freely -- the desk is warned by the POS card, never refused.
-        # The unit is the same memoised resolution the locality bound above
-        # already paid for.
+        # House limit, resident-self leg only: the resident's open exposure
+        # -- the recorded ledger balance plus the tab's running total plus
+        # this line -- may not pass the tightest .cafePolicy.tabLimitCents on
+        # the tab's unit chain (house_tab_limit; equal is allowed; a chain
+        # recording no policy has no limit). The balance is the ledger's
+        # recorded figure (house_exposure_balance): a credit widens the room,
+        # a debt narrows it, and a tab settled moments ago whose debit has
+        # not posted yet is not in it. The staff leg rings past the limit
+        # freely -- the desk is warned by the POS card, never refused. The
+        # unit is the same memoised resolution the locality bound above
+        # already paid for. Charge writes .status only and the balance's
+        # writers (cafe-ledger's entry ops) share no key with it, so a
+        # payment or debit racing this commit is read at the next line, never
+        # this one -- an accepted window, the same one every recorded-fact
+        # refusal in this script carries.
         if is_self:
-            limit = house_tab_limit(leaseapp_unit(existing.data.get("leaseAppKey"), unit_memo))
-            if limit != None and new_total > limit:
-                fail("TabLimitExceeded: this house limits a self-service tab to " + dollars(limit) +
-                     "; the tab stands at " + dollars(existing.data.get("totalCents")) +
-                     " and this item is " + dollars(amount_cents) + "; ask the desk")
+            lease_key_of_tab = existing.data.get("leaseAppKey")
+            limit = house_tab_limit(leaseapp_unit(lease_key_of_tab, unit_memo))
+            if limit != None:
+                owed = house_exposure_balance(lease_key_of_tab)
+                if owed + new_total > limit:
+                    balance_phrase = "this account owes " + dollars(owed) if owed >= 0 else "this account is in credit " + dollars(-owed)
+                    fail("TabLimitExceeded: this house limits what a resident may owe on self-service to " + dollars(limit) +
+                         "; " + balance_phrase + ", the tab stands at " + dollars(existing.data.get("totalCents")) +
+                         " and this item is " + dollars(amount_cents) + "; ask the desk")
 
         existing_lines = existing.data.get("lines", [])
         new_line_id = "line-" + str(len(existing_lines) + 1)
