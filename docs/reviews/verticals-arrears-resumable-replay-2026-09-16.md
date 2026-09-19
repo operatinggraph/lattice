@@ -121,7 +121,7 @@ re-opens, the next evaluation starts at page 1.
 | clinic-ledger | yes (`reverses`, uncapped) | full (`debits`, `reversed`, `creditCents`) | 0.6.1 → 0.7.0 |
 | cafe-ledger | yes (`reverses`, refund capped at the charge) | full — mirror clinic verbatim; the cap does not make the key-free form exact for legacy data | 0.7.0 → 0.8.0 |
 | wellness-ledger | yes — two hops (credit → `settlesRefund` → `wellnessrefund` marker → `reverses` → charge) | `entries: {id: {postedAt, type, amountCents, reversesKey}}` — every debit AND credit under its own id (see below) | 0.2.26 → 0.3.0 |
-| loftspace-ledger | none (`scripts.go:402`) | as wellness, each entry also carrying the `dueAt` its `arrears_head` reads off every debit row; its lens names `remindAt` beside `dueAt` | 0.8.2 → 0.9.0 |
+| loftspace-ledger | yes since 2026-09-18 (`reverses`, capped at the charge, netted at the credit's own position — [design](loftspace-ledger-reversal-and-late-fee-2026-09-18.md)); none at this design's ratification | as wellness, each entry also carrying the `dueAt` its `arrears_head` reads off every debit row; its lens names `remindAt` beside `dueAt` | 0.8.2 → 0.9.0 |
 
 **Two aggregate forms, one per `arrears_head` shape.** Clinic's and café's `arrears_head` return only the head's
 `postedAt` and the balance — pure functions of the per-debit net faces and the credit total, so the collapsed
