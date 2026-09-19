@@ -673,7 +673,10 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   (`at < endsAt`) instead.
   Tenth (clinic time-off displacement, 2026-09-17, builder-caught): a new KIND on a two-legged op-meta reached the
   send leg's enum and re-check but not the REPLY leg that parses the kind back out of `externalRef` — every outcome
-  would have been refused `InvalidArgument`; the leg of an enum is every op that reads the value, the reply op included.
+  would have been refused `InvalidArgument`; the leg of an enum is every op that reads the value, the reply op included. Sighting (loftspace late fee, 2026-09-18, caught cold): the reminder's
+  notification and event carried a balance computed BEFORE the fee debit the same commit posts, and the fee owed for a
+  charge later reversed had no leg tying it to that charge (a `billedFor` link) — a payload built in a commit is computed
+  after every write that commit makes, and a derived obligation's leg includes the correction of its source.
 - **Two individually-capped clearing verbs compose into a leak neither cap states — name the CONSERVED QUANTITY
   and refuse where the phantom is minted** — waiver (≤ owed) → refund (≤ charge) → payout (≤ credit) handed out cash
   for a charge nobody paid. Minted: cafe-ledger (2026-09-14); closed by `cashCents` on `.balance`. Check: for any
@@ -766,7 +769,11 @@ Retired (the gate names the rule; the walk that stays is in the gate's header):
   confinement VECTOR mirrored `VoidCharge`'s and dropped its two forged-`authContext.target` legs, and the "writes
   nothing else" pin named the keys the op touches but not the three the OCC upsert carries — a mirrored test drops a
   precedent's leg the way a mirrored script drops a conjunct; a carry pin enumerates every key of the dict,
-  revert-proven by dropping one.
+  revert-proven by dropping one. Sighting (loftspace `reversesRef` + `LinkReversal`, 2026-09-18, caught cold): the mirrored
+  netting pre-pass carried clinic's INPUT assumption — a reversal sorts after its charge — that the new backfill writer
+  voided; a mirror carries the precedent's input domain, and a new writer that widens it re-opens every ordering the
+  algorithm assumes (check: for each new writer of a mirrored algorithm's input, list the orderings the precedent's
+  writers guaranteed and refuse or handle each).
 
 ## Related contracts
 

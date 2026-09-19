@@ -2,6 +2,8 @@
 
 Rolled from `verticals.md` when its live Done log passed ~25 entries. Full detail is in git.
 
+- 2026-09-16 · `6e038e54` · Tab and visit times render as the viewer's local date-time — one `localDateTime` formatter on every card's `openedAt`/`settledAt`/`startsAt`; goja-pinned.
+- 2026-09-16 · `0cfa1e11` · A self-order says when it was ordered and whether it was served — `orderedAt`, `servedAt`, `MarkLineServed`, the desk's Orders panel; live ([design](../../../docs/reviews/cafe-self-order-fulfilment-2026-09-16.md)).
 - 2026-09-16 · `0f769e58` · A self-booking patient holds one open visit per provider per day — `patientSelfDayClaim` on the self path, moved by a reschedule, freed on every terminal transition; `SelfBookingLimit`; desk unrestricted; refused live.
 - 2026-09-16 · `99615546` · A clinical note is amended, not rewritten — the prior text stays in the encrypted record, `documentedAt` preserved, `amendedAt` projected ([design](../../../docs/reviews/clinic-visit-record-integrity-2026-09-16.md)).
 - 2026-09-16 · `99615546` · A moved visit returns to scheduled — `RescheduleAppointment` re-stamps a live non-terminal `.status`; `MarkPastDueNoShow` is a no-op before the visit's end and its playbook declares its reads; live.

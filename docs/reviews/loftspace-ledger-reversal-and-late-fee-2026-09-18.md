@@ -137,7 +137,9 @@ separate spine (lease-signing identity minting), picked after this pair by cohes
    lease's — a legacy lease gets one by `SetLateFee`, which is what Riley's needs); no removal of a fee term; no
    retro-billing of an episode already reminded; no reversal from the tenant's hat; no `CreditAccount` cap on the SUM of
    several reversals (netting caps at face, as clinic); no change to the reminder's grace (5 days serves the fee too); no
-   Facet descriptor (`SetLateFee`'s self leg is `standing`-dispatched from loftspace-app, as `SetUnitAddress` is).
+   fee-specific Facet surface: `SetLateFee`'s op-meta carries a form and `AuthContext: self` (the `DecideLeaseApplication`
+   posture — Facet may offer *Set a late fee* to a tenant on their own lease and the script refuses; loftspace-app is the
+   dispatcher of record).
 
 ## Build
 
@@ -222,3 +224,51 @@ and a self grant on a shared op is not this fire's to add); the `perArrearsEpiso
 (the ask's clause must not be billed at mint by `clauseSatisfaction`); the amendment gap (a fee term with no correction path
 is a trap). Declared dependency re-verified both ways: `bd722499`'s paged replay is load-bearing (the checkpoint entry
 gains a field) and shipped; `5e86a342`'s `SelfClearing` is not touched. Nothing here is load-bearing for anything unbuilt.
+
+**Build note (2026-09-18).** Deviations from the brief, each an increment of the same mechanism: `LinkReversal` carries
+`accountKey` (the stale mark and both custody proofs are derived keys only with the account in the payload; the account
+root also takes a bare update so two links on one credit serialize — the create-only link key embeds the debit id and
+guards only itself) and joins the account DDL's `PermittedCommands` for that write (a hand-run submit names
+`--class transaction`; the op-meta says so); the netting applies at the CREDIT's position in both implementations
+(clinic-app subtracts at the debit's — this ledger's `episodeStart` diverges between the two), a same-second reversal
+whose key sorts before its charge is held and applied when the charge is walked, a strictly-earlier one is a plain
+payment and `LinkReversal` refuses it (`ReversalPrecedesCharge`); a deposit charge is not reversible on either leg
+(`DepositNotReversible` off the target's `authorizedBy` walk — the deposit has its own verbs); `AuthDenied` binds to the
+RESIDENT standing (the landlord's self-scoped Reverse submits through the same leg); `SetLateFee`'s op-meta is
+`AuthContext: self` (lease-signing's dual-grant idiom), its manages link a live `(e)` follow-up bound whether declared or
+not (the package's own shape), `.tenancy` an OptionalRead read fail-closed, `amountCents ≤ 100000000`; `arrearsOp` joins
+the transaction DDL's `PermittedCommands` (the fee debit's root), so an evaluation envelope names `Class: account`
+(Weaver's target already does); the fee's clause is the GREATEST live `lateFee` key off the account's `chargesTo` links
+(paged 20 × 3 — a superseded clause's link is not tombstoned) and the amendment gap requires exactly one live clause
+and a bound account; the reminder's `balanceCents` includes the fee billed in the same commit and carries
+`lateFeeCents`; the fee is `billedFor` the head it was billed for (a link; `ledgerHistory` + one-bill's `rentEntries`
+project `billedForKey`, a fee row names the charge, and once that charge is reversed the fee's own Reverse says so);
+`DebitAccount{clauseRef}` refuses a late-fee clause; grace days reach the FE via `/api/config`; the tenant's
+statement rows (one-bill) carry `reversesKey`. Stated bounds: a fee term set, or amended concurrently with the send,
+bills from the next episode; an ended tenancy's arrears still bills a fee, as it still reminds.
+
+**Shipped `de5a9f26` (merge of `959e0098`), CI green, live 2026-09-18.** `refresh-loftspace` (lease-signing 0.43.0 →
+0.44.0, loftspace-ledger 0.10.0 → 0.11.0, semantic-contracts 0.7.3 → 0.8.0, `provision-readpath`, the app cycled),
+`reinstall-package` one-bill 0.5.3; `verify-kernel` + `verify-package-lease-signing` (103 OK) against the stack.
+Live: `LinkReversal` on Jordan Ellis's `qsUnXN5etSRLsQ9sTvaP → oyFreAn7rh1pf3herm2Z` (operator) → `ledgerHistory`
+projects `reversesKey`, the stale evaluation re-heads the account at 08-06 (`remindedFor` moved, `sentAt` carried —
+no second reminder); through the app's own path Jordan's `/api/ledger` reads `dueDate 2026-08-06 · daysOverdue 43 ·
+balance $3,675` (was 09-05 / 13) and his rendered statement says *43 days overdue* with *reverses the charge of Sep 5,
+2026* on the reversal row. Nora Vance, dev-login → Gateway, `SetLateFee{amountCents: 5000}` on Riley Chen's lease →
+`.lateFee` recorded by Nora, `leaseRentSettlement` minted `vtx.clause.Z4XMdYYN2oZJPmpCXwvc` (`purpose lateFee ·
+period perArrearsEpisode · governs + chargesTo`, `lateFeeClauseCount 1`, both gaps shut, no `clauseSatisfaction` row —
+nothing bills it at mint); Nora's console reads *Late fee $50 after 5 days · Change late fee*. Riley's current episode
+was reminded 09-16, so by design it carries no fee; **the fee's live billing is pending the next episode to pass its
+grace** (the first candidate account, remindAt 2026-09-20, carries no fee term) — the send-commit billing, the
+once-per-episode carry and the balance-with-fee notification are pinned by `late_fee_test.go`. One tab, closed.
+
+**Review classification (two cold passes, one per increment, 0 BLOCKING, 6 SHOULD-FIX + 11 NIT, all fixed before merge):**
+design-gap ×3 (the mirrored pre-pass carried clinic's input assumption — a reversal sorts after its charge — that the
+backfill writer voided; the reminder's balance computed before a same-batch debit; a fee owed for a charge later
+reversed had nothing tying it to the charge — the `billedFor` link), implementation ×3 (Reverse offered on the deposit
+charge; `TenancyEnded` open on a non-string `endedAt`; two links on one credit both landing), brief-gap ×6 (the
+same-second key order, the two-active-clauses arbitration, the amendment gap's account conjunct, the upper bound, the
+late-fee `clauseRef` refusal, the ended-tenancy billing statement), convention ×4 (the task-grant note, the page-limit
+comment, the op-meta's enumerations, the design's Facet wording), review-over-reach ×1 (the tenant statement's missing
+label was scoped in as a find, not a deviation). Dossier: `_packages.md` mirror entry + every-ARM entry gain a sighting;
+`vertical-apps.md` zone entry gains its fourth.

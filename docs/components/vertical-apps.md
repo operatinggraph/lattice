@@ -148,7 +148,8 @@ column the next fire adds (the third sighting's fix), not a settled verdict.
   helpers under a pinned `time.Local = America/Los_Angeles` with a positive vector proving the zone reaches goja's
   Date; an app that gains a date-only column adds its helper to that shape. Third sighting (clinic `amendedAt`,
   2026-09-16, caught cold): a real instant rendered by its UTC slice on the card and locale in the modal, beside a
-  locale `documentedAt` on the same line — the inverse error; an instant renders locale everywhere.
+  locale `documentedAt` on the same line — the inverse error; an instant renders locale everywhere. Fourth sighting
+  (LoftSpace `reminderSentAt` UTC beside `lateFeeBilledAt` local on one Rent-owed line, 2026-09-18, caught cold).
 - **A shared refusal-message map serves every hat whose form routes through it — a sentence in the patient's voice
   reaches the desk.** `friendlyBookingRejection` is read by `submitBook` and `submitReschedule` under both hats, and the
   `SelfBookingLimit` text told a refused front-desk mover "You already have an open visit … the front desk can book
